@@ -1,0 +1,10 @@
+; Anomaly Coop - AGDD Voiced Actor (agdd_voiced_actor.script). Read after every coop_route*.ltx (coop_route.ltx explains the
+; order).
+;
+; The whole file is the local players voice. It had no rule, so its npc_* and monster_* handlers followed the callback to
+; the host, where the killer is the clients proxy and not db.actor: a client never heard his kill confirmations. A puppet dies
+; on a client through the stock binder, with the killer in local ids, so owner is all a kill needs. Hits do not fire on a
+; client (a bullet is a claim there): coop_world_fight calls the hit handlers from the hosts word.
+
+[route_scripts]
+agdd_voiced_actor = owner

@@ -23,6 +23,10 @@
 	Client: the anomaly measurement HUD runs on the player who stands there with the device (the host's
 	functor only sees the result info); remove_item takes what the player lacks from the group (host).
 	RF targets the host adds (fate PDA, stitch decoder) are added on the clients too.
+	Dialog conditions that read "the actor" through a global (story id "actor", AC_ID) see the host's actor from a client:
+	dialogs_zaton.zat_b103_actor_has_needed_food counts the player's food, dialogs.is_actor_trustworthy his goodwill.
+	Dialog conditions on data only the host's logic fills (an anomaly zone's spawned count, the loot the Dark Valley bandit
+	companions carry): the host sends them once a second when they change.
 --]]
 
 local qc = coop_quests_core
@@ -46,9 +50,10 @@ local POSITION_FUNCTORS = {
 	fate_task = true,
 	anomaly_scanner_task_status = true,
 	gd_task_status_functor = PUMP_SMART,
+	spy_task_status_functor = true, -- an offline spy is brought to "the actor": the player nearest to him, not the host
 }
 
-local stats = { checks = 0, near_other = 0, stage_fix = 0, stash_flag = 0, takes = 0, measure_arm = 0, rf = 0 }
+local stats = { checks = 0, near_other = 0, stage_fix = 0, stash_flag = 0, takes = 0, measure_arm = 0, rf = 0, mirror_out = 0, mirror_in = 0 }
 
 local function ct() return rawget(_G, "coop_tasks") or coop_tasks end
 
@@ -223,6 +228,131 @@ local function patch_conditions()
 	end
 end
 
+-- Runs fn with the global `name` set to `value` for the call: stock code that reads "the actor" through a global.
+local function with_global(name, value, fn, ...)
+	local saved = rawget(_G, name)
+	_G[name] = value
+	local res = { pcall(fn, ...) }
+	_G[name] = saved
+	if not res[1] then error(res[2], 0) end
+	return unpack(res, 2)
+end
+
+-- On a client the story object "actor" and AC_ID are the host's actor: the food of the host decided whether the player at
+-- the NPC could hand it over, and the host's goodwill whether the NPC trusted him.
+local function patch_dialog_conditions()
+	local zat = qc.mod("dialogs_zaton")
+	local food = zat and zat.zat_b103_actor_has_needed_food
+	if type(food) == "function" then
+		zat.zat_b103_actor_has_needed_food = function(a, b, ...)
+			if not (qc.is_client() and db.actor) then return food(a, b, ...) end
+			local story = rawget(_G, "get_story_object")
+			return with_global("get_story_object", function(id, ...)
+				if id == "actor" then return db.actor end
+				return story(id, ...)
+			end, food, a, b, ...)
+		end
+	end
+	local dl = qc.mod("dialogs")
+	local trust = dl and dl.is_actor_trustworthy
+	if type(trust) == "function" then
+		dl.is_actor_trustworthy = function(a, b, ...)
+			if not (qc.is_client() and db.actor) then return trust(a, b, ...) end
+			return with_global("AC_ID", db.actor:id(), trust, a, b, ...)
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Dialog conditions that read the host's data
+-------------------------------------------------------------------------------
+-- A zone binder's counter and an NPC's pstor are filled by logic that runs on the host only, so a client's dialog saw
+-- nothing there. The host reads them once a second (when a player is connected) and sends what changed; the client's
+-- conditions read that copy.
+local MIRROR_MS = 1000
+local B32_ZONES = { "jup_b32_anomal_zone", "jup_b201_anomal_zone", "jup_b209_anomal_zone", "jup_b211_anomal_zone", "jup_b10_anomal_zone" }
+local LOOT_NEED = 9 -- loot the bandit companions bring (dialogs_darkvalley.bandit_companion_task_1_complete)
+local LOOT_KEY = "bandit1"
+local mirror = { vals = {}, sent = {}, next = 0, players = 0 }
+
+-- Host: the values as the stock conditions read them now. A zone: -1 none there, 0 nothing spawned, 1 an artefact spawned.
+local function mirror_values()
+	local out = {}
+	local by_name = db.anomaly_by_name or {}
+	for _, zone in ipairs(B32_ZONES) do
+		local z = by_name[zone]
+		out["b32:" .. zone] = z == nil and -1 or ((tonumber(z.spawned_count) or 0) > 0 and 1 or 0)
+	end
+	local gs = rawget(_G, "get_story_squad")
+	local squad = gs and gs("bandit_companion_task_1")
+	local total = 0
+	if squad then
+		for k in squad:squad_members() do
+			local st = db.storage[k.id]
+			local npc = st and st.object
+			if npc then total = total + (load_var(npc, "s_loot_count") or 0) end
+		end
+	end
+	out[LOOT_KEY] = total >= LOOT_NEED and 1 or 0
+	return out
+end
+
+local function mirror_tick()
+	local now = time_global()
+	if now < mirror.next or not qc.host_party() then return end
+	mirror.next = now + MIRROR_MS
+	local n = #qc.players()
+	if n > mirror.players then mirror.sent = {} end -- somebody came: he has none of it
+	mirror.players = n
+	for k, v in pairs(mirror_values()) do
+		if mirror.sent[k] ~= v then
+			mirror.sent[k] = v
+			if qc.send("mirror", { k = k, v = v }, -1) then stats.mirror_out = stats.mirror_out + 1 end
+		end
+	end
+end
+
+local function client_on_mirror(t, from)
+	if from ~= 0 or not qc.is_client() or type(t.k) ~= "string" or type(t.v) ~= "number" then return end
+	mirror.vals[t.k] = t.v
+	stats.mirror_in = stats.mirror_in + 1
+end
+
+-- The zones as the host has them, for one call of a stock function that reads db.anomaly_by_name.
+local function with_host_zones(fn, ...)
+	local saved = db.anomaly_by_name
+	db.anomaly_by_name = setmetatable({}, { __index = function(_, zone)
+		local v = mirror.vals["b32:" .. tostring(zone)]
+		if v == nil then return saved[zone] end
+		return v >= 0 and { spawned_count = v } or nil
+	end })
+	local res = { pcall(fn, ...) }
+	db.anomaly_by_name = saved
+	if not res[1] then error(res[2], 0) end
+	return unpack(res, 2)
+end
+
+local function patch_host_data_conditions()
+	local dj = qc.mod("dialogs_jupiter")
+	for _, name in ipairs({ "jup_b32_anomaly_has_af", "jup_b32_anomaly_do_not_has_af" }) do
+		local f = dj and dj[name]
+		if type(f) == "function" then
+			dj[name] = function(...)
+				if not qc.client_live() then return f(...) end
+				return with_host_zones(f, ...)
+			end
+		end
+	end
+	local dv = qc.mod("dialogs_darkvalley")
+	local done = dv and dv.bandit_companion_task_1_complete
+	if type(done) == "function" then
+		dv.bandit_companion_task_1_complete = function(...)
+			if not qc.client_live() then return done(...) end
+			return mirror.vals[LOOT_KEY] == 1 -- _not_complete asks this one
+		end
+	end
+end
+
 local function patch_task_types()
 	local tsf = qc.mod("task_status_functor")
 	local tf = qc.mod("task_functor")
@@ -336,6 +466,28 @@ local function patch_task_types()
 			local ok, d = pcall(orig, ...) -- the trigger corpse may be offline / gone
 			if ok and d then return d end
 			return 1
+		end
+	end
+	-- Shooting the guards before the attack fails the task: stock asks about enemy id 0, the host alone.
+	if type(psd) == "table" and type(psd.aggro) == "function" then
+		local orig = psd.aggro
+		local function at_player(id)
+			local npc = level.object_by_id(id)
+			local be = npc and npc:best_enemy()
+			if be and qc.is_character_id(be:id()) then return true end
+			local st = db.storage[id]
+			return st ~= nil and qc.is_character_id(st.enemy_id)
+		end
+		psd.aggro = function(...)
+			local r = orig(...)
+			if r or not party_on() then return r end
+			local m = coop_mods_core.find_local(psd, "M")
+			if type(m) ~= "table" then return r end
+			if m.commander_id and at_player(m.commander_id) then return true end
+			for id in pairs(m.guards or {}) do
+				if at_player(id) then return true end
+			end
+			return r
 		end
 	end
 	if type(tf) == "table" and type(tf.gd_task_target_functor) == "function" then
@@ -498,6 +650,9 @@ local function actor_on_update()
 	if qc.client_live() then
 		local ok, err = pcall(measure_tick)
 		if not ok then qc.report(TAG, "measure", err) end
+	elseif qc.is_host() then
+		local ok, err = pcall(mirror_tick)
+		if not ok then qc.report(TAG, "mirror", err) end
 	end
 end
 
@@ -547,8 +702,9 @@ end
 -- Status, start
 -------------------------------------------------------------------------------
 function print_status()
-	qc.log(TAG, "task checks with the group %d (another player nearer %d), stage fixes %d, stash flags %d, items taken %d, measure HUD armed %d, RF targets sent %d",
-		stats.checks, stats.near_other, stats.stage_fix, stats.stash_flag, stats.takes, stats.measure_arm, stats.rf)
+	qc.log(TAG, "task checks with the group %d (another player nearer %d), stage fixes %d, stash flags %d, items taken %d, measure HUD armed %d, RF targets sent %d, host data sent %d received %d",
+		stats.checks, stats.near_other, stats.stage_fix, stats.stash_flag, stats.takes, stats.measure_arm, stats.rf,
+		stats.mirror_out, stats.mirror_in)
 end
 
 local installed = false
@@ -557,7 +713,7 @@ local function install()
 	installed = true
 	for _, s in ipairs({
 		{ "check_task", patch_check_task }, { "has_item_by_id", patch_has_item_by_id },
-		{ "conditions", patch_conditions }, { "task types", patch_task_types },
+		{ "conditions", patch_conditions }, { "dialog conditions", patch_dialog_conditions }, { "host data conditions", patch_host_data_conditions }, { "task types", patch_task_types },
 		{ "client removal", patch_client_removal }, { "client relocate", patch_client_relocate }, { "rf", patch_rf },
 	}) do
 		local ok, err = pcall(s[2])
@@ -570,6 +726,7 @@ function on_game_start()
 	qc.register_host_action("take", host_take)
 	qc.register_host_action("give_npc", host_give_npc)
 	qc.on("rf", client_on_rf, TAG)
+	qc.on("mirror", client_on_mirror, TAG)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_first_update", install)
 end

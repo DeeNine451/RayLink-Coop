@@ -2,6 +2,7 @@
 -- Not shipped. Run: tools\test_lua.cmd tasks
 local SCRIPT = "gamedata/scripts/coop_tasks.script"
 dofile("tests/lua/support/stubs.d/money.lua") -- install_money_stubs: coop.money_* of the host ledger (F2 T1)
+dofile("tests/lua/support/luabind_like.lua")
 
 FAILS, PASSES = 0, 0
 local function check(cond, what)
@@ -292,7 +293,7 @@ local function machine(role, self_peer)
 		if t and t.forced_status == "fail" then t.forced_status = nil return true end
 		return false
 	end
-	local tm_instance = setmetatable({ task_info = {} }, CRandomTask)
+	local tm_instance = setmetatable({ task_info = luabind_task_table() }, CRandomTask)
 	env.task_manager = {
 		CRandomTask = CRandomTask,
 		task_ini = { section_exist = function(_, id) return ini[id] == true end },

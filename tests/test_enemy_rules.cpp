@@ -142,3 +142,14 @@ TEST(enemy_a_phantom_vanishes_for_any_players_shot)
 }
 
 TEST(enemy_a_puppet_phantom_is_not_dispelled_here) { CHECK(!phantom_dispelled(true, true, true, true)); }
+
+// F11: a client's stealth indicator goes out when it moved enough, and when nobody is noticing him any more.
+TEST(enemy_seen_goes_out_when_it_moved)
+{
+	CHECK(seen_worth_sending(0.f, 0.5f));
+	CHECK(seen_worth_sending(0.5f, 0.2f));
+	CHECK(!seen_worth_sending(0.5f, 0.51f));
+	CHECK(!seen_worth_sending(0.f, 0.f));
+}
+
+TEST(enemy_seen_falling_to_nothing_always_goes_out) { CHECK(seen_worth_sending(0.01f, 0.f)); }

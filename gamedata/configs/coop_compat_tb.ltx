@@ -1,0 +1,13 @@
+; Anomaly Coop - TB Coordinate Based Safe Zones (TB_Coordinate_Based_Safe_Zones.script). Read after every coop_route*.ltx
+; (coop_route.ltx explains the order), so it wins over the generated coop_route_gamma.ltx.
+;
+; The generator made it host: it creates tiny cubes for its map icons. But actor_on_update is also what tells this player he
+; stands in a safe zone (SetEvent "underground"), and the host trusts that report (coop_main: coop_env_cover). Host-only, a
+; client in a TB zone counted as outside and died in the emission, and using a sleeping bag there opened nothing.
+; Pairs, so on_game_load, save_state and load_state (the cubes) stay on the host; coop_world_compat keeps the cubes and the
+; icons off a client.
+
+[route_pairs]
+actor_on_update@tb_coordinate_based_safe_zones = owner
+physic_object_on_use_callback@tb_coordinate_based_safe_zones = owner
+time_event@tb_coordinate_based_safe_zones = owner

@@ -40,4 +40,32 @@
 	<string id="st_coop_news_away_more">
 		<text>И ещё предметов: %d.</text>
 	</string>
+	<string id="st_coop_news_task_lang_caption">
+		<text>Задания</text>
+	</string>
+	<string id="st_coop_news_task_lang">
+		<text>У хоста другой язык игры: тексты заданий приходят на его языке.</text>
+	</string>
+	<!-- Foreign loot (coop_loot_claim.script): the warning of a stalker who guards the body he killed, and the empty search; used when the strings of the GAMMA mod NPC Loot Claim are not installed. -->
+	<string id="st_coop_news_loot_last_1">
+		<text>Отойди от тела. Я его убил, добыча моя.</text>
+	</string>
+	<string id="st_coop_news_loot_last_2">
+		<text>Повторять не буду: не трогай мою добычу.</text>
+	</string>
+	<string id="st_coop_news_loot_last_3">
+		<text>Тронешь его вещи — пожалеешь.</text>
+	</string>
+	<string id="st_coop_news_loot_last_4">
+		<text>Назад, чужак. Я его первым достал.</text>
+	</string>
+	<string id="st_coop_news_loot_last_5">
+		<text>Руки прочь, или открою огонь.</text>
+	</string>
+	<string id="st_coop_news_loot_far">
+		<text>На этом теле не нашлось ничего полезного.</text>
+	</string>
+	<string id="st_coop_quests_npc_limit">
+		<text>У этого NPC взято максимум заданий на группу. Сдайте одно из них.</text>
+	</string>
 </string_table>

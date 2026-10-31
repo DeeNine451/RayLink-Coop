@@ -1,0 +1,63 @@
+--[[
+	Anomaly Coop - NPC statistics of the PDA contacts hint (parity audit F4).
+
+	The hint of a contact (ui_pda_contacts_tab) reads what the NPC did from m_data.se_object[id], the Lua state of the
+	server object, which the host's game_statistics counts. A client has that table as it was in its join save, and
+	nothing else writes it there: a veteran client showed the numbers of the moment he joined.
+
+	The host publishes the hint's six numbers with coop.sync (object scope: it goes when the NPC goes, a joiner gets his copy
+	from the engine); a client keeps them in its own m_data, where the hint reads them. Nothing in stock changes.
+--]]
+
+local KEY = "npc_stats"
+local HINT = {
+	killed_stalkers = true,
+	killed_monsters = true,
+	artefacts_found = true,
+	wounded_helped = true,
+	corpse_looted = true,
+	items_sold = true,
+}
+
+local installed = false
+
+local function sync() return rawget(_G, "coop") and coop.sync end
+
+local function publish(npc)
+	local id = npc and npc:id()
+	local se = id and alife_object(id)
+	local state = se and alife_storage_manager.get_se_obj_state(se)
+	if not state then return end
+	local t = {}
+	for k in pairs(HINT) do t[k] = state[k] end
+	sync().set("object:" .. id, KEY, t)
+end
+
+local function install_host()
+	local orig = game_statistics and game_statistics.increment_npc_statistic
+	if not orig or installed then return end
+	installed = true
+	game_statistics.increment_npc_statistic = function(npc, value, ...)
+		orig(npc, value, ...)
+		if HINT[value] and coop.is_active() and coop.is_host() then
+			local ok, err = pcall(publish, npc)
+			if not ok then printf("! coop_npc_stats: %s", tostring(err)) end
+		end
+	end
+end
+
+local function on_change(_, value, _, _, id)
+	local se = id and alife_object(id)
+	local state = se and value and alife_storage_manager.get_se_obj_state(se, true)
+	if not state then return end
+	for k in pairs(HINT) do state[k] = value[k] end
+end
+
+function on_game_start()
+	if not sync() then return end
+	if coop.is_client() then
+		coop.sync.on_change("object", KEY, on_change)
+	else
+		install_host() -- also before a session starts: the wrapper asks for one each time
+	end
+end

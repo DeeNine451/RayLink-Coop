@@ -558,7 +558,32 @@ local function patch_taskboard()
 			return nil
 		end
 	end
+	local orig_click = tab.OnTaskClicked
+	if type(orig_click) == "function" then
+		tab.OnTaskClicked = function(self, ...)
+			local item = qc.active() and self.task_list and self.task_list:GetSelectedItem()
+			if item and item.is_blocked then
+				local am = rawget(_G, "actor_menu")
+				if am and am.set_msg then pcall(am.set_msg, 1, game.translate_string("st_coop_quests_npc_limit"), 5) end
+			end
+			return orig_click(self, ...)
+		end
+	end
 	qc.log(TAG, "PDA taskboard: rows of a client come from the host's offers")
+end
+
+-- The journal is one for the group, so the stock limit of tasks per NPC counted every player's tasks: a friend's two tasks
+-- left the NPC red and silent for everybody. In a session the limit is per player in the game.
+local function patch_task_limit()
+	local dlg = qc.mod("dialogs")
+	local limit = type(dlg) == "table" and dlg.get_npc_task_limit
+	if type(limit) ~= "function" then return end
+	dlg.get_npc_task_limit = function(...)
+		local n = limit(...)
+		if not qc.active() then return n end
+		local ok, list = pcall(qc.players)
+		return n * math.max(ok and type(list) == "table" and #list or 1, 1)
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -632,6 +657,8 @@ local function install()
 	if not ok then qc.report(TAG, "install client wrappers", err) end
 	ok, err = pcall(patch_taskboard)
 	if not ok then qc.report(TAG, "install taskboard", err) end
+	ok, err = pcall(patch_task_limit)
+	if not ok then qc.report(TAG, "install task limit", err) end
 end
 
 function on_game_start()

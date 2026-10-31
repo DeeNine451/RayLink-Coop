@@ -13,6 +13,8 @@
 	    three lines in ten seconds; the rest of a burst becomes one "New articles: N" line when the window ends.
 	  - show_rewards(tasks, money, items, more): what the group's rewards brought a player while he was away
 	    (coop_reward_group): a short line over the game, and the money and every item in his PDA feed.
+	  - show_story(title): the storyline "New task" fade with its sound, on a client (the host's task object shows its own).
+	  - show_language(): one line when this machine reads another language than the host: task texts come in his.
 	  - clean_nick(s): a nick that came from the network, cut to 32 printable characters.
 	Nothing here changes the game outside a co-op session.
 --]]
@@ -129,6 +131,20 @@ function show_task(kind, title, icon, nick, cancelled)
 	local shown = feed(caption, text, icon or "ui_iconsTotal_storyline", TASK_MS)
 	if shown then stats.task_lines = stats.task_lines + 1 end
 	return shown
+end
+
+-- The storyline "New task" fade with its sound: the host's task object shows it in its constructor, a client has only stubs.
+function show_story(title)
+	local ok, am = pcall(function() return actor_menu end) -- through the global: the engine loads a script not loaded yet
+	if not (ok and am and am.set_fade_msg and type(title) == "string" and title ~= "") then return false end
+	local msg = tr("general_new_task", "New task") .. " " .. tr(title, title)
+	return pcall(am.set_fade_msg, msg, 5, nil, "interface\\horror_notify_02")
+end
+
+-- Task texts are final strings of the host's language (coop_tasks): one line when this machine reads another one.
+function show_language()
+	return feed(tr("st_coop_news_task_lang_caption", "Tasks"),
+		tr("st_coop_news_task_lang", "The host plays in another language: task texts come in his."), "ui_iconsTotal_storyline", TASK_MS)
 end
 
 -- The stock line of a task event, drawn here (see the header).

@@ -236,14 +236,33 @@ function leader_of(npc)
 	return nil
 end
 
+-- Scripted enemies told to walk to "the actor" (target = actor: the mirages, the pump station's attackers, the squads of The Living
+-- Fire) go for the nearest player on his feet: the host's character may be down or at a camp across the map. A companion
+-- keeps its leader (a squad with no proxy leader is the host's).
+local function hunted_player(self)
+	if not (self.st and self.st.target == "actor") then return nil end
+	local squad = squad_of(self.object)
+	local cs = axr_companions and axr_companions.companion_squads
+	if squad and type(cs) == "table" and cs[squad.id] then return nil end
+	local pos = self.object:position()
+	local best, best_d
+	for _, o in ipairs(P.everyone()) do
+		if P.standing(o) then
+			local d = o:position():distance_to_sqr(pos)
+			if not best_d or d < best_d then best, best_d = o, d end
+		end
+	end
+	return best and P.is_proxy(best) and best or nil
+end
+
 local function patch_beh()
 	local ab = _G["axr_beh"] and axr_beh.action_beh
 	local ex = ab and ab.execute
 	if type(ex) ~= "function" or orig.beh then return end
 	orig.beh = ex
 	ab.execute = function(self, ...)
-		if host_on and next(leaders) ~= nil and not P.in_identity() then
-			local lead = leader_of(self.object)
+		if host_on and not P.in_identity() then
+			local lead = next(leaders) ~= nil and leader_of(self.object) or hunted_player(self)
 			if lead then
 				stats.follow = stats.follow + 1
 				return P.with_identity(lead, ex, self, ...)

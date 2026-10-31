@@ -42,17 +42,19 @@ struct FakeConsole : CvarConsole
 std::string repeat(char c, size_t n) { return std::string(n, c); }
 } // namespace
 
-// §1.2: the white list is the 19 rules of the table, nothing else, each once. The last two are the split-levels rules of
+// §1.2: the white list is the 20 rules of the table, nothing else, each once. Rows 18 and 19 are the split-levels rules of
 // F3a (docs/plans/2026-10-24-f3a-split-levels.md §3): the engine registers them (coop_split_levels, coop_story_together).
-TEST(game_values_cvar_list_is_the_nineteen_rules)
+// Row 20 is "stalkers finish a downed player" (coop_finish_downed, registered by the NPC AI, coop_ai.cpp).
+TEST(game_values_cvar_list_is_the_twenty_rules)
 {
 	const char* expected[] = {
 		"coop_friendly_fire", "coop_max_new_characters", "coop_share_rewards", "coop_death_mode", "coop_death_drop",
 		"coop_bleedout", "coop_revive_health", "coop_respawn_delay", "coop_contusion", "coop_death_money",
 		"coop_death_wear", "coop_death_rank", "coop_hardcore_new_kit", "coop_checkpoints_group",
 		"coop_autosave_interval", "coop_autosave_count", "coop_death_share", "coop_split_levels", "coop_story_together",
+		"coop_finish_downed",
 	};
-	CHECK_EQ(kGameCvarCount, size_t(19));
+	CHECK_EQ(kGameCvarCount, size_t(20));
 	CHECK_EQ(sizeof(expected) / sizeof(expected[0]), kGameCvarCount);
 	for (size_t i = 0; i < kGameCvarCount; ++i)
 	{

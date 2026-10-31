@@ -130,7 +130,9 @@ print("== money task: the host's own task reads the host")
 Hm.ini.cf_host = { status_functor = "drx_sl_money_task_status" }
 Cm.ini.cf_host = Hm.ini.cf_host
 Hm.env.save_var(Hm.actor, "cf_host_fetch", 500)
+Hm.talking = true -- the host's own dialog (a script's task goes to the player nearest to the giver)
 Hm.env.task_manager.get_task_manager():give_task("cf_host", 700)
+Hm.talking = false
 Hm.actor._money = 600
 BAL[0], BAL[1] = 600, 0
 Hm.env.task_manager.get_task_manager():update()

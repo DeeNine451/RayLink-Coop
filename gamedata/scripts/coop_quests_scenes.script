@@ -9,7 +9,8 @@
 
 	Osoznanie (dialogs_warlab.osoznanie_decline). The dialog moves only the player who speaks, and the room is left for good
 	(the restrictor destroys Osoznanie and blacks the screen): every other player follows through npc.fx, and one who respawns
-	before the waves are over (sar2_monolith_end) is sent back, since this teleport is the only stock way there.
+	before the waves are over (sar2_monolith_end) is sent back, since this teleport is the only stock way there. The same for a
+	player who respawns while the others stand before Osoznanie: the room has no way in on foot.
 
 	The list of a wish is closures of the stock function, kept between the press and the answer; they hold no game object.
 
@@ -28,6 +29,7 @@ local MAX_CHOICES = 8
 local ZONE_GONE_SECONDS = 8
 local OSO_WALK, OSO_LOOK = "warlab_jump_sar2_walk", "warlab_jump_sar2_look"
 local OSO_ARGS = OSO_WALK .. ":" .. OSO_LOOK
+local ROOM_WALK, ROOM_LOOK = "oso_actor_walk", "oso_actor_look"
 
 local wish = nil -- host: { peer, list } the window that is out
 
@@ -106,11 +108,15 @@ end
 -- Osoznanie
 -------------------------------------------------------------------------------
 -- As the stock decline does it. Not through xr_effects.teleport_actor: coop_economy_travel would take the players around along.
-local function move_here()
-	if not level.patrol_path_exists(OSO_WALK) then return end
-	local walk, look = patrol(OSO_WALK), patrol(OSO_LOOK)
+local function move_along(walk_path, look_path)
+	if not level.patrol_path_exists(walk_path) then return end
+	local walk, look = patrol(walk_path), patrol(look_path)
 	db.actor:set_actor_position(walk:point(0))
 	db.actor:set_actor_direction(-look:point(0):sub(walk:point(0)):getH())
+end
+
+local function move_here()
+	move_along(OSO_WALK, OSO_LOOK)
 end
 
 local function host_oso_decline(from)
@@ -123,7 +129,11 @@ end
 local function on_respawned()
 	local a = db.actor
 	if not (qc.active() and a) then return end
-	if a:has_info("warlab_actor_teleported_to_sar2") and not a:has_info("sar2_monolith_end") then move_here() end
+	if a:has_info("warlab_actor_teleported_to_sar2") then
+		if not a:has_info("sar2_monolith_end") then move_here() end
+	elseif a:has_info("warlab_actor_teleported") then
+		move_along(ROOM_WALK, ROOM_LOOK)
+	end
 end
 
 -------------------------------------------------------------------------------

@@ -1,0 +1,531 @@
+--[[
+	Anomaly Coop - a fight nobody is at any more (gamedata\scripts\coop_encounters.script), encounter audit of 2026-10-31.
+	The checkpoint death mode only (coop_death_mode checkpoint): hardcore has no way back, rollback reloads the save.
+
+	A respawn leaves the group far from its fight, and a stock task was written for a player who reloads. The wipe table
+	(coop_wipe) answers one case, every player down for good, and only with fail or keep; "ran off" and "went to another
+	level" reach nobody. So the rule here looks at the place, not at deaths. An entry names a task (or a scene) and its zone.
+	While the fight is on:
+	  - a standing player in the zone (one who is down does not count): nothing happens, whatever the others do;
+	  - nobody there for GRACE_MS: the entry's roll back runs once. The next one needs a player who came back first; an armed
+	    entry (the task holds an object it waits for) does not wait for that: the save may have been made with nobody there.
+	The roll back is the smallest fair one, per entry:
+	  reset(tsk, e)  the task goes back to the stage that starts the fight, through its own code: what it spawned is released
+	                 and its ids are cleared together with the stage, so a stage that reads "the id is gone" never sees it
+	                 as a kill. A player who comes back to the start point starts the fight again, at full strength.
+	  heal(tsk, e)   -> ids of what is left of the enemies: back at full health the moment each is online. What is dead stays
+	                 dead, for tasks that count deaths (night hunts, Lost to the Zone, the BTR hunt, Baba Yaga, Mirage).
+	Scene rules outside the table: the Pripyat evacuation helis wait for a standing player in the zone they wait at (the timers
+	that make them leave stand still); the Impending Doom deadline does not run while no player stands; the Hidden Threat's
+	Degtyarev is not hurt while nobody is near him (his death ends the storyline; offline the mod itself leaves him alone).
+	The Bar arena takes a fighter's whole inventory into a box and has no way out but winning: a fighter who falls gets his gear
+	back when he respawns, through the stock end of a fight, at the arena's door; the fight ends by the rule.
+	A level the group left answers "nobody there". There is one level for everybody today (coop_levels.cpp level_of_player).
+
+	Host only. Status: coop_status line "encounters".
+--]]
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+local math_floor = math.floor
+
+local TAG = "encounters"
+local MODE = "checkpoint"
+local TICK_MS = 1000
+local GRACE_MS = 20000 -- a teleport, a level loading, a moment on the ground: not "nobody is there"
+local STAGE_WAITING = 255 -- stock: a task waiting for its repeat timer
+
+local SKYFALL = "mil_smart_terrain_7_7_freedom_leader_stalker_task_skyfall"
+local BIG_GAME = "jup_b220_trapper_task_big_game"
+local BTR_HUNT = "mil_smart_terrain_7_7_freedom_leader_stalker_task_9"
+
+local P -- coop_npc_players
+local function C() return coop_mods_core end
+
+local entries = {}
+local by_id = {}
+local recs = {} -- entry id -> { seen, away }
+local wounded = {} -- id -> true (a creature) | "car": to be healed when online
+local stats = { rollbacks = 0, healed = 0, doom_seconds = 0, guarded_hits = 0, errors = 0 }
+
+local function log(fmt, ...) P.log(TAG, fmt, ...) end
+local function report(what, err)
+	stats.errors = stats.errors + 1
+	P.report(TAG, what, err)
+end
+
+-------------------------------------------------------------------------------
+-- The rule
+-------------------------------------------------------------------------------
+-- One entry, one check. rec = { seen = a player was there, away = nobody since }. True: roll back now.
+function step(rec, live, armed, present, now, grace)
+	if not live then
+		rec.seen, rec.away = nil, nil
+		return false
+	end
+	if present then
+		rec.seen, rec.away = true, nil
+		return false
+	end
+	if not (rec.seen or armed) then return false end
+	rec.away = rec.away or now
+	if now - rec.away < grace then return false end
+	rec.seen, rec.away = nil, nil
+	return true
+end
+
+-- The Impending Doom deadline: the game seconds to move it by. down = no player stands, elapsed = game seconds since the last
+-- check, rest = the part of a second carried over. Returns whole seconds, the new rest.
+function doom_shift(down, elapsed, rest)
+	if not down or elapsed <= 0 then return 0, 0 end
+	local all = elapsed + rest
+	local whole = math_floor(all)
+	return whole, all - whole
+end
+
+function add(e)
+	entries[#entries + 1] = e
+	by_id[e.id] = e
+	recs[e.id] = {}
+end
+
+-- Host in the checkpoint mode.
+local function ruled()
+	if not P.is_host() then return false end
+	local f = rawget(_G, "get_console_cmd")
+	if type(f) ~= "function" then return false end
+	local ok, v = pcall(f, 0, "coop_death_mode")
+	return ok and type(v) == "string" and v:find(MODE, 1, true) == 1
+end
+
+local function in_progress(tsk)
+	if tsk == nil or tsk.forced_status ~= nil or tsk.stage == STAGE_WAITING then return false end
+	return tsk.status ~= "completed" and tsk.status ~= "fail"
+end
+
+local function task_of(id)
+	local tm = task_manager.get_task_manager()
+	local info = tm and tm.task_info
+	return type(info) == "table" and info[id] or nil
+end
+
+local function anyone_standing()
+	for _, o in ipairs(P.everyone()) do
+		if P.standing(o) then return true end
+	end
+	return false
+end
+
+-- A standing player within r of pos.
+function standing_near(pos, r)
+	local rr = r * r
+	for _, o in ipairs(P.everyone()) do
+		if P.standing(o) and o:position():distance_to_sqr(pos) <= rr then return true end
+	end
+	return false
+end
+
+local function level_of(e, tsk)
+	if type(e.level) == "function" then return e.level(tsk, e) end
+	return e.level
+end
+
+local function present_at(e, tsk)
+	local lvl = level_of(e, tsk)
+	if lvl and lvl ~= level.name() then return false end
+	local pos, r = e.zone(tsk, e)
+	if pos == nil then return true end -- no place known: nothing is decided
+	if r == nil then return anyone_standing() end -- the level is the zone
+	return standing_near(pos, r)
+end
+
+local function roll_back(e, tsk)
+	stats.rollbacks = stats.rollbacks + 1
+	log("%s: nobody there, rolled back (stage %s)", e.id, tostring(tsk and tsk.stage))
+	if e.reset then e.reset(tsk, e) end
+	if e.heal then
+		for _, id in ipairs(e.heal(tsk, e) or {}) do wounded[id] = e.car and "car" or true end
+	end
+end
+
+local function check(e, now)
+	local tsk = e.task and task_of(e.task) or nil
+	local live = (e.task == nil or in_progress(tsk)) and e.live(tsk, e) == true
+	-- a scene that needs its level loaded waits for the group to be back on it
+	if live and e.on_level and level_of(e, tsk) ~= level.name() then return end
+	if step(recs[e.id], live, e.armed, live and present_at(e, tsk), now, e.grace or GRACE_MS) then roll_back(e, tsk) end
+end
+
+-- For a status functor with "not on that level -> fail": the group left the level, so the task goes back instead. True: it
+-- went back (the functor must not run).
+function left_level(id, tsk)
+	local e = by_id[id]
+	if not (e and ruled() and in_progress(tsk) and e.live(tsk, e) == true) then return false end
+	if level_of(e, tsk) == level.name() then return false end
+	roll_back(e, tsk)
+	return true
+end
+
+-------------------------------------------------------------------------------
+-- Entries: what a task keeps
+-------------------------------------------------------------------------------
+local function module_local(mod_name, name)
+	local m = C().mod(mod_name)
+	if not m then return nil end
+	local v = C().find_local(m, name)
+	return v, m
+end
+
+local function smart_pos(name)
+	local sb = rawget(_G, "SIMBOARD")
+	local sm = sb and sb.smarts_by_names and sb.smarts_by_names[name]
+	return sm and sm.position
+end
+
+local function se_alive(se)
+	local ok, v = pcall(function() return se:alive() end)
+	return ok and v == true
+end
+
+local function release_alive(id)
+	local se = type(id) == "number" and alife_object(id)
+	if se and se_alive(se) then safe_release_manager.release({ id = id }) end
+end
+
+-- Skyfall. The zone is twice the radius that starts the fight, around the pad: stage 0 of the task is "come to the pad", and
+-- a player coming back gets a new heli at full health through spawn_dynamic_heli. Stage 1 (the static heli on the pad, no
+-- fight yet) goes back only when the level is empty.
+local function skyfall_zone(tsk)
+	local pad = module_local("tasks_skyfall", "landing_pad_location")
+	if not pad then return nil end
+	if tsk.stage == 2 then return pad.vector, 300 end
+	return pad.vector, nil
+end
+
+local function skyfall_reset(tsk)
+	local state, m = module_local("tasks_skyfall", "state")
+	if not state then return end
+	if state.dynamic_heli_id then
+		safe_release_manager.release({ id = state.dynamic_heli_id })
+		state.dynamic_heli_id = nil
+	end
+	if state.static_heli_id then m.despawn_static_heli_and_barrels() end
+	tsk.stage = 0 -- with the ids: stage 1 reads a missing static heli as a kill
+end
+
+-- Big Game: back to "come to the tunnel"; stage 0 spawns the small giants again.
+local function big_game_reset(tsk)
+	local state = module_local("tasks_big_game", "state")
+	if not state then return end
+	for _, id in ipairs(state.small_giants_ids or {}) do release_alive(id) end
+	release_alive(state.big_giant_id)
+	state.small_giants_ids, state.big_giant_id = {}, nil
+	tsk.stage = 0
+end
+
+local function btr_data(tsk)
+	local data = module_local("tasks_veh_destroy", "DATA")
+	return type(data) == "table" and data[tsk.id] or nil
+end
+
+local function btr_left(tsk)
+	local out = {}
+	local d = btr_data(tsk)
+	for _, v in ipairs(d and d.vehicles or {}) do
+		if v.id and not v.dead then out[#out + 1] = v end
+	end
+	return out
+end
+
+-- The hunts of one unique squad: the task waits for its "dead" info, so the squad must stay what it is: it is healed, never
+-- released. section -> the smart terrain it lives on.
+local HUNTS = {
+	{ "mar_smart_terrain_base_stalker_leader_marsh_task_2", "special_chimera_task_squad", "mar_smart_terrain_doc_2" },
+	{ "cit_killers_merc_barman_mlr_task_4", "special_chimera_task2_squad", "red_smart_terrain_6_6" },
+	{ "mil_smart_terrain_7_10_freedom_trader_stalker_task_3", "special_bloodsucker_task_squad", "mil_smart_terrain_4_2" },
+	{ "bar_dolg_leader_task_2", "special_bloodsucker_task2_squad", "trc_sim_9" },
+	{ "zat_b7_bandit_boss_sultan_task_6", "special_bloodsucker_task3_squad", "val_smart_terrain_6_4" },
+	{ "lttz_ll_attack_on_titan", "special_gigant_task_squad", "pri_sim_3" },
+	{ "lttz_ll_fetch_gauss", "special_poltergeist_task_squad", "zat_a23_smart_terrain" },
+	{ "lttz_oa_encrypted_transmission", "special_poltergeist_task2_squad", "zat_b100" },
+}
+local HUNT_RADIUS = 150
+
+local function find_squad(e)
+	local cached = e.squad_id and alife_object(e.squad_id)
+	if cached and cached:section_name() == e.section then return cached end
+	local sb = rawget(_G, "SIMBOARD")
+	local sm = sb and sb.smarts_by_names and sb.smarts_by_names[e.smart]
+	local rec = sm and sb.smarts[sm.id]
+	for id in pairs(rec and rec.squads or {}) do
+		local se = alife_object(id)
+		if se and se:section_name() == e.section then
+			e.squad_id = id
+			return se
+		end
+	end
+	return nil
+end
+
+local function squad_level(_, e)
+	local se = find_squad(e)
+	return se and alife():level_name(game_graph():vertex(se.m_game_vertex_id):level_id()) or nil
+end
+
+local function squad_member_ids(_, e)
+	local se = find_squad(e)
+	local out = {}
+	if se then
+		for k in se:squad_members() do out[#out + 1] = k.id end
+	end
+	return out
+end
+
+-- The Bar arena (stock has no death branch: the game just ended). A fight whose fighters are gone is over: the opponents
+-- and the arena's items go, the trigger goes back to its start, the fight can be asked for again. Not a win: no reward.
+local ARENA_FIGHTS = 8
+local ARENA_OPPONENTS = 6
+local ARENA_POINT = "bar_arena_wait_walk_6"
+local ARENA_RADIUS = 60
+
+local function arena_fight()
+	if not has_alife_info("bar_arena_fight_begin") then return nil end
+	for n = 1, ARENA_FIGHTS do
+		if has_alife_info("bar_arena_fight_" .. n) and not has_alife_info("bar_arena_fight_" .. n .. "_done") then return n end
+	end
+	return nil
+end
+
+local function arena_on() return arena_fight() ~= nil end
+
+local function arena_trigger()
+	for _, zone in pairs(db.zone_by_name or {}) do
+		local st = db.storage[zone:id()]
+		if st and st.ini and st.active_section == "sr_idle@wait_finish" and st.ini:section_exist("sr_cutscene@fight_1") then
+			return zone, st
+		end
+	end
+	return nil
+end
+
+local function arena_reset()
+	local n = arena_fight()
+	for _, id in pairs(db.OnlineStalkers or {}) do
+		local o = level.object_by_id(id)
+		if o and o:section():find("bar_arena_stalker", 1, true) == 1 then safe_release_manager.release({ id = id }) end
+	end
+	local xz = C().mod("xr_zones")
+	if xz and xz.purge_arena_items then xz.purge_arena_items("bar_arena") end
+	disable_info("bar_arena_fight_begin")
+	if n then
+		disable_info("bar_arena_fight_" .. n)
+		for i = 1, ARENA_OPPONENTS do disable_info(string.format("bar_arena_fight_%d_stalker_%d_die", n, i)) end
+	end
+	local zone, st = arena_trigger()
+	if zone then xr_logic.switch_to_section(zone, st.ini, "sr_idle@idle") end
+end
+
+local function install_entries()
+	add({ id = "skyfall", task = SKYFALL, level = "l03_agroprom", armed = true, reset = skyfall_reset, zone = skyfall_zone,
+		live = function(tsk) return tsk.stage == 1 or tsk.stage == 2 end })
+	add({ id = "big_game", task = BIG_GAME, level = "jupiter", armed = true, reset = big_game_reset,
+		zone = function() return smart_pos("jup_sim_2"), 150 end,
+		live = function(tsk) return tsk.stage == 1 or tsk.stage == 2 end })
+	add({ id = "baba_yaga", task = "bar_visitors_barman_stalker_trader_task_baba_yaga", level = "l02_garbage",
+		zone = function()
+			local cfg = C().mod("baba_yaga_configs")
+			return cfg and cfg.teleport_to_location and cfg.teleport_to_location.vector, 100
+		end,
+		live = function(tsk) return tsk.stage == 2 end,
+		heal = function()
+			local state = module_local("tasks_baba_yaga", "state")
+			return state and state.hag_id and { state.hag_id } or {}
+		end })
+	add({ id = "mirage", task = "zat_a2_stalker_barmen_task_mirage", level = "zaton",
+		zone = function()
+			local cfg = C().mod("mirage_configs")
+			return cfg and cfg.teleport_activator_center_point, cfg and cfg.teleport_activation_distance
+		end,
+		live = function(tsk) return tsk.stage > 0 and tsk.stage < 7 end,
+		heal = function()
+			local state = module_local("tasks_mirage", "state")
+			return state and state.enemy_ids or {}
+		end })
+	add({ id = "btr_hunt", task = BTR_HUNT, level = "l07_military", car = true,
+		zone = function(tsk)
+			local v = btr_left(tsk)[1]
+			return v and vector():set(v.x, v.y, v.z), 200
+		end,
+		live = function(tsk) return tsk.stage == 1 and btr_left(tsk)[1] ~= nil end,
+		heal = function(tsk)
+			local out = {}
+			for _, v in ipairs(btr_left(tsk)) do out[#out + 1] = v.id end
+			return out
+		end })
+	for _, h in ipairs(HUNTS) do
+		add({ id = h[1], task = h[1], section = h[2], smart = h[3], level = squad_level, heal = squad_member_ids,
+			zone = function(_, e)
+				local se = find_squad(e)
+				return se and se.position, HUNT_RADIUS
+			end,
+			live = function(_, e) return find_squad(e) ~= nil end })
+	end
+	add({ id = "bar_arena", level = "l05_bar", on_level = true, armed = true, reset = arena_reset, live = arena_on,
+		zone = function()
+			if not level.patrol_path_exists(ARENA_POINT) then return nil end
+			return patrol(ARENA_POINT):point(0), ARENA_RADIUS
+		end })
+end
+
+-------------------------------------------------------------------------------
+-- Scenes
+-------------------------------------------------------------------------------
+-- Pripyat evacuation. Waves, helis and the end of the scene run on timers without the players, and pri_a28_helis_leave decides
+-- the ending for a group that is not there. It comes from two timers (pri_a28_sr_mono_waves.ltx sr_idle@waves_done, 300 game
+-- seconds; pri_a28_sr_evac.ltx sr_timer@got_one_minute): while no standing player is in the zone the helis wait at, both stand
+-- still. The info itself cannot be held back: the logic of the scene reads it the frame it is given.
+local EVAC_ZONE = "pri_a28_scene_end_zone"
+
+local function evac_tick()
+	local end_zone = db.zone_by_name and db.zone_by_name[EVAC_ZONE]
+	if not end_zone then return end -- not the level of the scene
+	for _, o in ipairs(P.everyone()) do
+		if P.standing(o) and end_zone:inside(o:position()) then return end
+	end
+	for _, zone in pairs(db.zone_by_name) do
+		local st = db.storage[zone:id()]
+		local section = st and st.active_section
+		if section == "sr_idle@waves_done" then
+			st.activation_game_time = game.get_game_time()
+		elseif section == "sr_timer@got_one_minute" then
+			st.activation_time = time_global()
+		end
+	end
+end
+
+-- Impending Doom: the deadline counts game time; every minute the group lies dead burns it, and past it the Mortal Sin
+-- storyline is over (too_late, the companions die). The stored start moves on with the time nobody stood.
+local DOOM_KEY = "impending_doom_timer"
+local doom = { last = nil, rest = 0 }
+
+local function doom_tick()
+	local now = game.get_game_time()
+	local last = doom.last
+	doom.last = now
+	local start = load_ctime(db.actor, DOOM_KEY)
+	if not (last and start) then return end
+	local whole
+	whole, doom.rest = doom_shift(not anyone_standing(), now:diffSec(last), doom.rest)
+	if whole <= 0 then return end
+	local d = game.CTime()
+	d:setHMS(0, 0, whole)
+	start:add(d)
+	save_ctime(db.actor, DOOM_KEY, start)
+	stats.doom_seconds = stats.doom_seconds + whole
+end
+
+-- Hidden Threat, task 5: Degtyarev's death fails the storyline for good. Offline the mod's own ignore list keeps him out of
+-- the offline combat; online, while the whole group is down or gone from him, he takes no damage.
+local HT_TASK = "sl_hidden_threat_task_5"
+local HT_SQUAD = "pri_b35_mercs_ht_degtyarev_squad"
+local HT_RADIUS = 200
+local guarded = {} -- npc id -> true
+
+local function ht_tick()
+	for id in pairs(guarded) do guarded[id] = nil end
+	if not in_progress(task_of(HT_TASK)) then return end
+	local se = get_story_squad and get_story_squad(HT_SQUAD)
+	if not (se and se.position) or standing_near(se.position, HT_RADIUS) then return end
+	for k in se:squad_members() do guarded[k.id] = true end
+end
+
+local function npc_on_before_hit(npc, s_hit)
+	if next(guarded) == nil or not (ruled() and npc and s_hit and guarded[npc:id()]) then return end
+	s_hit.power = 0
+	stats.guarded_hits = stats.guarded_hits + 1
+end
+
+-- The arena's gear. The flag is set under coop_npc_logic's audience wrapper of these effects (this file starts before it):
+-- only a player the stock function really ran for was in the fight.
+local arena_gear = false
+
+local function install_arena_gear()
+	local xe = C().mod("xr_effects")
+	for name, taken in pairs({ bar_arena_teleport = true, bar_arena_teleport_2 = false }) do
+		C().wrap(xe, name, "xr_effects." .. name, function(stock)
+			return function(...)
+				arena_gear = taken
+				return stock(...)
+			end
+		end)
+	end
+end
+
+local function on_respawned()
+	if not (arena_gear and P.active() and db.actor) then return end
+	xr_effects.bar_arena_teleport_2(db.actor)
+end
+
+-- The host's own flag only: a client's goes with his Lua state, he gets his gear back from the box at the arena's exit.
+local function save_state(m_data)
+	m_data.coop_arena_gear = arena_gear or nil
+end
+
+local function load_state(m_data)
+	arena_gear = m_data.coop_arena_gear == true
+end
+
+-------------------------------------------------------------------------------
+-- Tick
+-------------------------------------------------------------------------------
+local function heal_tick()
+	for id, kind in pairs(wounded) do
+		local o = level.object_by_id(id)
+		if o then
+			wounded[id] = nil
+			if kind == "car" or o:alive() then
+				o:set_health_ex(1)
+				stats.healed = stats.healed + 1
+			end
+		elseif not alife_object(id) then
+			wounded[id] = nil
+		end
+	end
+end
+
+local SCENES = { { "evacuation", evac_tick }, { "deadline", doom_tick }, { "hidden threat", ht_tick }, { "heal", heal_tick } }
+
+local next_tick = 0
+
+local function actor_on_update()
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	if not (db.actor and ruled()) then return end
+	for _, e in ipairs(entries) do
+		local ok, err = pcall(check, e, now)
+		if not ok then report(e.id, err) end
+	end
+	for _, sc in ipairs(SCENES) do
+		local ok, err = pcall(sc[2], now)
+		if not ok then report(sc[1], err) end
+	end
+end
+
+function print_status()
+	return string.format("roll backs %d, healed %d, doom seconds given back %d, hits held off %d, errors %d",
+		stats.rollbacks, stats.healed, stats.doom_seconds, stats.guarded_hits, stats.errors)
+end
+
+function on_game_start()
+	P = coop_npc_players
+	if not rawget(_G, "coop") then return end
+	install_entries()
+	local ok, err = pcall(install_arena_gear) -- axr_main runs every on_game_start in one unprotected loop
+	if not ok then report("arena", err) end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
+	RegisterScriptCallback("coop_respawned", on_respawned)
+	RegisterScriptCallback("save_state", save_state)
+	RegisterScriptCallback("load_state", load_state)
+	C().status_line(TAG, print_status)
+end

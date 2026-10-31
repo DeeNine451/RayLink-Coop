@@ -77,6 +77,12 @@ constexpr Row kExpected[] = {
 	{Msg::ItemState, kMap},
 	{Msg::EntitySound, kMap},
 	{Msg::EntityVisual, kMap},
+	{Msg::EntityHash, kMap}, // the roster (coop_reconcile.h): the authority of the level compares it
+	{Msg::EntityRoster, kMap},
+	{Msg::EntityResync, kMap},
+	{Msg::EntityTraits, kMap},
+	{Msg::EntitySquad, kMap},
+	{Msg::LampState, kMap},
 	// requests (Req*, except the money) and their results
 	{Msg::ReqSpawn, kMap},
 	{Msg::ReqDestroy, kMap},

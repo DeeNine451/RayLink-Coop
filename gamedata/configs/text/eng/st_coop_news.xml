@@ -40,4 +40,32 @@
 	<string id="st_coop_news_away_more">
 		<text>And %d more items.</text>
 	</string>
+	<string id="st_coop_news_task_lang_caption">
+		<text>Tasks</text>
+	</string>
+	<string id="st_coop_news_task_lang">
+		<text>The host plays in another language: task texts come in his.</text>
+	</string>
+	<!-- Foreign loot (coop_loot_claim.script): the warning of a stalker who guards the body he killed, and the empty search; used when the strings of the GAMMA mod NPC Loot Claim are not installed. -->
+	<string id="st_coop_news_loot_last_1">
+		<text>Step away from that body. I killed him, it's mine.</text>
+	</string>
+	<string id="st_coop_news_loot_last_2">
+		<text>I won't say it twice: leave my kill alone.</text>
+	</string>
+	<string id="st_coop_news_loot_last_3">
+		<text>Touch his stuff and you will regret it.</text>
+	</string>
+	<string id="st_coop_news_loot_last_4">
+		<text>Back off, stranger. I got him first.</text>
+	</string>
+	<string id="st_coop_news_loot_last_5">
+		<text>Hands off, or I open fire.</text>
+	</string>
+	<string id="st_coop_news_loot_far">
+		<text>You found nothing useful on this body.</text>
+	</string>
+	<string id="st_coop_quests_npc_limit">
+		<text>This NPC has given the group all the tasks it can. Turn one of them in.</text>
+	</string>
 </string_table>

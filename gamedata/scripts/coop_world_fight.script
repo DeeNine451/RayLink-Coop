@@ -1,0 +1,225 @@
+--[[
+	Anomaly Coop - world group: a fight is also heard by the player it is with (gamedata\scripts\coop_world_fight.script)
+
+	1. Who fights this player. xr_combat_ignore.fighting_with_actor_npcs is read by the combat music (xrs_dyn_music), by
+	   Voiced Actor's combat lines, by the gates of fast travel. Stock writes it from the NPCs' enemy callback, for AC_ID
+	   only, and that logic runs on the host: a client's table stayed empty and a firefight had no music there. The host
+	   knows who fights whom (coop_npc_combat), writes a list per client into coop.sync and the client's table follows it,
+	   in its own ids. Per player, as stock has it for its one actor: an NPC that fights only a client gives the host no
+	   combat music, one that fights only the host gives the client none.
+	2. Hits. npc_on_hit_callback and its kin fire where the hit is applied, the host, and there the attacker is the client's
+	   proxy, so the mods that confirm a hit of "the actor" never answer it. A client's bullet is only a claim on his
+	   machine: nothing fires there. The host tells the attacker's machine (world.hit), which calls those handlers of the
+	   mods in HIT_HANDLERS with the local actor as the attacker. Only those: the rest of the callback's handlers are the
+	   host's business and must not start running on a client. A kill needs no such thing: a puppet dies on a client
+	   through the stock binder, with the killer in local ids (configs\coop_compat_voiced_actor.ltx).
+
+	Events (ids in host numbering):
+	  world.hit  host -> client  { i = victim, a = amount, b = bone, m = true for a monster }
+	coop.sync: session scope, "world.fight.<peer>" = list of NPC ids.
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+local math_min = math.min
+
+local TAG = "fight"
+local P -- coop_npc_players
+
+local function log(fmt, ...) P.log(TAG, fmt, ...) end
+local function report(what, err) P.report(TAG, what, err) end
+
+local EV_HIT = "world.hit"
+local KEY_PREFIX = "world.fight."
+local TICK_MS = 1000
+-- Hits told to one player, as a bucket: a shotgun's pellets come as separate hits.
+local HIT_BURST, HIT_PER_SEC = 20, 10
+
+local stats = { lists = 0, fights_in = 0, hits_out = 0, hits_in = 0, hits_limited = 0 }
+
+-------------------------------------------------------------------------------
+-- 1. Who fights this player
+-------------------------------------------------------------------------------
+local sent = {} -- host: peer -> the list as a string
+
+local function fights_by_player()
+	local c = rawget(_G, "coop_npc_combat")
+	local state = c and c._state and c._state()
+	local fighting = state and state.fighting
+	local lists = {} -- player id here -> { npc id, ... }
+	if type(fighting) ~= "table" then return lists end
+	for npc_id, players in pairs(fighting) do
+		local npc = level.object_by_id(npc_id)
+		if npc and npc:alive() then
+			for player_id in pairs(players) do
+				local l = lists[player_id]
+				if not l then
+					l = {}
+					lists[player_id] = l
+				end
+				l[#l + 1] = npc_id
+			end
+		end
+	end
+	return lists
+end
+
+local function host_tick()
+	local sync = api and api.sync
+	if not sync then return end
+	local lists = fights_by_player()
+	for _, o in ipairs(P.others()) do
+		local peer = P.peer_of(o)
+		if peer then
+			local l = lists[o:id()] or {}
+			table.sort(l)
+			local sig = table.concat(l, ",")
+			if (sent[peer] or "") ~= sig and sync.set("session", KEY_PREFIX .. tostring(peer), l) == true then
+				sent[peer] = sig
+				stats.lists = stats.lists + 1
+			end
+		end
+	end
+end
+
+local mine = {} -- client: local ids this script put into the table
+
+local function client_tick()
+	local sync = api and api.sync
+	local ci = _G["xr_combat_ignore"]
+	if not (sync and ci and type(ci.fighting_with_actor_npcs) == "table") then return end
+	local list = sync.get("session", KEY_PREFIX .. tostring(P.self_peer()))
+	local want = {}
+	if type(list) == "table" then
+		for _, hid in ipairs(list) do
+			local id = P.to_local(tonumber(hid))
+			if type(id) == "number" then
+				want[id] = true
+				if not mine[id] then stats.fights_in = stats.fights_in + 1 end
+				mine[id] = true
+				ci.fighting_with_actor_npcs[id] = true
+			end
+		end
+	end
+	for id in pairs(mine) do
+		if not want[id] then
+			mine[id] = nil
+			ci.fighting_with_actor_npcs[id] = nil
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- 2. Hits
+-------------------------------------------------------------------------------
+-- script, function, kind: "before" (npc, hit table, bone, flags), "hit" (npc, amount, direction, attacker, bone). `monster`:
+-- the handler of a mutant's hit; the others are a stalker's.
+local HIT_HANDLERS = {
+	{ "wepl_hit_effect", "npc_on_before_hit", "before" }, -- the hit sound at the NPC
+	{ "npe_gamma_tutorial_ammo_mcm", "is_ammo_item_used", "before" },
+	{ "agdd_voiced_actor", "npc_on_hit_callback", "hit" }, -- the combat intensity of the voice lines
+	{ "agdd_voiced_actor", "monster_on_hit_callback", "hit", monster = true },
+}
+
+local buckets = {} -- host: peer -> { tokens, at }
+
+local function allowed(peer)
+	local b = buckets[peer]
+	local now = time_global()
+	if not b then
+		b = { HIT_BURST, now }
+		buckets[peer] = b
+	end
+	b[1] = math_min(HIT_BURST, b[1] + (now - b[2]) * HIT_PER_SEC / 1000)
+	b[2] = now
+	if b[1] < 1 then
+		stats.hits_limited = stats.hits_limited + 1
+		return false
+	end
+	b[1] = b[1] - 1
+	return true
+end
+
+local function host_on_hit(victim, amount, who, bone, monster)
+	if not (who and victim and type(amount) == "number" and amount > 0) then return end
+	if not P.host_with_clients() then return end
+	local who_id = who:id()
+	if who_id == 0 then return end
+	local peer = P.peer_of(who_id)
+	if not (peer and allowed(peer)) then return end
+	local t = { i = victim:id(), a = amount, b = tonumber(bone) or 65535 }
+	if monster then t.m = true end
+	if P.send(EV_HIT, t, peer) then stats.hits_out = stats.hits_out + 1 end
+end
+
+local function npc_on_hit_callback(npc, amount, dir, who, bone)
+	local ok, err = pcall(host_on_hit, npc, amount, who, bone, false)
+	if not ok then report("npc hit", err) end
+end
+
+local function monster_on_hit_callback(npc, amount, dir, who, bone)
+	local ok, err = pcall(host_on_hit, npc, amount, who, bone, true)
+	if not ok then report("monster hit", err) end
+end
+
+local function hit_table(amount)
+	local item = db.actor:active_item()
+	return { power = amount, draftsman = db.actor, weapon_id = item and item:id() or 0, type = 6,
+		direction = vector():set(0, 0, 1), impulse = 0 }
+end
+
+local function client_on_hit(t)
+	if not db.actor or type(t.i) ~= "number" or type(t.a) ~= "number" then return end
+	local victim = level.object_by_id(P.to_local(t.i))
+	if not victim then return end
+	stats.hits_in = stats.hits_in + 1
+	local bone = tonumber(t.b) or 65535
+	for _, h in ipairs(HIT_HANDLERS) do
+		if (h.monster == true) == (t.m == true) then
+			local mod = rawget(_G, h[1])
+			local f = mod and mod[h[2]]
+			if type(f) == "function" then
+				local ok, err
+				if h[3] == "before" then
+					ok, err = pcall(f, victim, hit_table(t.a), bone, { ret_value = true })
+				else
+					ok, err = pcall(f, victim, t.a, vector():set(0, 0, 1), db.actor, bone)
+				end
+				if not ok then report(h[1] .. "." .. h[2], err) end
+			end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Install, update
+-------------------------------------------------------------------------------
+local next_tick = 0
+
+local function actor_on_update()
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	local f = P.is_host() and host_tick or (P.client_live() and client_tick) or nil
+	if f then
+		local ok, err = pcall(f)
+		if not ok then report("tick", err) end
+	end
+end
+
+function print_status()
+	local now = 0
+	for _ in pairs(mine) do now = now + 1 end
+	log("fights: lists written %d, taken %d, %d now | hits told %d (over the limit %d), heard %d | errors %d", stats.lists,
+		stats.fights_in, now, stats.hits_out, stats.hits_limited, stats.hits_in, P.error_count(TAG))
+end
+
+function on_game_start()
+	P = coop_npc_players
+	if not api then return end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("npc_on_hit_callback", npc_on_hit_callback)
+	RegisterScriptCallback("monster_on_hit_callback", monster_on_hit_callback)
+	P.on(EV_HIT, client_on_hit, "client", TAG)
+end

@@ -49,3 +49,11 @@ TEST(silence_pause_works_again_after_an_end)
 	CHECK(p.begin(false));
 	CHECK(p.end());
 }
+
+// Audit H4 (2026-10-31): the Pause key toggled by the device's word. In a session that word is always "not paused", so each
+// press took the sound's pause and none gave it back: what played at that moment stayed paused for good.
+TEST(pause_key_works_only_where_the_clock_can_stop)
+{
+	CHECK(coop::pause_key_acts(true));
+	CHECK(!coop::pause_key_acts(false));
+}

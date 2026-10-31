@@ -3,7 +3,7 @@
 --   c|coop_split_levels      on / off, the switch of the split levels, on by default
 --   c|coop_story_together    on / off, only while the levels are split, on by default
 --   o|coop/coop_session/join_spawn   a new player appears at the base of the world's faction by default
--- The catalog is loaded into a sealed environment (the standard library and nothing of the engine). The list of 19 console
+-- The catalog is loaded into a sealed environment (the standard library and nothing of the engine). The list of 20 console
 -- variables is also held against the engine's white list in engine\src\xrCoop\coop_game_values.h when that file is there.
 -- Not shipped. Run: tools\test_lua.cmd game_schema
 local PASSES, FAILS = 0, 0
@@ -67,18 +67,19 @@ local SPLIT, STORY = "c|coop_split_levels", "c|coop_story_together"
 local JOIN = "o|coop/coop_session/join_spawn"
 
 -------------------------------------------------------------------------------
-print("== the 19 console variables")
+print("== the 20 console variables")
 local FIRST_17 = { "coop_friendly_fire", "coop_max_new_characters", "coop_share_rewards", "coop_death_mode", "coop_death_drop",
 	"coop_bleedout", "coop_revive_health", "coop_respawn_delay", "coop_contusion", "coop_death_money", "coop_death_wear",
 	"coop_death_rank", "coop_hardcore_new_kit", "coop_checkpoints_group", "coop_autosave_interval", "coop_autosave_count",
 	"coop_death_share" }
-check(#schema.CVARS == 19, "CVARS holds 19 names (" .. #schema.CVARS .. ")")
+check(#schema.CVARS == 20, "CVARS holds 20 names (" .. #schema.CVARS .. ")")
 local same = true
 for i, n in ipairs(FIRST_17) do
 	if schema.CVARS[i] ~= n then same = false end
 end
 check(same, "the first 17 names keep their order")
 check(schema.CVARS[18] == "coop_split_levels" and schema.CVARS[19] == "coop_story_together", "rows 18 and 19 are the split-levels rules")
+check(schema.CVARS[20] == "coop_finish_downed", "row 20 is the NPC AI rule: stalkers finish a downed player")
 for _, n in ipairs({ "coop_split_levels", "coop_story_together" }) do
 	local c = schema.CVAR[n]
 	check(c ~= nil and c.kind == "int" and c.min == 0 and c.max == 1 and c.def == 1, n .. ": an on/off console flag, on by default")
@@ -94,7 +95,7 @@ if header then
 	for i, n in ipairs(names) do
 		if schema.CVARS[i] ~= n then equal = false end
 	end
-	check(#names == 19 and equal, "coop_game_values.h kGameCvars is the catalog's CVARS (" .. #names .. " names)")
+	check(#names == 20 and equal, "coop_game_values.h kGameCvars is the catalog's CVARS (" .. #names .. " names)")
 else
 	print("  skip the engine sources are not checked out: kGameCvars is not compared")
 end
@@ -103,7 +104,7 @@ local c_items = 0
 for _, k in ipairs(schema.keys()) do
 	if k:find("^c|") then c_items = c_items + 1 end
 end
-check(c_items == 19, "all 19 console variables, and only they, are catalog items of source c (" .. c_items .. ")")
+check(c_items == 20, "all 20 console variables, and only they, are catalog items of source c (" .. c_items .. ")")
 
 -------------------------------------------------------------------------------
 print("== the two switches")
@@ -154,9 +155,27 @@ check(schema.normalize(JOIN, "host") == "host" and schema.normalize(JOIN, "facti
 check(schema.to_raw(JOIN, "faction_start") == "faction_start", "to_raw")
 
 -------------------------------------------------------------------------------
+print("== two rules of the 2026-10-31 night: foreign loot, stalkers finish a downed player")
+local LOOT, FINISH = "o|coop/coop_session/loot_claim", "c|coop_finish_downed"
+local loot = schema.item(LOOT)
+check(loot ~= nil and loot.tab == "party" and loot.kind == "check" and loot.src == "o" and loot.def == true,
+	"Foreign loot: a check on the group tab, on by default")
+check(loot and loot.when == "session" and schema.editable(LOOT, true) and schema.editable(LOOT, false),
+	"Foreign loot: changed between sessions, editable on an existing game")
+check(schema.normalize(LOOT, "false") == false and schema.normalize(LOOT, "true") == true and schema.normalize(LOOT, "maybe") == nil
+	and schema.to_raw(LOOT, false) == "false", "Foreign loot: an option flag is true / false")
+local downed = schema.item(FINISH)
+check(downed ~= nil and downed.tab == "death" and downed.kind == "check" and downed.src == "c" and downed.cvar == "coop_finish_downed"
+	and downed.def == true, "finish a downed player: a check on the death tab, a console variable, on by default (as today)")
+check(downed and downed.range and downed.range[1] == 0 and downed.range[2] == 1 and downed.int == true
+	and schema.to_raw(FINISH, false) == "0" and schema.to_raw(FINISH, true) == "1", "finish a downed player: 0..1, the console form")
+check(downed and downed.shown_if == nil, "finish a downed player: always shown")
+
+-------------------------------------------------------------------------------
 print("== strings")
 local ids = schema.text_ids()
 local want = { "st_coop_game_split_levels", "st_coop_game_story_together", "st_coop_game_join_spawn",
+	"st_coop_game_loot_claim", "st_coop_game_finish_downed",
 	"st_coop_game_join_spawn_host", "st_coop_game_join_spawn_faction_start" }
 for _, id in ipairs(want) do
 	check(index_of(ids, id) ~= nil, "text_ids names " .. id)

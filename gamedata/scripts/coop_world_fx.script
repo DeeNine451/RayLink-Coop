@@ -1,0 +1,530 @@
+--[[
+	Anomaly Coop - world group: what host-side scripts draw and play reaches the clients (coop_world_fx.script)
+
+	particles_object():play_at_pos, a sound with no owner, level.add_cam_effector are View calls: nothing stops them, they
+	simply run where the script runs. For scripts that run on the host (npc_on_before_hit handlers, status functors of
+	tasks, their timers) that is the host alone: the engine relays a creature's own sound and nothing else (parity audit
+	W4, sound M4, tasks audit X2).
+
+	The scripts keep their code. A script's global names resolve through its own module table first, so a stand-in put
+	into that table by name changes that one script, its closures and timers included, and no other:
+	  particles_object                               play_at_pos goes to the clients near the point
+	  wallmarks_manager                              place goes to the clients near the point (mutant bleeding's drops)
+	  sound_object, xr_sound.get_safe_sound_object   a sound of nobody or of the actor goes to the clients (positional:
+	                                                 those near the point; 2D: all); the volume a script writes after
+	                                                 play goes with it: the sends wait for the next frame
+	  level                                          camera, postprocess and complex effectors and their removers
+	  dynamic_news_helper, news_manager              send_tip runs in a world scope of coop_core_world (core.news)
+	Outside a session, on a client and for a host alone every stand-in is the stock call and nothing else.
+
+	Which script gets which: EFFECT_SCRIPTS (the hit effects of mods), TASK_SCRIPTS (group tasks: everything).
+	Mute: nta_utils.teleport_visual is the screen of the player who moves, and the earthquake of The Living Fire is sent by
+	coop_mods_nta already.
+	Blood pools need no relay: the mod draws from death callbacks a client has too (configs\coop_compat_blood_pool.ltx).
+	The emission's body tear (CSurgeManager.explode) is neutralized on a client (coop_main): the host sends it.
+
+	Other scripts: coop_world_fx.play(name, pos, dir) plays a particle here and on the clients near pos.
+
+	coop.sync effects (host -> clients):
+	  world.part { n = particle, x, y, z, dx, dy, dz }        near the point
+	  world.mark { t = texture, x, y, z, dx, dy, dz, r, s, l, o = object }   near the point
+	  world.snd  { s = path, x, y, z | nothing, v, q }        near the point, or everybody for a 2D sound
+	  world.cfx  { k = cam | uncam | pp | unpp | cpx | uncpx, n = name, i = id, l = loop }   everybody
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tostring, tonumber, type, pairs, ipairs, pcall, rawget, rawset, setmetatable = tostring, tonumber, type, pairs, ipairs,
+	pcall, rawget, rawset, setmetatable
+local math_min = math.min
+
+local TAG = "fx"
+local P -- coop_npc_players
+
+local function log(fmt, ...) P.log(TAG, fmt, ...) end
+local function report(what, err) P.report(TAG, what, err) end
+
+local EV_PART, EV_MARK, EV_SND, EV_CFX = "world.part", "world.mark", "world.snd", "world.cfx"
+
+local PARTICLE_RADIUS, SOUND_RADIUS = 120, 300
+local TICK_MS = 500
+local MAX_NAME = 192
+-- Per hit effects of a firefight are the only flood: effects sent, as a bucket (burst, per second).
+local BURST, PER_SEC = 40, 20
+local KEEP_PARTICLES = 48 -- client: stock scripts hold a particle that must play out, a lost reference ends it
+
+-- The hit effects of mods: GBOOBS armor sparks and head bursts, Eidolon's shield, Fuji's teleports, mutant bleeding.
+local EFFECT_SCRIPTS = { "grok_bo", "fuji_magician", "arszi_mutant_bleeding" }
+-- Group tasks (New Tasks Addon, Hidden Threat, Operation Monolith): their tips, sounds, effectors and particles are the
+-- group's, whatever pass of the task's functor made them.
+local TASK_SCRIPTS = { "nta_utils", "new_tasks_addon_tasks_utils", "tasks_baba_yaga", "tasks_big_game", "tasks_brain_game",
+	"tasks_dead_night", "tasks_gambling_with_life", "tasks_hold_the_ground", "tasks_house_of_horrors",
+	"tasks_intercept_artifact", "tasks_mirage", "tasks_mystery_of_the_swamps", "tasks_no_step_back", "tasks_nta_stash",
+	"tasks_skyfall", "tasks_the_living_fire", "tasks_urgent_orders", "tasks_vengence_amplified", "z_nta_xr_effects",
+	"hidden_threat", "task_functor_hidden_threat", "utils_slht", "operacia_monolith" }
+
+local host_on = false -- a host with at least one client
+local muted = 0
+local stats = { parts = 0, sounds = 0, effectors = 0, limited = 0, parts_in = 0, sounds_in = 0, effectors_in = 0, scripts = 0 }
+
+-- Script module by name, or nil (coop_mods_core: the file is checked before _G is touched).
+local function module_of(name)
+	local m = rawget(_G, name)
+	if m ~= nil then return m end
+	local ok, r = pcall(function() return coop_mods_core.mod(name) end)
+	return ok and r or nil
+end
+
+local function plain_name(s)
+	return type(s) == "string" and #s > 0 and #s <= MAX_NAME
+end
+
+-------------------------------------------------------------------------------
+-- Sending
+-------------------------------------------------------------------------------
+local tokens, tokens_at = BURST, 0
+
+local function allowed()
+	local now = time_global()
+	tokens = math_min(BURST, tokens + (now - tokens_at) * PER_SEC / 1000)
+	tokens_at = now
+	if tokens < 1 then
+		stats.limited = stats.limited + 1
+		return false
+	end
+	tokens = tokens - 1
+	return true
+end
+
+local function cast(name, args, x, y, z, radius)
+	local s = api and api.sync
+	if not s then return false end
+	if x then return s.broadcast(name, args, { pos = vector():set(x, y, z), radius = radius }) == true end
+	return s.broadcast(name, args) == true
+end
+
+local function relaying() return host_on and muted == 0 end
+
+local function send_particle(name, pos, dir)
+	if not (relaying() and plain_name(name) and pos and allowed()) then return end
+	local t = { n = name, x = pos.x, y = pos.y, z = pos.z }
+	if dir then t.dx, t.dy, t.dz = dir.x, dir.y, dir.z end
+	if cast(EV_PART, t, pos.x, pos.y, pos.z, PARTICLE_RADIUS) then stats.parts = stats.parts + 1 end
+end
+
+local function send_mark(dir, pos, range, size, texture, obj, ttl)
+	if not (relaying() and plain_name(texture) and pos and dir and obj and allowed()) then return end
+	local t = { t = texture, x = pos.x, y = pos.y, z = pos.z, dx = dir.x, dy = dir.y, dz = dir.z, r = range, s = size, l = ttl,
+		o = obj:id() }
+	if cast(EV_MARK, t, pos.x, pos.y, pos.z, PARTICLE_RADIUS) then stats.parts = stats.parts + 1 end
+end
+
+-- A sound leaves on the next frame, with the volume and frequency the script writes right after play.
+local queue = {}
+
+local function queue_sound(rec, pos)
+	if not (relaying() and plain_name(rec.path) and allowed()) then return end
+	local t = { s = rec.path }
+	if pos then t.x, t.y, t.z = pos.x, pos.y, pos.z end
+	rec.pending = t
+	queue[#queue + 1] = rec
+end
+
+local function flush_sounds()
+	for i = 1, #queue do
+		local rec, t = queue[i], nil
+		t, rec.pending = rec.pending, nil
+		if t then
+			if cast(EV_SND, t, t.x, t.y, t.z, SOUND_RADIUS) then stats.sounds = stats.sounds + 1 end
+		end
+		queue[i] = nil
+	end
+end
+
+local function send_effector(t)
+	if not relaying() then return end
+	if cast(EV_CFX, t) then stats.effectors = stats.effectors + 1 end
+end
+
+-- Plays a particle here and on the clients near pos.
+function play(name, pos, dir)
+	local fx = particles_object(name)
+	if dir then fx:set_direction(dir) end
+	fx:play_at_pos(pos)
+	send_particle(name, pos, dir)
+	return fx
+end
+
+-------------------------------------------------------------------------------
+-- Stand-ins
+-------------------------------------------------------------------------------
+local rec_of = setmetatable({}, { __mode = "k" }) -- stand-in -> { real, ... }
+
+-- An object that behaves like the engine's one (methods, properties); `methods` take over some of them.
+local function behaving(real, rec, methods, on_write)
+	rec.real = real
+	local p = {}
+	rec_of[p] = rec
+	return setmetatable(p, {
+		__index = function(_, k)
+			local m = methods[k]
+			if m then return m end
+			local v = real[k]
+			if type(v) ~= "function" then return v end
+			return function(self, ...)
+				if self == p then return v(real, ...) end
+				return v(self, ...)
+			end
+		end,
+		__newindex = function(_, k, v)
+			real[k] = v
+			if on_write then on_write(rec, k, v) end
+		end,
+	})
+end
+
+local particle_methods = {
+	set_direction = function(p, dir)
+		local rec = rec_of[p]
+		rec.real:set_direction(dir)
+		rec.dir = { x = dir.x, y = dir.y, z = dir.z }
+	end,
+	play_at_pos = function(p, pos)
+		local rec = rec_of[p]
+		rec.real:play_at_pos(pos)
+		send_particle(rec.name, pos, rec.dir)
+	end,
+}
+
+local function particle_factory(real_class)
+	return function(name, ...)
+		return behaving(real_class(name, ...), { name = name }, particle_methods)
+	end
+end
+
+local mark_methods = {
+	place = function(p, dir, pos, range, size, texture, obj, ttl, ...)
+		local r = rec_of[p].real:place(dir, pos, range, size, texture, obj, ttl, ...)
+		send_mark(dir, pos, range, size, texture, obj, ttl)
+		return r
+	end,
+}
+
+local function mark_factory(real_manager)
+	return function(...)
+		return behaving(real_manager(...), {}, mark_methods)
+	end
+end
+
+local function owner_is_nobody(obj)
+	if obj == nil then return true end
+	local ok, id = pcall(function() return obj:id() end)
+	return ok and id == 0
+end
+
+local function is_looped(flags)
+	local c = rawget(_G, "sound_object")
+	local looped = c and c.looped
+	return type(flags) == "number" and type(looped) == "number" and bit.band(flags, looped) ~= 0
+end
+
+local sound_methods = {
+	play = function(p, obj, delay, flags, ...)
+		local rec = rec_of[p]
+		local r = rec.real:play(obj, delay, flags, ...)
+		if owner_is_nobody(obj) and not is_looped(flags) then queue_sound(rec, nil) end
+		return r
+	end,
+	play_at_pos = function(p, obj, pos, delay, flags, ...)
+		local rec = rec_of[p]
+		local r
+		if flags ~= nil then
+			r = rec.real:play_at_pos(obj, pos, delay, flags, ...)
+		elseif delay ~= nil then
+			r = rec.real:play_at_pos(obj, pos, delay)
+		else
+			r = rec.real:play_at_pos(obj, pos)
+		end
+		if owner_is_nobody(obj) and not is_looped(flags) then
+			local c = rawget(_G, "sound_object")
+			local flat = c and type(flags) == "number" and flags == c.s2d
+			queue_sound(rec, not flat and pos or nil)
+		end
+		return r
+	end,
+	play_no_feedback = function(p, obj, flags, delay, pos, ...)
+		local rec = rec_of[p]
+		local r = rec.real:play_no_feedback(obj, flags, delay, pos, ...)
+		if owner_is_nobody(obj) and not is_looped(flags) then
+			local c = rawget(_G, "sound_object")
+			local flat = c and flags == c.s2d
+			queue_sound(rec, not flat and pos or nil)
+		end
+		return r
+	end,
+}
+
+local function on_sound_write(rec, k, v)
+	local t = rec.pending
+	if not t or type(v) ~= "number" then return end
+	if k == "volume" then t.v = v elseif k == "frequency" then t.q = v end
+end
+
+local function sound_stand_in(real, path)
+	return behaving(real, { path = path }, sound_methods, on_sound_write)
+end
+
+-- sound_object(path) and sound_object.s2d, the class stays readable.
+local function sound_class(real_class)
+	return setmetatable({}, {
+		__index = real_class,
+		__call = function(_, path, ...) return sound_stand_in(real_class(path, ...), path) end,
+	})
+end
+
+local function xr_sound_table(real)
+	return setmetatable({
+		get_safe_sound_object = function(path, ...)
+			return sound_stand_in(real.get_safe_sound_object(path, ...), path)
+		end,
+	}, { __index = real })
+end
+
+local function level_table(real)
+	local function relayed(name, make)
+		return function(...)
+			local r = real[name](...)
+			local ok, t = pcall(make, ...)
+			if ok and t then send_effector(t) end
+			return r
+		end
+	end
+	return setmetatable({
+		add_cam_effector = relayed("add_cam_effector", function(path, id, loop) return { k = "cam", n = path, i = id, l = loop == true } end),
+		remove_cam_effector = relayed("remove_cam_effector", function(id) return { k = "uncam", i = id } end),
+		add_pp_effector = relayed("add_pp_effector", function(name, id, loop) return { k = "pp", n = name, i = id, l = loop == true } end),
+		remove_pp_effector = relayed("remove_pp_effector", function(id) return { k = "unpp", i = id } end),
+		add_complex_effector = relayed("add_complex_effector", function(name, id) return { k = "cpx", n = name, i = id } end),
+		remove_complex_effector = relayed("remove_complex_effector", function(id) return { k = "uncpx", i = id } end),
+	}, { __index = real })
+end
+
+local function world_news(real)
+	return setmetatable({
+		send_tip = function(...)
+			local w = rawget(_G, "coop_core_world")
+			if host_on and w and w.in_world_scope then return w.in_world_scope(real.send_tip, ...) end
+			return real.send_tip(...)
+		end,
+	}, { __index = real })
+end
+
+local function give(mod, name, make)
+	if rawget(mod, name) ~= nil then return end -- the script's own global of that name
+	local real = _G[name]
+	if real ~= nil then rawset(mod, name, make(real)) end
+end
+
+local function hand_out_effects(mod)
+	give(mod, "particles_object", particle_factory)
+	give(mod, "wallmarks_manager", mark_factory)
+end
+
+local function hand_out_all(mod)
+	give(mod, "particles_object", particle_factory)
+	give(mod, "sound_object", sound_class)
+	give(mod, "xr_sound", xr_sound_table)
+	give(mod, "level", level_table)
+	give(mod, "dynamic_news_helper", world_news)
+	give(mod, "news_manager", world_news)
+end
+
+-- tasks_mirage made its loop's particle and sound at load, into file locals: they get their stand-ins through any
+-- function that shares the upvalues.
+local function hand_out_mirage()
+	local m = module_of("tasks_mirage")
+	local f = m and rawget(m, "actor_on_update")
+	if type(f) ~= "function" or not debug then return end
+	for i = 1, 60 do
+		local name, v = debug.getupvalue(f, i)
+		if name == nil then return end
+		if name == "anomaly_particles" and v ~= nil and not rec_of[v] then
+			debug.setupvalue(f, i, behaving(v, { name = "anomaly2\\bold_idle" }, particle_methods))
+		elseif name == "anomaly_sound" and v ~= nil and not rec_of[v] then
+			debug.setupvalue(f, i, sound_stand_in(v, "anomaly\\gravi_rumble1"))
+		end
+	end
+end
+
+local function silenced(orig)
+	return function(...)
+		muted = muted + 1
+		local function done(ok, ...)
+			muted = muted - 1
+			if not ok then error((...), 0) end
+			return ...
+		end
+		return done(pcall(orig, ...))
+	end
+end
+
+local function wrap_mute(mod, name)
+	local f = mod and rawget(mod, name)
+	if type(f) == "function" then mod[name] = silenced(f) end
+end
+
+-- The emission's body tear: coop_main neutralizes explode on a client, the host's particle and sound stay there.
+local function wrap_explode()
+	local sm = module_of("surge_manager")
+	local cls = sm and sm.CSurgeManager
+	if not cls then return end
+	local orig = cls.explode
+	if type(orig) ~= "function" then return end
+	cls.explode = function(self, se_obj, squad, ...)
+		local at = squad and se_obj and vector():set(se_obj.position)
+		local r = orig(self, se_obj, squad, ...)
+		if at then
+			send_particle("anomaly2\\body_tear_01", at)
+			if relaying() and allowed() then
+				if cast(EV_SND, { s = "anomaly\\anomaly_body_tear_1", x = at.x, y = at.y, z = at.z, v = 1 }, at.x, at.y, at.z,
+					SOUND_RADIUS) then
+					stats.sounds = stats.sounds + 1
+				end
+			end
+		end
+		return r
+	end
+end
+
+local function install()
+	local n = 0
+	for _, name in ipairs(EFFECT_SCRIPTS) do
+		local m = module_of(name)
+		if type(m) == "table" then
+			hand_out_effects(m)
+			n = n + 1
+		end
+	end
+	for _, name in ipairs(TASK_SCRIPTS) do
+		local m = module_of(name)
+		if type(m) == "table" then
+			hand_out_all(m)
+			n = n + 1
+		end
+	end
+	stats.scripts = n
+	hand_out_mirage()
+	wrap_mute(module_of("nta_utils"), "teleport_visual")
+	wrap_mute(module_of("new_tasks_addon_tasks_utils"), "teleport_visual")
+	wrap_mute(module_of("tasks_the_living_fire"), "earthquake_effect")
+	wrap_explode()
+end
+
+-------------------------------------------------------------------------------
+-- Client
+-------------------------------------------------------------------------------
+local kept, kept_at = {}, 0
+
+local function keep(fx)
+	kept_at = kept_at % KEEP_PARTICLES + 1
+	kept[kept_at] = fx
+end
+
+local function client_particle(t)
+	if not (db.actor and plain_name(t.n) and tonumber(t.x) and tonumber(t.y) and tonumber(t.z)) then return end
+	local fx = particles_object(t.n)
+	if tonumber(t.dx) then fx:set_direction(vector():set(t.dx, t.dy, t.dz)) end
+	fx:play_at_pos(vector():set(t.x, t.y, t.z))
+	keep(fx)
+	stats.parts_in = stats.parts_in + 1
+end
+
+local function client_mark(t)
+	if not (db.actor and plain_name(t.t) and tonumber(t.x) and tonumber(t.dx) and tonumber(t.o)) then return end
+	local obj = level.object_by_id(P.to_local(t.o))
+	if not obj then return end
+	wallmarks_manager():place(vector():set(t.dx, t.dy, t.dz), vector():set(t.x, t.y, t.z), tonumber(t.r) or 1, tonumber(t.s) or 0.1,
+		t.t, obj, tonumber(t.l) or 30)
+	stats.parts_in = stats.parts_in + 1
+end
+
+local function client_sound(t)
+	if not (db.actor and plain_name(t.s)) then return end
+	local snd = xr_sound.get_safe_sound_object(t.s)
+	if not snd then return end
+	if tonumber(t.x) then
+		snd:play_at_pos(db.actor, vector():set(t.x, t.y, t.z), 0, sound_object.s3d)
+	else
+		snd:play(db.actor, 0, sound_object.s2d)
+	end
+	if tonumber(t.v) then snd.volume = t.v end
+	if tonumber(t.q) then snd.frequency = t.q end
+	stats.sounds_in = stats.sounds_in + 1
+end
+
+local function client_effector(t)
+	if not db.actor then return end
+	stats.effectors_in = stats.effectors_in + 1
+	local id = tonumber(t.i) or 0
+	if t.k == "cam" and plain_name(t.n) then
+		level.add_cam_effector(t.n, id, t.l == true, "")
+	elseif t.k == "uncam" then
+		level.remove_cam_effector(id)
+	elseif t.k == "pp" and plain_name(t.n) then
+		level.add_pp_effector(t.n, id, t.l == true)
+	elseif t.k == "unpp" then
+		level.remove_pp_effector(id)
+	elseif t.k == "cpx" and plain_name(t.n) then
+		level.add_complex_effector(t.n, id)
+	elseif t.k == "uncpx" then
+		level.remove_complex_effector(id)
+	end
+end
+
+local function on_effect(f, what)
+	return function(args, from)
+		if from ~= 0 or not P.is_client() then return end
+		local ok, err = pcall(f, args)
+		if not ok then report(what, err) end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Install, update
+-------------------------------------------------------------------------------
+local next_tick = 0
+
+local function actor_on_update()
+	if #queue > 0 then
+		local ok, err = pcall(flush_sounds)
+		if not ok then
+			report("sounds", err)
+			queue = {}
+		end
+	end
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	host_on = P.host_with_clients()
+end
+
+function print_status()
+	log("%d scripts relayed | out: particles %d, sounds %d, effectors %d, over the limit %d | in: particles %d, sounds %d, "
+		.. "effectors %d | errors %d", stats.scripts, stats.parts, stats.sounds, stats.effectors, stats.limited, stats.parts_in,
+		stats.sounds_in, stats.effectors_in, P.error_count(TAG))
+end
+
+function on_game_start()
+	P = coop_npc_players
+	if not (api and api.sync) then return end
+	local ok, err = pcall(install)
+	if not ok then report("install", err) end
+	api.sync.on(EV_PART, on_effect(client_particle, "particle"))
+	api.sync.on(EV_MARK, on_effect(client_mark, "wallmark"))
+	api.sync.on(EV_SND, on_effect(client_sound, "sound"))
+	api.sync.on(EV_CFX, on_effect(client_effector, "effector"))
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+end
+
+function _set_host_on(v) host_on = v end
+function _stats() return stats end

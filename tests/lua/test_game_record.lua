@@ -90,12 +90,12 @@ end
 local EXPECT_TABS = { "death", "party", "world", "difficulty", "saves", "other" }
 check(deep_equal(schema.TABS, EXPECT_TABS), "TABS are death, party, world, difficulty, saves, other")
 
-local EXPECT_COUNT = { death = 12, party = 17, world = 21, difficulty = 2, saves = 2, other = 0 }
+local EXPECT_COUNT = { death = 13, party = 18, world = 21, difficulty = 2, saves = 2, other = 0 }
 for _, tab in ipairs(EXPECT_TABS) do
 	check(#schema.items(tab) == EXPECT_COUNT[tab], "tab " .. tab .. " has " .. EXPECT_COUNT[tab] .. " items (docs 3.6)")
 end
 check(#schema.items("nope") == 0, "an unknown tab has no items")
-check(#schema.keys() == 54, "54 catalog keys in all")
+check(#schema.keys() == 56, "56 catalog keys in all")
 check(schema.item("c|nope") == nil and schema.item(nil) == nil, "an unknown key has no item")
 
 do
@@ -195,7 +195,7 @@ do
 end
 
 -- ------------------------------------------------------------------------------------------------ schema_cvars_match_engine
--- The table of docs\GAME_SETTINGS.md 1.2 (rows 1..19, file GAME_SETTINGS.md lines 119-135 on 2026-10-23), name, kind, min,
+-- The table of docs\GAME_SETTINGS.md 1.2 (rows 1..20, file GAME_SETTINGS.md lines 119-135 on 2026-10-23), name, kind, min,
 -- max, default; the engine registration is in the comment. Rows 5 (keep) and 17 are the death-ux build 10, rows 18 and 19
 -- the split-levels build of F3a (2026-10-24): not all in the engine yet.
 local ENGINE = {
@@ -218,10 +218,11 @@ local ENGINE = {
 	{ "coop_death_share", "float", 0, 200, 100 }, -- build 10: CCC_Float 0..200, default 100
 	{ "coop_split_levels", "int", 0, 1, 1 }, -- F3a: CCC_Integer 0..1, on by default
 	{ "coop_story_together", "int", 0, 1, 1 }, -- F3a: CCC_Integer 0..1, on by default
+	{ "coop_finish_downed", "int", 0, 1, 1 }, -- coop_ai.cpp: CCC_Integer 0..1, on = the stock behaviour of a stalker
 }
 
 do
-	check(#schema.CVARS == 19, "CVARS holds 19 names")
+	check(#schema.CVARS == 20, "CVARS holds 20 names")
 	local bad = {}
 	for i, row in ipairs(ENGINE) do
 		local name, kind, lo, hi, def, tokens = row[1], row[2], row[3], row[4], row[5], row[6]
@@ -259,13 +260,13 @@ do
 		end
 		if why then bad[#bad + 1] = name .. ": " .. why end
 	end
-	check(#bad == 0, "the 19 console variables match the table 1.2: names, order, ranges, defaults, values inside ("
+	check(#bad == 0, "the 20 console variables match the table 1.2: names, order, ranges, defaults, values inside ("
 		.. table.concat(bad, "; ") .. ")")
 	local c_items = 0
 	for _, k in ipairs(schema.keys()) do
 		if k:find("^c|") then c_items = c_items + 1 end
 	end
-	check(c_items == 19, "all 19 console variables, and only they, are catalog items of source c")
+	check(c_items == 20, "all 20 console variables, and only they, are catalog items of source c")
 	local tokens = schema.item("c|coop_death_drop").values
 	check(tokens[1][1] == "drop" and tokens[4][1] == "keep", "death drop offers drop, corpse, lose, keep")
 	local share = schema.item("c|coop_death_share").values
@@ -342,9 +343,9 @@ do
 		local extra = {}
 		for _, k in ipairs(schema.keys()) do
 			local id = k:match("^o|coop/coop_session/(.+)$")
-			if id and core.RULES[id] == nil and id ~= "join_spawn" then extra[#extra + 1] = id end
+			if id and core.RULES[id] == nil and id ~= "join_spawn" and id ~= "loot_claim" then extra[#extra + 1] = id end
 		end
-		check(#extra == 0, "no other session rule in the catalog than RULES and join_spawn (" .. table.concat(extra, ",") .. ")")
+		check(#extra == 0, "no other session rule in the catalog than RULES, join_spawn and loot_claim (" .. table.concat(extra, ",") .. ")")
 		check(schema.item("o|coop/coop_session/join_spawn").def == "faction_start", "join_spawn is at the faction's base by default (F3a, docs 8.2)")
 	end
 end
@@ -570,7 +571,8 @@ local CONSOLE = {
 	coop_death_drop = "drop", coop_bleedout = "60.00000", coop_revive_health = "0.300000", coop_respawn_delay = "30.00000",
 	coop_contusion = "10.00000", coop_death_money = "10.00000", coop_death_wear = "10.00000", coop_death_rank = "0.00000",
 	coop_hardcore_new_kit = "0", coop_checkpoints_group = "1", coop_autosave_interval = "15", coop_autosave_count = "10",
-	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_nick = "Bob", fov = "67",
+	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_finish_downed = "1",
+	coop_nick = "Bob", fov = "67",
 }
 
 local function make_reader()
@@ -620,7 +622,7 @@ do
 	for k in pairs(v) do
 		if k:find("^c|") then c = c + 1 end
 	end
-	check(c == 19 and #reader.asked == 19, "the console: the 19 names, and only they are asked")
+	check(c == 20 and #reader.asked == 20, "the console: the 20 names, and only they are asked")
 	check(v["c|coop_nick"] == nil and v["c|fov"] == nil, "no other console variable")
 	check(v["c|coop_death_mode"] == "checkpoint" and v["c|coop_revive_health"] == "0.3" and v["c|coop_bleedout"] == "60"
 		and v["c|coop_autosave_interval"] == "15" and v["c|coop_death_share"] == "100", "console values come in the canonical form")

@@ -351,8 +351,8 @@ local function engine_task(actor, id, info)
 end
 
 -- Where a task points (v2.1, owner 2026-10-23 "the bar shows almost nothing"): current_target when it is on this level
--- (the host's task_objects keeps it fresh), else the object of the task's PDA spot (what the PDA map shows, and the
--- only target a client has: the spot is replicated, the stub has no current_target), else nowhere.
+-- (the host's task_objects keeps it fresh; a client's stub answers with the target of the replicated spot), else the object
+-- of the task's PDA spot (what the PDA map shows), else nowhere.
 local function task_pos(t, info)
 	local target = valid_id(info.current_target)
 	local p = target and object_pos(target)
@@ -367,7 +367,7 @@ local function src_tasks()
 	local actor = db.actor
 	if not (tm and tm.get_task_manager and actor) then return EMPTY end
 	local ok, mgr = pcall(tm.get_task_manager)
-	local info = ok and type(mgr) == "table" and mgr.task_info
+	local info = ok and mgr and mgr.task_info -- the manager is a luabind object
 	if type(info) ~= "table" then return EMPTY end
 	local out = {}
 	for id, ti in pairs(info) do

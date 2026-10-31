@@ -12,6 +12,7 @@ function printf(fmt, ...)
 	if VERBOSE then print(line) end
 end
 printe = printf
+has_alife_info = function() return false end -- coop_mods_nta: the storylines that start when a player joins
 function log_has(pat)
 	for i = #LOG, 1, -1 do if LOG[i]:find(pat, 1, true) then return LOG[i] end end
 	return nil

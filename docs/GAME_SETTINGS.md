@@ -133,6 +133,7 @@
 | 15 | `coop_autosave_interval` | `coop_autosave.cpp:533`, `:51` | 10 мин | 0..120 | таймер (`:628-634`) | Л | `:107`; экран новой игры (`:241`) |
 | 16 | `coop_autosave_count` | `:534`, `:52` | 10 | 1..50 | запись и ротация (`:180`, `:397`) | Л | `:108` |
 | 17 | `coop_death_share` (сборка 10) | `coop_survival.cpp`, рядом с `:2526-2534`, CCC_Float | 100 % | 0..200 | расчёт потерь при смерти: доля категории `[coop_death_drop]` (`mod_system_coop_death.ltx`) = clamp(доля × k / 100, 0, 1), только для drop и lose; `coop_death_preview`. Клиентам — как `coop_death_drop` (`PlayerRules`) | Л | Опции (рядом с `:92`); экран новой игры — список «Сколько выпадает»: 50 / 100 / 150 / 200 % |
+| 20 | `coop_finish_downed` (ночь 2026-10-31) | `coop_ai.cpp`, `register_console`, CCC_Integer | 1 | 0/1 | `CEnemyManager::useful` (`enemy_manager.cpp`): добивает ли сталкер упавшего игрока. Выкл: сталкер оставляет раненого, как мутант (`death::enemy_leaves`); мёртвого и выбывшего не трогает никто | Л | Вкладка «Смерть», «Сталкеры добивают упавшего игрока» |
 
 Не входят в «Настройки игры» (технические или свои у каждого игрока):
 - `coop_money_gain_burst`, `_gain_per_min`, `_dialog_cap`, `_dialog_per_min`, `_max`, `_transfer_burst`,
@@ -162,6 +163,7 @@
 | `money_transfer` | true | вкл/выкл | `coop_economy_money.script:81, 137, 298`; движку раз в 2 с — `coop.money_set_rules` (`:130-146`, `coop_money.cpp:54-60`) |
 | `max_money_transfer` | 1 000 000 | 0..1e8 | `:89`, `:138` |
 | `give_radius` | 5 м | 1..20 | `:257` |
+| `loot_claim` (ночь 2026-10-31, «Чужая добыча») | true | вкл/выкл | `coop_loot_claim.script`: живой сталкер-убийца охраняет тело (ближе 25 м угроза, дальше «ничего полезного»); выкл: любое тело свободно. Читается `coop_settings.rule("core/loot_claim")` |
 
 ### 1.4 Экран новой игры (создание мира)
 
@@ -469,6 +471,7 @@ m_data.coop_game = {
 | `c|coop_bleedout` | 30 / 60 / 90 / 120 / 180 / 300 с | 60 | между | Л |
 | `c|coop_revive_health` | 10 / 20 / 30 / 50 / 75 / 100 % | 30 | между | Л |
 | `c|coop_checkpoints_group` | вкл / выкл | вкл | между | Л |
+| `c|coop_finish_downed` (новый) | вкл / выкл | вкл | между | Л |
 
 **Вкладка 2. «Группа и экономика»**
 
@@ -489,6 +492,7 @@ m_data.coop_game = {
 | `…/money_transfer` | вкл / выкл | вкл | между |
 | `…/max_money_transfer` | 10 тыс. / 100 тыс. / 1 млн / 10 млн / 100 млн | 1 млн | между |
 | `…/give_radius` | 2 / 5 / 10 / 20 м | 5 | между |
+| `…/loot_claim` (новый) | вкл / выкл | вкл | между |
 
 Все пункты действуют на лету (Л).
 

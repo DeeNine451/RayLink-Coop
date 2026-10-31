@@ -319,6 +319,9 @@ end
 local function around_world(orig, ...) return in_scope("world", orig, ...) end
 local function around_personal(orig, ...) return in_scope("personal", orig, ...) end
 
+-- f runs as a world generator: its news reach every client (coop_world_fx hands this to the scripts of group tasks).
+function in_world_scope(f, ...) return in_scope("world", f, ...) end
+
 -- TickQuick sends the reply to the last queued message; a reply to a trade is personal like the trade.
 local function around_quick(orig, self, ...)
 	local ok, resp = pcall(function() return self.response end)

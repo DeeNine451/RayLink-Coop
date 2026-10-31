@@ -143,7 +143,7 @@ end
 -- A task in progress: not finished (stage 255 / completed / failed = waiting for its repeat timer) and with no status
 -- forced by somebody else (cancelled by the player, being completed).
 local function in_progress(tsk)
-	if type(tsk) ~= "table" then return false end
+	if tsk == nil then return false end
 	if tsk.status == "completed" or tsk.status == "fail" then return false end
 	if tsk.stage == STAGE_WAITING then return false end
 	return tsk.forced_status == nil

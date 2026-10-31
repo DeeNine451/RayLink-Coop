@@ -1,0 +1,272 @@
+-- World parity W4, sound M4, tasks X2 (coop_world_fx.script): what scripts on the host draw and play reaches the clients.
+-- Run: tools\test_lua.cmd world_fx
+dofile("tests/lua/support/harness_world.lua")
+
+-- A script of the machine, loaded the way CScriptStorage does (module table with __index to the globals).
+local function fixture(M, name, src)
+	local header = "local this = {} " .. name .. " = this setmetatable(this, {__index = _G}) setfenv(1, this) "
+	local f = assert(loadstring(header .. src, "@" .. name .. ".script"))
+	setfenv(f, M.env)
+	f()
+	return M.env[name]
+end
+
+local PartMT = {}
+PartMT.__index = PartMT
+function PartMT:set_direction(d) self.dir = d end
+function PartMT:play_at_pos(p) self.m.parts[#self.m.parts + 1] = { name = self.name, x = p.x, y = p.y, z = p.z, dir = self.dir } end
+function PartMT:playing() return false end
+function PartMT:stop() self.stopped = true end
+
+local SndMT = {}
+SndMT.__index = SndMT
+function SndMT:play(obj, delay, flags) self.m.snds[#self.m.snds + 1] = { path = self.path, obj = obj, flat = flags == 1 } end
+function SndMT:play_at_pos(obj, pos, delay, flags) self.m.snds[#self.m.snds + 1] = { path = self.path, obj = obj, pos = pos, flags = flags } end
+function SndMT:play_no_feedback(obj, flags, delay, pos, vol, freq) self.m.snds[#self.m.snds + 1] = { path = self.path, obj = obj, flags = flags, nofb = true } end
+function SndMT:playing() return false end
+
+local function engine_fx(M)
+	local E = M.env
+	M.parts, M.snds, M.news = {}, {}, {}
+	E.vector = vector
+	E.particles_object = function(name) return setmetatable({ name = name, m = M }, PartMT) end
+	local cls = setmetatable({ s2d = 1, s3d = 2, looped = 4 }, {
+		__call = function(_, path) return setmetatable({ path = path, m = M }, SndMT) end,
+	})
+	E.sound_object = cls
+	E.xr_sound = {
+		cached = true,
+		get_safe_sound_object = function(path) return setmetatable({ path = path, m = M }, SndMT) end,
+	}
+	E.wallmarks_manager = function()
+		return { place = function(_, dir, pos, range, size, tex, obj, ttl)
+			M.marks = M.marks or {}
+			M.marks[#M.marks + 1] = { tex = tex, x = pos.x, dy = dir.y, size = size, obj = obj:id(), ttl = ttl }
+		end }
+	end
+	E.level.add_pp_effector = function(n, id, loop) M.ppe = { n, id, loop } end
+	E.level.remove_pp_effector = function(id) M.ppe_removed = id end
+	E.level.vertex_id = function() return 77 end
+	E.dynamic_news_helper = { send_tip = function(m) M.news[#M.news + 1] = m return true end }
+	E.news_manager = { send_tip = function(a, id) M.news[#M.news + 1] = id return true end, other = "kept" }
+	E.coop_core_world = { in_world_scope = function(f, ...)
+		M.world_scope = (M.world_scope or 0) + 1
+		return f(...)
+	end }
+	E.coop_mods_core = { mod = function(n) return E[n] end }
+end
+
+local function tick(H, C)
+	NOW = NOW + 600
+	H.fire("actor_on_update")
+	if C then C.fire("actor_on_update") end
+	world_pump()
+end
+
+local function stage()
+	local H, C = world_pair()
+	engine_fx(H)
+	engine_fx(C)
+	local grok = [[
+function hit(pos, dir)
+	local fx = particles_object("hit_fx\\hit_metal_01")
+	fx:set_direction(dir)
+	fx:play_at_pos(pos)
+	return fx
+end]]
+	local task = [[
+function blast(pos, npc)
+	local s = sound_object("new_tasks_addon\\boom")
+	s:play_at_pos(db.actor, pos)
+	s.volume = 0.4
+	sound_object("new_tasks_addon\\scream"):play(db.actor, 0, sound_object.s2d)
+	sound_object("new_tasks_addon\\own"):play_at_pos(npc, pos)
+	sound_object("new_tasks_addon\\hum"):play_at_pos(db.actor, pos, 0, sound_object.s3d + sound_object.looped)
+end
+function safe(pos) xr_sound.get_safe_sound_object("anomaly\\rumble"):play_at_pos(db.actor, pos) end
+function shake() level.add_cam_effector("camera_effects\\earthquake.anm", 3, true, "cb") end
+function calm() level.remove_cam_effector(3) end
+function fade() level.add_pp_effector("fade_in.ppe", 200, false) end
+function vertex() return level.vertex_id() end
+function tip() return dynamic_news_helper.send_tip("msg_1") end
+function tip2() return news_manager.send_tip(db.actor, "id_1") end
+function other() return news_manager.other end
+function later() return function() return dynamic_news_helper.send_tip("msg_late") end end]]
+	for _, M in ipairs({ H, C }) do
+		fixture(M, "grok_bo", grok)
+		fixture(M, "tasks_dead_night", task)
+		fixture(M, "arszi_mutant_bleeding", [[
+function drop(pos, monster) wallmarks_manager():place(vector():set(0, -1, 0), pos, 1, 0.2, "bloody_marks", monster, 30) end]])
+		fixture(M, "nta_utils", [[
+function teleport_visual()
+	level.add_pp_effector("teleport.ppe", 2006, false)
+	sound_object("affects\\tinnitus3a"):play_no_feedback(db.actor, sound_object.s2d, 0, vector(), 1.0, 1.0)
+end]])
+		fixture(M, "tasks_the_living_fire", [[
+function earthquake_effect() level.add_cam_effector("camera_effects\\earthquake.anm", 3, true, "") end]])
+		fixture(M, "tasks_mirage", [[
+local anomaly_particles = particles_object("anomaly2\\bold_idle")
+local anomaly_sound = xr_sound.get_safe_sound_object("anomaly\\gravi_rumble1")
+function actor_on_update(pos)
+	anomaly_particles:play_at_pos(pos)
+	anomaly_sound:play_at_pos(db.actor, pos)
+end]])
+	end
+	local cls = {}
+	function cls:explode(se_obj, squad) self.m.exploded = se_obj end
+	cls.m = H
+	H.env.surge_manager = { CSurgeManager = cls }
+	local FH, FC = load_script(H, "coop_world_fx"), load_script(C, "coop_world_fx")
+	FH.on_game_start()
+	FC.on_game_start()
+	FH._set_host_on(true)
+	return H, C, FH, FC
+end
+
+print("== particles")
+do
+	local H, C, FH = stage()
+	local g = H.env.grok_bo
+	g.hit(vec(1, 2, 3), vec(0, 1, 0))
+	check(#H.parts == 1 and H.parts[1].dir ~= nil, "the host plays the mod's particle with its direction, as in stock")
+	world_pump()
+	check(#C.parts == 1 and C.parts[1].name == "hit_fx\\hit_metal_01" and C.parts[1].x == 1, "the client plays it at the same point")
+	check(C.parts[1].dir and C.parts[1].dir.y == 1, "with the same direction")
+	check(g.hit(vec(0, 0, 0), vec(0, 1, 0)).stopped == nil and g.hit(vec(0, 0, 0), vec(0, 1, 0)).playing() == false, "the stand-in answers like the object")
+
+	world_pump()
+	C.parts = {}
+	g.hit(vec(900, 0, 0), vec(0, 1, 0))
+	world_pump()
+	check(#C.parts == 0, "too far from the client's character: not sent to it")
+
+	-- a firefight: a burst passes, the flood does not
+	H.parts, C.parts = {}, {}
+	for i = 1, 200 do g.hit(vec(1, 0, 0), vec(0, 1, 0)) end
+	world_pump()
+	check(#H.parts == 200, "the host's own particles are never limited")
+	check(#C.parts >= 20 and #C.parts <= 40, "the relay stays inside its limit (" .. #C.parts .. ")")
+	NOW = NOW + 3000
+	C.parts = {}
+	g.hit(vec(1, 0, 0), vec(0, 1, 0))
+	world_pump()
+	check(#C.parts == 1, "the limit fills again with time")
+end
+
+print("== wallmarks")
+do
+	local H, C = stage()
+	local m = H.add(make_obj(600, 1, 0, 0))
+	C.add(make_obj(600, 1, 0, 0))
+	H.env.arszi_mutant_bleeding.drop(vec(1, 0, 0), m)
+	world_pump()
+	check(H.marks and #H.marks == 1, "the host draws the drop")
+	check(C.marks and C.marks[1].tex == "bloody_marks" and C.marks[1].obj == 600 and C.marks[1].ttl == 30 and C.marks[1].dy == -1, "and the client, on its copy of the mutant")
+end
+
+print("== sounds")
+do
+	local H, C = stage()
+	local t = H.env.tasks_dead_night
+	local npc = H.add(make_obj(700, 0, 0, 0))
+	t.blast(vec(5, 0, 0), npc)
+	check(#H.snds == 4, "every sound plays on the host")
+	tick(H, C)
+	local boom, scream = nil, nil
+	for _, s in ipairs(C.snds) do
+		if s.path:find("boom", 1, true) then boom = s end
+		if s.path:find("scream", 1, true) then scream = s end
+	end
+	check(boom and boom.pos and boom.pos.x == 5, "a positional sound of the actor plays at that point on the client")
+	check(scream and scream.flat, "a 2D sound of the actor stays 2D")
+	check(#C.snds == 2, "a creature's own sound (the engine relays it) and a looped one stay out")
+
+	C.snds = {}
+	t.safe(vec(1, 0, 0))
+	tick(H, C)
+	check(#C.snds == 1 and C.snds[1].path == "anomaly\\rumble", "xr_sound.get_safe_sound_object of the script is relayed as well")
+
+	-- the volume a script writes after play
+	C.snds = {}
+	local real_set = C.env.xr_sound.get_safe_sound_object
+	local got = {}
+	C.env.xr_sound.get_safe_sound_object = function(path)
+		local o = real_set(path)
+		got[path] = o
+		return o
+	end
+	t.blast(vec(5, 0, 0), npc)
+	tick(H, C)
+	check(got["new_tasks_addon\\boom"] and got["new_tasks_addon\\boom"].volume == 0.4, "the volume written after play reaches the client")
+end
+
+print("== effectors and news")
+do
+	local H, C = stage()
+	local t = H.env.tasks_dead_night
+	t.shake()
+	check(H.cam and H.cam[4] == "cb", "the host's effector runs with its callback")
+	world_pump()
+	check(C.cam and C.cam[1] == "camera_effects\\earthquake.anm" and C.cam[2] == 3 and C.cam[3] == true and C.cam[4] == "", "the client gets it without the callback")
+	t.calm()
+	world_pump()
+	check(C.cam_removed == 3, "and its end")
+	t.fade()
+	world_pump()
+	check(C.ppe and C.ppe[1] == "fade_in.ppe" and C.ppe[2] == 200, "a postprocess effector too")
+	check(t.vertex() == 77, "the rest of level answers as before")
+	t.tip()
+	t.tip2()
+	check(H.news[1] == "msg_1" and H.news[2] == "id_1", "tips show on the host")
+	check(H.world_scope == 2, "and run in a world scope: core.news takes them to the clients")
+	check(t.other() == "kept", "the rest of news_manager answers as before")
+	t.later()()
+	check(H.world_scope == 3, "a closure of the script (a delayed message) is covered as well")
+end
+
+print("== mute")
+do
+	local H, C = stage()
+	H.env.nta_utils.teleport_visual()
+	check(H.ppe and H.ppe[1] == "teleport.ppe", "teleport_visual runs on the host")
+	tick(H, C)
+	check(C.ppe == nil and #C.snds == 0, "and is not everybody's: it is the screen of the player who moves")
+	H.env.tasks_the_living_fire.earthquake_effect()
+	world_pump()
+	check(H.cam ~= nil and C.cam == nil, "the Living Fire earthquake stays with coop_mods_nta's relay")
+end
+
+print("== mirage, emission")
+do
+	local H, C = stage()
+	H.env.tasks_mirage.actor_on_update(vec(2, 0, 0))
+	tick(H, C)
+	check(#H.parts == 1 and #C.parts == 1 and C.parts[1].name == "anomaly2\\bold_idle", "the particle made at load is relayed")
+	check(#C.snds == 1 and C.snds[1].path == "anomaly\\gravi_rumble1", "the sound made at load is relayed")
+
+	local sm = H.env.surge_manager.CSurgeManager
+	sm:explode({ position = vec(3, 0, 0) }, {})
+	world_pump()
+	check(H.exploded ~= nil, "explode runs on the host")
+	check(#C.parts == 2 and C.parts[2].name:find("body_tear", 1, true), "the body tear is seen on the client")
+	check(#C.snds == 2 and C.snds[2].path == "anomaly\\anomaly_body_tear_1", "and heard")
+	sm:explode({ position = vec(3, 0, 0) }, nil)
+	world_pump()
+	check(#C.parts == 2, "no squad: a plain kill, nothing to show")
+end
+
+print("== alone, single player, client")
+do
+	local H, C, FH = stage()
+	FH._set_host_on(false)
+	H.env.grok_bo.hit(vec(1, 0, 0), vec(0, 1, 0))
+	H.env.tasks_dead_night.tip()
+	world_pump()
+	check(#H.parts == 1 and H.casts == nil and H.world_scope == nil, "a host alone: stock calls, nothing sent")
+	C.env.grok_bo.hit(vec(1, 0, 0), vec(0, 1, 0))
+	C.env.tasks_dead_night.shake()
+	check(#C.parts == 1 and C.casts == nil, "on a client the stand-ins are stock calls")
+end
+
+print(string.format("%d passed, %d failed", PASSES, FAILS))
+os.exit(FAILS == 0 and 0 or 1)

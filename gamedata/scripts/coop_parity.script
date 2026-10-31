@@ -1,0 +1,438 @@
+--[[
+	Anomaly Coop - parity probe (gamedata\scripts\coop_parity.script)
+
+	The oracle of the owner's rule: the host is a client with direct access, remote clients get exactly what the host gets.
+	The console command coop_parity [tag] on the host (or coop_parity.request(tag) from a test plan) makes the host and every
+	client write what they see of the world to $logs$\coop_parity_<tag>_<role>.tsv, role = host | client<peer>;
+	tools\parity_diff.py host.tsv client.tsv compares two files. Default tag: t<the host's game time in seconds>.
+	On a client the command refuses: half a pair proves nothing. Reads only, and only when asked: nothing runs on its own.
+
+	Alignment: a client dumps when the host's reliable event arrives, so after every state message the host sent before it.
+
+	Format: rows kind<TAB>key<TAB>fields..., sorted as bytes, LF, floats %.2f, ids %05d in HOST numbering. Every section ends
+	with kind<TAB>DIGEST<TAB>hex<TAB>rows: FNV-1a 32 over its sorted rows, each with its newline. A failed engine call is the
+	row kind<TAB>!error<n><TAB>message and the rest of the dump goes on (at most MAX_ERRORS of them, then kind<TAB>!errors<TAB>total).
+	  meta         format, tag, role, peer, self_id (this machine's character), level, host_game_s
+	  players      peer -> the character's id
+	  objects      id -> section, parent, online (the server entity's flag), live (a game object exists), alive (- for a
+	               non-creature). A player's character is @player on every machine: id 0 is the actor on the host and an
+	               avatar on a client, the other way round for the client's own id, and the digests must still compare
+	  positions    id -> x, y, z, live: from the game object, else from the server entity; carried items have no row
+	  health       id -> health of creatures with a game object (Lua cannot read it from an offline entity; split from
+	               objects because a snapshot rounds it: that digest stays exact)
+	  sections     section -> entities
+	  inventories  owner -> id:section:cond:ammo:uses per child, by id; -:-:- without a game object (Lua cannot read an offline
+	               item); !:!:! when reading it failed
+	  money        peer -> money: every player's on the host (its ledger), the own on a client
+	  time         game_s (exact, CTime:diffSec is a float that loses minutes at this size), factor, pause
+	  weather      cycle, fx, sky, clouds, ambient
+	  tasks        id -> in_progress | done; the ids are task_info + task_manager.ltx: Lua cannot list the engine's tasks
+	  infos        info -> 1, the local actor's, without machine infos (xrCoop\coop_rules.h is_machine_info: never synced)
+
+	Events:
+		parity.dump  host -> clients  { tag, t = the host's game time in seconds }
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace (nil on an exe without co-op)
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+local string_format, string_byte, table_concat, table_sort = string.format, string.byte, table.concat, table.sort
+local math_floor = math.floor
+local bit_bxor, bit_lshift, bit_tobit, bit_tohex = bit.bxor, bit.lshift, bit.tobit, bit.tohex
+
+EVENT = "parity.dump"
+
+local FORMAT = 1
+local NO_ID = 65535
+local MAX_ID = 65534
+local MAX_TAG = 48
+local MAX_ERRORS = 16
+local PLAYER = "@player"
+
+-- Anomaly's printf substitutes %s only.
+local function log(fmt, ...)
+	printf("[coop-parity] %s", string_format(fmt, ...))
+end
+
+local function active()
+	if not api then return false end
+	local ok, v = pcall(api.is_active)
+	return ok and v == true
+end
+
+-------------------------------------------------------------------------------
+-- Digest
+-------------------------------------------------------------------------------
+local FNV_OFFSET = bit_tobit(0x811c9dc5)
+
+-- FNV-1a 32, signed like every bit.* result. The prime is 2^24 + 403: its product stays exact in a double.
+function fnv1a(text, h)
+	h = h or FNV_OFFSET
+	for i = 1, #text do
+		h = bit_bxor(h, string_byte(text, i))
+		h = bit_tobit(bit_lshift(h, 24) + h * 403)
+	end
+	return h
+end
+
+local function digest_sorted(rows)
+	local h = FNV_OFFSET
+	for i = 1, #rows do h = fnv1a(rows[i] .. "\n", h) end
+	return bit_tohex(h)
+end
+
+-- Hex digest of a set of rows: any order of the same rows gives the same digest.
+function digest(rows)
+	local sorted = {}
+	for i = 1, #rows do sorted[i] = rows[i] end
+	table_sort(sorted)
+	return digest_sorted(sorted)
+end
+
+-------------------------------------------------------------------------------
+-- Rows
+-------------------------------------------------------------------------------
+local function field(v)
+	v = tostring(v)
+	if v:find("[\t\r\n]") then return (v:gsub("[\t\r\n]", " ")) end
+	return v
+end
+
+local function put(sec, key, ...)
+	local parts = { sec.kind, key, ... }
+	for i = 2, #parts do parts[i] = field(parts[i]) end
+	sec.rows[#sec.rows + 1] = table_concat(parts, "\t")
+end
+
+local function fail(sec, err)
+	sec.errors = sec.errors + 1
+	if sec.errors <= MAX_ERRORS then put(sec, "!error" .. sec.errors, tostring(err):sub(1, 240)) end
+end
+
+-- One row whose value comes from the engine.
+local function put_call(sec, key, f)
+	local ok, v = pcall(f)
+	if ok then put(sec, key, v) else fail(sec, v) end
+end
+
+local function each(sec, list, row, ctx)
+	for i = 1, #list do
+		local ok, err = pcall(row, sec, list[i], ctx)
+		if not ok then fail(sec, err) end
+	end
+end
+
+local function id_key(id) return string_format("%05d", id) end
+local function flag(v) return v and 1 or 0 end
+local function f2(v) return string_format("%.2f", v) end
+
+-------------------------------------------------------------------------------
+-- What the sections read
+-------------------------------------------------------------------------------
+local function to_host(id) return api.to_host_id(id) or id end
+
+local function entity(lid)
+	local se = alife_object(lid)
+	if not se then return nil end
+	local cls, parent = se:clsid(), se.parent_id
+	return {
+		hid = to_host(lid), se = se, section = se:section_name(), parent = parent == NO_ID and NO_ID or to_host(parent),
+		online = se.online == true, obj = level.object_by_id(lid), creature = IsStalker(nil, cls) or IsMonster(nil, cls),
+	}
+end
+
+-- Every ALife entity by host id, offline ones included. alife_object over the id space: bounded, and the call every
+-- script uses; ctx.bad says how many ids failed.
+local function walk(ctx)
+	local list, bad, first = {}, 0, nil
+	for lid = 0, MAX_ID do
+		local ok, e = pcall(entity, lid)
+		if not ok then
+			bad = bad + 1
+			first = first or e
+		elseif e then
+			list[#list + 1] = e
+		end
+	end
+	table_sort(list, function(a, b) return a.hid < b.hid end)
+	ctx.ents = list
+	if bad > 0 then ctx.bad = string_format("%d ids failed, first: %s", bad, tostring(first)) end
+end
+
+local function entities(sec, ctx)
+	if not ctx.ents then walk(ctx) end
+	if ctx.bad then fail(sec, ctx.bad) end
+	return ctx.ents
+end
+
+-- Raw game time in whole seconds. The days of the proleptic Gregorian calendar, so that two clocks a midnight apart stay
+-- seconds apart.
+local function days_from_civil(y, m, d)
+	if m <= 2 then y = y - 1 end
+	local era = math_floor(y / 400)
+	local yoe = y - era * 400
+	local doy = math_floor((153 * ((m + 9) % 12) + 2) / 5) + d - 1
+	return era * 146097 + yoe * 365 + math_floor(yoe / 4) - math_floor(yoe / 100) + doy
+end
+
+local function game_seconds()
+	local Y, M, D, h, m, s, ms = 0, 0, 0, 0, 0, 0, 0
+	Y, M, D, h, m, s, ms = game.get_game_time():get(Y, M, D, h, m, s, ms)
+	return days_from_civil(Y, M, D) * 86400 + h * 3600 + m * 60 + s
+end
+
+local function seconds_text(v) return v and string_format("%.0f", v) or "-" end
+
+-- The same rule as rules::is_machine_info.
+local function machine_info(s)
+	return s == "ui_pda" or s == "actor_is_sleeping" or s == "sleep_active" or s:sub(1, 7) == "ui_talk" or s:sub(-9) == "_wnd_open"
+end
+
+-------------------------------------------------------------------------------
+-- Sections
+-------------------------------------------------------------------------------
+local function s_meta(sec, ctx)
+	put(sec, "format", FORMAT)
+	put(sec, "tag", ctx.tag)
+	put(sec, "role", ctx.role)
+	put(sec, "host_game_s", seconds_text(ctx.host_s))
+	put_call(sec, "peer", api.self_id)
+	put_call(sec, "self_id", function() return id_key(to_host(0)) end)
+	put_call(sec, "level", level.name)
+end
+
+local function s_players(sec, ctx)
+	if ctx.players_error then fail(sec, ctx.players_error) end
+	for peer, hid in pairs(ctx.characters) do put(sec, peer, id_key(hid)) end
+	for _, peer in ipairs(ctx.unknown) do put(sec, peer, "-") end
+end
+
+local function alive_of(e)
+	if not e.creature then return "-" end
+	if e.obj then return flag(e.obj:alive()) end
+	return flag(e.se:alive())
+end
+
+local function r_object(sec, e, ctx)
+	put(sec, id_key(e.hid), ctx.is_player[e.hid] and PLAYER or e.section, id_key(e.parent), flag(e.online), flag(e.obj), alive_of(e))
+end
+
+local function s_objects(sec, ctx) each(sec, entities(sec, ctx), r_object, ctx) end
+
+local function r_position(sec, e)
+	if e.parent ~= NO_ID then return end
+	local p = e.obj and e.obj:position() or e.se.position
+	put(sec, id_key(e.hid), f2(p.x), f2(p.y), f2(p.z), flag(e.obj))
+end
+
+local function s_positions(sec, ctx) each(sec, entities(sec, ctx), r_position, ctx) end
+
+local function r_health(sec, e)
+	if e.creature and e.obj then put(sec, id_key(e.hid), f2(e.obj.health)) end
+end
+
+local function s_health(sec, ctx) each(sec, entities(sec, ctx), r_health, ctx) end
+
+local function s_sections(sec, ctx)
+	local count = {}
+	for _, e in ipairs(entities(sec, ctx)) do count[e.section] = (count[e.section] or 0) + 1 end
+	for section, n in pairs(count) do put(sec, section, n) end
+end
+
+local function item_state(e)
+	local obj = e.obj
+	if not obj then return "-:-:-" end
+	local ammo = "-"
+	if obj:is_ammo() then
+		ammo = obj:ammo_get_count()
+	elseif obj:is_weapon() then
+		ammo = obj:get_ammo_in_magazine()
+	end
+	return string_format("%.2f:%s:%s", obj:condition(), tostring(ammo), tostring(obj:get_remaining_uses()))
+end
+
+local function s_inventories(sec, ctx)
+	local owners = {}
+	for _, e in ipairs(entities(sec, ctx)) do
+		if e.parent ~= NO_ID then
+			local ok, state = pcall(item_state, e)
+			if not ok then
+				fail(sec, state)
+				state = "!:!:!"
+			end
+			local items = owners[e.parent]
+			if not items then
+				items = {}
+				owners[e.parent] = items
+			end
+			items[#items + 1] = id_key(e.hid) .. ":" .. field(e.section) .. ":" .. state
+		end
+	end
+	-- one field per child, each already clean: the diff lists the children that differ
+	for owner, items in pairs(owners) do
+		sec.rows[#sec.rows + 1] = table_concat({ sec.kind, id_key(owner), table_concat(items, "\t") }, "\t")
+	end
+end
+
+local function s_money(sec, ctx)
+	local host = api.is_host()
+	for _, p in ipairs(ctx.players) do
+		if p.is_self then
+			put_call(sec, p.id, function() return db.actor:money() end)
+		elseif host then
+			put_call(sec, p.id, function() return api.money_of(p.id) or "-" end)
+		end
+	end
+end
+
+local function s_time(sec)
+	put_call(sec, "game_s", function() return seconds_text(game_seconds()) end)
+	put_call(sec, "factor", function() return f2(level.get_time_factor()) end)
+	put_call(sec, "pause", function() return flag(device():is_paused()) end)
+end
+
+local function s_weather(sec)
+	put_call(sec, "cycle", level.get_weather)
+	put_call(sec, "fx", function() return flag(level.is_wfx_playing()) end)
+	put_call(sec, "sky", function() return weather.get_value_string("sky_texture") end)
+	put_call(sec, "clouds", function() return weather.get_value_string("clouds_texture") end)
+	put_call(sec, "ambient", function() return weather.get_value_string("ambient") end)
+end
+
+local function r_task(sec, id)
+	if db.actor:get_task(id, false) == nil then return end
+	put(sec, id, db.actor:get_task(id, true) ~= nil and "in_progress" or "done")
+end
+
+local function s_tasks(sec)
+	local ids = {}
+	local ok, err = pcall(function()
+		for id in pairs(task_manager.get_task_manager().task_info) do ids[id] = true end
+	end)
+	if not ok then fail(sec, err) end
+	ok, err = pcall(function()
+		task_manager.task_ini:section_for_each(function(id) ids[id] = true end)
+	end)
+	if not ok then fail(sec, err) end
+	local list = {}
+	for id in pairs(ids) do list[#list + 1] = id end
+	each(sec, list, r_task)
+end
+
+local function s_infos(sec)
+	alife():iterate_info(0, function(_, info)
+		if not machine_info(info) then put(sec, info, 1) end
+	end)
+end
+
+local SECTIONS = {
+	{ "meta", s_meta }, { "players", s_players }, { "objects", s_objects }, { "positions", s_positions }, { "health", s_health },
+	{ "sections", s_sections }, { "inventories", s_inventories }, { "money", s_money }, { "time", s_time },
+	{ "weather", s_weather }, { "tasks", s_tasks }, { "infos", s_infos },
+}
+
+-------------------------------------------------------------------------------
+-- The dump
+-------------------------------------------------------------------------------
+-- Host numbering of the players' characters. ctx.is_player: the ids objects writes as @player.
+local function read_players(ctx)
+	ctx.players, ctx.characters, ctx.is_player, ctx.unknown = {}, {}, {}, {}
+	local ok, list = pcall(api.players)
+	if not ok then
+		ctx.players_error = list
+		return
+	end
+	ctx.players = type(list) == "table" and list or {}
+	for _, p in ipairs(ctx.players) do
+		local lid = p.is_self and 0 or p.avatar_id
+		if lid then
+			local hid = to_host(lid)
+			ctx.characters[p.id] = hid
+			ctx.is_player[hid] = true
+		else
+			ctx.unknown[#ctx.unknown + 1] = p.id
+		end
+	end
+end
+
+-- Sanitized for a file name: a client takes it from the network.
+local function clean_tag(tag)
+	tag = tostring(tag or ""):gsub("[^%w_%-]", "_")
+	if tag == "" then return nil end
+	return tag:sub(1, MAX_TAG)
+end
+
+local function write_file(name, lines)
+	local path = getFS():update_path("$logs$", name)
+	local fh, err = io.open(path, "wb")
+	if not fh then error(tostring(err), 0) end
+	fh:write(table_concat(lines, "\n"), "\n")
+	fh:close()
+	return path
+end
+
+-- This machine's file for `tag`; host_s: the host's game time at the request. The path, or nil if it cannot be written.
+function dump(tag, host_s)
+	local started = time_global()
+	local role = api.is_host() and "host" or "client"
+	local ctx = { tag = tag, role = role, host_s = host_s }
+	read_players(ctx)
+	local lines, total, errors = {}, 0, 0
+	for _, def in ipairs(SECTIONS) do
+		local sec = { kind = def[1], rows = {}, errors = 0 }
+		local ok, err = pcall(def[2], sec, ctx)
+		if not ok then fail(sec, err) end
+		if sec.errors > MAX_ERRORS then put(sec, "!errors", sec.errors) end
+		table_sort(sec.rows)
+		for i = 1, #sec.rows do lines[#lines + 1] = sec.rows[i] end
+		lines[#lines + 1] = table_concat({ sec.kind, "DIGEST", digest_sorted(sec.rows), #sec.rows }, "\t")
+		total, errors = total + #sec.rows, errors + sec.errors
+	end
+	local peer = role == "host" and "" or tostring(api.self_id())
+	local ok, path = pcall(write_file, string_format("coop_parity_%s_%s%s.tsv", tag, role, peer), lines)
+	if not ok then
+		log("! cannot write the dump: %s", tostring(path))
+		return nil
+	end
+	log("%s: %d rows, %d errors, %d ms", tostring(path), total, errors, time_global() - started)
+	return path
+end
+
+-- Host: this machine and every client dump now. The tag used, or nil if this machine is not a session's host.
+function request(tag)
+	if not (active() and api.is_host()) then return nil end
+	local ok, now = pcall(game_seconds)
+	if not ok then
+		log("! no game time: %s", tostring(now))
+		now = nil
+	end
+	tag = clean_tag(tag) or ("t" .. seconds_text(now))
+	local sent, why = api.send_event(EVENT, coop_main.encode({ tag = tag, t = now }))
+	if not sent then log("! the clients were not asked: %s", tostring(why)) end
+	dump(tag, now)
+	return tag
+end
+
+-- Engine entry: the console command coop_parity [tag].
+function command(args)
+	if not active() then
+		log("no co-op session")
+	elseif not api.is_host() then
+		log("host only: run coop_parity on the host, every machine dumps")
+	else
+		request(args)
+	end
+end
+
+local function on_dump_event(payload, from)
+	if from ~= 0 or not active() or api.is_host() then return end
+	local t = coop_main.decode(payload)
+	dump(clean_tag(t.tag) or "untagged", tonumber(t.t))
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop.
+function on_game_start()
+	if not api then return end
+	local ok, err = pcall(function() return coop_main.add_event_handler(EVENT, on_dump_event) end)
+	if not ok then printf("! [coop_parity] event handler: %s", tostring(err)) end
+end

@@ -1,0 +1,410 @@
+--[[
+	Anomaly Coop - foreign loot (gamedata\scripts\coop_loot_claim.script).
+
+	The stalker who killed something still guards its body: a player who tries to search a body a living stalker killed
+	is told off, or finds nothing. It replaces the GAMMA mod "NPC Loot Claim Remade" (grok_loot_claim) in a session
+	(configs\coop_compat_loot_claim.ltx keeps the mod's own scripts at "none"); outside a session the mod works as installed
+	and this script does nothing. The rule is the game setting "Foreign loot" (o|coop/coop_session/loot_claim, on by default):
+	off, every body is free.
+
+	Who claims a body. The host sees every death. A kill is free (no row) when the killer is
+	  - nobody (an anomaly, a fall), the victim itself (suicide), a player's character, the companion of any player;
+	  - a monster, or a stalker turned zombie;
+	  - a story character, or the victim is one.
+	A kill by any other stalker is a claim: victim id -> killer id.
+
+	The table. It belongs to the host: it is saved in m_data (coop_loot_claims) and kept small: at most MAX_CLAIMS rows, the
+	oldest one is dropped for a new one, and a row goes as soon as it is useless (the killer is dead or offline, the victim
+	is gone or alive again; the host looks every SCAN_MS). A client gets every change as an event and the whole table
+	when it goes live; a row never closes a body for ever, only while its killer is there.
+
+	Searching. The check runs on the machine of the player who presses USE, on the body the engine itself would open
+	(level.get_target_obj within the use reach of the engine, 2 m), and the host's own player goes the same way:
+	  - the killer alive and within NEAR_M of the player: USE is refused and the killer's warning comes as a PDA tip;
+	  - the killer alive and farther: USE is refused, "found nothing useful on this body";
+	  - the killer dead, offline here or not a stalker: the body is free.
+	Nothing is remembered about a refusal: the next press asks again.
+
+	Events (host numbering of ids; the prefix "quests." belongs to coop_quests_core):
+		loot_claim  host -> clients  { v = victim, k = killer }
+		loot_free   host -> clients  { v = victim }
+		loot_snap   host -> client   { r = "v:k;v:k;..." }      the whole table, oldest first
+		loot_ask    client -> host   { }                         "send me the table"
+--]]
+
+local qc = coop_quests_core
+
+local tostring, tonumber, type, pairs, ipairs, pcall, next = tostring, tonumber, type, pairs, ipairs, pcall, next
+local math_random = math.random
+local table_sort, table_concat = table.sort, table.concat
+
+local TAG = "loot"
+local MAX_CLAIMS = 48
+local NEAR_M = 25 -- a living killer this close warns, farther he just keeps the body
+local USE_REACH = 2.0 -- m, the reach of USE in Actor.cpp (the pick distance of m_pObjectWeLookingAt)
+local SCAN_MS = 3000 -- host: how often the rows are checked for a reason to go
+local ASK_MS = 4000 -- client: how often the table is asked for until it comes
+local ASK_TRIES = 8
+local MSG_GAP_MS = 2000 -- the same refusal is shown at most this often
+local THREATS = 5
+
+local claims = {} -- victim id -> { k = killer id, n = serial (age) }
+local count = 0
+local serial = 0
+local next_scan = 0
+local ask = { need = true, tries = 0, at = 0 } -- client: the table has not come yet
+local shown = { at = -100000, text = nil }
+local stats = { claims = 0, freed = 0, dropped = 0, refused_near = 0, refused_far = 0, snaps_out = 0, snaps_in = 0 }
+
+local function log(fmt, ...) qc.log(TAG, fmt, ...) end
+
+-------------------------------------------------------------------------------
+-- Small helpers
+-------------------------------------------------------------------------------
+local function alive(o)
+	local ok, v = pcall(function() return o:alive() end)
+	return ok and v ~= false
+end
+
+-- Object id on the wire: a whole number in the range of a game object id.
+local function id16(v)
+	if type(v) ~= "number" or v ~= v or v < 0 or v > 65534 or v % 1 ~= 0 then return nil end
+	return v
+end
+
+local function rule_on()
+	local cs = qc.mod("coop_settings")
+	if not (cs and type(cs.rule) == "function") then return true end
+	local ok, v = pcall(cs.rule, "core/loot_claim")
+	if not ok or v == nil then return true end
+	return not (v == false or v == 0 or v == "0" or v == "false")
+end
+
+local function is_stalker(o)
+	return type(IsStalker) == "function" and IsStalker(o) == true
+end
+
+local function is_monster(o)
+	return type(IsMonster) == "function" and IsMonster(o) == true
+end
+
+-------------------------------------------------------------------------------
+-- The table
+-------------------------------------------------------------------------------
+local function remove(vid)
+	if claims[vid] == nil then return false end
+	claims[vid] = nil
+	count = count - 1
+	return true
+end
+
+-- Adds or renews a row; returns the ids of the rows dropped to stay within MAX_CLAIMS (the oldest first).
+local function put(vid, kid)
+	if claims[vid] == nil then count = count + 1 end
+	serial = serial + 1
+	claims[vid] = { k = kid, n = serial }
+	local dropped = {}
+	while count > MAX_CLAIMS do
+		local oldest, age
+		for id, c in pairs(claims) do
+			if not age or c.n < age then oldest, age = id, c.n end
+		end
+		remove(oldest)
+		dropped[#dropped + 1] = oldest
+	end
+	return dropped
+end
+
+-- Rows oldest first: { {v, k, n}, ... }
+local function sorted_rows()
+	local rows = {}
+	for vid, c in pairs(claims) do rows[#rows + 1] = { v = vid, k = c.k, n = c.n } end
+	table_sort(rows, function(a, b) return a.n < b.n end)
+	return rows
+end
+
+local function to_clients(name, t)
+	for _, p in ipairs(qc.players()) do
+		if not p.is_self then qc.send(name, t, p.id) end
+	end
+end
+
+-- Host: a row goes, the clients are told.
+local function release(vid, why)
+	if not remove(vid) then return end
+	stats.freed = stats.freed + 1
+	to_clients("loot_free", { v = vid })
+	log("body %d is free: %s", vid, why)
+end
+
+-------------------------------------------------------------------------------
+-- Host: deaths
+-------------------------------------------------------------------------------
+-- Is this stalker a companion of some player? The host knows every squad of axr_companions, whoever leads it.
+local function is_companion(npc)
+	local ok, v = pcall(function() return npc:has_info("npcx_is_companion") end)
+	if ok and v then return true end
+	local ac = rawget(_G, "axr_companions")
+	local squads = ac and ac.companion_squads
+	local get = rawget(_G, "get_object_squad")
+	if type(squads) ~= "table" or type(get) ~= "function" then return false end
+	local ok2, sq = pcall(get, npc)
+	return ok2 and sq ~= nil and squads[sq.id] ~= nil
+end
+
+local function has_story_id(id)
+	local get = rawget(_G, "get_object_story_id")
+	return type(get) == "function" and get(id) ~= nil
+end
+
+local function is_zombied(npc)
+	local ok, v = pcall(function() return npc:character_community() end)
+	return ok and v == "zombied"
+end
+
+-- The id of the killer whose claim this death makes, or nil when the body stays free.
+local function claiming_killer(victim, killer)
+	if not (victim and killer) then return nil end
+	local vid, kid = victim:id(), killer:id()
+	if vid == kid or qc.is_character_id(vid) or qc.is_character_id(kid) then return nil end
+	if is_monster(killer) or not is_stalker(killer) then return nil end
+	if has_story_id(vid) or has_story_id(kid) then return nil end
+	if is_zombied(killer) or is_companion(killer) then return nil end
+	return kid
+end
+
+local function on_death(victim, killer)
+	if not (qc.is_host() and rule_on()) then return end
+	local ok, kid = pcall(claiming_killer, victim, killer)
+	if not ok then
+		qc.report(TAG, "death", kid)
+		return
+	end
+	if not kid then return end
+	local vid = victim:id()
+	stats.claims = stats.claims + 1
+	for _, gone in ipairs(put(vid, kid)) do
+		to_clients("loot_free", { v = gone })
+		stats.dropped = stats.dropped + 1
+	end
+	to_clients("loot_claim", { v = vid, k = kid })
+end
+
+-- Why a row is of no use any more (host), or nil to keep it.
+local function useless(vid, c)
+	local victim = level.object_by_id(vid)
+	if victim then
+		if alive(victim) then return "the id is a live creature again" end
+	elseif not alife_object(vid) then
+		return "the body is gone"
+	end
+	local killer = level.object_by_id(c.k)
+	if not killer then return "the killer is offline or gone" end
+	if not alive(killer) then return "the killer is dead" end
+	return nil
+end
+
+local function host_scan()
+	local gone = {}
+	for vid, c in pairs(claims) do
+		local why = useless(vid, c)
+		if why then gone[#gone + 1] = { vid, why } end
+	end
+	for _, g in ipairs(gone) do release(g[1], g[2]) end
+end
+
+-------------------------------------------------------------------------------
+-- Searching: the player's own machine
+-------------------------------------------------------------------------------
+local function say(text, show)
+	local now = time_global()
+	if text == shown.text and now - shown.at < MSG_GAP_MS then return end
+	shown.text, shown.at = text, now
+	show()
+end
+
+-- The mod's own string when its text is installed (it is translated into more languages), else ours.
+local function tr(mod_id, own_id)
+	local g = rawget(_G, "game")
+	if not g then return own_id end
+	for _, id in ipairs({ mod_id, own_id }) do
+		local ok, s = pcall(g.translate_string, id)
+		if ok and type(s) == "string" and s ~= "" and s ~= id then return s end
+	end
+	return own_id
+end
+
+local function hud(text)
+	local am = rawget(_G, "actor_menu")
+	if am and am.set_msg then pcall(am.set_msg, 1, text, 5) end
+end
+
+local function sender_name(killer)
+	local ok, name = pcall(function() return killer:character_name() end)
+	local c_ok, comm = pcall(function() return killer:character_community() end)
+	local head = ok and tostring(name) or "?"
+	local g = rawget(_G, "game")
+	if g and c_ok and type(comm) == "string" then
+		local s_ok, s = pcall(g.translate_string, "st_dyn_news_comm_" .. comm .. "_6")
+		if s_ok and type(s) == "string" and s ~= "" and not s:find("^st_dyn_news_comm_") then head = head .. ", " .. s end
+	end
+	return head
+end
+
+local function warn(killer)
+	local n = math_random(THREATS)
+	local text = tr("st_npc_loot_claim_last_" .. n, "st_coop_news_loot_last_" .. n)
+	say("near", function()
+		local dnh = rawget(_G, "dynamic_news_helper")
+		local ok, icon = pcall(function() return killer:character_icon() end)
+		local sent = false
+		if dnh and type(dnh.send_tip) == "function" and ok then
+			local s_ok, r = pcall(dnh.send_tip, text, sender_name(killer), 0, 10, icon, "danger", "npc")
+			sent = s_ok and r ~= false
+		end
+		if not sent then hud(text) end
+	end)
+	stats.refused_near = stats.refused_near + 1
+end
+
+local function nothing_here()
+	say("far", function() hud(tr("st_npc_loot_claim_far", "st_coop_news_loot_far")) end)
+	stats.refused_far = stats.refused_far + 1
+end
+
+-- The body the engine would open on USE, or nil: a dead stalker or monster within reach.
+local function body_in_reach()
+	local ok, target = pcall(level.get_target_obj)
+	if not (ok and target) then return nil end
+	local d_ok, dist = pcall(level.get_target_dist)
+	if not (d_ok and type(dist) == "number" and dist > 0 and dist < USE_REACH) then return nil end
+	if alive(target) or not (is_stalker(target) or is_monster(target)) then return nil end
+	return target
+end
+
+local function on_before_key_press(key, bind, dis, flags)
+	if bind ~= key_bindings.kUSE or next(claims) == nil or not (qc.active() and db.actor) then return end
+	local body = body_in_reach()
+	local row = body and claims[qc.to_host_id(body:id())]
+	if not (row and rule_on()) then return end
+	local killer = level.object_by_id(qc.to_local_id(row.k))
+	if not (killer and alive(killer) and is_stalker(killer)) then return end
+	flags.ret_value = false
+	if killer:position():distance_to(db.actor:position()) <= NEAR_M then
+		warn(killer)
+	else
+		nothing_here()
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Events
+-------------------------------------------------------------------------------
+local function snapshot()
+	local out = {}
+	for _, r in ipairs(sorted_rows()) do out[#out + 1] = r.v .. ":" .. r.k .. ";" end
+	return table_concat(out)
+end
+
+local function host_on_ask(t, from)
+	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
+	if qc.send("loot_snap", { r = snapshot() }, from) then stats.snaps_out = stats.snaps_out + 1 end
+end
+
+local function from_host(from)
+	return from == 0 and qc.is_client()
+end
+
+local function client_on_snap(t, from)
+	if not from_host(from) or type(t.r) ~= "string" then return end
+	claims, count = {}, 0
+	for v, k in t.r:gmatch("(%d+):(%d+);") do
+		v, k = id16(tonumber(v)), id16(tonumber(k))
+		if v and k then put(v, k) end
+	end
+	ask.need = false
+	stats.snaps_in = stats.snaps_in + 1
+end
+
+local function client_on_claim(t, from)
+	if not from_host(from) then return end
+	local v, k = id16(t.v), id16(t.k)
+	if v and k then put(v, k) end
+end
+
+local function client_on_free(t, from)
+	if not from_host(from) then return end
+	local v = id16(t.v)
+	if v then remove(v) end
+end
+
+-------------------------------------------------------------------------------
+-- Update, save, status, start
+-------------------------------------------------------------------------------
+local function on_update()
+	if not qc.active() then return end
+	local now = time_global()
+	if qc.is_host() then
+		if now >= next_scan then
+			next_scan = now + SCAN_MS
+			if next(claims) ~= nil then host_scan() end
+		end
+	elseif qc.client_live() and ask.need and ask.tries < ASK_TRIES and now >= ask.at then
+		ask.tries, ask.at = ask.tries + 1, now + ASK_MS
+		qc.send("loot_ask", {}, 0)
+	end
+end
+
+local function save_state(m_data)
+	if not qc.is_host() then return end
+	local rows = {}
+	for _, r in ipairs(sorted_rows()) do rows[#rows + 1] = { v = r.v, k = r.k } end
+	m_data.coop_loot_claims = rows
+end
+
+local function load_state(m_data)
+	claims, count, serial = {}, 0, 0
+	ask.need, ask.tries, ask.at = false, 0, 0
+	if qc.is_client() then
+		ask.need = true -- the host's table comes as an event; the one in this save may be old
+		return
+	end
+	local rows = qc.is_host() and type(m_data) == "table" and m_data.coop_loot_claims
+	if type(rows) ~= "table" then return end
+	for _, r in ipairs(rows) do
+		local v, k = type(r) == "table" and id16(r.v), type(r) == "table" and id16(r.k)
+		if v and k then put(v, k) end
+	end
+end
+
+function print_status()
+	log("rows %d | claims %d, freed %d, dropped %d | refused near %d, far %d | tables sent %d, received %d",
+		count, stats.claims, stats.freed, stats.dropped, stats.refused_near, stats.refused_far, stats.snaps_out, stats.snaps_in)
+end
+
+-- Read by the tests: the killer of a body, or nil.
+function claim_of(victim_id)
+	local c = claims[victim_id]
+	return c and c.k or nil
+end
+
+function claim_count() return count end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an error here
+-- would skip all the scripts after this one, single player included.
+function on_game_start()
+	if not qc.engine() then return end
+	local ok, err = pcall(function()
+		qc.on("loot_ask", host_on_ask, TAG)
+		qc.on("loot_snap", client_on_snap, TAG)
+		qc.on("loot_claim", client_on_claim, TAG)
+		qc.on("loot_free", client_on_free, TAG)
+		RegisterScriptCallback("npc_on_death_callback", on_death)
+		RegisterScriptCallback("monster_on_death_callback", on_death)
+		RegisterScriptCallback("on_before_key_press", on_before_key_press)
+		RegisterScriptCallback("actor_on_update", on_update)
+		RegisterScriptCallback("save_state", save_state)
+		RegisterScriptCallback("load_state", load_state)
+	end)
+	if not ok then printf("! [coop_loot_claim] start failed: %s", tostring(err)) end
+end

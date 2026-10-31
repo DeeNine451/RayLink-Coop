@@ -417,6 +417,13 @@ local function on_pmd(t, from)
 	stats.pmd_in = stats.pmd_in + 1
 end
 
+-- Host: what a client last reported of a per-player key, nil if nothing yet (the enemy audit's phantoms read his psy health).
+function player_value(avatar_id, key)
+	local m = m_data()
+	local e = m and peer_store(m, avatar_id, false)
+	return e and e.keys and e.keys[key]
+end
+
 -- Client loading the host's world: its own per-player values replace the host's before load_state runs.
 local function apply_surrogate(m)
 	if type(m) ~= "table" or pmd_loaded_for == m then return end

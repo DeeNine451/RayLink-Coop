@@ -694,7 +694,8 @@ TEST(limits_client_rate_rules)
 		Msg type;
 		uint32_t burst, refill_ms;
 	};
-	const Expected expected[] = {{Msg::StateDumpRequest, 64, 50}, {Msg::TransitionVote, 4, 2000}, {Msg::PlayerEquip, 8, 400},
+	const Expected expected[] = {{Msg::StateDumpRequest, 64, 50}, {Msg::EntityResync, 32, 250}, {Msg::TransitionVote, 4, 2000},
+		{Msg::PlayerEquip, 8, 400},
 		{Msg::PlayerVitals, 4, 1000}, {Msg::MapSpot, 32, 250}, {Msg::InfoPortion, 64, 50}, {Msg::StoryResync, 4, 5000},
 		{Msg::ScriptEvent, 64, 20}, {Msg::ReqMoney, 32, 100}, {Msg::DialogLock, 10, 1000}, {Msg::CharChoice, 4, 2000},
 		// F3: a tent placed, lying down / getting up, a hardcore restart
@@ -1177,6 +1178,12 @@ constexpr Direction kDirections[] = {
 	{Msg::ItemState, kBoth}, // the owner's item, relayed; the host's authority
 	{Msg::EntitySound, kHost},
 	{Msg::EntityVisual, kHost}, // protocol 17: a host creature's new visual
+	{Msg::EntityHash, kHost}, // the roster (coop_reconcile.h)
+	{Msg::EntityRoster, kHost},
+	{Msg::EntityResync, kClient},
+	{Msg::EntityTraits, kHost},
+	{Msg::EntitySquad, kHost},
+	{Msg::LampState, kHost}, // audit W2: the host's word on its lamps
 	// requests and their results
 	{Msg::ReqSpawn, kClient},
 	{Msg::ReqDestroy, kClient},

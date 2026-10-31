@@ -1,0 +1,9 @@
+; Anomaly Coop - placeable campfires (campfire_placeable.script of G.A.M.M.A.). Read after every coop_route*.ltx (coop_route.ltx
+; explains the order), so it wins over the generated coop_route_gamma.ltx.
+;
+; The script stays host: its item use creates the campfire. Gathering wood is a menu action of the players own inventory: it
+; arms two time events of this script (allowing_chop_again, eat_xcvb). Host-only, the router removed them on a client, so the
+; "Gather wood" entry never came back after the first chop and the dummy item was never eaten.
+
+[route_pairs]
+time_event@campfire_placeable = owner

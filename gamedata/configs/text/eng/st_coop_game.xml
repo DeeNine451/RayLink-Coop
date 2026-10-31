@@ -352,6 +352,9 @@
 	<string id="st_coop_game_faction">
 		<text>World faction</text>
 	</string>
+	<string id="st_coop_game_finish_downed">
+		<text>Stalkers finish a downed player</text>
+	</string>
 	<string id="st_coop_game_friendly_fire">
 		<text>Friendly fire</text>
 	</string>
@@ -402,6 +405,9 @@
 	</string>
 	<string id="st_coop_game_join_spawn_host">
 		<text>Next to the host</text>
+	</string>
+	<string id="st_coop_game_loot_claim">
+		<text>Foreign loot</text>
 	</string>
 	<string id="st_coop_game_max_money_transfer">
 		<text>Largest transfer</text>

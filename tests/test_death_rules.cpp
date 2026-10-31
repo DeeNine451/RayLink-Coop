@@ -446,6 +446,31 @@ TEST(death_who_is_left_alone)
 	CHECK(!monster_leaves(255));
 }
 
+// Game setting "stalkers finish a downed player" (coop_finish_downed, on by default): only a stalker's choice. A monster
+// leaves a wounded player whatever the setting says; a dead one is nobody's enemy.
+TEST(death_enemy_leaves_by_kind_and_setting)
+{
+	// on: as before the setting existed
+	CHECK(!enemy_leaves(kLifeAlive, true, true));
+	CHECK(!enemy_leaves(kLifeWounded, true, true)); // a stalker finishes him
+	CHECK(enemy_leaves(kLifeDead, true, true));
+	CHECK(enemy_leaves(kLifeSpectating, true, true));
+	CHECK(enemy_leaves(kLifeRespawning, true, true));
+	// off: a stalker leaves him as a monster does
+	CHECK(!enemy_leaves(kLifeAlive, true, false));
+	CHECK(enemy_leaves(kLifeWounded, true, false));
+	CHECK(enemy_leaves(kLifeDead, true, false));
+	// a monster ignores the setting
+	for (const bool setting : {true, false})
+	{
+		CHECK(!enemy_leaves(kLifeAlive, false, setting));
+		CHECK(enemy_leaves(kLifeWounded, false, setting));
+		CHECK(enemy_leaves(kLifeDead, false, setting));
+		CHECK(!enemy_leaves(255, false, setting));
+		CHECK(!enemy_leaves(255, true, setting));
+	}
+}
+
 TEST(death_category_names)
 {
 	const char* names[] = {"materials", "ammo", "consumables", "gear", "artefacts", "tools", "other"};

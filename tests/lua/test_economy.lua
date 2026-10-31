@@ -626,6 +626,8 @@ do
 	local e = H.MDATA.coop_peer_mdata and H.MDATA.coop_peer_mdata[501]
 	check(e and e.keys.sleep.last_sleep == 1234 and e.keys.psy_table.actor_psy_health == 0.4, "client's own values stored on the host by character id")
 	check(e and e.name == "coop_player_avatar501", "entry verified by the character's name")
+	check(H.coop_economy_mdata.player_value(501, "psy_table").actor_psy_health == 0.4, "the host reads a client's value")
+	check(H.coop_economy_mdata.player_value(502, "psy_table") == nil, "nothing reported: nil")
 	-- next session: the client loads the host's save (host values on top level)
 	local save = { se_object = {}, sleep = { last_sleep = 9 }, psy_table = { actor_psy_health = 1 }, coop_peer_mdata = H.MDATA.coop_peer_mdata }
 	A.MDATA = save

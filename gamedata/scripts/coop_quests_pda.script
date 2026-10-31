@@ -358,7 +358,7 @@ local function host_stash(from, t)
 	local swapped = type(stock) == "function" and type(from) == "number" and from ~= 0
 	if swapped then
 		nm.send_treasure = function(param)
-			if param == 0 or param == nil then qc.send("treasure", { p = 0 }, from) else return stock(param) end
+			if param == 0 or param == nil then qc.send("treasure", { p = 0, b = b }, from) else return stock(param) end
 		end
 	end
 	local ok, err = pcall(tm.set_random_stash, spot, type(t.h) == "string" and t.h or nil, nil, b)
@@ -366,11 +366,20 @@ local function host_stash(from, t)
 	if not ok then qc.report(TAG, "reveal stash", err) end
 end
 
--- Client: the host revealed the stash this player's PDA message points to.
+-- Client: the host revealed the stash this player's PDA message points to, or a task's reward did (coop_tasks). b: the stash
+-- in host numbering. A mod's override of the line may show where it is (Descriptive Stash Coordinates): in this machine's
+-- language, from the stock point names.
 local function client_on_treasure(t, from)
 	if from ~= 0 or not qc.is_client() then return end
 	local nm = qc.mod("news_manager")
-	if nm and nm.send_treasure then pcall(nm.send_treasure, 0) end
+	local helper = qc.mod("dynamic_news_helper")
+	local b = tonumber(t.b)
+	local text
+	if b and helper and helper.GetPointDescription then
+		local ok, s = pcall(helper.GetPointDescription, alife_object(qc.to_local_id(b)))
+		if ok and type(s) == "string" then text = s end
+	end
+	if nm and nm.send_treasure then pcall(nm.send_treasure, 0, text) end
 end
 
 -- Client opened an inventory box: the host fills a revealed stash (its callback does not run here).

@@ -1,0 +1,244 @@
+--[[
+	Anomaly Coop - world group: the script side of the weather (gamedata\scripts\coop_world_weather.script)
+
+	The engine (coop_worldstate, WeatherSync) keeps every machine's sky on the host's. level_weathers keeps a second,
+	script-side state of the same weather (cycle, preset, weather file, current and next weather). It came with the join
+	save and then every machine went its own way: bind_stalker's actor_binder.update runs on a client too, and at every
+	game hour change_period and select_weather rolled with math.random. level.set_weather* is refused on a client, so the
+	sky stayed and the private state moved on. What reads it there: level_environment (fog, mist, storm leaves, radiation
+	by weather), set_brightness_boosts (night brightness), meteorites, GAMMA's weather file table of get_curr_weather.
+
+	1. The manager. The host writes that state into coop.sync (session scope: a joining player has it before his world)
+	   when it changes. A client takes it once a second and when the stock code would select a weather; change_period and
+	   select_weather roll nothing there (select_custom_weather of GAMMA's aaaa_script_fixes_mp neither). update,
+	   meteorites and distant_storm stay on: with the host's fields they answer the same on every machine, and the
+	   meteor shower is drawn over each player. Until the first state arrives a client keeps the stock code.
+	2. Wetness (SSS puddles, level.rain_wetness). The engine adds to it per frame and starts from zero at every load, and
+	   Lua has no way to set it: a client that joins a long rain stays dry, at 144 fps it gets wet 3.6 times as fast as a
+	   host at 40. The host writes its value; a client outside a small band steers its own with the two console rates of
+	   ssfx_wetness_multiplier (x build-up in rain, y drying), and puts the player's numbers back inside the band and
+	   when it leaves the world, so user.ltx never keeps a correction.
+	Everything here is a no-op outside a co-op session.
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tonumber, tostring, type, pairs, ipairs, pcall = tonumber, tostring, type, pairs, ipairs, pcall
+local math_abs, math_min, string_format = math.abs, math.min, string.format
+
+local TAG = "weather"
+local P -- coop_npc_players
+
+local function log(fmt, ...) P.log(TAG, fmt, ...) end
+local function report(what, err) P.report(TAG, what, err) end
+
+local SCOPE, KEY_STATE, KEY_WET = "session", "world.weather", "world.wet"
+local TICK_MS = 1000
+
+-- wire name -> field of the manager
+local FIELDS = { c = "cycle", p = "preset", f = "weather_file", lf = "last_weather_file", lc = "last_cycle",
+	cw = "curr_weather", nw = "next_weather", lw = "levelWeather" }
+-- A field the host may not have yet is left as it is here, except these: nil means something (get_curr_weather of GAMMA).
+local MAY_BE_EMPTY = { last_weather_file = true, last_cycle = true }
+
+local stats = { sent = 0, applied = 0, wet_sent = 0, wet_rates = 0 }
+
+local function sync_get(key)
+	local s = api and api.sync
+	if not s then return nil end
+	return s.get(SCOPE, key)
+end
+
+local function sync_set(key, value)
+	local s = api and api.sync
+	return s ~= nil and s.set(SCOPE, key, value) == true
+end
+
+local function manager()
+	local lw = _G["level_weathers"]
+	return lw and lw.get_weather_manager and lw.get_weather_manager() or nil
+end
+
+-------------------------------------------------------------------------------
+-- 1. The manager
+-------------------------------------------------------------------------------
+local last_sent = nil -- host: the state as a string
+
+local function snapshot(wm)
+	local t, parts = {}, {}
+	for wire, field in pairs(FIELDS) do
+		local v = wm[field]
+		if type(v) == "string" then t[wire] = v end
+	end
+	for _, wire in ipairs({ "c", "p", "f", "lf", "lc", "cw", "nw", "lw" }) do parts[#parts + 1] = tostring(t[wire]) end
+	return t, table.concat(parts, "|")
+end
+
+local function host_tick(wm)
+	local t, sig = snapshot(wm)
+	if sig ~= last_sent and sync_set(KEY_STATE, t) then
+		last_sent = sig
+		stats.sent = stats.sent + 1
+	end
+end
+
+-- Client: the host's state goes into this machine's manager. -> have a state, the weather file changed
+local function apply(wm)
+	local t = sync_get(KEY_STATE)
+	if type(t) ~= "table" then return false, false end
+	local file_changed = false
+	for wire, field in pairs(FIELDS) do
+		local v = t[wire]
+		if (v ~= nil or MAY_BE_EMPTY[field]) and wm[field] ~= v then
+			wm[field] = v
+			if field == "weather_file" then file_changed = true end
+			stats.applied = stats.applied + 1
+		end
+	end
+	return true, file_changed
+end
+
+-- What select_weather leaves behind on a client, from the host's state instead of its own roll.
+local function client_select(wm)
+	if not apply(wm) then return false end
+	wm.forced_weather_change_on_time_change = false
+	wm.transition_period, wm.pre_blowout_period = false, false
+	wm:set_brightness_boosts()
+	return true
+end
+
+local patched = {}
+
+local function patch_method(cls, name, around)
+	if patched[name] then return end
+	local ok, f = pcall(function() return cls[name] end)
+	if not (ok and type(f) == "function") then return end
+	patched[name] = true
+	-- luabind: the class table is read at call time, the one manager uses the new function
+	cls[name] = around(f)
+end
+
+local function patch_class()
+	local lw = _G["level_weathers"]
+	local cls = lw and lw.WeatherManager
+	if not cls then return end
+	patch_method(cls, "change_period", function(orig)
+		return function(self, ...)
+			if P.is_client() then return end
+			return orig(self, ...)
+		end
+	end)
+	local function selecting(orig)
+		return function(self, ...)
+			if P.is_client() and client_select(self) then return end
+			return orig(self, ...)
+		end
+	end
+	patch_method(cls, "select_weather", selecting)
+	patch_method(cls, "select_custom_weather", selecting) -- GAMMA's, called by its reset
+end
+
+-------------------------------------------------------------------------------
+-- 2. Wetness
+-------------------------------------------------------------------------------
+local WET_CMD = "ssfx_wetness_multiplier"
+local WET_STEP = 0.02 -- host: written when it moved this far
+local WET_BAND = 0.03 -- client: left alone inside this band
+local RATE_MIN, RATE_MAX, RATE_GAIN = 0.1, 20, 40 -- the command's limits; 0.1 off the host's value: 5 times the rate
+
+local wet_sent = nil -- host
+local own = nil -- client: { text, x, y, z } the player's numbers while a correction runs
+
+local function read_own()
+	local s = get_console_cmd(0, WET_CMD)
+	if type(s) ~= "string" then return nil end
+	local x, y, z = s:match("(%-?[%d%.]+)[^%d%.%-]+(%-?[%d%.]+)[^%d%.%-]+(%-?[%d%.]+)")
+	x, y, z = tonumber(x), tonumber(y), tonumber(z)
+	if not (x and y and z) then return nil end
+	return { text = s, x = x, y = y, z = z }
+end
+
+local function wet_release()
+	if not own then return end
+	exec_console_cmd(WET_CMD .. " " .. own.text)
+	own = nil
+end
+
+local function faster(base, gap)
+	return math_min(RATE_MAX, base * (1 + gap * RATE_GAIN))
+end
+
+local function wet_client_tick()
+	local target = sync_get(KEY_WET)
+	if type(target) ~= "number" then return wet_release() end
+	local gap = target - level.rain_wetness()
+	if math_abs(gap) <= WET_BAND then return wet_release() end
+	own = own or read_own()
+	if not own then return end
+	local x, y = own.x, own.y
+	if weather.get_value_numric("rain_density") > 0 then
+		x = gap > 0 and faster(x, gap) or RATE_MIN
+	else
+		y = gap < 0 and faster(y, -gap) or RATE_MIN
+	end
+	exec_console_cmd(string_format("%s (%.3f,%.3f,%.3f)", WET_CMD, x, y, own.z))
+	stats.wet_rates = stats.wet_rates + 1
+end
+
+local function wet_host_tick()
+	local v = level.rain_wetness()
+	if type(v) ~= "number" then return end
+	if wet_sent == nil or math_abs(v - wet_sent) >= WET_STEP or ((v == 0 or v == 1) and v ~= wet_sent) then
+		if sync_set(KEY_WET, v) then
+			wet_sent = v
+			stats.wet_sent = stats.wet_sent + 1
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Install, update
+-------------------------------------------------------------------------------
+local next_tick = 0
+
+local function tick()
+	local wm = manager()
+	if P.is_host() then
+		if wm then host_tick(wm) end
+		wet_host_tick()
+	elseif P.client_live() then
+		patch_class()
+		if wm then
+			local have, file_changed = apply(wm)
+			if have and file_changed then wm:set_brightness_boosts() end
+		end
+		wet_client_tick()
+	end
+end
+
+local function actor_on_update()
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	if not P.active() then return wet_release() end
+	local ok, err = pcall(tick)
+	if not ok then report("tick", err) end
+end
+
+local function actor_on_net_destroy()
+	wet_release()
+end
+
+function print_status()
+	log("manager: written %d, fields taken %d | wetness: written %d, rates set %d, correcting %s | errors %d",
+		stats.sent, stats.applied, stats.wet_sent, stats.wet_rates, tostring(own ~= nil), P.error_count(TAG))
+end
+
+function on_game_start()
+	P = coop_npc_players
+	if not api then return end
+	local ok, err = pcall(patch_class)
+	if not ok then report("install", err) end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+end

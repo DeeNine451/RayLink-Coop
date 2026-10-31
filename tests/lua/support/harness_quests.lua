@@ -2,6 +2,7 @@
 -- coop_tasks.script and coop_quests_*.script loaded like CScriptStorage modules. Not shipped.
 local SCRIPTS = "gamedata/scripts/"
 dofile("tests/lua/support/stubs.d/money.lua") -- install_money_stubs: coop.money_* of the host ledger (F2 T1)
+dofile("tests/lua/support/luabind_like.lua")
 
 H = {}
 FAILS, PASSES = 0, 0
@@ -329,9 +330,10 @@ function machine(role, self_peer)
 		if t and t.forced_status == "fail" then t.forced_status = nil return true end
 		return false
 	end
-	local tm_instance = setmetatable({ task_info = {} }, CRandomTask)
+	local tm_instance = setmetatable({ task_info = luabind_task_table() }, CRandomTask)
+	local tm_object = luabind_object(tm_instance)
 	env.task_manager.CRandomTask = CRandomTask
-	env.task_manager.get_task_manager = function() return tm_instance end
+	env.task_manager.get_task_manager = function() return tm_object end
 	env.task_manager.task_complete = function(id) return tm_instance:task_complete(id) end
 	env.task_manager.task_fail = function(id) return tm_instance:task_fail(id) end
 	env.task_manager.task_callback = function(tsk, state)

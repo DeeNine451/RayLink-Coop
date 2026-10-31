@@ -122,13 +122,16 @@ end
 -- World mechanics stay host: their handlers create or release objects of the world (spawners, mines, campfires, quest
 -- scripts, NPC loot and trade, warfare), which the host does once for everybody.
 local B3_HOST = { "campfire_placeable", "item_mine", "txr_mines", "bind_anomaly_field", "bind_anomaly_zone",
-	"bind_container", "tb_coordinate_based_safe_zones", "xcv_phantoms", "safespawn", "nimbleclearinventory",
+	"bind_container", "xcv_phantoms", "safespawn", "nimbleclearinventory",
 	"trader_autoinject", "exo_loot", "night_mutants", "guards_spawner", "release_item_manager", "info_portions",
 	"game_relations", "tasks_fetch", "warfare", "xr_effects", "bind_artifact_harvester", "bind_hf_base",
 	"axr_companions_varefined", "soulslike", "gamemode_ironman" }
 for _, n in ipairs(B3_HOST) do
 	check(domain_of("actor_on_update", n) == "host", n .. " stays host-only (world mechanic)")
 end
+-- Its update tells this player he is in a safe zone, and the host trusts that (coop_compat_tb.ltx); the cubes stay host.
+check(domain_of("actor_on_update", "tb_coordinate_based_safe_zones") == "owner", "tb_coordinate_based_safe_zones: the update is the player's")
+check(domain_of("on_game_load", "tb_coordinate_based_safe_zones") == "host", "tb_coordinate_based_safe_zones: the rest stays host-only")
 -- Native wrappers retain the authority of the original mod callback despite coop_* = view.
 for _, cb in ipairs({ "npc_on_hit_callback", "npc_on_before_hit" }) do
 	check(domain_of(cb, "coop_npc_adapters") == "host", "native adapter preserves host authority: " .. cb)

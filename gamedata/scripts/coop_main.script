@@ -560,6 +560,20 @@ local function mirror_update(m, game_sec, what, limit_field)
 	with_cover(env_cl.cover, function() m:update() end, what)
 end
 
+-- A mirror that starts late (the player joined during it): the stock update plays every stage that is due at once. A
+-- stage is over this many stock seconds in. The rumble and the last step of the quake ladder are not listed: they are
+-- on now, and they end later.
+local SURGE_STAGES_OVER = { beginning = 5, siren = 30, impact = 52, quake20 = 100, quake40 = 102, quake60 = 104, quake80 = 106,
+	["1stwavesnd"] = 120, ["1stwave"] = 124, ["2ndwavesnd"] = 168, ["2ndwave"] = 172 }
+local PSI_STAGES_OVER = { beginning = 5, siren = 15 }
+
+local function skip_stages_over(m, over, game_sec)
+	local sec = game_sec / (env_cl.tf or level.get_time_factor())
+	for stage, at in pairs(over) do
+		if sec >= at then m.stages[stage] = true end
+	end
+end
+
 local function client_env_tick()
 	if not env_cl.have or not db.actor then return end
 	local tg = time_global()
@@ -571,7 +585,10 @@ local function client_env_tick()
 	local sm = surge_mgr()
 	if sm then
 		if env_cl.s then
-			if not sm.started then mirror_start_surge(sm) end
+			if not sm.started then
+				mirror_start_surge(sm)
+				skip_stages_over(sm, SURGE_STAGES_OVER, env_cl.sg + dt)
+			end
 			mirror_update(sm, env_cl.sg + dt, "emission mirror", "surge_time")
 		elseif sm.started then
 			with_cover(true, function() sm:end_surge() end, "emission end")
@@ -581,7 +598,10 @@ local function client_env_tick()
 	local pm = psi_mgr()
 	if pm then
 		if env_cl.p then
-			if not pm.started then mirror_start_psi(pm) end
+			if not pm.started then
+				mirror_start_psi(pm)
+				skip_stages_over(pm, PSI_STAGES_OVER, env_cl.pg + dt)
+			end
 			mirror_update(pm, env_cl.pg + dt, "psi-storm mirror", "psi_storm_duration")
 		elseif pm.started then
 			with_cover(true, function() pm:finish() end, "psi-storm end")
@@ -869,10 +889,12 @@ end
 STATUS_MODULES = {
 	"coop_route",
 	"coop_core_chat", "coop_core_hud", "coop_core_player", "coop_core_world",
+	"coop_world_weather", "coop_world_fx", "coop_world_fight", "coop_world_compat",
 	"coop_economy_core",
 	"coop_npc_logic", "coop_npc_effects", "coop_npc_meet", "coop_npc_companions", "coop_npc_disguise",
 	"coop_npc_world", "coop_npc_compat",
 	"coop_tasks",
+	"coop_loot_claim",
 	"coop_mods_core",
 }
 
@@ -925,6 +947,9 @@ ensure_callback("coop_actor_revived")
 ensure_callback("coop_on_container_opened")
 ensure_callback("coop_avatar_step")
 ensure_callback("coop_respawned") -- coop_death adds it at its own start: a subscriber that starts earlier would be lost
+-- Fired by the engine (parity audit D10) when a queue of events dropped some on this machine: coop_events_lost(count).
+-- Events are for effects, state goes over coop.sync; a script with a resync of its own asks for it here (coop_tasks).
+ensure_callback("coop_events_lost")
 
 -- The callback router's Lua half on every machine with the engine API, the host and single player too: a session
 -- can start in this Lua state, and none holds on the host as well (F2 T10).

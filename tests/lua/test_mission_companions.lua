@@ -120,6 +120,28 @@ local comp = H.add(make_obj(301, 12, 0, 0, { _name = "comp" }))
 H.env.axr_beh.action_beh.execute({ object = comp })
 check(H.beh_actor == 500, "a task companion thinks with 'actor' = its leader's proxy")
 
+print("== a scripted enemy walks to the nearest player on his feet (target = actor)")
+local enemy = H.add(make_obj(302, 500, 0, 0, { _name = "attacker" }))
+local proxy_of = H.objects[500]
+local host_of = H.env.db.actor
+host_of._pos, proxy_of._pos = vec(1000, 0, 0), vec(510, 0, 0)
+H.env.coop_npc_players.invalidate()
+H.beh_actor = nil
+H.env.axr_beh.action_beh.execute({ object = enemy, st = { target = "actor" } })
+check(H.beh_actor == 500, "the client next to it, not the far host")
+host_of._pos = vec(501, 0, 0)
+H.beh_actor = nil
+H.env.axr_beh.action_beh.execute({ object = enemy, st = { target = "actor" } })
+check(H.beh_actor == 0, "the host when he is the nearest")
+H.env.coop.life_of = function(id) return id == 0 and "wounded" or "alive" end
+H.beh_actor = nil
+H.env.axr_beh.action_beh.execute({ object = enemy, st = { target = "actor" } })
+check(H.beh_actor == 500, "the host is down: the one on his feet")
+H.env.coop.life_of = nil
+H.beh_actor = nil
+H.env.axr_beh.action_beh.execute({ object = enemy, st = { target = "smart" } })
+check(H.beh_actor == 0, "another target: stock")
+
 print("== add_speaker_companion for a client's give")
 H.env.axr_companions.companion_squads = {}
 CH._leaders()[300] = nil

@@ -352,6 +352,9 @@
 	<string id="st_coop_game_faction">
 		<text>Группировка мира</text>
 	</string>
+	<string id="st_coop_game_finish_downed">
+		<text>Сталкеры добивают упавшего игрока</text>
+	</string>
 	<string id="st_coop_game_friendly_fire">
 		<text>Огонь по своим</text>
 	</string>
@@ -402,6 +405,9 @@
 	</string>
 	<string id="st_coop_game_join_spawn_host">
 		<text>Рядом с хостом</text>
+	</string>
+	<string id="st_coop_game_loot_claim">
+		<text>Чужая добыча</text>
 	</string>
 	<string id="st_coop_game_max_money_transfer">
 		<text>Самая большая передача</text>

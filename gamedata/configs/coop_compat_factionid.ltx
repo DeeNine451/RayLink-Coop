@@ -1,0 +1,8 @@
+; Anomaly Coop - Faction ID HUD (factionID_hud_mcm.script). Read after every coop_route*.ltx (coop_route.ltx explains the order).
+;
+; The label of the aimed NPC is cleared when that NPC dies or goes away. Those two callbacks follow their prefix to the host,
+; so a clients label stayed on a dead target. Both fire on a client (the stock binder of a puppet).
+
+[route_pairs]
+npc_on_death_callback@factionid_hud_mcm = owner
+npc_on_net_destroy@factionid_hud_mcm = owner

@@ -6,7 +6,7 @@
 	outside value is a parameter. The record built on this catalog is coop_game_record.script.
 
 	Keys. A key is "<source>|<path>", the source says where the value lives (the wire format of coop_settings):
-		c|<name>        console variable of the engine (CVARS below, 19 of them)
+		c|<name>        console variable of the engine (CVARS below, 20 of them)
 		o|<path>        [options] of axr_options.ltx (stock options, "coop/coop_session/<id>" rules)
 		m|<path>        [mcm] of axr_options.ltx (mod settings)
 		w|<flag>        world creation flag: story, routes, difficulty, economy (record.world)
@@ -50,7 +50,7 @@ TABS = { "death", "party", "world", "difficulty", "saves", "other" }
 -------------------------------------------------------------------------------
 -- Console variables of the engine (docs\GAME_SETTINGS.md 1.2, the engine's CMD registrations)
 -------------------------------------------------------------------------------
-CVARS = {} -- the 19 names, in the order of the table in 1.2 (18 and 19: the split-levels rules of F3a)
+CVARS = {} -- the 20 names, in the order of the table in 1.2 (18 and 19: the split-levels rules of F3a, 20: the NPC AI)
 CVAR = {} -- name -> { name, kind = "int" | "float" | "token", min, max, def, tokens, aliases }
 
 local function cvar(name, kind, lo, hi, def, tokens, aliases)
@@ -80,6 +80,8 @@ cvar("coop_death_share", "float", 0, 200, 100)
 -- F3a: each player may be on a different level; the story levels that are entered together (docs/plans/2026-10-24-f3a-split-levels.md 3)
 cvar("coop_split_levels", "int", 0, 1, 1)
 cvar("coop_story_together", "int", 0, 1, 1)
+-- row 20: stalkers finish a player who is down (the stock behaviour, on); off, they leave him as monsters do (coop_ai.cpp)
+cvar("coop_finish_downed", "int", 0, 1, 1)
 
 -------------------------------------------------------------------------------
 -- Values: parsing and formatting
@@ -199,6 +201,7 @@ c_item("death", "coop_hardcore_new_kit", "check", { shown_if = { key = "c|coop_d
 c_item("death", "coop_bleedout", "list", { v = { 30, 60, 90, 120, 180, 300 }, unit = "s" })
 c_item("death", "coop_revive_health", "list", { v = { 0.1, 0.2, 0.3, 0.5, 0.75, 1 }, unit = "frac" })
 c_item("death", "coop_checkpoints_group", "check")
+c_item("death", "coop_finish_downed", "check")
 
 -- Tab 2. Group and economy
 c_item("party", "coop_friendly_fire", "check")
@@ -224,6 +227,8 @@ add("party", RULE .. "money_transfer", "check", { def = true })
 add("party", RULE .. "max_money_transfer", "list", { v = { 10000, 100000, 1000000, 10000000, 100000000 },
 	def = 1000000, range = { 0, 100000000 }, int = true })
 add("party", RULE .. "give_radius", "list", { v = { 2, 5, 10, 20 }, def = 5, range = { 1, 20 }, unit = "m" })
+-- "Foreign loot": a living stalker keeps the body of what he killed (coop_loot_claim.script); off, every body is free
+add("party", RULE .. "loot_claim", "check", { def = true })
 
 -- Tab 3. World. faction, story and routes are the stock controls of the new game screen (created, never changed)
 add("world", "faction", "list", { vt = "name", when = "create", applies = "create" })

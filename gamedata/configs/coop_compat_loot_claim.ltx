@@ -6,6 +6,10 @@
 ; host a client's kill has the client's avatar as the killer, and the avatar is a stalker NPC, so every body a client
 ; killed was "claimed" by that stalker and the loot key gave threats instead of the body (live 2026-10-29, GAMMA).
 ; Owner 2026-10-29: the mod is not loaded in co-op at all. Outside a session (single player) it works as installed.
+; Owner 2026-10-31: the rule comes back in a session as our own script, coop_loot_claim.script (the host owns the table,
+; the player's machine checks the distance, the game setting "Foreign loot" turns it off), without the faults of the mod:
+; a flag that closed a body for ever, global variables, killer:has_info on nil, a wipe of the whole table at 30 rows and a
+; 10 m ray longer than the reach of USE. The mod's own scripts stay at "none" here, the mod's strings are used by ours.
 
 [route_scripts]
 grok_loot_claim                = none

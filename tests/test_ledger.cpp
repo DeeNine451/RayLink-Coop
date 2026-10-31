@@ -931,7 +931,7 @@ TEST(ledger_wire_note)
 		Reader rc(full.data(), cut);
 		CHECK(!read(rc, got));
 	}
-	const uint8_t no_kind = 3, no_cause = 3, no_verdict = coop::ledger::kVerdictCount;
+	const uint8_t no_kind = coop::ledger::kNoteKindCount, no_cause = 3, no_verdict = coop::ledger::kVerdictCount;
 	for (const auto& bad : {std::make_pair(size_t(8), no_kind), std::make_pair(size_t(9), no_cause),
 	         std::make_pair(size_t(10), no_verdict)})
 	{

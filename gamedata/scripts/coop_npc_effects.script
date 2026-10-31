@@ -7,15 +7,21 @@
 	Host:
 	  - NPC and object voices started by Lua (xr_sound.set_sound_play: meet greetings, wounded calls, camp
 	    stories, restrictor play_sound) are played on the clients too (npc.snd), on the same object. Only
-	    sent when some client is within [coop_npc] sound_radius of the object. A theme of class actor_sound
-	    (a voice in the player's head) started by a replicated restrictor goes to its audience only.
-	  - Looped sounds started/stopped by Lua (xr_sound.play_sound_looped / stop_sound_looped) follow
-	    (npc.loop); the join save already carries the loops that play at join time.
+	    sent when some client is within [coop_npc] sound_radius of the object, or within the range of the
+	    sound itself for a theme that has one (a door, a helicopter: object_sound). A theme of class
+	    actor_sound (a voice in the player's head) started by a replicated restrictor goes to its audience
+	    only.
+	  - Looped sounds started/stopped by Lua (xr_sound.play_sound_looped / stop_sound_looped) follow at once
+	    (npc.loop) and as a state (coop.sync, session scope, "npc.loops", every 2 s): the join save holds the
+	    table, nothing plays it, and an object that comes online later needs its loop then. A client plays
+	    what the state lists for objects online here and stops the rest of what it started.
 	  - Cosmetic actor effects of the world logic (camera effectors, complex postprocess, psy gluks,
 	    earthshake, actor sound, PDA tips) run on the host as before and are relayed (npc.cfx): to the audience of a
 	    replicated restrictor, or to everybody when no restrictor fired them. Not while the host's player
 	    is in a dialog (dialog effects belong to the talker, whose machine runs the dialog).
 	Any machine, in a session:
+	  - A puppet's voice table: xr_sound.update runs from the binder, suspended for puppets, so a played theme
+	    stayed in sound_table and the next one lost its Lua part. The tick does it for the themes npc.snd played.
 	  - Anabiotic (bind_stalker_ext) no longer moves the group's clock or ends the emission for everybody:
 	    the player sleeps through it, "anabiotic_in_process" (the stock survive condition of the emission)
 	    is held until the emission and psi-storm are over (cap 5 min, 20 s if none comes).
@@ -28,7 +34,8 @@
 	  npc.cfx   host -> client  { f = effect, n = name/section, id = effector id, l = loop, v = fov }
 	Stock functions wrapped: xr_sound.set_sound_play, play_sound_looped, stop_sound_looped;
 	xr_effects.run_cam_effector, run_cam_effector_global, stop_cam_effector, run_postprocess,
-	stop_postprocess, play_sound_on_actor, yan_gluk, x18_gluk, aes_earthshake, warlab_stop_particle, send_tip;
+	stop_postprocess, play_sound_on_actor, yan_gluk, x18_gluk, aes_earthshake, warlab_stop_particle, send_tip,
+play_particle_on_path (Warlab door scares, steam vents: the chance of each point is rolled per machine);
 	bind_stalker_ext.anabiotic_callback, anabiotic_callback2.
 --]]
 
@@ -49,6 +56,11 @@ local installed = false
 local host_on = false
 local orig = {}
 local stats = { snd_out = 0, snd_in = 0, loop_out = 0, loop_in = 0, cfx_out = 0, cfx_in = 0, anabiotic = 0, psy_floor = 0 }
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+local KEY_LOOPS = "npc.loops" -- session scope: a list of "id|theme", ids in host numbering
+local LOOPS_TICK_MS = 2000
+local SOUND_REACH_MAX = 300 -- m: what the engine's relay clamps a sound to
 
 local function logic_audience(npc)
 	local L = _G["coop_npc_logic"]
@@ -83,10 +95,11 @@ end
 -------------------------------------------------------------------------------
 -- Host: voices and looped sounds
 -------------------------------------------------------------------------------
-local function client_near(id)
+-- `reach`: the range of the sound itself, when the theme has one.
+local function client_near(id, reach)
 	local obj = level.object_by_id(id)
 	if not obj then return false end
-	local r = P.setting("sound_radius", 80)
+	local r = math.max(P.setting("sound_radius", 80), reach or 0)
 	local r2 = r * r
 	local pos = obj:position()
 	for _, o in ipairs(P.others()) do
@@ -98,6 +111,14 @@ end
 local function plain(v)
 	local tv = type(v)
 	if tv == "number" or tv == "string" or tv == "boolean" then return v end
+	return nil
+end
+
+-- set_sound_play answers with the sound object of an object_sound or actor_sound theme; a voice has none.
+local function sound_reach(snd)
+	if snd == nil then return nil end
+	local ok, d = pcall(function() return snd.max_distance end)
+	if ok and type(d) == "number" and d > 0 then return math.min(d, SOUND_REACH_MAX) end
 	return nil
 end
 
@@ -124,7 +145,7 @@ local function patch_sounds()
 					local sent
 					if theme.class_id == "actor_sound" then
 						sent = send_scoped(EV_SND, t, npc)
-					elseif client_near(npc_id) then
+					elseif client_near(npc_id, sound_reach(r)) then
 						sent = P.send(EV_SND, t, -1)
 					end
 					if sent then stats.snd_out = stats.snd_out + 1 end
@@ -164,6 +185,76 @@ local function patch_sounds()
 	end
 end
 
+-- Host: the loops as a state. The table also changes without the wrappers (xr_sound.stop_sounds_by_id at an object's
+-- net_destroy, a save loaded), so it is read, not tracked.
+local loops_sent = nil
+
+local function host_loops_tick()
+	local xs = _G["xr_sound"]
+	local sync = api and api.sync
+	if not (xs and type(xs.looped_sound) == "table" and sync) then return end
+	local list = {}
+	for id, themes in pairs(xs.looped_sound) do
+		if type(id) == "number" and id ~= 0 and type(themes) == "table" then
+			for theme in pairs(themes) do list[#list + 1] = tostring(id) .. "|" .. tostring(theme) end
+		end
+	end
+	table.sort(list)
+	local sig = table.concat(list, ",")
+	if sig ~= loops_sent and sync.set("session", KEY_LOOPS, list) == true then loops_sent = sig end
+end
+
+local client_loops = {} -- "local id|theme" -> { id, theme }: what this machine started for the host
+local puppet_voices = {} -- local id -> true: a theme npc.snd played on it
+
+local function loop_ready(id)
+	local st = db.storage[id]
+	return st ~= nil and st.object ~= nil and level.object_by_id(id) ~= nil
+end
+
+local function client_loop_start(id, theme)
+	local key = tostring(id) .. "|" .. theme
+	if client_loops[key] or not loop_ready(id) then return end
+	if not (sound_theme and sound_theme.theme[theme]) then return end
+	xr_sound.play_sound_looped(id, theme)
+	client_loops[key] = { id, theme }
+end
+
+local function client_loops_tick()
+	local sync = api and api.sync
+	local list = sync and sync.get("session", KEY_LOOPS)
+	if type(list) ~= "table" then return end
+	local want = {}
+	for _, entry in ipairs(list) do
+		local hid, theme = tostring(entry):match("^(%d+)|(.+)$")
+		if hid then
+			local id = P.to_local(tonumber(hid))
+			want[tostring(id) .. "|" .. theme] = true
+			client_loop_start(id, theme)
+		end
+	end
+	for key, l in pairs(client_loops) do
+		if not want[key] then
+			xr_sound.stop_sound_looped(l[1], l[2])
+			client_loops[key] = nil
+		elseif not loop_ready(l[1]) then
+			client_loops[key] = nil -- offline here: the next time it is online it needs its loop again
+		end
+	end
+end
+
+local function client_voices_tick()
+	local xs = _G["xr_sound"]
+	for id in pairs(puppet_voices) do
+		if level.object_by_id(id) then
+			xs.update(id)
+		else
+			xs.sound_table[id] = nil
+		end
+		if xs.sound_table[id] == nil then puppet_voices[id] = nil end
+	end
+end
+
 local function client_on_snd(t)
 	if type(t.i) ~= "number" or type(t.s) ~= "string" then return end
 	if not (sound_theme and sound_theme.theme[t.s]) then return end
@@ -172,6 +263,7 @@ local function client_on_snd(t)
 	local point = t.p
 	if type(point) == "number" then point = P.to_local(point) end
 	stats.snd_in = stats.snd_in + 1
+	if id ~= 0 then puppet_voices[id] = true end
 	-- its subtitle news (news_manager.send_sound) comes from the host as core.news (coop_core_world): not
 	-- twice (W5)
 	local nm = rawget(_G, "news_manager")
@@ -187,9 +279,12 @@ local function client_on_loop(t)
 	local id = P.to_local(t.i)
 	stats.loop_in = stats.loop_in + 1
 	if t.on == true then
-		if sound_theme and sound_theme.theme[t.s] then xr_sound.play_sound_looped(id, t.s) end
+		client_loop_start(id, t.s) -- an object not online here gets it from the state when it comes
 	else
 		xr_sound.stop_sound_looped(id, t.s ~= "" and t.s or nil)
+		for key, l in pairs(client_loops) do
+			if l[1] == id and (t.s == "" or l[2] == t.s) then client_loops[key] = nil end
+		end
 	end
 end
 
@@ -206,7 +301,7 @@ local function num(v) return type(v) == "number" and v > 0 and v or nil end
 
 -- Effects that are pure visuals/sounds on the receiving machine: replayed by name with the same params.
 local REPLAY_BY_NAME = { yan_gluk = true, x18_gluk = true, aes_earthshake = true, warlab_stop_particle = true,
-	play_sound_on_actor = true, send_tip = true }
+	play_sound_on_actor = true, send_tip = true, play_particle_on_path = true }
 
 local function patch_effects()
 	local xe = _G["xr_effects"]
@@ -428,7 +523,18 @@ end
 -------------------------------------------------------------------------------
 -- Install, update, events
 -------------------------------------------------------------------------------
-local next_tick = 0
+local next_tick, next_loops = 0, 0
+
+local function loops_tick(now)
+	if now < next_loops then return end
+	next_loops = now + LOOPS_TICK_MS
+	if P.is_host() then
+		host_loops_tick()
+	elseif P.client_live() then
+		client_loops_tick()
+		client_voices_tick()
+	end
+end
 
 local function actor_on_update()
 	local now = time_global()
@@ -436,6 +542,8 @@ local function actor_on_update()
 	next_tick = now + 500
 	host_on = installed and P.host_with_clients()
 	if not P.active() then return end
+	local ok, err = pcall(loops_tick, now)
+	if not ok then report("loops", err) end
 	-- host: a save made during the hold comes back with anabiotic_in_process set and no hold in this Lua
 	-- state; the poll clears it after the emission (or 20 s), or the host would be immune for good (W5)
 	if not ana.on and P.is_host() and has_alife_info("anabiotic_in_process") then

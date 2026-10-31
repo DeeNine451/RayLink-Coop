@@ -300,13 +300,15 @@ end
 -- heli - or actor_always_enemy), and "the actor" as a target is the nearest player.
 -- Live 2026-10-31: heli_fire with enemy = actor picks once and keeps it, and a player who is down is alive for the engine: a
 -- mission's heli fired at the host alone, even dead. It now works through the players it sees, on their feet, in turns.
+-- Skyfall sets its heli on db.actor at every status check, past all of this (tasks_skyfall set_player_enemy ->
+-- heli_combat:set_enemy): that one call goes through the same turns; a heli that sees nobody looks for the players it knows of.
 local HELI_TURN_MS = 10000 -- how long one player has its attention
 local HELI_LOOK_MS = 1000 -- how often it looks while it has nobody
 
-local function heli_next_player(self, heli)
+local function heli_next_player(self, heli, anywhere)
 	local seen = {}
 	for _, o in ipairs(P.everyone()) do
-		if P.standing(o) and heli:isVisible(o) then seen[#seen + 1] = o end
+		if P.standing(o) and (anywhere or heli:isVisible(o)) then seen[#seen + 1] = o end
 	end
 	if #seen == 0 then return nil end
 	table.sort(seen, function(a, b) return a:id() < b:id() end)
@@ -373,6 +375,30 @@ local function wrap_helis()
 			return set_enemy(self, ...)
 		end
 		applied[#applied + 1] = "heli:fire"
+	end
+	local sky = mod("tasks_skyfall")
+	local aim = sky and sky.set_player_enemy
+	if type(aim) == "function" and not orig.heli_skyfall then
+		orig.heli_skyfall = aim
+		sky.set_player_enemy = function(...)
+			if not P.is_host() then return aim(...) end
+			local go = sky.get_dynamic_heli()
+			local bound = go and go:binded_object()
+			local combat = bound and bound.st and bound.st.combat
+			if not combat then return end
+			local now = time_global()
+			local cur = combat.st.enemy_id
+			if cur and P.is_player_id(cur) and P.standing(cur) and now < (combat.coop_until or 0) then return end
+			local heli = go:get_helicopter()
+			local target = heli_next_player(combat, heli) or heli_next_player(combat, heli, true)
+			if target then
+				combat.coop_until = now + HELI_TURN_MS
+				combat:set_enemy(target)
+			elseif cur then
+				combat:forget_enemy()
+			end
+		end
+		applied[#applied + 1] = "heli:skyfall"
 	end
 end
 
@@ -522,6 +548,8 @@ function on_game_start()
 		end
 		local adapters = mod("coop_npc_adapters")
 		if adapters then adapters.install(P, function() return host_on and P.host_with_clients() end, applied) end
+		local phantoms = mod("coop_npc_phantoms") -- enemy audit F10
+		if phantoms then phantoms.install(P, function() return host_on and P.host_with_clients() end, applied) end
 		for _, s in ipairs({ { "ai_rework", wrap_ai_rework }, { "night_mutants", wrap_night_mutants },
 			{ "peace_zone", wrap_peace_zone }, { "loot", wrap_loot },
 			{ "squads", wrap_squads }, { "smart_respawn", wrap_smart_respawn }, { "helis", wrap_helis },

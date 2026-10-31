@@ -1,0 +1,16 @@
+# Today's `== Actor()` / `!= Actor()` comparisons in engine/src/xrGame/ai/monsters (tools/check_actor_compare.py).
+# One per line: path (relative to that folder) | code of the line, comments dropped, white space collapsed | count.
+# Fixing an occurrence (is_player / is_remote_player) means deleting its entry; the checker warns about stale ones.
+anti_aim_ability.cpp|if (enemy == Actor() || coop::npc_ai::is_remote_player(enemy))|1
+anti_aim_ability.cpp|if (who && who != Actor())|1
+basemonster/base_monster_debug.cpp|if ( Actor() == pEnemy )|1
+basemonster/base_monster_feel.cpp|if (pEntityNC == Actor())|1
+burer/burer_state_attack_shield_inline.h|if (enemy == Actor())|1
+controller/controller.cpp|if (pEntity == Actor())|1
+controller/controller_psy_hit.cpp|if (who == Actor() ? !!Actor()->Cameras().GetCamEffector(eCEControllerPsyHit) : coop::monster_fx::host_held(who->ID()))|1
+controller/controller_psy_hit.cpp|m_coop_target = who && who != Actor() ? who->ID() : u16(-1);|1
+controller/controller_psy_hit.cpp|return l_rq.O == Actor() || (l_rq.range >= dist - 0.1f);|1
+monster_enemy_manager.cpp|if (Actor() == enemy)|1
+poltergeist/poltergeist.cpp|const bool host_actor = target == Actor();|1
+poltergeist/poltergeist.cpp|if (pHDS->who == Actor() || coop::npc_ai::is_player(pHDS->who))|1
+pseudodog/psy_dog.cpp|if (EnemyMan.get_enemy() != Actor())|1

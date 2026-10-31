@@ -15,8 +15,26 @@
 	  tasks_mystery_of_the_swamps.start_task                   the two squads and the task
 	  tasks_defense.barrier_defense_*_start / _complete         the squads and the task / the surge lock and the reward
 	  dialogs_lostzone.set_impending_doom_timer                the start of the Impending Doom deadline
+	  tasks_guide.activate / complete                          the guide job: taken, paid
+	  operacia_monolith (2), ah_dialogs (10), dialogs_agr_u    a task whose target the action makes in the world: documents,
+	                                                           a device, artefacts, PDAs (a client's world spawn is refused)
+	  dialogs.save_* / leave_zone_save (15)                    the story checkpoint of a step (only the world server sets one)
+	  xr_bribe.bribe_N_days_<faction> (16), jurov_4            a bought ceasefire (xr_bribe keeps it on the host)
+	  dialogs.give_hip_medic_potion, rescue_hostage, dialogs_mlr.spawn_1_11_af_medusa_kmb, jup_b202_hit_bandit_from_actor,
+	  hidden_threat.sl_hidden_threat_task_3 (rolls the reward the later dialogs read), dialogs_agr_u (the boss: dismiss, release)
 	Not here: the Sakharov upgrade wait (its dialog also moves the player's own money and helmet; the host stamps the time
 	when it gives the task, coop_tasks).
+
+	A bought ceasefire protects every player. xr_combat_ignore asks xr_bribe.at_peace for the host's actor only, so on the host
+	a callback (on_enemy_eval) asks it for a client's character too, and a hit by a client breaks the ceasefire like the host's.
+
+	Stock functions that work on the host's side of the world, for a client's dialog:
+	  treasure_manager.create_random_stash   a reward's stash (money is paid, the stash was never made): the host makes it
+	                                         (quests.act "stash"), the "stash coordinates" line goes to the one who asked
+	  dialogs.is_trade_accept (+ 2)          "wanna trade?" of an ordinary stalker: the roll is the client's, the host spawns the
+	                                         stock into the NPC and remembers the answer (quests.act "trade", reply quests.trade)
+	  dialogs.update_npc_dialog              the NPC's logic is the host's: nothing to do on a client
+	  zat_b103_actor_has_needed_food, is_actor_trustworthy   "the actor" is the player at the NPC, not the host
 
 	A status functor's kill. xr_effects.kill_actor() called with no NPC from inside a task check (the Impending Doom deadline
 	of lttz_ms_decisive_blow / _endgame, Sabaoth's psi death) kills the host's actor only. The host passes it on to every
@@ -24,6 +42,13 @@
 
 	Semenov's tissue samples (yan_ecolog_semenov_task_1). The kill counter lives in grok_loot_claim, which a session turns
 	off for everybody (coop_compat_loot_claim.ltx). The host counts a mutant any player killed while the task needs samples.
+
+	The guide job (tasks_guide) is no task of the task manager: a timer offers it, two tables of the module hold the offer and
+	the running job, and the dialog reads them on the talker's machine. The host sends the tables to every client (quests.guide)
+	with the offer's news, a client's take and turn-in are relayed, the job remembers its taker: his pay, and his fine when it
+	runs late.
+
+	NPE tutorials: one task id and its text in module locals, so a tutorial is personal: given and checked on its machine.
 --]]
 
 local qc = coop_quests_core
@@ -34,6 +59,8 @@ local MAX_DIST_SQR = 225 -- 15 m: the dialog was face to face
 local TALK_MS = 5000 -- the talk window may have closed when the request arrives
 local PACE_MS = 1000
 local KILL_GAP_MS = 2000
+local GUIDE_TICK_MS = 2000
+local GUIDE_SPOT = "secondary_task_location"
 
 local function task_of(id)
 	return task_manager.get_task_manager().task_info[id]
@@ -51,6 +78,67 @@ local function open_task(id)
 	end
 end
 
+-- A table local of tasks_guide (nil without the mod).
+local function guide_table(name)
+	local m = qc.mod("tasks_guide")
+	local v = m and coop_mods_core.find_local(m, name)
+	return type(v) == "table" and v or nil
+end
+
+-- The guide of that table is the NPC talked to.
+local function guide_is(name, npc)
+	local t = guide_table(name)
+	local squad = t and t.squad_id and get_object_squad(npc)
+	return squad ~= nil and squad ~= false and squad.id == t.squad_id
+end
+
+-- The host remembers its own relayed runs ("module.function" -> time_global()). The guard of an action that leaves no state of
+-- its own to read (a checkpoint, a one-time spawn) is "not run for that long".
+local ran_at = {}
+local function not_run_for(full, ms)
+	return function()
+		local t = ran_at[full]
+		return t == nil or time_global() - t >= ms
+	end
+end
+local BOSS_RELEASED = not_run_for("dialogs_agr_u.remove_agr_u_bandit_boss", 60000) -- it leaves after a fade-out
+local CHECKPOINT_GAP_MS = 20000 -- a story checkpoint is for the whole group: one per step is enough
+
+-- Game seconds left of the ceasefire with `faction` (0: none runs). M_DATA is a local of xr_bribe, which saves and loads it.
+local function bribe_left(faction)
+	local m = qc.mod("xr_bribe")
+	local data = m and coop_mods_core.find_local(m, "M_DATA")
+	local b = type(data) == "table" and data[faction]
+	if type(b) ~= "table" then return 0 end
+	local ok, left = pcall(function()
+		return b.duration - game.get_game_time():diffSec(utils_data.CTime_from_table(b.start))
+	end)
+	return ok and left or 0
+end
+
+-- Actions whose task makes a part of the world (documents, a device, artefacts, PDAs) with alife():create, which a client
+-- cannot do: the host runs them, once per task.
+local START_TASKS = {
+	["operacia_monolith.give_task_esc_military_docs_poisk"] = "esc_military_docs_task",
+	["operacia_monolith.cs_story_task0"] = "cs_story_task0",
+	["dialogs_agr_u.give_agr_u_bandit_boss_task_1"] = "agr_u_bandit_boss_task_1",
+	["ah_dialogs.pirogov_give_quest1"] = "ah_pirogov_quest1", ["ah_dialogs.pirogov_give_quest3"] = "ah_pirogov_quest3",
+	["ah_dialogs.chernov_give_quest1"] = "ah_chernov_quest1", ["ah_dialogs.chernov_give_quest4"] = "ah_chernov_quest4",
+	["ah_dialogs.chernov_give_quest5"] = "ah_chernov_quest5",
+	["ah_dialogs.juk_give_quest1"] = "ah_juk_quest1", ["ah_dialogs.juk_give_quest2"] = "ah_juk_quest2",
+	["ah_dialogs.juk_give_quest3"] = "ah_juk_quest3",
+	["ah_dialogs.vorobushkin_give_quest1"] = "ah_vorobushkin_quest1", ["ah_dialogs.vorobushkin_give_quest2"] = "ah_vorobushkin_quest2",
+}
+-- dialogs.script (GAMMA): xr_effects.scenario_autosave(db.actor, nil, { "st_..." }) and nothing else
+local CHECKPOINTS = { "leave_zone_save", "save_uni_travel_zat_to_jup", "save_uni_travel_zat_to_pri", "save_uni_travel_jup_to_zat",
+	"save_uni_travel_jup_to_pri", "save_uni_travel_pri_to_zat", "save_uni_travel_pri_to_jup", "save_jup_b218_travel_jup_to_pas",
+	"save_pri_a17_hospital_start", "save_jup_a10_gonna_return_debt", "save_jup_b6_arrived_to_fen", "save_jup_b6_arrived_to_ash_heap",
+	"save_jup_b19_arrived_to_kopachy", "save_zat_b106_arrived_to_chimera_lair", "save_zat_b5_met_with_others" }
+local BRIBE_FACTIONS = { "army", "bandit", "csky", "dolg", "ecolog", "freedom", "killer", "stalker" }
+local BRIBE_DAYS = { 2, 4 }
+local DAY_S = 86400
+local BRIBE_RENEW_S = 3600 -- game seconds a ceasefire runs before the same one can be bought again
+
 -- Allow list: "module.function" -> what must hold on the host. The dialog's own conditions ran on the client, and a repeat
 -- must change nothing. The host looks a function up from these entries, never from the wire.
 local RELAY = {
@@ -61,9 +149,55 @@ local RELAY = {
 	["tasks_defense.barrier_defense_monolith_complete"] = open_task("barrier_defense_monolith"),
 	["tasks_defense.barrier_defense_zombie_complete"] = open_task("barrier_defense_zombie"),
 	["dialogs_lostzone.set_impending_doom_timer"] = function() return load_ctime(db.actor, "impending_doom_timer") == nil end,
+	["tasks_guide.activate"] = function(npc) return guide_is("guid", npc) end,
+	["tasks_guide.complete"] = function(npc) return guide_is("curr_guid", npc) and qc.mod("tasks_guide").prec_5(db.actor, npc) end,
+	-- Fanatic's training: the artefact in the anomaly (the phrase gives fanat_training_anomaly_reached_done itself)
+	["dialogs_mlr.spawn_1_11_af_medusa_kmb"] = not_run_for("dialogs_mlr.spawn_1_11_af_medusa_kmb", math.huge),
+	-- npc.health / npc.radiation of another creature are the host's to set
+	["dialogs.give_hip_medic_potion"] = function(npc) return npc.health < 1 or npc.radiation > 0 end,
+	-- the squad relation of the bandits (a frozen copy on a client); the phrase's own infos are given with it
+	["dialogs_jupiter.jup_b202_hit_bandit_from_actor"] = not_run_for("dialogs_jupiter.jup_b202_hit_bandit_from_actor", math.huge),
+	-- Agroprom underground's bandit boss: the companion tables and the squads are the host's
+	["dialogs_agr_u.dimiss_agr_u_bandit_boss"] = function()
+		local squad = get_story_squad("agr_u_bandits_boss_squad")
+		return squad ~= nil and axr_companions.companion_squads[squad.id] ~= nil
+	end,
+	["dialogs_agr_u.remove_agr_u_bandit_boss"] = function()
+		return get_story_squad("agr_u_bandits_boss_squad") ~= nil and BOSS_RELEASED()
+	end,
+	["dialogs_agr_u.remove_agr_u_bandit_squad"] = function() return get_story_squad("agr_u_bandits_squad") ~= nil end,
+	-- the host's hostage table and the NPC's flag
+	["dialogs.rescue_hostage"] = function(npc)
+		local hostages = axr_task_manager and axr_task_manager.hostages_by_id
+		return type(hostages) == "table" and hostages[npc:id()] ~= nil
+	end,
+	-- the reward of Hidden Threat's third task is rolled into utils_slht.reward_table when the task starts: the host's table
+	["hidden_threat.sl_hidden_threat_task_3"] = function() return not has_alife_info("hidden_threat_task_3_start") end,
+	["dialogs_hidden_threat.postcond_dialog_jurov_4"] = function() return bribe_left("stalker") <= 0 end,
+}
+for full, tid in pairs(START_TASKS) do RELAY[full] = not_given(tid) end
+for _, fn in ipairs(CHECKPOINTS) do
+	local full = "dialogs." .. fn
+	RELAY[full] = not_run_for(full, CHECKPOINT_GAP_MS)
+end
+-- A ceasefire is due when none runs, the one running is shorter than the one bought now, or the same one has run for an hour
+-- (a repeat of a bought one a moment later is refused: the player would pay for the time he already has).
+for _, faction in ipairs(BRIBE_FACTIONS) do
+	for _, days in ipairs(BRIBE_DAYS) do
+		RELAY["xr_bribe.bribe_" .. days .. "_days_" .. faction] = function() return bribe_left(faction) < days * DAY_S - BRIBE_RENEW_S end
+	end
+end
+
+-- After the stock function ran on the host for player `from`.
+local AFTER_RELAY = {
+	["tasks_guide.activate"] = function(from)
+		local job = guide_table("curr_guid")
+		if job then job.coop_taker = from end
+	end,
 }
 
-local stats = { sent = 0, run = 0, refused = 0, paced = 0, kills_out = 0, kills_in = 0, tissue = 0 }
+local stats = { sent = 0, run = 0, refused = 0, paced = 0, kills_out = 0, kills_in = 0, tissue = 0, guide_sent = 0,
+	stash_sent = 0, stash_run = 0, trade_sent = 0, trade_run = 0, peace = 0 }
 local orig = {}
 local last_run = {} -- "peer:module.function" -> time
 local last_kill = {} -- peer -> time
@@ -102,6 +236,32 @@ local function talked_recently(from, npc)
 	return recent(from, npc:id(), TALK_MS) == true
 end
 
+-- Host: the NPC player `from` talks to (host id `nid`): alive, within reach of him, and (with an engine that tells) one he held a
+-- talk with in the last seconds. nil when it is not there; `what` names the request in the log.
+local function talk_partner(from, nid, what)
+	local npc = nid and not qc.is_character_id(nid) and level.object_by_id(nid) -- a player is nobody's dialog partner here
+	local who = qc.avatar_obj(from)
+	if npc and who and npc:alive() and npc:position():distance_to_sqr(who:position()) <= MAX_DIST_SQR
+		and talked_recently(from, npc) then
+		return npc
+	end
+	stats.refused = stats.refused + 1
+	qc.log(TAG, "! %s from #%s refused: the NPC is not there, or not talked to", what, tostring(from))
+	return nil
+end
+
+-- The same request from one player at most once a PACE_MS.
+local function paced(from, what)
+	local now = time_global()
+	local key = tostring(from) .. ":" .. what
+	if last_run[key] and now - last_run[key] < PACE_MS then
+		stats.paced = stats.paced + 1
+		return true
+	end
+	last_run[key] = now
+	return false
+end
+
 local function host_relay(from, t)
 	local full = t.f
 	if not (type(full) == "string" and RELAY[full]) then
@@ -109,32 +269,235 @@ local function host_relay(from, t)
 		qc.log(TAG, "! relay '%s' from #%s refused: not on the list", tostring(full), tostring(from))
 		return
 	end
-	local now = time_global()
-	local key = tostring(from) .. ":" .. full
-	if last_run[key] and now - last_run[key] < PACE_MS then
-		stats.paced = stats.paced + 1
-		return
-	end
-	last_run[key] = now
+	if paced(from, full) then return end
 	local m, fn = resolve(full)
 	local f = m and m[fn]
 	if type(f) ~= "function" then return end
-	local nid = tonumber(t.n)
-	local npc = nid and not qc.is_character_id(nid) and level.object_by_id(nid) -- a player is nobody's dialog partner here
-	local who = qc.avatar_obj(from)
-	if not (npc and who and npc:alive() and npc:position():distance_to_sqr(who:position()) <= MAX_DIST_SQR
-		and talked_recently(from, npc)) then
-		stats.refused = stats.refused + 1
-		qc.log(TAG, "! relay '%s' from #%s refused: the NPC is not there, or not talked to", full, tostring(from))
-		return
-	end
-	if not RELAY[full]() then
+	local npc = talk_partner(from, tonumber(t.n), "relay '" .. full .. "'")
+	if not npc then return end
+	if not RELAY[full](npc) then
 		stats.refused = stats.refused + 1
 		qc.log(TAG, "! relay '%s' from #%s refused: not due now", full, tostring(from))
 		return
 	end
 	stats.run = stats.run + 1
+	ran_at[full] = time_global()
 	ct().with_recipient(from, f, db.actor, npc)
+	if AFTER_RELAY[full] then AFTER_RELAY[full](from) end
+end
+
+-------------------------------------------------------------------------------
+-- A reward's stash
+-------------------------------------------------------------------------------
+-- treasure_manager is the host's: a client has no caches, so the reward paid the money and never made the stash. The call
+-- goes to the host as it is (the same four arguments), under the player's scope, so the "stash coordinates" line is his.
+local STASH_BONUS = 4 -- sections a stash tip can add (stock: one)
+local STASH_HINT = 200 -- characters of the hint (the map label)
+
+local function patch_client_stash()
+	local tm = qc.mod("treasure_manager")
+	local f = tm and tm.create_random_stash
+	if type(f) ~= "function" or orig.stash then return end
+	orig.stash = f
+	tm.create_random_stash = function(no_spot, hint, bonus_items, spawn_local, inv_box, ...)
+		if not qc.is_client() then return f(no_spot, hint, bonus_items, spawn_local, inv_box, ...) end
+		if qc.in_condlist() or not qc.client_live() then return end -- a condlist: the host's logic makes it
+		local t = { ns = no_spot == true and 1 or 0, sl = spawn_local and 1 or 0, ib = inv_box and 1 or 0 }
+		if type(hint) == "string" then t.h = hint:sub(1, STASH_HINT) end
+		if type(bonus_items) == "table" then
+			for i = 1, STASH_BONUS do
+				if type(bonus_items[i]) == "string" then t["b" .. i] = bonus_items[i] end
+			end
+		end
+		if qc.request_host_action("stash", t) then
+			stats.stash_sent = stats.stash_sent + 1
+			tm.last_secret = true -- read by a victim's answer (dialogs.surrender_victim_answers_1): "there is a stash"
+		end
+	end
+end
+
+-- Host: an NPC a player is at (the dialog that pays the stash), or nil. The stash call does not name him.
+local function any_talk_partner(from)
+	local who = qc.avatar_obj(from)
+	if not who then return nil end
+	local pos = who:position()
+	for id, st in pairs(db.storage) do
+		local npc = id ~= 0 and st.object
+		if npc and not qc.is_character_id(id) and npc:alive() and npc:position():distance_to_sqr(pos) <= MAX_DIST_SQR
+			and talked_recently(from, npc) then
+			return npc
+		end
+	end
+	return nil
+end
+
+local function host_stash(from, t)
+	local make = orig.stash
+	if type(make) ~= "function" or paced(from, "stash") then return end
+	if not any_talk_partner(from) then
+		stats.refused = stats.refused + 1
+		qc.log(TAG, "! stash from #%s refused: no NPC he talks to", tostring(from))
+		return
+	end
+	local bonus
+	for i = 1, STASH_BONUS do
+		local sec = t["b" .. i]
+		if type(sec) == "string" and ini_sys:section_exist(sec) then
+			bonus = bonus or {}
+			bonus[#bonus + 1] = sec
+		end
+	end
+	local hint = type(t.h) == "string" and t.h:sub(1, STASH_HINT) or nil
+	stats.stash_run = stats.stash_run + 1
+	ct().with_recipient(from, make, t.ns == 1 or nil, hint, bonus, t.sl == 1 or nil, t.ib == 1 or nil)
+end
+
+-------------------------------------------------------------------------------
+-- "Wanna trade?" of an ordinary stalker (dialogs.is_trade_accept)
+-------------------------------------------------------------------------------
+-- 60 percent of the stalkers agree, once: death_manager.items_by_npc holds the answer (a table: the stock they got, false: no)
+-- and the stock is created into the NPC. That table lives on the host and a client cannot create into an NPC, so on a client
+-- the stock rolled but never came and the refusal was forgotten at once (he could ask again until he won). The client rolls
+-- as the stock does, keeps the answer, and tells the host, which makes the stock and keeps its own answer; when it already
+-- had a different one it tells the client (his next dialog follows it).
+local TRADE_PERCENT = 60 -- dialogs.is_trade_accept
+
+local function client_trade_accept(a, b)
+	local dm = qc.mod("death_manager")
+	local npc = dialogs.who_is_npc(a, b)
+	local known = dm.get_items_by_npc(npc:id())
+	if known ~= nil then return known and true or false end
+	local yes = math.random(100) <= TRADE_PERCENT
+	dm.set_items_by_npc(npc:id(), yes and {} or false)
+	if qc.client_live() then
+		qc.request_host_action("trade", { n = qc.to_host_id(npc:id()), y = yes and 1 or 0 })
+		stats.trade_sent = stats.trade_sent + 1
+	end
+	return yes
+end
+
+local function patch_client_trade()
+	local dl = qc.mod("dialogs")
+	local f = dl and dl.is_trade_accept
+	if type(f) ~= "function" or orig.trade then return end
+	orig.trade = f
+	dl.is_trade_accept = function(a, b, ...)
+		if not (qc.client_live() and qc.mod("death_manager")) then return f(a, b, ...) end
+		return client_trade_accept(a, b)
+	end
+end
+
+local function host_trade(from, t)
+	local dm = qc.mod("death_manager")
+	if not dm or paced(from, "trade:" .. tostring(t.n)) then return end
+	local npc = talk_partner(from, tonumber(t.n), "trade")
+	if not (npc and IsStalker(npc)) then return end
+	local id = npc:id()
+	local known = dm.get_items_by_npc(id)
+	if known == nil then
+		if t.y == 1 then
+			dm.create_item_list(npc, character_community(npc), ranks.get_obj_rank_name(npc), false, true)
+			known = dm.get_items_by_npc(id) or {} -- a list with nothing in it left no record: he agreed
+		else
+			dm.set_items_by_npc(id, false)
+			known = false
+		end
+	end
+	stats.trade_run = stats.trade_run + 1
+	if (known ~= false) ~= (t.y == 1) then qc.send("trade", { n = t.n, y = known ~= false and 1 or 0 }, from) end
+end
+
+local function client_on_trade(t, from)
+	local dm = qc.mod("death_manager")
+	if from ~= 0 or not qc.client_live() or not dm or type(t.n) ~= "number" then return end
+	dm.set_items_by_npc(qc.to_local_id(t.n), t.y == 1 and {} or false)
+end
+
+-------------------------------------------------------------------------------
+-- A bought ceasefire (xr_bribe) protects every player
+-------------------------------------------------------------------------------
+-- xr_combat_ignore asks xr_bribe.at_peace for the host's actor only, and its hit callback breaks the ceasefire when the
+-- host's actor hits. The same questions for a client's character, from the callbacks the stock rules send first.
+-- on_enemy_eval fires for every pair of every NPC: the players' ids are read from the engine once a second, not per call.
+local PLAYERS_MS = 1000
+local player_ids, player_ids_at = {}, -PLAYERS_MS
+local function player_id(obj)
+	local id = obj:id()
+	if id == 0 then return nil end
+	local now = time_global()
+	if now - player_ids_at >= PLAYERS_MS then
+		player_ids, player_ids_at = qc.character_ids(), now
+	end
+	return player_ids[id] and id or nil
+end
+
+local function on_enemy_eval(obj, enemy, flags)
+	if flags.override or not player_id(enemy) or not qc.is_host() then return end
+	local xb = qc.mod("xr_bribe")
+	if not (xb and type(xb.at_peace) == "function") then return end
+	local ok, peace = pcall(xb.at_peace, character_community(obj), character_community(enemy),
+		enemy:position():distance_to_sqr(obj:position()))
+	if ok and peace then
+		flags.override, flags.result = true, false
+		stats.peace = stats.peace + 1
+	end
+end
+
+local function on_npc_hit(npc, amount, dir, who)
+	if not (who and player_id(who) and qc.is_host()) then return end
+	local xb = qc.mod("xr_bribe")
+	if xb and type(xb.npc_on_hit_callback) == "function" then pcall(xb.npc_on_hit_callback, character_community(npc)) end
+end
+
+-------------------------------------------------------------------------------
+-- Dialog functions of the NPC's logic and of the host's data
+-------------------------------------------------------------------------------
+-- The NPC's logic is the host's: the dialog's update of its meet manager has nothing to update on a client (no .meet there).
+local function patch_client_noops()
+	local dl = qc.mod("dialogs")
+	local f = dl and dl.update_npc_dialog
+	if type(f) ~= "function" or orig.update_npc then return end
+	orig.update_npc = f
+	dl.update_npc_dialog = function(a, b, ...)
+		if qc.is_client() then return end
+		return f(a, b, ...)
+	end
+end
+
+-- Hidden Threat: the reward of a task is rolled into utils_slht.reward_table, which the dialogs that pay read. The host rolls
+-- it (the relay above) and sends the table (a world key of coop_economy_mdata); a client reads the host's copy.
+local SLHT_READERS = { "postcond_dialog_kuznetsov_d4_1", "postcond_dialog_kuznetsov_d5_3", "postcond_dialog_degtyarev_d2" }
+
+local function slht_table() -- the live copy in m_data that the economy script keeps for the world key
+	local asm = rawget(_G, "alife_storage_manager") or alife_storage_manager
+	local m = asm and asm.get_state and asm.get_state()
+	return type(m) == "table" and m or nil
+end
+
+local function patch_slht_rewards()
+	local dh, us = qc.mod("dialogs_hidden_threat"), qc.mod("utils_slht")
+	if not (dh and us) then return end
+	for _, name in ipairs(SLHT_READERS) do
+		local f = dh[name]
+		if type(f) == "function" and not orig[name] then
+			orig[name] = f
+			dh[name] = function(...)
+				local m = qc.is_client() and slht_table()
+				if m and type(m.slht_reward_table) == "table" then us.reward_table = m.slht_reward_table end
+				return f(...)
+			end
+		end
+	end
+	local m = qc.is_host() and slht_table()
+	if m and type(us.reward_table) == "table" then m.slht_reward_table = us.reward_table end -- the stock puts it there when it saves
+end
+
+-- Per-player m_data of the mlr dialogs (debts, counters): a client never saves, so it is his own to send (coop_economy_mdata)
+local function register_data_keys()
+	local em = qc.mod("coop_economy_mdata")
+	if not em then return end
+	if type(em.register_player_key) == "function" then em.register_player_key("mlr") end
+	if type(em.register_world_key) == "function" then em.register_world_key("slht_reward_table") end
 end
 
 -------------------------------------------------------------------------------
@@ -187,18 +550,114 @@ local function monster_on_death(victim, killer)
 end
 
 -------------------------------------------------------------------------------
+-- The guide job
+-------------------------------------------------------------------------------
+local guide = { sent = nil, next = 0, players = 0, offer = nil }
+
+-- Where the guide waits and his name, for the news of the offer on a client.
+local function guide_offer_text(offer)
+	local se = offer.squad_id and alife_object(offer.squad_id)
+	local npc = se and level.object_by_id(se:commander_id())
+	if not npc then return nil, nil end
+	return dynamic_news_helper.GetPointDescription(npc), npc:character_name()
+end
+
+local function host_guide_tick()
+	local now = time_global()
+	if now < guide.next or not qc.host_party() then return end
+	guide.next = now + GUIDE_TICK_MS
+	local offer, job = guide_table("guid"), guide_table("curr_guid")
+	if not (offer and job) then return end
+	local g, c = qc.ser(offer), qc.ser(job)
+	local state, n = g .. "|" .. c, #qc.players()
+	if state == guide.sent and n <= guide.players then return end
+	local at, who = guide_offer_text(offer)
+	if qc.send("guide", { g = g, c = c, a = at, w = who }, -1) then
+		guide.sent, guide.players = state, n
+		stats.guide_sent = stats.guide_sent + 1
+	end
+end
+
+local function fill(dst, src)
+	for k in pairs(dst) do dst[k] = nil end
+	for k, v in pairs(src) do dst[k] = v end
+end
+
+local function client_on_guide(t, from)
+	if from ~= 0 or not qc.client_live() then return end
+	local offer, job = guide_table("guid"), guide_table("curr_guid")
+	local g, c = qc.des(t.g), qc.des(t.c)
+	if not (offer and job and type(g) == "table" and type(c) == "table") then return end
+	local was = job.id_smart
+	fill(offer, g)
+	fill(job, c)
+	-- stock adds the target's spot in activate and removes it in clear: on the machine they ran on
+	if was and was ~= c.id_smart then level.map_remove_object_spot(was, GUIDE_SPOT) end
+	if c.id_smart and c.id_smart ~= was then
+		level.map_add_object_spot_ser(c.id_smart, GUIDE_SPOT, game.translate_string("st_jg_29") .. tostring(c.description))
+	end
+	if g.squad_id and g.squad_id ~= guide.offer and t.a and t.w then
+		local str = string.format(game.translate_string("st_jg_14"), game.translate_string(tostring(g.target_level)), t.a, t.w)
+		news_manager.send_tip(db.actor, str, nil, nil, 15000)
+	end
+	guide.offer = g.squad_id
+end
+
+-- The late job's reputation and fine are the taker's: his ledger stands in for the host's money.
+local function patch_guide_timers()
+	local m = qc.mod("tasks_guide")
+	for _, name in ipairs({ "fail_partial_late", "fail_complete_late" }) do
+		local f = m and m[name]
+		if type(f) == "function" then
+			m[name] = function(...)
+				local job = guide_table("curr_guid")
+				local peer = job and job.coop_taker
+				if not (qc.is_host() and peer and qc.avatar_obj(peer)) then return f(...) end
+				local dl = qc.mod("dialogs")
+				local relocate = dl.relocate_money
+				dl.relocate_money = function(who, n, typ, ...)
+					if typ ~= "out" then return relocate(who, n, typ, ...) end
+					ct().give_to_peer(peer, -n)
+				end
+				local ok, err = qc.with_actor({ money = function() return qc.engine().money_of(peer) or 0 end },
+					ct().with_recipient, peer, f, ...)
+				dl.relocate_money = relocate
+				if not ok then qc.report(TAG, name, err) end
+			end
+		end
+	end
+end
+
+local function actor_on_update()
+	if qc.is_host() then
+		local ok, err = pcall(host_guide_tick)
+		if not ok then qc.report(TAG, "guide", err) end
+	end
+end
+
+-- A tutorial is the machine's own.
+local function patch_npe()
+	if not qc.mod("npe_actions") then return end
+	ct().set_local_task("task_npe_actions_default")
+end
+
+-------------------------------------------------------------------------------
 -- Status, start
 -------------------------------------------------------------------------------
 function print_status()
-	qc.log(TAG, "dialog actions sent %d, run for players %d (refused %d, paced %d) | kills passed on %d, received %d | tissue samples %d",
-		stats.sent, stats.run, stats.refused, stats.paced, stats.kills_out, stats.kills_in, stats.tissue)
+	qc.log(TAG, "dialog actions sent %d, run for players %d (refused %d, paced %d) | kills passed on %d, received %d | tissue samples %d | guide job sent %d",
+		stats.sent, stats.run, stats.refused, stats.paced, stats.kills_out, stats.kills_in, stats.tissue, stats.guide_sent)
+	qc.log(TAG, "stashes asked %d, made %d | trade rolls sent %d, kept %d | bribed ceasefires that held %d",
+		stats.stash_sent, stats.stash_run, stats.trade_sent, stats.trade_run, stats.peace)
 end
 
 local installed = false
 local function install()
 	if installed then return end
 	installed = true
-	for _, s in ipairs({ { "relay", patch_client_relay }, { "status kill", patch_status_kill } }) do
+	for _, s in ipairs({ { "relay", patch_client_relay }, { "status kill", patch_status_kill },
+		{ "guide timers", patch_guide_timers }, { "npe", patch_npe }, { "stash", patch_client_stash },
+		{ "trade", patch_client_trade }, { "no-ops", patch_client_noops }, { "hidden threat", patch_slht_rewards } }) do
 		local ok, err = pcall(s[2])
 		if not ok then qc.report(TAG, "install " .. s[1], err) end
 	end
@@ -207,7 +666,16 @@ end
 function on_game_start()
 	if not qc.engine() then return end
 	qc.register_host_action("rly", host_relay)
+	qc.register_host_action("stash", host_stash)
+	qc.register_host_action("trade", host_trade)
 	qc.on("kill", client_on_kill, TAG)
+	qc.on("guide", client_on_guide, TAG)
+	qc.on("trade", client_on_trade, TAG)
+	local ok, err = pcall(register_data_keys) -- before the world is loaded: a joining client's own values replace the host's
+	if not ok then qc.report(TAG, "data keys", err) end
+	RegisterScriptCallback("on_enemy_eval", on_enemy_eval)
+	RegisterScriptCallback("npc_on_hit_callback", on_npc_hit)
 	RegisterScriptCallback("monster_on_death_callback", monster_on_death)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_first_update", install)
 end
