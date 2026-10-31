@@ -252,6 +252,29 @@ do
 	check(math.abs(E.coop_npc_players.with_identity(proxy, a.get_ppe_intensity) - 0.05) < 1e-6, "no clients: stock psy")
 end
 
+-- A xcv squad's target "actor" is id 0: the place the engine sends it to is the nearest player's.
+do
+	local M, E, proxy = boot()
+	stubs(E)
+	local m = xcv(E)
+	local class = { get_current_task = function(self) return "stock of " .. self.id end }
+	E.sim_squad_scripted = { sim_squad_scripted = class }
+	E.CALifeSmartTerrainTask = function(gvid, lvid) return { gvid = gvid, lvid = lvid } end
+	E.db.actor._pos = vec(1000, 0, 0)
+	proxy._pos = vec(10, 0, 0)
+	install(M)
+	local phantom_squad = { id = 40, position = vec(12, 0, 0) }
+	local other_squad = { id = 41, position = vec(12, 0, 0) }
+	check(class.get_current_task(phantom_squad) == "stock of 40", "not a phantom's squad yet: stock")
+	m.add(40)
+	local task = class.get_current_task(phantom_squad)
+	check(type(task) == "table" and task.gvid == proxy:game_vertex_id() and task.lvid == proxy:level_vertex_id(),
+		"a phantom near a far client runs to him")
+	check(class.get_current_task(other_squad) == "stock of 41", "any other squad: stock")
+	phantom_squad.position = vec(1001, 0, 0)
+	check(class.get_current_task(phantom_squad) == "stock of 40", "near the host: stock, it is his")
+end
+
 do
 	local M, E = boot()
 	check(#install(M) == 0 and E.db.actor:id() == 0, "absent mods: the adapter is inert")

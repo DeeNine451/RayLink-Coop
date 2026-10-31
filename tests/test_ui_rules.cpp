@@ -54,3 +54,26 @@ TEST(ui_input_flag_comes_back_in_the_same_world)
 	CHECK(!input_off_after_hold(false, 3, 3));
 	CHECK(!input_off_after_hold(false, 3, 4));
 }
+
+TEST(ui_tutorials_xml_is_kept_within_one_lua_state)
+{
+	CHECK(tutorials_xml_reusable(true, true, 3, 3)); // the campfire stutter of a read on every prompt stays fixed
+}
+
+TEST(ui_tutorials_xml_is_read_the_first_time)
+{
+	CHECK(!tutorials_xml_reusable(false, true, 0, 0));
+}
+
+TEST(ui_tutorials_xml_is_read_during_a_load)
+{
+	CHECK(!tutorials_xml_reusable(true, false, 3, 3)); // single player's "press any key" read, the stock path
+}
+
+TEST(ui_tutorials_xml_goes_with_its_lua_state)
+{
+	// Live 2026-10-31: the boot logo read it in the main menu's Lua state; a client never gets "press any key", the one read
+	// of a load, so the XML kept pointing at functions of a state that was gone and no use prompt was ever drawn.
+	CHECK(!tutorials_xml_reusable(true, true, 0, 1));
+	CHECK(!tutorials_xml_reusable(true, true, 3, 4)); // the next level the same
+}

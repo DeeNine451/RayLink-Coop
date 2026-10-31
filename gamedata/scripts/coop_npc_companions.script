@@ -21,14 +21,43 @@
 	  nta_utils.spawn_companion_squad) join the player the task was taken by (coop_tasks.reward_peer): the squads such
 	  a call adds are led by his proxy. add_speaker_companion takes the giver of the request for the speaker (the host
 	  is not talking while a client takes the task).
-	Not covered: companion hotkeys of a client (axr_companions.on_key_release is host-domain), the squad-level travel
-	  target offline (follows the host).
+	Control (owner's request 2026-11-01): a companion squad has one leader, a player. The leader hands it to another player
+	  (a line of the companion's list of commands, then a line per player), any other player takes it (the dialog
+	  dm_coop_companion_take, modxml_coop_companions). The host decides (host_lead, its own dialog takes the same path): the
+	  asker must be a player of the session, the NPC a living companion within 15 m, and only the leader hands over.
+	  Both players get a short message. leaders[] holds the character (a proxy id, which a character keeps in the save); a
+	  squad with no entry is the host's. Non-leaders see the NPC with no flags, so a line of npc.comp_info says who leads it.
+	A leader who leaves: his entry stays, saved with the game; while his character is out of the world the squad acts for
+	  the host (control_peer, leader_of). It is his again when he comes back, unless somebody took it meanwhile. Chosen over
+	  "passes to the host for good": nobody finds his companions gone after a reconnect, and over "waits for him": the group
+	  is not left with idle companions.
+	Every "the actor" of a companion is its leader:
+	  axr_beh and the combat of Useful Idiots run with_identity; Useful Idiots' follower list is per leader (formations);
+	  who is an enemy (on_enemy_eval) is judged for the leader; offline travel: get_current_task of a squad that goes to
+	  "the actor" (target 0, the stock's scripted_target) goes to the leader instead, and Useful Idiots' offline rule stays;
+	  the keys, the wheel, the panel and the squad list of the host cover the squads he leads (filtered companion_squads,
+	  own_squads_only); a client's orders reach his companions at any distance; a client's go-to key: npc.comp_go.
+	  Level change: nothing to do. The stock on_level_changing puts the squads at the group's arrival, and the engine puts
+	  every mover's character there too (host_place_movers), a late one next to the host (bring_proxy_to_level).
+	  Inventory: the host's stock table is the truth, a client's moves go there (npc.comp_item), the list goes to the leader
+	  (npc.comp_items), so what the old leader gave is the new leader's to take; F2-32b reads leader_of.
+	Not covered: the Useful Idiots panel on a client (axr_companions.companion_squads is empty there), unstuck()'s distance to
+	  the host, the overweight gate on a client, split levels (F3a: one level for the group today).
 
 	Events (ids in host numbering):
 	  npc.comp       client -> host  { f = "module.function", i = npc }
-	  npc.comp_info  host -> client  { i = npc, s = "flag1,flag2,..." }
-	Stock functions wrapped: dialogs_axr_companion.<the actions below>, dialogs_lostzone and dialogs_agr_u
-	companion setters (if present), axr_beh.action_beh.execute.
+	  npc.comp_info  host -> client  { i = npc, s = "flag1,flag2,...", l = peer who holds control, nil: nobody's companion }
+	  npc.comp_lead  client -> host  { a = "take" | "give", i = npc, to = peer }
+	  npc.comp_msg   host -> client  { k = string id, n = NPC's name, w = player's nick }
+	  npc.comp_req   client -> host  {}: his Lua state is new, send everything
+	  npc.comp_go    client -> host  { x, y, z }: his companions go there
+	  npc.comp_item  client -> host  { i = npc, o = item, g = true: gave, false: took }
+	  npc.comp_items host -> leader  { i = npc, s = "id,id,...": what he may take back }
+	Stock functions wrapped: dialogs_axr_companion.<the actions below>, is_actor_companion, is_not_actor_companion,
+	dm_init_is_actor_companion, dialogs_lostzone and dialogs_agr_u companion setters (if present),
+	axr_beh.action_beh.execute, sim_squad_scripted:get_current_task, axr_companions.cycle_state, move_to_point,
+	list_actor_squad_by_id, get_nearby_companion, is_assigned_item, is_assigned_companion, transfer_item; of Useful Idiots
+	NPC.getCompanions, getTargetCompanion, the surge patch's companion helpers, onEvalEnemy, its combat actions.
 --]]
 
 local tostring, tonumber, type, pairs, ipairs, pcall, next = tostring, tonumber, type, pairs, ipairs, pcall, next
@@ -40,6 +69,8 @@ local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err) P.report(TAG, what, err) end
 
 local EV_CMD, EV_INFO = "npc.comp", "npc.comp_info"
+local EV_LEAD, EV_MSG, EV_REQ, EV_GO = "npc.comp_lead", "npc.comp_msg", "npc.comp_req", "npc.comp_go"
+local EV_ITEM, EV_ITEMS = "npc.comp_item", "npc.comp_items"
 
 -- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order.
 local ACTIONS = {
@@ -49,7 +80,12 @@ local ACTIONS = {
 	["dialogs_lostzone.set_degtyarev_taskforce_squad_as_companion"] = "add",
 	["dialogs_lostzone.dismiss_speaker_companion"] = "remove",
 	["dialogs_agr_u.set_speaker_as_companion"] = "add",
+	["dialogs_escape.set_esc_2_12_stalker_fanat_as_companion"] = "add",
+	-- a hire: the stock contract table is read by the host's timer, the days the client paid come with the order (paid_period)
+	["txr_paid_companions.register_paid_companion"] = true,
 }
+local PAID = "txr_paid_companions.register_paid_companion"
+local PAID_SECONDS = { take_guard_money_1 = 86400, take_guard_money_2 = 172800 } -- the stock's guard_period, a file local
 for _, n in ipairs({
 	"set_companion_to_stealth_substate", "set_companion_to_default_substate", "set_companion_to_wait_state",
 	"set_companion_to_follow_state", "set_companion_to_attack_state", "set_companion_to_ignore_combat_state",
@@ -76,8 +112,19 @@ local installed = false
 local host_on = false
 local orig = {}
 local leaders = {} -- host: squad id -> proxy id (host numbering) of the client that leads it
-local stats = { cmd_out = 0, cmd_in = 0, refused = 0, refused_talk = 0, info_out = 0, info_in = 0, follow = 0, task_squads = 0 }
+local view = {} -- client: NPC id -> peer who holds control of it (npc.comp_info)
+local waiting_flags = {} -- client: NPC id -> flags that came while the NPC was not here
+local visible = {} -- client: NPC id -> { item id = true }: what the leader may take back (npc.comp_items)
+local asked = false -- client: this Lua state asked the host for everything (npc.comp_req)
+local every_companion = 0 -- host: > 0 while Useful Idiots' surge code runs: it needs every companion, whoever leads
+local stats = { cmd_out = 0, cmd_in = 0, refused = 0, refused_talk = 0, info_out = 0, info_in = 0, follow = 0, task_squads = 0,
+	lead = 0, lead_refused = 0, go = 0 }
 local RECRUIT_TALK_MS = 5000 -- Ruling F2-34: a recruit within this long after a talk with the squad
+local FACE_TO_FACE_SQR = 225 -- 15 m: the dialog was face to face
+local OTHER_PLAYERS = 7 -- lines of the choice of player: a full session less the asker (peers 0..7)
+local PHRASE_HAND, PHRASE_WHOM, PHRASE_BACK, PHRASE_SLOTS = 7000, 7001, 7002, 7010 -- free ids of dm_is_actor_companion_dialog
+local PHRASE_GOODWILL = -10001 -- the engine sorts by this: after the stock lines (-10000)
+local paid_period = nil -- client: the seconds of the contract he just paid for
 
 local function resolve(full)
 	local mod, fn = full:match("^([%w_]+)%.([%w_]+)$")
@@ -88,6 +135,38 @@ end
 local function squad_of(npc)
 	local ok, sq = pcall(get_object_squad, npc)
 	return ok and sq or nil
+end
+
+-- The stock's own test: a loaded squad is false until its first update.
+local function is_companion_squad(squad)
+	return not not squad and axr_companions ~= nil and axr_companions.companion_squads[squad.id] ~= nil
+end
+
+-- The NPC of a stock (actor, npc) pair, in either order.
+local function npc_of(a, b)
+	if a and a:id() ~= 0 then return a end
+	return b
+end
+
+local function nick_of(peer)
+	for _, p in ipairs(P.players()) do
+		if p.id == peer then return tostring(p.nick) end
+	end
+	return "?"
+end
+
+-- The other players in the world, in the order of the choice of player.
+local function other_players()
+	local list = {}
+	for _, p in ipairs(P.players()) do
+		if not p.is_self and type(p.avatar_id) == "number" then list[#list + 1] = p end
+	end
+	return list
+end
+
+local function idiots_lib(name)
+	local t = type(package) == "table" and package.loaded and package.loaded[name]
+	return type(t) == "table" and t or nil
 end
 
 -------------------------------------------------------------------------------
@@ -102,27 +181,150 @@ local function patch_client_actions()
 			m[fn] = function(a, b, ...)
 				if not P.client_live() then return f(a, b, ...) end
 				local npc = (a and a:id() == 0) and b or a
-				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()) }, 0) then
+				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()), p = paid_period }, 0) then
 					stats.cmd_out = stats.cmd_out + 1
 				end
 			end
 		end
 	end
+	local paid = _G["txr_paid_companions"]
+	for fn, seconds in pairs(PAID_SECONDS) do
+		local f = paid and paid[fn]
+		if type(f) == "function" then
+			paid[fn] = function(...)
+				paid_period = seconds
+				return f(...)
+			end
+		end
+	end
 end
 
-local function client_on_info(t)
-	if type(t.i) ~= "number" or type(t.s) ~= "string" then return end
-	local npc = level.object_by_id(P.to_local(t.i))
-	if not npc then return end
-	stats.info_in = stats.info_in + 1
+local function apply_flags(npc, s)
 	local on = {}
-	for flag in t.s:gmatch("[%w_]+") do on[flag] = true end
+	for flag in s:gmatch("[%w_]+") do on[flag] = true end
 	for _, flag in ipairs(FLAGS) do
 		local has = npc:has_info(flag)
 		if on[flag] and not has then
 			npc:give_info_portion(flag)
 		elseif not on[flag] and has then
 			npc:disable_info_portion(flag)
+		end
+	end
+end
+
+local function client_on_info(t)
+	if type(t.i) ~= "number" or type(t.s) ~= "string" then return end
+	local id = P.to_local(t.i)
+	view[id] = type(t.l) == "number" and t.l or nil
+	if view[id] ~= P.self_peer() then visible[id] = nil end
+	stats.info_in = stats.info_in + 1
+	local npc = level.object_by_id(id)
+	if npc then
+		waiting_flags[id] = nil
+		apply_flags(npc, t.s)
+	else
+		waiting_flags[id] = t.s -- not online here yet: the host says it once
+	end
+end
+
+local function client_on_items(t)
+	if type(t.i) ~= "number" or type(t.s) ~= "string" then return end
+	local set = {}
+	for id in t.s:gmatch("%d+") do set[P.to_local(tonumber(id))] = true end
+	visible[P.to_local(t.i)] = set
+end
+
+-- A short message: in the talk window while a talk is on (it covers the HUD), on the HUD otherwise.
+local function show(key, name, nick)
+	local text = game.translate_string(key)
+	local ok, line = pcall(string.format, text, tostring(name or ""), tostring(nick or ""))
+	line = ok and line or text
+	local a = db.actor
+	if a and a:is_talking() then
+		a:give_talk_message2(game.translate_string("st_coop_comp_caption"), line, "ui_iconsTotal_grouping", "iconed_answer_item")
+	else
+		actor_menu.set_msg(1, line, 8)
+	end
+end
+
+local function client_on_msg(t)
+	if type(t.k) == "string" then show(t.k, t.n, t.w) end
+end
+
+-- Client: the item list the host sent, and what he did since (ui_inventory's move reports it, a talk's take-all goes
+-- through transfer_item). The stock table of this machine stays empty: its writers are host-domain callbacks.
+local function note_item(npc_id, item_id, gave)
+	local set = visible[npc_id] or {}
+	visible[npc_id] = set
+	set[item_id] = gave and true or nil
+	P.send(EV_ITEM, { i = P.to_host(npc_id), o = P.to_host(item_id), g = gave }, 0)
+end
+
+local function on_item_after_move(npc_id, obj, mode, bag_from)
+	if not (mode == "loot" and P.client_live() and view[npc_id] == P.self_peer()) then return end
+	if bag_from == EDDListType.iActorBag then
+		note_item(npc_id, obj:id(), true)
+	elseif bag_from == EDDListType.iDeadBodyBag then
+		note_item(npc_id, obj:id(), false)
+	end
+end
+
+local function patch_items()
+	local ac = axr_companions
+	if not ac then return end
+	local assigned, companion, transfer = ac.is_assigned_item, ac.is_assigned_companion, ac.transfer_item
+	if type(assigned) == "function" then
+		ac.is_assigned_item = function(npc_id, item_id)
+			local set = visible[npc_id]
+			if set and set[item_id] then return true end
+			return assigned(npc_id, item_id)
+		end
+	end
+	if type(companion) == "function" then
+		ac.is_assigned_companion = function(a, b)
+			local npc = npc_of(a, b)
+			local set = npc and visible[npc:id()]
+			if set and next(set) ~= nil then return true end
+			return companion(a, b)
+		end
+	end
+	if type(transfer) == "function" then
+		ac.transfer_item = function(item_id, from, to, no_snd)
+			local take = from and from:id() ~= 0
+			local npc_id = take and from:id() or (to and to:id())
+			local set = npc_id and visible[npc_id]
+			if not (P.client_live() and to and npc_id and view[npc_id] == P.self_peer() and (not take or (set and set[item_id]))) then
+				return transfer(item_id, from, to, no_snd)
+			end
+			local item = level.object_by_id(item_id)
+			if not item then return end
+			from:transfer_item(item, to)
+			note_item(npc_id, item_id, not take)
+			if not no_snd then itms_manager.play_item_sound(item) end
+		end
+	end
+end
+
+-- Client: the go-to order of the stock (kCUSTOM3) or of Useful Idiots (its point key).
+local function go_key(dik)
+	local mcm = idiots_lib("illish.lib.npc") and _G["ui_mcm"]
+	if mcm then
+		local key = mcm.get("idiots/keybinds/point/move_key")
+		return key ~= nil and key > 0 and key == dik and mcm.get_mod_key(mcm.get("idiots/keybinds/point/move_mod")) and true or false
+	end
+	return dik_to_bind(dik) == key_bindings.kCUSTOM3
+end
+
+local function on_key_press(dik)
+	if not (P.client_live() and go_key(dik)) then return end
+	local me = P.self_peer()
+	for _, peer in pairs(view) do
+		if peer == me then
+			local pos = level.get_target_pos()
+			if pos and P.send(EV_GO, { x = pos.x, y = pos.y, z = pos.z }, 0) then
+				actor_menu.set_msg(1, game.translate_string("st_move_to_point"), 8)
+			end
+			return
 		end
 	end
 end
@@ -138,21 +340,8 @@ local function flags_of(npc)
 	return table.concat(t, ",")
 end
 
-local sent_info = {} -- npc id -> peer -> string
-
-local function push_info(npc, leader_peer)
-	local id = npc:id()
-	sent_info[id] = sent_info[id] or {}
-	for _, p in ipairs(P.players()) do
-		if not p.is_self then
-			local s = (p.id == leader_peer) and flags_of(npc) or ""
-			if sent_info[id][p.id] ~= s and P.send(EV_INFO, { i = id, s = s }, p.id) then
-				sent_info[id][p.id] = s
-				stats.info_out = stats.info_out + 1
-			end
-		end
-	end
-end
+local sent_info = {} -- npc id -> peer -> what he was told last
+local sent_items = {} -- npc id -> peer -> the list he was sent last
 
 local function members(squad)
 	local list = {}
@@ -163,6 +352,78 @@ local function members(squad)
 		if o then list[#list + 1] = o end
 	end
 	return list
+end
+
+-- Who holds control of a companion squad: the peer of its leader, or the host's own: no entry, or a leader out of the world.
+local function control_peer(squad)
+	local id = leaders[squad.id]
+	local peer = id and level.object_by_id(id) and P.peer_of(id)
+	if type(peer) == "number" then return peer end
+	return P.self_peer()
+end
+
+-- Every player learns who holds control (nil: a companion of nobody), that player also the flags.
+local function push_info(npc, leader_peer)
+	local id = npc:id()
+	sent_info[id] = sent_info[id] or {}
+	for _, p in ipairs(P.players()) do
+		if not p.is_self then
+			local s = (p.id == leader_peer) and flags_of(npc) or ""
+			local mark = tostring(leader_peer) .. ":" .. s
+			if sent_info[id][p.id] ~= mark and P.send(EV_INFO, { i = id, s = s, l = leader_peer }, p.id) then
+				sent_info[id][p.id] = mark
+				stats.info_out = stats.info_out + 1
+			end
+		end
+	end
+end
+
+-- What the leader may take back: the stock's list (mode 1: what was given, Useful Idiots adds the loot).
+local function push_items(npc, leader_peer)
+	local get = axr_companions and axr_companions.get_inventory_table
+	if leader_peer == P.self_peer() or type(get) ~= "function" then return end
+	local ids = {}
+	for item_id in pairs(get(npc, npc:id(), 1)) do ids[#ids + 1] = item_id end
+	table.sort(ids)
+	local s = table.concat(ids, ",")
+	local id = npc:id()
+	sent_items[id] = sent_items[id] or {}
+	if sent_items[id][leader_peer] ~= s and P.send(EV_ITEMS, { i = id, s = s }, leader_peer) then
+		sent_items[id][leader_peer] = s
+	end
+end
+
+local function push_squad(squad, peer)
+	for _, o in ipairs(members(squad)) do
+		push_info(o, peer)
+		push_items(o, peer)
+	end
+end
+
+local function squad_ids()
+	local ids = {}
+	local cs = axr_companions and axr_companions.companion_squads
+	if type(cs) == "table" then
+		for id, sq in pairs(cs) do
+			if sq then ids[id] = true end
+		end
+	end
+	return ids
+end
+
+-- The squads added since `before` are led by the player. Returns how many. Several for one recruit: Useful Idiots splits a
+-- recruited squad into one per member.
+local function claim_new_squads(before, peer)
+	local who = P.object_of_peer(peer)
+	local n = 0
+	if not who then return n end
+	for id in pairs(squad_ids()) do
+		if not before[id] then
+			leaders[id] = who:id()
+			n = n + 1
+		end
+	end
+	return n
 end
 
 -- Ruling F2-34: did player `from` talk to the NPC, or to a member of its squad, now or in the last RECRUIT_TALK_MS
@@ -185,15 +446,16 @@ local function host_on_cmd(t, from)
 	local npc = level.object_by_id(t.i)
 	local who = P.object_of_peer(from)
 	if not (npc and npc:alive() and who) then return end
-	if npc:position():distance_to_sqr(who:position()) > 225 then -- 15 m: the dialog was face to face
-		stats.refused = stats.refused + 1
-		return
-	end
 	local m, fn = resolve(full)
 	local f = orig[full] or (m and m[fn])
 	if type(f) ~= "function" then return end
 	local squad = squad_of(npc)
 	local leader = squad and leaders[squad.id]
+	-- the dialog was face to face; a leader's order reaches his companion from anywhere, as the stock hotkeys (coop_world_compat)
+	if leader ~= who:id() and npc:position():distance_to_sqr(who:position()) > FACE_TO_FACE_SQR then
+		stats.refused = stats.refused + 1
+		return
+	end
 	-- somebody's companion already: orders only from its leader, and nobody recruits it away (W5)
 	if squad and axr_companions and axr_companions.companion_squads[squad.id] and (kind == "add" or leader ~= who:id()) then
 		stats.refused = stats.refused + 1
@@ -207,6 +469,7 @@ local function host_on_cmd(t, from)
 		return
 	end
 	stats.cmd_in = stats.cmd_in + 1
+	local before = kind == "add" and squad_ids()
 	-- (host actor, npc) makes dialogs.who_is_npc pick the NPC. Orders placed at "the actor's" position run
 	-- with the client's proxy as db.actor; the rest as stock (they only touch the NPC and its squad).
 	if POSITIONAL[full] then
@@ -215,15 +478,18 @@ local function host_on_cmd(t, from)
 		f(db.actor, npc)
 	end
 	squad = squad_of(npc)
-	if squad then
-		if kind == "add" and axr_companions.companion_squads[squad.id] then
-			leaders[squad.id] = who:id()
-		elseif kind == "remove" then
-			leaders[squad.id] = nil
-		end
+	if full == PAID then
+		local e = squad and txr_paid_companions.paid_companions[squad.id]
+		if e then e.guard_period = t.p == PAID_SECONDS.take_guard_money_2 and t.p or PAID_SECONDS.take_guard_money_1 end
 	end
-	for _, o in ipairs(members(squad)) do push_info(o, from) end
-	if not squad then push_info(npc, from) end
+	if kind == "add" then
+		claim_new_squads(before, from)
+	elseif kind == "remove" and squad then
+		leaders[squad.id] = nil
+	end
+	local peer = is_companion_squad(squad) and control_peer(squad) or nil
+	for _, o in ipairs(members(squad)) do push_info(o, peer) end
+	if not squad then push_info(npc, nil) end
 end
 
 -- The proxy leading this NPC's squad, or nil (no leader, the host leads, or the proxy is gone).
@@ -234,6 +500,110 @@ function leader_of(npc)
 	local p = level.object_by_id(id)
 	if p and P.is_proxy(p) then return p end
 	return nil
+end
+
+local function tell(peer, key, name, nick)
+	if peer == P.self_peer() then
+		show(key, name, nick)
+	else
+		P.send(EV_MSG, { k = key, n = name, w = nick }, peer)
+	end
+end
+
+-- The host's decision on both commands, for a client's request and for its own dialog alike. act = "take": `from` takes control,
+-- "give": `from` hands it to player `to`.
+local function host_lead(from, act, npc_id, to)
+	local function refuse(why)
+		stats.lead_refused = stats.lead_refused + 1
+		log("%s of %s by player #%s refused: %s", tostring(act), tostring(npc_id), tostring(from), why)
+		tell(from, "st_coop_comp_refused_" .. why)
+	end
+	local npc = level.object_by_id(npc_id)
+	local me = P.object_of_peer(from)
+	local squad = npc and npc:alive() and squad_of(npc)
+	if not (me and is_companion_squad(squad)) then return refuse("nobody") end
+	if npc:position():distance_to_sqr(me:position()) > FACE_TO_FACE_SQR then return refuse("far") end
+	local holder = control_peer(squad)
+	local target = from
+	if act == "give" then
+		if holder ~= from then return refuse("not_yours") end
+		target = to
+		if type(target) ~= "number" or target == from then return refuse("player") end
+	elseif holder == from then
+		return -- the same request twice
+	end
+	local who = P.object_of_peer(target)
+	if not who then return refuse("player") end
+	leaders[squad.id] = target ~= P.self_peer() and who:id() or nil
+	stats.lead = stats.lead + 1
+	log("squad %s (%s): control %s -> player #%s", tostring(squad.id), npc:name(), tostring(holder), tostring(target))
+	for _, o in ipairs(members(squad)) do sent_items[o:id()] = nil end -- a former leader dropped his list
+	push_squad(squad, target)
+	local name = npc:character_name()
+	if act == "give" then
+		tell(from, "st_coop_comp_you_gave", name, nick_of(target))
+		tell(target, "st_coop_comp_gave_you", name, nick_of(from))
+	else
+		tell(from, "st_coop_comp_you_took", name)
+		tell(holder, "st_coop_comp_took_from_you", name, nick_of(from))
+	end
+end
+
+local function host_on_lead(t, from)
+	if type(t.i) ~= "number" then return end
+	host_lead(from, t.a == "give" and "give" or "take", t.i, t.to)
+end
+
+-- A client's Lua state is new: all it knows of the companions came with the save, nothing of it is sure.
+local function host_on_req(_, from)
+	for _, told in pairs(sent_info) do told[from] = nil end
+	for _, told in pairs(sent_items) do told[from] = nil end
+	if axr_companions then
+		for squad_id in pairs(axr_companions.companion_squads) do
+			local squad = alife_object(squad_id)
+			if squad then push_squad(squad, control_peer(squad)) end
+		end
+	end
+end
+
+-- A client's item move in his companion's inventory: stock's OnItemAfterMove is host-domain, this is its call for him.
+local function host_on_item(t, from)
+	if type(t.i) ~= "number" or type(t.o) ~= "number" then return end
+	local npc, obj = level.object_by_id(t.i), level.object_by_id(t.o)
+	local squad = npc and squad_of(npc)
+	if obj and is_companion_squad(squad) and control_peer(squad) == from then
+		axr_companions.OnItemAfterMove(t.i, obj, "loot", t.g == true and EDDListType.iActorBag or EDDListType.iDeadBodyBag)
+	end
+end
+
+-- A client's go-to: stock move_to_point or Useful Idiots' point key, for the squads he leads.
+local function host_on_go(t, from)
+	if not (t.x == t.x and t.y == t.y and t.z == t.z and type(t.x) == "number" and type(t.y) == "number" and type(t.z) == "number") then
+		return -- a peer's numbers: nan is the one that differs from itself
+	end
+	local pos = vector():set(t.x, t.y, t.z)
+	local NPC = idiots_lib("illish.lib.npc")
+	local mcm = NPC and _G["ui_mcm"]
+	local wait, guard = mcm and mcm.get("idiots/options/autoWait"), mcm and mcm.get("idiots/options/autoGuard")
+	for id in pairs(squad_ids()) do
+		local squad = alife_object(id)
+		if squad and control_peer(squad) == from and not axr_task_manager.hostages_by_id[squad:commander_id()] then
+			for _, o in ipairs(members(squad)) do
+				stats.go = stats.go + 1
+				if NPC then
+					NPC.moveToPoint(o, pos)
+					if wait then NPC.setState(o, "movement", "wait", true) end
+					if guard then NPC.setState(o, "combat", "guard", true) end
+				else
+					local lvid = level.vertex_id(pos)
+					axr_companions.set_companion_to_follow_state(o)
+					save_var(o, "fight_from_point", lvid)
+					local st = db.storage[o:id()]
+					if st and st.beh and o:id() == squad:commander_id() then st.beh.rally_lvid = lvid end
+				end
+			end
+		end
+	end
 end
 
 -- Scripted enemies told to walk to "the actor" (target = actor: the mirages, the pump station's attackers, the squads of The Living
@@ -272,6 +642,142 @@ local function patch_beh()
 	end
 end
 
+-- The leader of this companion for stock code outside axr_beh; nil: run it as it is.
+local function lead_for(npc)
+	if host_on and next(leaders) ~= nil and not P.in_identity() then return leader_of(npc) end
+	return nil
+end
+
+local function run_as_leader(cls, name)
+	local f = cls and cls[name]
+	if type(f) ~= "function" then return end
+	cls[name] = function(self, ...)
+		local lead = lead_for(self.object)
+		if lead then return P.with_identity(lead, f, self, ...) end
+		return f(self, ...)
+	end
+end
+
+-- Stock code over every companion squad, for the host's own keys, wheel and squad list: it sees the squads he leads.
+local function own_squads_only(ac, name)
+	local f = ac[name]
+	if type(f) ~= "function" then return end
+	ac[name] = function(...)
+		if not (host_on and next(leaders) ~= nil) then return f(...) end
+		local all, own = ac.companion_squads, {}
+		for id, squad in pairs(all) do
+			if not squad or control_peer(squad) == P.self_peer() then own[id] = squad end
+		end
+		ac.companion_squads = own
+		local res = { pcall(f, ...) }
+		ac.companion_squads = all
+		if not res[1] then error(res[2], 0) end
+		return unpack(res, 2)
+	end
+end
+
+-- Is this companion led by the player the code runs for: the one under with_identity, else the host?
+local function led_here(npc)
+	local lead = leader_of(npc)
+	if P.in_identity() then return lead ~= nil and lead:id() == db.actor:id() end
+	return lead == nil
+end
+
+-- Useful Idiots keeps "the companions" in one list. Its formations, the panel and the keys want those of one player; its surge
+-- rules protect or expose every companion alike.
+local function patch_idiots(NPC)
+	local get, target = NPC.getCompanions, NPC.getTargetCompanion
+	NPC.getCompanions = function()
+		local list = get()
+		if not (host_on and next(leaders) ~= nil) or every_companion > 0 then return list end
+		local own = {}
+		for _, npc in ipairs(list) do
+			if led_here(npc) then own[#own + 1] = npc end
+		end
+		return own
+	end
+	NPC.getTargetCompanion = function(...)
+		local npc = target(...)
+		if npc and lead_for(npc) then return nil end
+		return npc
+	end
+	local surge = idiots_lib("illish.patches.surge_manager")
+	for _, name in ipairs({ "obfuscateCompanions", "addCompanionStoryIds", "removeCompanionStoryIds" }) do
+		local f = surge and surge[name]
+		if type(f) == "function" then
+			surge[name] = function()
+				every_companion = every_companion + 1
+				local ok, err = pcall(f)
+				every_companion = every_companion - 1
+				if not ok then error(err, 0) end
+			end
+		end
+	end
+	for _, name in ipairs({ "assault", "guard", "snipe", "support" }) do
+		local m = _G["idiots_combat_" .. name]
+		local cls = m and m["action_combat_" .. name]
+		run_as_leader(cls, "initialize")
+		run_as_leader(cls, "execute")
+	end
+end
+
+-- "He is with me" and its Useful Idiots replacement: no fight between a companion and whoever is no enemy of "the actor".
+local function patch_enemy_rule()
+	local ignore, with_me = idiots_lib("illish.patches.xr_combat_ignore"), _G["he_is_with_me"]
+	local f = ignore and ignore.onEvalEnemy or with_me and with_me.escorteval
+	if type(f) ~= "function" then return end
+	local function eval(npc, enemy, flags)
+		local lead = lead_for(npc) or lead_for(enemy)
+		if lead then return P.with_identity(lead, f, npc, enemy, flags) end
+		return f(npc, enemy, flags)
+	end
+	if ignore and ignore.onEvalEnemy then ignore.onEvalEnemy = eval end
+	if with_me and with_me.escorteval == f then with_me.escorteval = eval end
+end
+
+local function patch_leader_paths()
+	local ac = axr_companions
+	if ac then
+		for _, name in ipairs({ "cycle_state", "move_to_point", "list_actor_squad_by_id", "get_nearby_companion" }) do
+			own_squads_only(ac, name)
+		end
+		local nearby = ac.get_nearby_companion
+		if type(nearby) == "function" then
+			ac.get_nearby_companion = function() -- the stock asks the flag of the NPC under the cursor first
+				local res = nearby()
+				if res and res ~= true and lead_for(res) then return #ac.list_actor_squad_by_id() > 0 end
+				return res
+			end
+		end
+	end
+	local m = _G["sim_squad_scripted"]
+	local cls = m and m.sim_squad_scripted
+	local task = cls and cls.get_current_task
+	if type(task) == "function" then
+		cls.get_current_task = function(self)
+			local id = host_on and self.assigned_target_id == 0 and leaders[self.id] -- 0: the stock's "actor"
+			local lead = id and level.object_by_id(id)
+			if lead and P.peer_of(id) then return CALifeSmartTerrainTask(lead:game_vertex_id(), lead:level_vertex_id()) end
+			return task(self)
+		end
+	end
+	-- stock code that brings a companion squad to "the actor" by hand (an offline spy, tasks_agent_rescue)
+	local teleport = rawget(_G, "TeleportSquad")
+	if type(teleport) == "function" then
+		_G.TeleportSquad = function(squad, pos, lvid, gvid)
+			local id = host_on and squad and leaders[squad.id]
+			local lead = id and level.object_by_id(id)
+			if lead and P.peer_of(id) and pos:distance_to_sqr(db.actor:position()) < 1 then
+				return teleport(squad, lead:position(), lead:level_vertex_id(), lead:game_vertex_id())
+			end
+			return teleport(squad, pos, lvid, gvid)
+		end
+	end
+	local NPC = idiots_lib("illish.lib.npc")
+	if NPC then patch_idiots(NPC) end
+	patch_enemy_rule()
+end
+
 -- Companions a task gives (on_init of the escort, raid and hostage tasks, Mystery of the Swamps, the speaker of
 -- simulation_task_66/67) join the player the task was taken by, not the host. While coop_tasks gives a task for a client
 -- (reward_peer), every squad one of these calls adds to companion_squads is led by that player's proxy, like a dialog
@@ -287,28 +793,6 @@ local function task_taker()
 	local ct = rawget(_G, "coop_tasks")
 	local peer = ct and type(ct.reward_peer) == "function" and ct.reward_peer()
 	return type(peer) == "number" and peer or nil
-end
-
-local function squad_ids()
-	local ids = {}
-	local cs = axr_companions and axr_companions.companion_squads
-	if type(cs) == "table" then
-		for id, sq in pairs(cs) do
-			if sq then ids[id] = true end
-		end
-	end
-	return ids
-end
-
-local function claim_new_squads(before, peer)
-	local who = P.object_of_peer(peer)
-	if not who then return end
-	for id in pairs(squad_ids()) do
-		if not before[id] then
-			leaders[id] = who:id()
-			stats.task_squads = stats.task_squads + 1
-		end
-	end
 end
 
 -- The speaker of add_speaker_companion is the NPC the host's player talks to; the host is not talking while a client
@@ -346,7 +830,7 @@ local function wrap_task_squads()
 				else
 					res = { pcall(f, ...) }
 				end
-				claim_new_squads(before, peer)
+				stats.task_squads = stats.task_squads + claim_new_squads(before, peer)
 				if not res[1] then error(res[2], 0) end
 				return unpack(res, 2)
 			end
@@ -356,15 +840,137 @@ end
 
 local function host_refresh()
 	if not axr_companions then return end
-	for squad_id, proxy_id in pairs(leaders) do
+	local cs = axr_companions.companion_squads
+	local live = {}
+	for squad_id in pairs(cs) do
 		local squad = alife_object(squad_id)
-		if not (squad and axr_companions.companion_squads[squad_id]) then
+		if squad then
+			for k in squad:squad_members() do live[k.id] = true end
+			push_squad(squad, control_peer(squad))
+		end
+	end
+	for squad_id in pairs(leaders) do
+		if cs[squad_id] == nil or not alife_object(squad_id) then -- a loaded squad is false until its first update
 			leaders[squad_id] = nil -- dismissed by the host, dead or released
-		else
-			local peer = P.peer_of(proxy_id)
-			if peer then
-				for _, o in ipairs(members(squad)) do push_info(o, peer) end
-			end
+		end
+	end
+	-- the last word about whom this was: a contract's end, a dismissal by the host, a death
+	for id, told in pairs(sent_info) do
+		if not live[id] then
+			for peer in pairs(told) do P.send(EV_INFO, { i = id, s = "" }, peer) end
+			sent_info[id], sent_items[id] = nil, nil
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- The commands of the companion's dialog (the machine of the player who talks)
+-------------------------------------------------------------------------------
+-- Who holds control of this NPC, as this machine knows it; nil: a companion of nobody.
+local function holder_of(npc)
+	if P.is_host() then
+		local squad = squad_of(npc)
+		return is_companion_squad(squad) and control_peer(squad) or nil
+	end
+	return view[npc:id()]
+end
+
+-- The engine's functor<bool> dies on an error or on anything but a boolean.
+local function answer(f, ...)
+	local ok, res = pcall(f, ...)
+	if not ok then report("dialog", res) end
+	return ok and res == true
+end
+
+local function may_hand(a, b)
+	return P.active() and holder_of(npc_of(a, b)) == P.self_peer() and #other_players() > 0
+end
+
+local function may_take(a, b)
+	local peer = holder_of(npc_of(a, b))
+	return P.active() and peer ~= nil and peer ~= P.self_peer()
+end
+
+local function slot_player(params)
+	return other_players()[tonumber(params and params[1]) or 0]
+end
+
+local function ask_lead(act, npc, to)
+	if P.client_live() then
+		P.send(EV_LEAD, { a = act, i = P.to_host(npc:id()), to = to }, 0)
+	else
+		host_lead(P.self_peer(), act, npc:id(), to)
+	end
+end
+
+function dlg_can_hand(a, b) return answer(may_hand, a, b) end
+function dlg_can_take(a, b) return answer(may_take, a, b) end
+function dlg_slot(a, b, dialog_id, phrase_id, next_id, params) return answer(function() return slot_player(params) ~= nil end) end
+
+function dlg_slot_text(a, b, dialog_id, phrase_id, next_id, params)
+	local ok, p = pcall(slot_player, params)
+	return ok and p and tostring(p.nick) or ""
+end
+
+function dlg_hand(a, b, dialog_id, phrase_id, next_id, params)
+	local ok, err = pcall(function()
+		local p = slot_player(params)
+		if p then ask_lead("give", npc_of(a, b), p.id) end
+	end)
+	if not ok then report("hand over", err) end
+end
+
+function dlg_take(a, b)
+	local ok, err = pcall(ask_lead, "take", npc_of(a, b))
+	if not ok then report("take control", err) end
+end
+
+-- The lines go into the list of commands of dm_is_actor_companion_dialog (phrase 1 of the stock's init_func). Conditions with
+-- a (n) come to the function in its params table, as a string (engine: DIALOG_UPGRADE); add_dialog of the stock refuses such names.
+local function add_lead_phrases(dialog)
+	local function add(id, prev, text)
+		local phrase = dialog:AddPhrase(text, tostring(id), tostring(prev), PHRASE_GOODWILL)
+		return phrase and phrase:GetPhraseScript()
+	end
+	local script = add(PHRASE_HAND, 1, "st_coop_comp_cmd_hand")
+	if not script then return end
+	script:AddPrecondition("coop_npc_companions.dlg_can_hand")
+	add(PHRASE_WHOM, PHRASE_HAND, "st_coop_comp_cmd_whom")
+	for slot = 1, OTHER_PLAYERS do
+		script = add(PHRASE_SLOTS + slot, PHRASE_WHOM, "st_coop_comp_cmd_hand")
+		script:AddPrecondition("coop_npc_companions.dlg_slot(" .. slot .. ")")
+		script:SetScriptText("coop_npc_companions.dlg_slot_text(" .. slot .. ")")
+		script:AddAction("coop_npc_companions.dlg_hand(" .. slot .. ")")
+	end
+	add(PHRASE_BACK, PHRASE_WHOM, "axr_phrase_actor_give_command_nevermind") -- the engine asserts on a list with no line
+end
+
+local function patch_dialog()
+	local d = _G["dialogs_axr_companion"]
+	if not d then return end
+	local init, is, is_not = d.dm_init_is_actor_companion, d.is_actor_companion, d.is_not_actor_companion
+	if type(init) == "function" then
+		d.dm_init_is_actor_companion = function(dialog)
+			init(dialog)
+			local ok, err = pcall(add_lead_phrases, dialog) -- the stock list must stand, whatever happens to ours
+			if not ok then report("lines of the list of commands", err) end
+		end
+	end
+	-- the host's copy of a client's companion has the flags: the stock's list of commands stays closed to him as to any non-leader
+	if type(is) == "function" then
+		d.is_actor_companion = function(a, b, ...)
+			local res = is(a, b, ...)
+			if res and lead_for(npc_of(a, b)) then return false end
+			return res
+		end
+	end
+	-- a client's copy has no flags: no offer to recruit a companion of the group
+	if type(is_not) == "function" then
+		d.is_not_actor_companion = function(a, b, ...)
+			local res = is_not(a, b, ...)
+			local npc = npc_of(a, b)
+			if res and npc and view[npc:id()] ~= nil then return false end
+			return res
 		end
 	end
 end
@@ -384,7 +990,17 @@ local function actor_on_update()
 		local ok, err = pcall(host_refresh)
 		if not ok then report("refresh", err) end
 	end
-	if not host_on then sent_info = {} end
+	if not host_on then sent_info, sent_items = {}, {} end
+	if P.client_live() then
+		if not asked then asked = P.send(EV_REQ, {}, 0) end
+		for id, flags in pairs(waiting_flags) do
+			local npc = level.object_by_id(id)
+			if npc then
+				waiting_flags[id] = nil
+				apply_flags(npc, flags)
+			end
+		end
+	end
 end
 
 local function save_state(m_data)
@@ -409,9 +1025,9 @@ end
 function print_status()
 	local n = 0
 	for _ in pairs(leaders) do n = n + 1 end
-	log("installed %s | squads led by clients %d | orders out %d in %d refused %d, recruits without a talk %d | flags out %d in %d | follow ticks %d | errors %d",
+	log("installed %s | squads led by clients %d | orders out %d in %d refused %d, recruits without a talk %d | flags out %d in %d | follow ticks %d | control changed %d refused %d | go-to %d | errors %d",
 		tostring(installed), n, stats.cmd_out, stats.cmd_in, stats.refused, stats.refused_talk, stats.info_out, stats.info_in,
-		stats.follow, P.error_count(TAG))
+		stats.follow, stats.lead, stats.lead_refused, stats.go, P.error_count(TAG))
 end
 
 function on_game_start()
@@ -419,7 +1035,8 @@ function on_game_start()
 	if not rawget(_G, "coop") then return end
 	if not installed then
 		for _, s in ipairs({ { "client actions", patch_client_actions }, { "beh", patch_beh },
-			{ "task squads", wrap_task_squads } }) do
+			{ "task squads", wrap_task_squads }, { "leader paths", patch_leader_paths }, { "dialog", patch_dialog },
+			{ "items", patch_items } }) do
 			local ok, err = pcall(s[2])
 			if not ok then report("install " .. s[1], err) end
 		end
@@ -427,7 +1044,15 @@ function on_game_start()
 	end
 	P.on(EV_CMD, host_on_cmd, "host", TAG)
 	P.on(EV_INFO, client_on_info, "client", TAG)
+	P.on(EV_LEAD, host_on_lead, "host", TAG)
+	P.on(EV_REQ, host_on_req, "host", TAG)
+	P.on(EV_GO, host_on_go, "host", TAG)
+	P.on(EV_ITEM, host_on_item, "host", TAG)
+	P.on(EV_MSG, client_on_msg, "client", TAG)
+	P.on(EV_ITEMS, client_on_items, "client", TAG)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("on_key_press", on_key_press)
+	RegisterScriptCallback("ActorMenu_on_item_after_move", on_item_after_move)
 	RegisterScriptCallback("save_state", save_state)
 	RegisterScriptCallback("load_state", load_state)
 end

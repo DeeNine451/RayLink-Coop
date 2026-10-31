@@ -10,9 +10,9 @@
 	    now answers for that player (what his machine reports, coop_economy_mdata), not with the host's psy health. A
 	    phantom's contact is measured to the nearest player; the psy hit lands on him in the phantom's name, because a hit
 	    a character deals itself never reaches its owner (hits::to_owner).
-	Left: xcv's squad still runs to "actor". sim_squad_scripted resolves that to id 0, and a player's character has none of
-	a squad target's methods (am_i_reached, on_reach_target, get_alife_task). Next to the host it changes nothing; near a
-	far client a phantom heads off to the host.
+	  xcv's squad runs to "actor". sim_squad_scripted resolves that to id 0, and a player's character has none of a squad
+	  target's methods, so the target stays and only the place changes: the engine asks get_current_task, and near a client
+	  that is his place.
 --]]
 
 local type, ipairs, pcall, error = type, ipairs, pcall, error
@@ -105,12 +105,30 @@ local function contact(C, P, active)
 	return true
 end
 
+local function squad_place(C, P, active)
+	local m, squads = C.mod("xcv_phantoms"), C.mod("sim_squad_scripted")
+	local class = squads and squads.sim_squad_scripted
+	local task = class and class.get_current_task
+	if type(task) ~= "function" then return false end
+	local _, holder, index = C.find_local(m, "spawned_phantoms")
+	if not holder then return false end
+	class.get_current_task = function(self, ...) -- the engine asks this for every squad: the table first
+		local _, spawned = debug.getupvalue(holder, index) -- xcv replaces the table at load_state
+		if not (type(spawned) == "table" and spawned[self.id] and active()) then return task(self, ...) end
+		local near = P.nearest(self.position)
+		if not (near and P.is_proxy(near)) then return task(self, ...) end
+		return CALifeSmartTerrainTask(near:game_vertex_id(), near:level_vertex_id())
+	end
+	return true
+end
+
 function install(P, active, applied)
 	if installed then return end
 	local C = coop_mods_core
 	if not (C and type(C.find_local) == "function") then return end
 	installed = true
-	for _, spec in ipairs({ { "phantoms", dynamic }, { "phantom_psy", psy }, { "phantom_contact", contact } }) do
+	for _, spec in ipairs({ { "phantoms", dynamic }, { "phantom_psy", psy }, { "phantom_contact", contact },
+		{ "phantom_squad", squad_place } }) do
 		local ok, result = pcall(spec[2], C, P, active)
 		if not ok then
 			P.report("compat", "native " .. spec[1], result)

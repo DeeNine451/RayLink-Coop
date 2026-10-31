@@ -375,6 +375,21 @@ print("== a save from before the mode")
 Hm.env.SendScriptCallback("load_state", {})
 check(Hm.env.coop_reward_group.peek(501) == nil, "nothing to tell")
 
+print("== a host out of a hardcore run is no member: the group is the others")
+Hm.members = { { id = 500, peer = 1, in_world = true }, { id = 501 } }
+Hm.env.coop.out_of_run = function(id) return id == 0 end
+Hm.share = 2
+fresh()
+local out_group = Hm.env.coop_reward_group.list()
+check(#out_group == 2 and out_group[1].id == 500, "the host is not in the list, the members are")
+turn_in(1, pay(100))
+check(Hm.actor:money() == 0, "the host gets no share")
+Hm.members = {}
+check(#Hm.env.coop_reward_group.list() == 1 and Hm.env.coop_reward_group.list()[1].id == 0,
+	"nobody else in the run: the group is never empty")
+Hm.members = { { id = 500, peer = 1, in_world = true }, { id = 501 } }
+Hm.env.coop.out_of_run = nil
+
 print("== without coop.members (an older exe) only the host is the group")
 Hm.env.coop.members = nil
 fresh()

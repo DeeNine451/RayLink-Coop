@@ -65,6 +65,25 @@
 	<string id="st_coop_news_loot_far">
 		<text>На этом теле не нашлось ничего полезного.</text>
 	</string>
+	<!-- Чужая добыча, сделка за тело (coop_loot_claim.script): друг разрешает взять, нейтральный убийца называет цену (%d руб., %d сек.), принимает плату или говорит, что денег не хватает. -->
+	<string id="st_coop_news_loot_friend_1">
+		<text>Бери, друг. Я не против.</text>
+	</string>
+	<string id="st_coop_news_loot_friend_2">
+		<text>Забирай, мы же свои.</text>
+	</string>
+	<string id="st_coop_news_loot_friend_3">
+		<text>Давай, бери, что нужно.</text>
+	</string>
+	<string id="st_coop_news_loot_price">
+		<text>Это моя добыча. Заплати %d руб. и забирай: нажми ещё раз в течение %d сек.</text>
+	</string>
+	<string id="st_coop_news_loot_paid">
+		<text>Приятно иметь дело. Забирай.</text>
+	</string>
+	<string id="st_coop_news_loot_poor">
+		<text>У тебя нет %d руб. Возвращайся с деньгами.</text>
+	</string>
 	<string id="st_coop_quests_npc_limit">
 		<text>У этого NPC взято максимум заданий на группу. Сдайте одно из них.</text>
 	</string>

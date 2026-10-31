@@ -65,6 +65,25 @@
 	<string id="st_coop_news_loot_far">
 		<text>You found nothing useful on this body.</text>
 	</string>
+	<!-- Foreign loot, the deal over a body (coop_loot_claim.script): a friend lets the player take it, a neutral killer names a price (%d RU, %d seconds), takes the payment, or says the money is not enough. -->
+	<string id="st_coop_news_loot_friend_1">
+		<text>Take it, friend. I don't mind.</text>
+	</string>
+	<string id="st_coop_news_loot_friend_2">
+		<text>It's yours. We are on the same side.</text>
+	</string>
+	<string id="st_coop_news_loot_friend_3">
+		<text>Go ahead, help yourself.</text>
+	</string>
+	<string id="st_coop_news_loot_price">
+		<text>My kill. Pay me %d RU and take it: press USE again within %d seconds.</text>
+	</string>
+	<string id="st_coop_news_loot_paid">
+		<text>Pleasure doing business. Take what you need.</text>
+	</string>
+	<string id="st_coop_news_loot_poor">
+		<text>You don't have %d RU. Come back with the money.</text>
+	</string>
 	<string id="st_coop_quests_npc_limit">
 		<text>This NPC has given the group all the tasks it can. Turn one of them in.</text>
 	</string>

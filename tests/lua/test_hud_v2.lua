@@ -245,7 +245,7 @@ local function machine(self_peer, opts)
 		for i, g in ipairs(M.cb[name] or {}) do if g == f then table.remove(M.cb[name], i) break end end
 	end
 	env.AddScriptCallback = function() end
-	env.DIK_keys = { MOUSE_5 = MOUSE_5, DIK_F15 = 102 }
+	env.DIK_keys = { MOUSE_5 = MOUSE_5, DIK_F15 = 102, DIK_F8 = 66 }
 	env.key_bindings = { kCHAT = 42, kCHAT_TEAM = CHAT_TEAM }
 	env.dik_to_bind = function(dik) return M.binds[dik] or 999 end
 	env.bind_to_dik = function(action)
@@ -255,7 +255,7 @@ local function machine(self_peer, opts)
 	env.exec_console_cmd = function(c)
 		M.console[#M.console + 1] = c
 		local act, key = c:match("^bind (%S+) (%S+)$")
-		if act == "chat_team" and key == "mouse5" then M.binds[MOUSE_5] = CHAT_TEAM end
+		if act == "chat_team" and key == "kF8" then M.binds[66] = CHAT_TEAM end
 	end
 	env.Check_UI = function() return M.ui_open == true end
 	env.sound_object = function(path)
@@ -1198,12 +1198,12 @@ check(#ins == 1 and ins[1]:find('exe="chat_team"', 1, true) and ins[1]:find('id=
 -- default binding: mouse 5 (free in GAMMA), once
 M.binds = {}
 fire(M, "actor_on_first_update")
-check(M.console[1] == "bind chat_team mouse5" and M.options["coop/coop_player/ping_key_set"] == true, "ping key bound to mouse 5 once")
+check(M.console[1] == "bind chat_team kF8", "ping key bound to F8: mouse 5 is GAMMA's Free Zoom")
 M.binds = {}
 fire(M, "actor_on_first_update")
-check(#M.console == 1, "not again after the player cleared it")
+check(#M.console == 2, "another profile (its own user.ltx, the same axr_options.ltx) gets the key too")
 M2 = machine(3)
-M2.binds[MOUSE_5] = 55
+M2.binds[66] = 55
 fire(M2, "actor_on_first_update")
 check(#M2.console == 0, "mouse 5 taken by something else: left unbound")
 -- Tactical Compass adapter: TC installed and our compass off -> allies and pings go to tc_markers as companions

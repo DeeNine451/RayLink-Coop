@@ -19,24 +19,45 @@
 	when it goes live; a row never closes a body for ever, only while its killer is there.
 
 	Searching. The check runs on the machine of the player who presses USE, on the body the engine itself would open
-	(level.get_target_obj within the use reach of the engine, 2 m), and the host's own player goes the same way:
-	  - the killer alive and within NEAR_M of the player: USE is refused and the killer's warning comes as a PDA tip;
-	  - the killer alive and farther: USE is refused, "found nothing useful on this body";
+	(level.get_target_obj within the use reach of the engine, 2 m), and the host's own player goes the same way. A body of
+	a living stalker is refused at once, and the host says what the killer does about it (the deal below):
+	  - an enemy within NEAR_M of the player: his warning comes as a PDA tip;
+	  - an enemy farther: "found nothing useful on this body";
+	  - a friend or a neutral killer: his line (below), near or far;
 	  - the killer dead, offline here or not a stalker: the body is free.
 	Nothing is remembered about a refusal: the next press asks again.
+
+	The deal. Only a living stalker killer deals, while the setting is on. The host decides everything: a client sends
+	loot_deal, the host checks the body (dead, claimed), its killer (alive, a stalker), the distance (DEAL.reach_m from
+	the player's character, on the host a client's character is his proxy), the setting and the balance, and answers
+	with loot_say; a peer is heard at most once in DEAL.host_gap_ms, the client sends at most once in DEAL.ask_gap_ms.
+	How the killer sees the player's character, as the stock game reads it (the community of the character without the
+	"actor_" prefix, game_relations, npc:relation):
+	  - a friend (the same community, an allied one, or a friendly relation): he lets the player take the body, the
+	    row goes at once, one line from him;
+	  - a neutral one: the first USE names a price (PRICE_POINTS by his rank) in a line and keeps the claim; a second USE
+	    within DEAL.window_ms pays it (coop.money_grant of a negative amount for a client, the host's own actor for the
+	    host), the row goes for everybody. Short of money: a line with the sum, nothing is taken. A quote is one per
+	    player and body and goes with the payment, so a repeat cannot pay twice (no row, no charge);
+	  - an enemy: the threat stays, no deal.
+	The quotes are the host's, short-lived, and not saved.
 
 	Events (host numbering of ids; the prefix "quests." belongs to coop_quests_core):
 		loot_claim  host -> clients  { v = victim, k = killer }
 		loot_free   host -> clients  { v = victim }
 		loot_snap   host -> client   { r = "v:k;v:k;..." }      the whole table, oldest first
 		loot_ask    client -> host   { }                         "send me the table"
+		loot_deal   client -> host   { v = victim }              the player pressed USE on this body
+		loot_say    host -> client   { v = victim, k = killer, a = answer, p = RU }
+		                              a: friend | price | paid | poor | enemy | gone ("gone": no claim any more)
 --]]
 
 local qc = coop_quests_core
 
 local tostring, tonumber, type, pairs, ipairs, pcall, next = tostring, tonumber, type, pairs, ipairs, pcall, next
-local math_random = math.random
+local math_random, math_floor = math.random, math.floor
 local table_sort, table_concat = table.sort, table.concat
+local string_format = string.format
 
 local TAG = "loot"
 local MAX_CLAIMS = 48
@@ -47,6 +68,21 @@ local ASK_MS = 4000 -- client: how often the table is asked for until it comes
 local ASK_TRIES = 8
 local MSG_GAP_MS = 2000 -- the same refusal is shown at most this often
 local THREATS = 5
+local FRIENDLY = 3 -- the lines of a friend who lets the player take the body
+local FRIEND, ENEMY = 0, 2 -- game_object.friend and game_object.enemy, as npc:relation() returns them
+local DEAL = {
+	window_ms = 5000, -- the second USE pays when it comes within this time of the quote
+	reach_m = 5.0, -- host: the player's character is this close to the body (USE reaches 2 m, a remote character lags)
+	ask_gap_ms = 800, -- client: USE asks the host at most this often (a double press is no payment)
+	host_gap_ms = 600, -- host: a peer is answered at most this often (a little less than the client's, for jitter)
+	price_round = 10, -- RU
+}
+-- Price of a body by the character_rank of the killer: { rank, RU } points of a line, linear between them (the rank bands
+-- of game_relations.ltx "rating", novice up to legend), 200 RU at the bottom and 1000 RU from the master's top up.
+local PRICE_POINTS = {
+	{ 0, 200 }, { 3500, 300 }, { 6500, 400 }, { 9000, 500 }, { 12000, 620 }, { 14500, 740 }, { 17500, 860 }, { 27000, 1000 },
+}
+local ANSWERS = { friend = true, price = true, paid = true, poor = true, enemy = true, gone = true }
 
 local claims = {} -- victim id -> { k = killer id, n = serial (age) }
 local count = 0
@@ -54,7 +90,11 @@ local serial = 0
 local next_scan = 0
 local ask = { need = true, tries = 0, at = 0 } -- client: the table has not come yet
 local shown = { at = -100000, text = nil }
-local stats = { claims = 0, freed = 0, dropped = 0, refused_near = 0, refused_far = 0, snaps_out = 0, snaps_in = 0 }
+local quotes = {} -- host: peer -> { v = victim id, p = RU, at = ms }, the price one player was told (0 = the host's own)
+local last_deal = {} -- host: peer -> ms of his last request
+local deal_at = -100000 -- player's machine: when USE last asked for a deal
+local stats = { claims = 0, freed = 0, dropped = 0, refused_near = 0, refused_far = 0, snaps_out = 0, snaps_in = 0,
+	friends = 0, quoted = 0, bought = 0, poor = 0 }
 
 local function log(fmt, ...) qc.log(TAG, fmt, ...) end
 
@@ -214,6 +254,129 @@ local function host_scan()
 end
 
 -------------------------------------------------------------------------------
+-- Host: the deal
+-------------------------------------------------------------------------------
+-- A player's community without the "actor_" prefix of a player's character ("stalker" when it has none), as coop_npc_meet reads it.
+local function player_comm(who)
+	local community = (who:character_community() or ""):gsub("^actor_", "", 1)
+	if community == "" then return "stalker" end
+	return community
+end
+
+-- "friend", "neutral" or "enemy": how the killer sees a player's character (on the host a client's character is his proxy).
+local function attitude(killer, who)
+	local gr = qc.mod("game_relations")
+	local mine, his = player_comm(who), killer:character_community()
+	local rel = killer:relation(who)
+	if mine == his or rel == FRIEND or (gr and gr.is_factions_friends(mine, his)) then return "friend" end
+	if rel >= ENEMY or (gr and gr.is_factions_enemies(mine, his)) then return "enemy" end
+	return "neutral"
+end
+
+-- RU for the body, by the rank of the killer.
+local function price_of(killer)
+	local ok, rank = pcall(function() return killer:character_rank() end)
+	rank = ok and tonumber(rank) or 0
+	if rank ~= rank then rank = 0 end
+	local pts = PRICE_POINTS
+	local price = pts[#pts][2]
+	if rank <= pts[1][1] then
+		price = pts[1][2]
+	else
+		for i = 2, #pts do
+			local lo, hi = pts[i - 1], pts[i]
+			if rank < hi[1] then
+				price = lo[2] + (hi[2] - lo[2]) * (rank - lo[1]) / (hi[1] - lo[1])
+				break
+			end
+		end
+	end
+	return math_floor(price / DEAL.price_round + 0.5) * DEAL.price_round
+end
+
+-- RU the player has: the host's own actor, or a client's balance in the host's ledger (nil when unknown).
+local function balance_of(peer)
+	local api = qc.engine()
+	local ok, v
+	if peer == 0 then
+		ok, v = pcall(function() return db.actor:money() end)
+	elseif api and type(api.money_of) == "function" then
+		ok, v = pcall(api.money_of, peer)
+	end
+	return ok and tonumber(v) or nil
+end
+
+-- Takes the price from the player: the host's own actor, or a client's character through the host's ledger.
+local function charge(peer, price)
+	if peer == 0 then return (pcall(function() db.actor:give_money(-price) end)) end
+	local api = qc.engine()
+	local grant = api and api.money_grant
+	if type(grant) ~= "function" then
+		qc.report(TAG, "payment", "coop.money_grant is missing")
+		return false
+	end
+	local called, ok, why = pcall(grant, peer, -price)
+	if not (called and ok) then
+		log("! #%d could not pay %d RU: %s", peer, price, tostring(called and why or ok))
+		return false
+	end
+	return true
+end
+
+local function answer(vid, row, a, p)
+	return { v = vid, k = row.k, a = a, p = p }
+end
+
+-- What the killer of body vid does about the USE of a player (peer 0 is the host's own player): the answer for that
+-- player's machine, or nil when there is nothing to answer (too soon, a bad request, a character far from the body).
+local function decide(peer, vid)
+	local now = time_global()
+	if last_deal[peer] and now - last_deal[peer] < DEAL.host_gap_ms then return nil end
+	last_deal[peer] = now
+	local who = vid and rule_on() and qc.avatar_obj(peer)
+	if not (who and alive(who)) then return nil end
+	local row = claims[vid]
+	if not row then return { v = vid, a = "gone" } end
+	local body = level.object_by_id(vid)
+	if not body or alive(body) or body:position():distance_to(who:position()) > DEAL.reach_m then return nil end
+	local killer = level.object_by_id(row.k)
+	if not (killer and alive(killer) and is_stalker(killer)) then
+		release(vid, "the killer is dead or gone")
+		return { v = vid, a = "gone" }
+	end
+	local ok, mood = pcall(attitude, killer, who)
+	if not ok then
+		qc.report(TAG, "attitude", mood)
+		mood = "enemy"
+	end
+	if mood == "enemy" then return answer(vid, row, "enemy") end
+	if mood == "friend" then
+		stats.friends = stats.friends + 1
+		release(vid, "the killer is a friend of #" .. peer)
+		return answer(vid, row, "friend")
+	end
+	local q = quotes[peer]
+	if q and q.v == vid and now - q.at <= DEAL.window_ms then
+		quotes[peer] = nil -- a quote pays once
+		local have = balance_of(peer)
+		if not have then return nil end
+		if have < q.p then
+			stats.poor = stats.poor + 1
+			return answer(vid, row, "poor", q.p)
+		end
+		if not charge(peer, q.p) then return nil end
+		stats.bought = stats.bought + 1
+		log("body %d is bought by #%d for %d RU", vid, peer, q.p)
+		release(vid, "bought")
+		return answer(vid, row, "paid", q.p)
+	end
+	q = { v = vid, p = price_of(killer), at = now }
+	quotes[peer] = q
+	stats.quoted = stats.quoted + 1
+	return answer(vid, row, "price", q.p)
+end
+
+-------------------------------------------------------------------------------
 -- Searching: the player's own machine
 -------------------------------------------------------------------------------
 local function say(text, show)
@@ -251,25 +414,58 @@ local function sender_name(killer)
 	return head
 end
 
+-- A line of the killer: a PDA tip under his name, the HUD message when no tip can be sent.
+local function tip_from(killer, text, sound)
+	local dnh = rawget(_G, "dynamic_news_helper")
+	local ok, icon = pcall(function() return killer:character_icon() end)
+	local sent = false
+	if dnh and type(dnh.send_tip) == "function" and ok then
+		local s_ok, r = pcall(dnh.send_tip, text, sender_name(killer), 0, 10, icon, sound, "npc")
+		sent = s_ok and r ~= false
+	end
+	if not sent then hud(text) end
+end
+
 local function warn(killer)
 	local n = math_random(THREATS)
 	local text = tr("st_npc_loot_claim_last_" .. n, "st_coop_news_loot_last_" .. n)
-	say("near", function()
-		local dnh = rawget(_G, "dynamic_news_helper")
-		local ok, icon = pcall(function() return killer:character_icon() end)
-		local sent = false
-		if dnh and type(dnh.send_tip) == "function" and ok then
-			local s_ok, r = pcall(dnh.send_tip, text, sender_name(killer), 0, 10, icon, "danger", "npc")
-			sent = s_ok and r ~= false
-		end
-		if not sent then hud(text) end
-	end)
+	say("near", function() tip_from(killer, text, "danger") end)
 	stats.refused_near = stats.refused_near + 1
 end
 
 local function nothing_here()
 	say("far", function() hud(tr("st_npc_loot_claim_far", "st_coop_news_loot_far")) end)
 	stats.refused_far = stats.refused_far + 1
+end
+
+-- The refusal of a body whose killer keeps it: his warning when he is near, "nothing useful" when he is farther.
+local function refuse(killer)
+	if killer:position():distance_to(db.actor:position()) <= NEAR_M then warn(killer) else nothing_here() end
+end
+
+-- The line of a deal (our own strings: the mod has none): a friend's, the price, the payment, the lack of money.
+local function deal_line(a, p)
+	local id = a == "friend" and "st_coop_news_loot_friend_" .. math_random(FRIENDLY) or "st_coop_news_loot_" .. a
+	local text = tr(id, id)
+	local ok, s = pcall(string_format, text, p, math_floor(DEAL.window_ms / 1000))
+	return ok and s or text
+end
+
+-- Player's machine: what the killer of a body did about the USE, as the host decided it.
+local function show_answer(v, k, a, p)
+	if a == "gone" then
+		remove(v) -- the host has no claim on this body any more
+		return
+	end
+	local killer = k and level.object_by_id(qc.to_local_id(k))
+	if a == "enemy" then
+		if killer and alive(killer) then refuse(killer) else nothing_here() end
+		return
+	end
+	local text = deal_line(a, p or 0)
+	say(a .. ":" .. v .. ":" .. tostring(p), function()
+		if killer then tip_from(killer, text, "news") else hud(text) end
+	end)
 end
 
 -- The body the engine would open on USE, or nil: a dead stalker or monster within reach.
@@ -282,19 +478,35 @@ local function body_in_reach()
 	return target
 end
 
+-- USE on a claimed body: the host decides what the killer does about it. A client asks and shows the answer when it
+-- comes; the host's own player is answered on the spot. A request that cannot go out leaves the old refusal.
+local function ask_host(vid, killer)
+	local now = time_global()
+	if now - deal_at < DEAL.ask_gap_ms then return end
+	deal_at = now
+	if qc.is_host() then
+		local ok, ans = pcall(decide, 0, vid)
+		if not ok then
+			qc.report(TAG, "deal", ans)
+			refuse(killer)
+		elseif ans then
+			show_answer(ans.v, ans.k, ans.a, ans.p)
+		end
+	elseif not qc.send("loot_deal", { v = vid }, 0) then
+		refuse(killer)
+	end
+end
+
 local function on_before_key_press(key, bind, dis, flags)
 	if bind ~= key_bindings.kUSE or next(claims) == nil or not (qc.active() and db.actor) then return end
 	local body = body_in_reach()
-	local row = body and claims[qc.to_host_id(body:id())]
+	local vid = body and qc.to_host_id(body:id())
+	local row = vid and claims[vid]
 	if not (row and rule_on()) then return end
 	local killer = level.object_by_id(qc.to_local_id(row.k))
 	if not (killer and alive(killer) and is_stalker(killer)) then return end
 	flags.ret_value = false
-	if killer:position():distance_to(db.actor:position()) <= NEAR_M then
-		warn(killer)
-	else
-		nothing_here()
-	end
+	ask_host(vid, killer)
 end
 
 -------------------------------------------------------------------------------
@@ -311,8 +523,22 @@ local function host_on_ask(t, from)
 	if qc.send("loot_snap", { r = snapshot() }, from) then stats.snaps_out = stats.snaps_out + 1 end
 end
 
+local function host_on_deal(t, from)
+	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
+	local ans = decide(from, id16(t.v))
+	if ans then qc.send("loot_say", ans, from) end
+end
+
 local function from_host(from)
 	return from == 0 and qc.is_client()
+end
+
+local function client_on_say(t, from)
+	if not from_host(from) then return end
+	local v, k = id16(t.v), id16(t.k)
+	if not (v and type(t.a) == "string" and ANSWERS[t.a]) then return end
+	local p = tonumber(t.p)
+	show_answer(v, k, t.a, p and math_floor(p) or 0)
 end
 
 local function client_on_snap(t, from)
@@ -364,6 +590,7 @@ end
 
 local function load_state(m_data)
 	claims, count, serial = {}, 0, 0
+	quotes, last_deal = {}, {}
 	ask.need, ask.tries, ask.at = false, 0, 0
 	if qc.is_client() then
 		ask.need = true -- the host's table comes as an event; the one in this save may be old
@@ -380,6 +607,7 @@ end
 function print_status()
 	log("rows %d | claims %d, freed %d, dropped %d | refused near %d, far %d | tables sent %d, received %d",
 		count, stats.claims, stats.freed, stats.dropped, stats.refused_near, stats.refused_far, stats.snaps_out, stats.snaps_in)
+	log("deals | friends %d, quoted %d, bought %d, short of money %d", stats.friends, stats.quoted, stats.bought, stats.poor)
 end
 
 -- Read by the tests: the killer of a body, or nil.
@@ -399,6 +627,8 @@ function on_game_start()
 		qc.on("loot_snap", client_on_snap, TAG)
 		qc.on("loot_claim", client_on_claim, TAG)
 		qc.on("loot_free", client_on_free, TAG)
+		qc.on("loot_deal", host_on_deal, TAG)
+		qc.on("loot_say", client_on_say, TAG)
 		RegisterScriptCallback("npc_on_death_callback", on_death)
 		RegisterScriptCallback("monster_on_death_callback", on_death)
 		RegisterScriptCallback("on_before_key_press", on_before_key_press)

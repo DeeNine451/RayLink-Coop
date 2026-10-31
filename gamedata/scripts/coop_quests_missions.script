@@ -34,6 +34,8 @@
 	  dialogs.is_trade_accept (+ 2)          "wanna trade?" of an ordinary stalker: the roll is the client's, the host spawns the
 	                                         stock into the NPC and remembers the answer (quests.act "trade", reply quests.trade)
 	  dialogs.update_npc_dialog              the NPC's logic is the host's: nothing to do on a client
+	  dialogs.complete_simulation_task       a delivery: the host stops keeping the target's squad out of offline combat (quests.act
+	                                         "delivery"), the task itself is the client's stock call
 	  zat_b103_actor_has_needed_food, is_actor_trustworthy   "the actor" is the player at the NPC, not the host
 
 	A status functor's kill. xr_effects.kill_actor() called with no NPC from inside a task check (the Impending Doom deadline
@@ -462,6 +464,22 @@ local function patch_client_noops()
 		if qc.is_client() then return end
 		return f(a, b, ...)
 	end
+	-- A delivery ended by a client: the stock's task id is a local of his precondition, the squad it clears is the NPC's
+	qc.mod("tasks_delivery") -- it puts the function on dialogs when it loads
+	local done = dl.complete_simulation_task
+	if type(done) ~= "function" then return end
+	dl.complete_simulation_task = function(a, npc, ...)
+		if qc.is_client() and npc then qc.request_host_action("delivery", { n = qc.to_host_id(npc:id()) }) end
+		return done(a, npc, ...)
+	end
+end
+
+-- Host: the target's squad was kept out of offline combat for the delivery (tasks_delivery.script)
+local function host_delivery(from, t)
+	local npc = talk_partner(from, tonumber(t.n), "delivery")
+	local squad = npc and get_object_squad(npc)
+	local soc = qc.mod("sim_offline_combat")
+	if squad and soc and type(soc.task_squads) == "table" then soc.task_squads[squad.id] = nil end
 end
 
 -- Hidden Threat: the reward of a task is rolled into utils_slht.reward_table, which the dialogs that pay read. The host rolls
@@ -668,6 +686,7 @@ function on_game_start()
 	qc.register_host_action("rly", host_relay)
 	qc.register_host_action("stash", host_stash)
 	qc.register_host_action("trade", host_trade)
+	qc.register_host_action("delivery", host_delivery)
 	qc.on("kill", client_on_kill, TAG)
 	qc.on("guide", client_on_guide, TAG)
 	qc.on("trade", client_on_trade, TAG)

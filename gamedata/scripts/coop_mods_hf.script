@@ -14,6 +14,7 @@
 	  mods.hf_refuel   client -> host  { o }                   lamp refuelled (fuel already used by the client)
 	  mods.hf_box      client -> host  { k kind, o owner }     the hidden box of a workbench / stove / harvester
 	  mods.hf_box_r    host -> client  { k, o, b box | -1 }    answer; the client opens the box when it is online
+	                                                           (the host watches a harvester's box: a client's artefact starts it)
 	  mods.hf_data     host -> all     { o, d data | x }       furniture data changed (hf_obj_manager)
 	  mods.hf_show     client -> host  { c case, i item, m 1|0, s section }   mount / unmount a showcase item
 	  mods.hf_show_map host -> all     { c, m map }            what a showcase displays now
@@ -600,6 +601,59 @@ local function publish_case(ws, case_id)
 	if C().is_host() then C().to_all("hf_show_map", { c = case_id, m = encode_case(ws, case_id) }) end
 end
 
+-- The harvester's start and stop are ActorMenu callbacks of the machine whose window it is, and its data is the host's: a client's
+-- artefact never reached them. The host looks into the boxes and runs the mod's own two halves for what changed.
+local WATCH_MS = 1000
+local harv = { seen = {}, next_look = 0, before = nil, after = nil }
+
+local function harvester_refuses(box_id, item, bag)
+	local flags = { ret_value = true }
+	local menu = actor_menu
+	local line = menu.set_msg
+	menu.set_msg = function() end -- the mod's answer is for the window of the one who moved the item
+	local ok, err = pcall(harv.before, flags, box_id, item, "loot", bag)
+	menu.set_msg = line
+	if not ok then error(err, 0) end
+	return flags.ret_value == false
+end
+
+local function harvester_look(harvester_id, box_id)
+	local box = level.object_by_id(box_id)
+	if not box then return end
+	local was, inside, fresh = harv.seen[box_id], {}, {}
+	box:iterate_inventory_box(function(_, item)
+		inside[item:id()] = true
+		if was and not was[item:id()] then fresh[#fresh + 1] = item end
+	end, box)
+	harv.seen[box_id] = inside
+	local data = hf_obj_manager.get_data(harvester_id) or {}
+	local active = tonumber(data.artifact_item_id)
+	if active and active > 0 then
+		local item = not inside[active] and level.object_by_id(active)
+		if item then harv.after(box_id, item, "loot", nil) end
+		return
+	end
+	local bag = EDDListType.iActorBag
+	for _, item in ipairs(fresh) do
+		if not harvester_refuses(box_id, item, bag) then
+			harv.after(box_id, item, "loot", bag)
+			return
+		end
+	end
+end
+
+local function harvester_watch()
+	local now = time_global()
+	if now < harv.next_look or not C().is_host() then return end
+	harv.next_look = now + WATCH_MS
+	local m = {}
+	bind_artifact_harvester.harvester_save_state(m)
+	for harvester_id, box_id in pairs(m.harvester_stashes or {}) do
+		local ok, err = pcall(harvester_look, harvester_id, box_id)
+		if not ok then log("! harvester %s: %s", tostring(harvester_id), tostring(err)) end
+	end
+end
+
 local function install_gadgets()
 	local bh = C().mod("bind_artifact_harvester")
 	if bh and C().fn(bh, "open_harvester_stash") and C().fn(bh, "harvester_save_state") then
@@ -618,6 +672,8 @@ local function install_gadgets()
 			bh.harvester_save_state(m) -- the mod publishes its box table only here
 			return type(m.harvester_stashes) == "table" and m.harvester_stashes[id] or nil
 		end
+		harv.before, harv.after = C().find_local(bh, "on_item_before_move"), C().find_local(bh, "on_item_after_move")
+		if harv.before and harv.after then RegisterScriptCallback("actor_on_update", harvester_watch) end
 	end
 
 	local ws = C().mod("weapon_showcase")

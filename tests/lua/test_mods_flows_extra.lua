@@ -45,10 +45,35 @@ ui_stove_furniture = {
 	UICookStove = { UseCook = function() COOKED = true end },
 }
 HARV = {}
-bind_artifact_harvester = {
-	open_harvester_stash = function(id) HARV[id] = HARV[id] or spawn("inv_box", vec3(21, 0, 3)).id end,
-	harvester_save_state = function(m) m.harvester_stashes = HARV end,
-}
+HARV_DATA = {} -- harvester id -> the mod's data
+HARV_MOVES = {}
+EDDListType = { iActorBag = 1 }
+hf_obj_manager = hf_obj_manager or {}
+hf_obj_manager.get_data = hf_obj_manager.get_data or function(id) return HARV_DATA[id] end
+do -- file locals of the mod, reachable only through ensure_callbacks_registered
+	local function harvester_of(box_id)
+		for hid, sid in pairs(HARV) do
+			if sid == box_id then return hid end
+		end
+	end
+	local function on_item_before_move(flags, case_id, item, mode, bag_from)
+		if item:section() ~= "af_ok" then
+			flags.ret_value = false
+			actor_menu.set_msg(1, "Only configured artifacts can be inserted.", 3)
+		end
+	end
+	local function on_item_after_move(case_id, item, mode, bag_from)
+		local d = HARV_DATA[harvester_of(case_id)]
+		HARV_MOVES[#HARV_MOVES + 1] = { item = item:id(), bag = bag_from }
+		if bag_from then d.artifact_item_id = item:id() else d.artifact_item_id = 0 end
+	end
+	local function ensure_callbacks_registered() return on_item_before_move, on_item_after_move end
+	bind_artifact_harvester = {
+		open_harvester_stash = function(id) HARV[id] = HARV[id] or spawn("inv_box", vec3(21, 0, 3)).id end,
+		harvester_save_state = function(m) m.harvester_stashes = HARV end,
+		on_game_start = function() ensure_callbacks_registered() end,
+	}
+end
 weapon_showcase = {
 	spawn_displayed_item = function(case, item) weapon_showcase.weapon_displays = weapon_showcase.weapon_displays or {}
 		weapon_showcase.weapon_displays[case] = weapon_showcase.weapon_displays[case] or {}
@@ -103,6 +128,38 @@ if which == "host" then
 	local _, harv = spawn("harvester", vec3(21, 0, 0))
 	from("hf_box", { k = "harvester", o = harv:id() }, 1)
 	check(sent("mods.hf_box_r").b == HARV[harv:id()], "harvester: box id answered")
+	-- A client's moves are his own window's: the host watches the box and runs the mod's two halves
+	do
+		local box_id = HARV[harv:id()]
+		local box_obj = OBJ[box_id]
+		box_obj._kind = "box"
+		HARV_DATA[harv:id()] = {}
+		local kept = spawn("af_ok", vec3(21, 0, 3), box_id)
+		local function watch() NOW = NOW + 1100; SendScriptCallback("actor_on_update") end
+		box_obj.iterate_inventory_box = function(self, f)
+			for id, se in pairs(SE) do
+				if se.parent_id == box_id then f(self, OBJ[id]) end
+			end
+		end
+		watch()
+		check(#HARV_MOVES == 0, "harvester: what lay in the box at the first look starts nothing")
+		local wrong = spawn("af_wrong", vec3(21, 0, 3), box_id)
+		HUD = nil
+		watch()
+		check(#HARV_MOVES == 0 and HUD == nil, "harvester: an item the mod refuses starts nothing, and no line on the host's screen")
+		local put = spawn("af_ok", vec3(21, 0, 3), box_id)
+		watch()
+		check(HARV_MOVES[1] and HARV_MOVES[1].item == put.id and HARV_MOVES[1].bag == EDDListType.iActorBag,
+			"harvester: a client's artefact starts production through the mod's own code")
+		check(HARV_DATA[harv:id()].artifact_item_id == put.id, "harvester: the mod's data has it")
+		watch()
+		check(#HARV_MOVES == 1, "harvester: once")
+		SE[put.id].parent_id = 500
+		watch()
+		check(HARV_MOVES[2] and HARV_MOVES[2].item == put.id and HARV_MOVES[2].bag == nil, "harvester: taken out, the mod stops")
+		alife_release_id(kept.id)
+		alife_release_id(wrong.id)
+	end
 	-- showcase: the item must be in the case
 	local _, case = spawn("showcase", vec3(21, 0, 0))
 	local gun = spawn("wpn_ak", vec3(21, 0, 0), case:id())

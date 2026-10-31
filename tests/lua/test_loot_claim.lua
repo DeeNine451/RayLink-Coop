@@ -1,7 +1,9 @@
 -- Foreign loot (coop_loot_claim): a living stalker who killed something keeps the body for himself, in a session only.
 -- Rules: a kill by any player / a companion / a story character / a monster / a zombie / nobody / suicide is free; another
 -- stalker's kill is a claim of the host's table (saved, small, sent to clients as events and as a snapshot); a player's own
--- machine decides on USE: killer within 25 m = warning, farther = "nothing useful", dead or offline = free; no permanent flag.
+-- machine asks the host on USE and the host decides: an enemy killer within 25 m = warning, farther = "nothing useful"; a
+-- friend (his community is the player's or an ally's, or his relation is friendly) frees the body at once; a neutral one
+-- names a price (200..1000 RU by his rank) and a second USE within 5 s pays it through the host; dead or offline = free.
 -- Run: tools\test_lua.cmd loot_claim
 dofile("tests/lua/support/harness_quests.lua")
 
@@ -20,8 +22,19 @@ local function setup_world(M)
 	e.get_object_story_id = function(id) return e.story[id] end
 	e.game.translate_string = function(id)
 		if id:find("^st_npc_loot_claim_") and not M.mod_strings then return id end -- the mod's text is not installed
+		if id == "st_coop_news_loot_price" then return "P(%d|%d)" end
+		if id == "st_coop_news_loot_poor" then return "N(%d)" end
 		return "T(" .. id .. ")"
 	end
+	-- how a killer sees a player's character (relation(): 0 friend, 1 neutral, 2 enemy) and how the factions see each other
+	M.ObjMT.relation = function(self, other) return (self._rel and self._rel[other._id]) or 1 end
+	M.ObjMT.money = function(self) return self._money end
+	M.comm = { ["stalker>bandit"] = "enemy", ["stalker>freedom"] = "friend" }
+	e.game_relations = {
+		is_factions_friends = function(a, b) return M.comm[a .. ">" .. b] == "friend" end,
+		is_factions_enemies = function(a, b) return M.comm[a .. ">" .. b] == "enemy" end,
+	}
+	M.actor._comm = "actor_stalker"
 	e.rules = { ["core/loot_claim"] = true }
 	e.coop_settings = { rule = function(key) return e.rules[key] end }
 	M.msgs, M.tips = {}, {}
@@ -54,6 +67,7 @@ local function key_press(M)
 	local flags = {}
 	M.fire_key = true
 	fire(M, "on_before_key_press", KEY_USE, KEY_USE, false, flags)
+	pump() -- the client's request, the host's answer
 	return flags.ret_value == false
 end
 
@@ -69,8 +83,8 @@ for _, M in ipairs({ Hm, Cm }) do
 	M.victim._dead = true
 	M.killer = stalker(M, 801, vec(20, 0, 0), "bandit")
 end
-Hm.proxy = stalker(Hm, 500, vec(40, 0, 0)) -- the client's character on the host
-Cm.actor._pos = vec(40, 0, 0)
+Hm.proxy = stalker(Hm, 500, vec(11, 0, 0), "actor_stalker") -- the client's character on the host, next to the body
+Cm.actor._pos = vec(11, 0, 0)
 boot(Hm)
 boot(Cm)
 local LC = Hm.env.coop_loot_claim
@@ -188,7 +202,7 @@ print("== USE on a body")
 do
 	Cm.look = Cm.objects[701]
 	Cm.mod_strings = true
-	-- the killer is 20 m from the body; the client stands at 40 m: 20 m from him -> near
+	-- the client stands next to the body, the killer is 9 m from him -> near
 	check(key_press(Cm) == true, "near killer: USE refused")
 	check(#Cm.tips == 1 and Cm.tips[1].text:find("^T%(st_npc_loot_claim_last_%d%)$") ~= nil, "a warning came as a tip")
 	check(Cm.tips[1] and Cm.tips[1].head:find("Sidor801", 1, true) ~= nil, "from the killer by name")
@@ -204,7 +218,7 @@ do
 	NOW = NOW + 3000
 	check(key_press(Cm) == true and #Cm.tips == 0 and Cm.msgs[1] == "T(st_npc_loot_claim_far)", "far killer: refused, nothing useful")
 	NOW = NOW + 3000
-	Cm.killer._pos = vec(45, 0, 0)
+	Cm.killer._pos = vec(30, 0, 0)
 	Cm.tips = {}
 	check(key_press(Cm) == true and #Cm.tips == 1, "he comes back: the warning again (no permanent flag)")
 	-- the engine's reach: 2 m
@@ -230,7 +244,7 @@ do
 	Cm.env.rules["core/loot_claim"] = true
 	-- the host's own player goes the same way
 	Hm.look = Hm.objects[701]
-	Hm.actor._pos = vec(21, 0, 0)
+	Hm.actor._pos = vec(11, 0, 0)
 	Hm.tips = {}
 	NOW = NOW + 3000
 	check(key_press(Hm) == true and #Hm.tips == 1, "the host presses USE: the same answer")
@@ -247,7 +261,7 @@ do
 	Cm.killer._dead = true
 	check(key_press(Cm) == false, "the killer is dead: the body is free")
 	Cm.killer._dead = false
-	Cm.killer._pos = vec(45, 0, 0)
+	Cm.killer._pos = vec(20, 0, 0)
 end
 
 print("== the host frees a row when it is useless")
@@ -379,6 +393,298 @@ do
 	fire(Hm, "actor_on_update")
 	check(LC.claim_count() == 0, "a stale row is dropped at the first scan")
 	Hm.killer._dead = false
+end
+
+print("== a deal over a body")
+do
+	-- the clients' balances on the host's ledger; the host's own player pays from his actor
+	local BAL = { [1] = 5000 }
+	install_money_stubs(Hm.env.coop, {
+		calls = Hm.money_calls,
+		is_host = function() return true end,
+		balance = function(peer) return BAL[peer] end,
+		on_call = function(fn, peer, n) if fn == "money_grant" then BAL[peer] = (BAL[peer] or 0) + n end end,
+	})
+	local function grants()
+		local n = 0
+		for _, c in ipairs(Hm.money_calls) do if c.fn == "money_grant" then n = n + 1 end end
+		return n
+	end
+	local function last_grant() return Hm.money_calls[#Hm.money_calls] end
+	Cm.mod_strings = false
+	Hm.killer._dead, Cm.killer._dead = false, false
+
+	local next_body, next_killer = 1300, 1400
+	-- a fresh body killed by a new stalker of this community, on both machines; opts.rank, opts.rel (his relation to the
+	-- client's character on the host) and opts.far (the killer stands 90 m from the body, on the client's machine)
+	local function incident(comm, opts)
+		opts = opts or {}
+		next_body, next_killer = next_body + 1, next_killer + 1
+		fresh_victim(next_body)
+		local k = stalker(Hm, next_killer, vec(20, 0, 0), comm)
+		stalker(Cm, next_killer, opts.far and vec(100, 0, 0) or vec(20, 0, 0), comm)
+		k._rank = opts.rank
+		if opts.rel then k._rel = { [500] = opts.rel, [0] = opts.rel } end
+		die(next_body, k)
+		return next_body, next_killer
+	end
+	-- USE on body v on a machine, a second after the last press
+	local function use(M, v)
+		M.look = M.objects[v]
+		NOW = NOW + 1000
+		M.tips, M.msgs = {}, {}
+		return key_press(M)
+	end
+	local function ask_raw(v, peer)
+		Hm.handlers["quests.loot_deal"](H.encode({ v = v }), peer or 1)
+		pump()
+	end
+	local function says() return count_sent(Hm, "quests.loot_say") end
+	local function said() return last_sent(Hm, "quests.loot_say") end
+	check(Hm.handlers["quests.loot_deal"] and Cm.handlers["quests.loot_say"], "the deal events are handled")
+
+	-- friend: free at once, one line from him
+	do
+		local v, k = incident("stalker")
+		local freed = count_sent(Hm, "quests.loot_free")
+		check(use(Cm, v) == true, "a friend (his community is the player's): that press is refused")
+		check(LC.claim_of(v) == nil and LC_C.claim_of(v) == nil, "the body is free at once, on the host and on the client")
+		check(count_sent(Hm, "quests.loot_free") == freed + 1, "one free event")
+		check(#Cm.tips == 1 and Cm.tips[1].text:find("^T%(st_coop_news_loot_friend_%d%)$") ~= nil, "one line: he lets you take it")
+		check(Cm.tips[1] and Cm.tips[1].head:find("Sidor" .. k, 1, true) ~= nil, "his name is in the line")
+		check(#Cm.msgs == 0 and grants() == 0, "no money moved")
+		check(use(Cm, v) == false, "the next press opens the body")
+		v, k = incident("freedom")
+		use(Cm, v)
+		check(LC.claim_of(v) == nil and #Cm.tips == 1, "a friend (an allied community): free")
+		v, k = incident("dolg", { rel = 0 })
+		use(Cm, v)
+		check(LC.claim_of(v) == nil and #Cm.tips == 1, "a friend (his relation to the player is friendly): free")
+		v, k = incident("bandit", { rel = 0 })
+		use(Cm, v)
+		check(LC.claim_of(v) == nil, "a friendly relation wins over enemy communities")
+		v, k = incident("stalker", { far = true })
+		use(Cm, v)
+		check(LC.claim_of(v) == nil and #Cm.tips == 1, "a friend far away: the same")
+	end
+
+	-- enemy: the threat stays, no deal
+	do
+		local v, k = incident("bandit")
+		check(use(Cm, v) == true and #Cm.tips == 1 and Cm.tips[1].text:find("^T%(st_coop_news_loot_last_%d%)$") ~= nil,
+			"an enemy community: the threat")
+		check(LC.claim_of(v) == k and grants() == 0, "the claim stays, no money")
+		NOW = NOW + 1500 -- the same warning is not shown twice within 2 s
+		check(use(Cm, v) == true and #Cm.tips == 1 and Cm.tips[1].text:find("last_", 1, true) ~= nil and grants() == 0,
+			"a second press is no deal either")
+		v, k = incident("dolg", { rel = 2 })
+		NOW = NOW + 1500
+		use(Cm, v)
+		check(LC.claim_of(v) == k and Cm.tips[1] and Cm.tips[1].text:find("last_", 1, true) ~= nil, "an enemy by relation: the threat")
+		v, k = incident("bandit", { far = true })
+		check(use(Cm, v) == true and #Cm.tips == 0 and Cm.msgs[1] == "T(st_coop_news_loot_far)", "an enemy far away: nothing useful")
+		check(LC.claim_of(v) == k, "and the claim stays")
+	end
+
+	-- neutral: a price, then payment
+	do
+		local v, k = incident("dolg")
+		local asks = count_sent(Cm, "quests.loot_deal")
+		check(use(Cm, v) == true, "a neutral killer: the first press is refused")
+		check(count_sent(Cm, "quests.loot_deal") == asks + 1, "the client asked the host once")
+		check(#Cm.tips == 1 and Cm.tips[1].text == "P(200|5)", "the price in a line (200 RU, 5 s)")
+		check(Cm.tips[1] and Cm.tips[1].head:find("Sidor" .. k, 1, true) ~= nil, "from him by name")
+		check(LC.claim_of(v) == k and LC_C.claim_of(v) == k and grants() == 0 and BAL[1] == 5000, "the claim stays, nothing is paid")
+		check(use(Cm, v) == true, "the second press: refused, it pays")
+		check(grants() == 1 and last_grant().peer == 1 and last_grant().n == -200 and BAL[1] == 4800, "the host took 200 RU from the client")
+		check(LC.claim_of(v) == nil and LC_C.claim_of(v) == nil, "the body is free for everybody")
+		check(#Cm.tips == 1 and Cm.tips[1].text == "T(st_coop_news_loot_paid)", "he says so")
+		check(use(Cm, v) == false, "the next press opens the body")
+		-- a repeat cannot pay twice
+		local n = says()
+		NOW = NOW + 1000
+		ask_raw(v)
+		check(grants() == 1 and BAL[1] == 4800 and said().a == "gone" and says() == n + 1, "a repeated request: not charged, the body is free")
+		NOW = NOW + 1000
+		ask_raw(v)
+		check(grants() == 1 and BAL[1] == 4800, "and again")
+	end
+
+	-- the price by rank
+	do
+		local want = { [0] = 200, [1234] = 240, [3500] = 300, [5000] = 350, [7750] = 450, [12000] = 620, [20000] = 900,
+			[27000] = 1000, [90000] = 1000 }
+		local ranks = {}
+		for r in pairs(want) do ranks[#ranks + 1] = r end
+		table.sort(ranks)
+		local prev, ok_round, ok_range = 0, true, true
+		local got = {}
+		for _, r in ipairs(ranks) do
+			local v = incident("dolg", { rank = r })
+			use(Cm, v)
+			local p = said().p
+			got[#got + 1] = r .. "=" .. tostring(p)
+			ok_round = ok_round and p % 10 == 0
+			ok_range = ok_range and p >= 200 and p <= 1000 and p >= prev
+			prev = p
+			check(p == want[r], "rank " .. r .. " costs " .. want[r] .. " (" .. tostring(p) .. ")")
+		end
+		check(ok_round and ok_range, "prices are tens, between 200 and 1000, never fall with the rank (" .. table.concat(got, " ") .. ")")
+	end
+
+	-- not enough money, a late second press, a quote is for one body, rate limits
+	do
+		BAL[1] = 100
+		local v, k = incident("dolg")
+		use(Cm, v)
+		local before = grants()
+		check(use(Cm, v) == true and #Cm.tips == 1 and Cm.tips[1].text == "N(200)", "not enough money: a line with the sum")
+		check(grants() == before and BAL[1] == 100 and LC.claim_of(v) == k and LC_C.claim_of(v) == k, "nothing is taken, the claim stays")
+		BAL[1] = 5000
+		check(use(Cm, v) == true and #Cm.tips == 1 and Cm.tips[1].text == "P(200|5)" and grants() == before, "the next press is a new price")
+
+		NOW = NOW + 6000
+		use(Cm, v)
+		check(grants() == before and LC.claim_of(v) == k and Cm.tips[1] and Cm.tips[1].text == "P(200|5)", "a second press after 5 s only names the price again")
+		use(Cm, v)
+		check(grants() == before + 1 and LC.claim_of(v) == nil, "and the one after it pays")
+
+		local a = incident("dolg")
+		local b = incident("dolg")
+		local g = grants()
+		use(Cm, a)
+		use(Cm, b)
+		use(Cm, a)
+		check(grants() == g and LC.claim_of(a) ~= nil and LC.claim_of(b) ~= nil, "a quote is for one body: the other body is quoted again")
+		use(Cm, a)
+		check(grants() == g + 1 and LC.claim_of(a) == nil and LC.claim_of(b) ~= nil, "and it pays for that one only")
+
+		-- a quick double press is no deal
+		local c = incident("dolg")
+		Cm.look = Cm.objects[c]
+		g = grants()
+		local asks = count_sent(Cm, "quests.loot_deal")
+		NOW = NOW + 1000
+		key_press(Cm)
+		NOW = NOW + 100
+		local flags = {}
+		fire(Cm, "on_before_key_press", KEY_USE, KEY_USE, false, flags)
+		pump()
+		check(flags.ret_value == false and count_sent(Cm, "quests.loot_deal") == asks + 1 and grants() == g, "a double press asks the host once and pays nothing")
+		-- and the host holds the same line for a client that does not
+		local d = incident("dolg")
+		NOW = NOW + 1000
+		local n = says()
+		ask_raw(d)
+		NOW = NOW + 100
+		ask_raw(d)
+		check(says() == n + 1 and grants() == g, "the host answers a peer at most once in a moment")
+		NOW = NOW + 1000
+		ask_raw(d)
+		check(says() == n + 2 and grants() == g + 1, "later it pays")
+	end
+
+	-- the host checks the request
+	do
+		local v, k = incident("dolg")
+		NOW = NOW + 1000
+		ask_raw(v)
+		local g, n = grants(), says()
+		Hm.proxy._pos = vec(60, 0, 0)
+		NOW = NOW + 1000
+		ask_raw(v)
+		check(says() == n and grants() == g and LC.claim_of(v) == k, "a character far from the body: no answer, no money")
+		Hm.proxy._pos = vec(11, 0, 0)
+		Hm.env.rules["core/loot_claim"] = false
+		NOW = NOW + 1000
+		ask_raw(v)
+		check(says() == n and grants() == g and LC.claim_of(v) == k, "the setting off: no answer, no money")
+		Hm.env.rules["core/loot_claim"] = true
+		Hm.proxy._dead = true
+		NOW = NOW + 1000
+		ask_raw(v)
+		Hm.proxy._dead = false
+		check(says() == n and grants() == g, "a dead character: no answer")
+		-- junk
+		for _, bad in ipairs({ "x", -1, 70000, 1.5 }) do
+			NOW = NOW + 1000
+			Hm.handlers["quests.loot_deal"](H.encode({ v = bad }), 1)
+			pump()
+		end
+		NOW = NOW + 1000
+		Hm.handlers["quests.loot_deal"](H.encode({}), 1)
+		NOW = NOW + 1000
+		Hm.handlers["quests.loot_deal"](H.encode({ v = v }), 0)
+		NOW = NOW + 1000
+		Hm.handlers["quests.loot_deal"](H.encode({ v = v }), 7)
+		pump()
+		check(says() == n and grants() == g, "bad ids, the host's own peer, a peer with no character: ignored")
+		NOW = NOW + 1000
+		fresh_victim(1390)
+		ask_raw(1390)
+		check(said().a == "gone" and says() == n + 1 and grants() == g, "a body nobody claimed: free")
+		-- the killer died or went offline between the press and the answer
+		NOW = NOW + 1000
+		Hm.objects[k]._dead = true
+		local freed = count_sent(Hm, "quests.loot_free")
+		Cm.tips = {}
+		ask_raw(v)
+		check(said().a == "gone" and LC.claim_of(v) == nil and LC_C.claim_of(v) == nil and #Cm.tips == 0, "the killer is dead: the row goes, no line")
+		check(count_sent(Hm, "quests.loot_free") == freed + 1 and grants() == g, "told to the clients, no money")
+		local v2, k2 = incident("dolg")
+		NOW = NOW + 1000
+		local keep = Hm.objects[k2]
+		Hm.objects[k2] = nil
+		ask_raw(v2)
+		Hm.objects[k2] = keep
+		check(said().a == "gone" and LC.claim_of(v2) == nil, "the killer is offline: the row goes")
+		-- the client side takes answers from the host only
+		Cm.tips = {}
+		Cm.handlers["quests.loot_say"](H.encode({ v = 1, k = k, a = "friend" }), 3)
+		Cm.handlers["quests.loot_say"](H.encode({ v = 1, k = k, a = "zzz" }), 0)
+		Cm.handlers["quests.loot_say"](H.encode({ v = "x", k = k, a = "friend" }), 0)
+		Cm.handlers["quests.loot_say"](H.encode({ k = k, a = "friend" }), 0)
+		check(#Cm.tips == 0, "an answer from another peer, an unknown one, a broken one: nothing is shown")
+	end
+
+	-- far killers deal as well; no network answer: the old refusal
+	do
+		local v, k = incident("dolg", { far = true })
+		use(Cm, v)
+		check(#Cm.tips == 1 and Cm.tips[1].text == "P(200|5)", "a neutral killer far away names a price too")
+		use(Cm, v)
+		check(LC.claim_of(v) == nil and BAL[1] < 5000, "and is paid")
+		local w, kw = incident("dolg")
+		local keep = Cm.env.coop.send_event
+		Cm.env.coop.send_event = function() return false end
+		use(Cm, w)
+		Cm.env.coop.send_event = keep
+		check(#Cm.tips == 1 and Cm.tips[1].text:find("last_", 1, true) ~= nil and LC.claim_of(w) == kw,
+			"the request could not go out: the body stays closed with the old warning")
+	end
+
+	-- the host's own player
+	do
+		Hm.actor._money = 1000
+		local g = grants()
+		local v, k = incident("dolg")
+		check(use(Hm, v) == true and #Hm.tips == 1 and Hm.tips[1].text == "P(200|5)", "the host presses USE: the price")
+		check(use(Hm, v) == true and Hm.actor._money == 800 and grants() == g, "the second press takes the money from his actor, not the ledger")
+		check(LC.claim_of(v) == nil and LC_C.claim_of(v) == nil and Hm.tips[1] and Hm.tips[1].text == "T(st_coop_news_loot_paid)",
+			"the body is free for the client too")
+		check(use(Hm, v) == false, "he can open it")
+		Hm.actor._money = 50
+		v, k = incident("dolg")
+		use(Hm, v)
+		check(use(Hm, v) == true and Hm.tips[1] and Hm.tips[1].text == "N(200)" and Hm.actor._money == 50 and LC.claim_of(v) == k,
+			"the host is short of money: a line with the sum, nothing taken")
+		v, k = incident("stalker")
+		check(use(Hm, v) == true and #Hm.tips == 1 and Hm.tips[1].text:find("friend_", 1, true) ~= nil and LC.claim_of(v) == nil
+			and LC_C.claim_of(v) == nil, "the host's friend: free at once")
+		v, k = incident("bandit")
+		check(use(Hm, v) == true and Hm.tips[1] and Hm.tips[1].text:find("last_", 1, true) ~= nil and LC.claim_of(v) == k, "the host's enemy: the threat")
+		check(pcall(LC.print_status), "the status line prints")
+	end
 end
 
 print("== single player")

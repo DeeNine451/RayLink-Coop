@@ -51,6 +51,7 @@ local function setup_world(M)
 	M.talk_npc = M.npc
 	e.dialogs.is_trade_accept = function() M.stock_trade = (M.stock_trade or 0) + 1 return true end
 	e.dialogs.update_npc_dialog = function() M.updated = (M.updated or 0) + 1 end
+	e.dialogs.complete_simulation_task = function() M.completed = (M.completed or 0) + 1 end
 
 	-- xr_bribe
 	M.peace = {}
@@ -322,6 +323,29 @@ do
 	check(Cm.updated == nil, "update_npc_dialog does nothing on a client")
 	Hm.env.dialogs.update_npc_dialog(Hm.actor, Hm.npc)
 	check(Hm.updated == 1, "...and is the stock function on the host")
+end
+
+print("== a delivery ends on the client: the host stops keeping the target's squad out of offline combat")
+do
+	local squad = { id = 950 }
+	Hm.env.get_object_squad = function(o) return o == Hm.npc and squad or nil end
+	Hm.env.sim_offline_combat.task_squads[950] = true
+	Hm.talked = true
+	Cm.completed = 0
+	Cm.env.dialogs.complete_simulation_task(Cm.actor, Cm.npc)
+	pump()
+	check(Cm.completed == 1, "the stock function runs on the client: the task, his pstor")
+	check(Hm.env.sim_offline_combat.task_squads[950] == nil, "the host's protection of the squad is gone")
+	Hm.env.sim_offline_combat.task_squads[950] = true
+	Hm.talked = false
+	NOW = NOW + PACE_WAIT_MS
+	Cm.env.dialogs.complete_simulation_task(Cm.actor, Cm.npc)
+	pump()
+	check(Hm.env.sim_offline_combat.task_squads[950] == true, "without a talk with that NPC nothing changes")
+	Hm.talked = true
+	Hm.completed = 0
+	Hm.env.dialogs.complete_simulation_task(Hm.actor, Hm.npc)
+	check(Hm.completed == 1, "the host's own call is the stock one")
 end
 
 print("== the food and the trust are the player's")

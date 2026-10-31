@@ -347,6 +347,29 @@ TEST(manifest_leaves_out_textures_only)
 	CHECK(!manifest_visual_only("scripts\\grok_textures.script"));
 }
 
+TEST(manifest_leaves_out_what_the_game_writes)
+{
+	// live 2026-10-29: a client was refused for these two, written by his own game through mods he had on
+	CHECK(manifest_game_written("configs\\laser_settings_user.ltx"));
+	CHECK(manifest_game_written("configs\\medik_welcomed.flag"));
+	CHECK(manifest_game_written("Configs/Some_Mod_USER.LTX"));
+	CHECK(manifest_game_written("configs\\axr_options.ltx"));
+	CHECK(manifest_game_written("configs/cache_dbg.ltx"));
+	CHECK(manifest_game_written("CONFIGS\\Localization.ltx"));
+	CHECK(manifest_game_written("configs\\localization.ltx.bak"));
+	CHECK(manifest_game_written("logs\\session.log"));
+	CHECK(manifest_game_written("awr_table.txt"));
+	CHECK(manifest_game_written("cache\\a.tmp"));
+	// content, even when the name looks close
+	CHECK(!manifest_game_written("configs\\system.ltx"));
+	CHECK(!manifest_game_written("configs\\items\\axr_options.ltx"));
+	CHECK(!manifest_game_written("configs\\user_settings.ltx"));
+	CHECK(!manifest_game_written("configs\\superuser.ltx"));
+	CHECK(!manifest_game_written("scripts\\flag_carrier.script"));
+	CHECK(!manifest_game_written("scripts\\medik.flag.script"));
+	CHECK(!manifest_game_written("configs\\mod_system_flag.ltx"));
+}
+
 TEST(manifest_fingerprint_order_independent)
 {
 	Manifest a = {{"a.ltx", 1}, {"b.script", 2}, {"c.ogf", 3}, {"d.dds", 4}};

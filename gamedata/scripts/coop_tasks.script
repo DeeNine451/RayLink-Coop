@@ -925,7 +925,7 @@ end
 
 -- Host: an effect on a player's own character, run by his machine. It waits for his answer and goes out again on his next
 -- sync: a level change or a reconnect right after the turn-in would lose it (client_on_reward needs an actor), and money
--- may already have been taken for it. Kept in this Lua state only: a restart of the host forgets it.
+-- may already have been taken for it. The host's save keeps what waits (save_effects).
 local function send_effect(peer, t)
 	host.fx_seq = host.fx_seq + 1
 	t.q = host.fx_seq
@@ -2781,6 +2781,25 @@ local function register_events()
 	end))
 end
 
+-- Host: effects nobody answered yet, in the save: a restart of the host must not lose what was already paid for.
+function save_effects(m_data)
+	local wait
+	for key, list in pairs(host.fx_wait) do
+		if #list > 0 then
+			wait = wait or {}
+			wait[key] = list
+		end
+	end
+	m_data.coop_task_fx = wait and { seq = host.fx_seq, wait = wait } or nil
+end
+
+function load_effects(m_data)
+	local saved = m_data.coop_task_fx
+	host.fx_seq = saved and saved.seq or 0
+	host.fx_wait = saved and saved.wait or {}
+	m_data.coop_task_fx = nil
+end
+
 function print_status()
 	local role = not api and "no engine API" or is_host() and "host" or is_client() and "client" or "off"
 	local n_stub, n_real = 0, 0
@@ -2838,6 +2857,8 @@ function on_game_start()
 	end
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_reinit", actor_on_reinit)
+	RegisterScriptCallback("save_state", save_effects)
+	RegisterScriptCallback("load_state", load_effects)
 	-- Parity audit D10: this machine dropped events (a long stall): one of them may be a task's, ask for the whole list
 	RegisterScriptCallback("coop_events_lost", function()
 		if client_live() then client_request_sync() end

@@ -1184,6 +1184,7 @@ constexpr Direction kDirections[] = {
 	{Msg::EntityTraits, kHost},
 	{Msg::EntitySquad, kHost},
 	{Msg::LampState, kHost}, // audit W2: the host's word on its lamps
+	{Msg::Thunderbolt, kHost}, // audit W5: the host's bolts
 	// requests and their results
 	{Msg::ReqSpawn, kClient},
 	{Msg::ReqDestroy, kClient},

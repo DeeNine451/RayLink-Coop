@@ -10,12 +10,12 @@
 
 	Modes 2 and 3 count the characters of the world (coop.members), also of players who left: such a character lives on
 	in the host's save, so its money (coop.money_grant_to) and items go straight onto it. A character out of a hardcore
-	run is no member. What came meanwhile is noted per character, in the host's save, and shown to its player once, when
+	run is no member, the host's own too (coop.out_of_run). What came meanwhile is noted per character, in the host's save, and shown to its player once, when
 	he is back: the money and every item in his PDA feed (coop_tasks, event k = "away"; coop_quests_news.show_rewards).
 	Quest items stay single: the story needs one of them, and a group check counts the whole party anyway. Reputation,
 	rank and goodwill stay with the player who turned the task in.
 
-		coop_reward_group.list() -> the group of one reward, the host first: { id, peer | nil, in_world }
+		coop_reward_group.list() -> the group of one reward, the host first unless he is out of the run: { id, peer | nil, in_world }
 		coop_reward_group.shareable(section) -> bool
 		coop_reward_group.money_plan(n, group, rcpt, full) -> { { m = member, n = RU }, ... }
 		coop_reward_group.item_targets(group, full) -> the members one unit goes to
@@ -38,7 +38,10 @@ local book = {} -- character id -> what came while its player was away, see peek
 local turn = 0 -- how many items of shared rewards were given: the next one goes to this place of the group
 
 function list()
-	local group = { { id = 0, peer = 0, in_world = true } }
+	local out = api and api.out_of_run
+	local host_out = type(out) == "function" and out(0) == true
+	local group = {}
+	if not host_out then group[1] = { id = 0, peer = 0, in_world = true } end
 	local get = api and api.members
 	local ok, members = false, nil
 	if type(get) == "function" then ok, members = pcall(get) end
@@ -47,6 +50,7 @@ function list()
 			group[#group + 1] = { id = m.id, peer = m.peer, in_world = m.in_world == true }
 		end
 	end
+	if #group == 0 then group[1] = { id = 0, peer = 0, in_world = true } end -- a reward needs somebody: the host, out or not
 	return group
 end
 

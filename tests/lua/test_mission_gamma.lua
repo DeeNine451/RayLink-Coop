@@ -367,6 +367,38 @@ do
 	check(H.timers[1] and H.timers[1].name == "stht_update", "its time event runs again")
 end
 
+print("== Hidden Threat: its rank gate counts an army client, not the host alone")
+do
+	local H, E = host_world()
+	local NEWS = {}
+	do
+		local cond_rank = 1000
+		local function hidden_threat_update() return cond_rank end
+		E.hidden_threat = { touch = function() return hidden_threat_update end }
+	end
+	E.utils_slht = { valid_faction_actor = function() return true end,
+		HTCreateNews = function(_, msg) NEWS[#NEWS + 1] = msg end }
+	H.objects[500]._comm = "actor_army"
+	H.objects[500].character_rank = function() return 400 end
+	E.db.actor.character_rank = function() return 100 end
+	start_nta(H)
+	NOW = NOW + 6000
+	H.fire("actor_on_update")
+	check(E.INFOS.hidden_threat_start == nil, "under the rank: not yet")
+	H.objects[500].character_rank = function() return 1200 end
+	NOW = NOW + 6000
+	H.fire("actor_on_update")
+	check(E.INFOS.hidden_threat_start == true and NEWS[1] == "st_sl_hidden_threat_msg_start", "the army client reached it: the stock start")
+	NOW = NOW + 6000
+	H.fire("actor_on_update")
+	check(#NEWS == 1, "once")
+	E.INFOS.hidden_threat_start = nil
+	E.INFOS.hidden_threat_disabled = true
+	NOW = NOW + 6000
+	H.fire("actor_on_update")
+	check(E.INFOS.hidden_threat_start == nil, "a storyline that is off stays off")
+end
+
 print("== Mystery of the Swamps: the ghost's blow lands on the player nearest to it")
 do
 	local H, E = host_world()

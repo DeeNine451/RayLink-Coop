@@ -172,6 +172,78 @@ TAKER, GIVER = 1, nil
 H.env.xr_effects.add_speaker_companion(H.env.db.actor, nil, { "simulation_task_66" })
 check(H.speaker_refused == true, "no giver known: the stock effect decides (it refuses without a talk)")
 
+print("== recruits of a client: the Fanatic at Rookie Village, a hired squad")
+do
+	local H2, C2, proxy2 = pair()
+	local sq2 = {}
+	local make2 = stock(H2, sq2)
+	stock(C2, {})
+	for _, M in ipairs({ H2, C2 }) do
+		local E = M.env
+		M.ran = {}
+		local recruit = function(a, b)
+			M.ran[#M.ran + 1] = "recruit"
+			E.axr_companions.companion_squads[E.get_object_squad(b).id] = E.get_object_squad(b)
+		end
+		E.dialogs_axr_companion = { become_actor_companion = recruit }
+		E.dialogs_escape = { set_esc_2_12_stalker_fanat_as_companion = recruit }
+		local period
+		E.txr_paid_companions = {
+			paid_companions = {},
+			take_guard_money_1 = function() period = 86400 end,
+			take_guard_money_2 = function() period = 172800 end,
+			register_paid_companion = function(a, b)
+				local s = E.get_object_squad(b)
+				if s and E.axr_companions.companion_squads[s.id] then
+					E.txr_paid_companions.paid_companions[s.id] = { guard_period = period }
+				end
+			end,
+		}
+		E.coop.talk_recent = function() return true end
+	end
+	local HC = load_script(H2, "coop_npc_companions")
+	local CC2 = load_script(C2, "coop_npc_companions")
+	HC.on_game_start()
+	CC2.on_game_start()
+	H2.fire("actor_on_update")
+	local fanat_squad = make2(600)
+	local fanat = H2.add(make_obj(601, 12, 0, 0, { _name = "fanat" }))
+	local fanat_copy = C2.add(make_obj(601, 2, 0, 0, { _name = "fanat" }))
+	C2.env.get_object_squad = function(o) return o:id() == 601 and fanat_squad or nil end
+	C2.env.dialogs_escape.set_esc_2_12_stalker_fanat_as_companion(C2.env.db.actor, fanat_copy)
+	pump()
+	check(#C2.ran == 0, "the Fanatic: nothing runs on the client's copy")
+	check(H2.ran[1] == "recruit" and HC._leaders()[600] == 500, "the Fanatic: the host recruits him for the client's character")
+
+	local hired = make2(610)
+	local merc = H2.add(make_obj(611, 12, 0, 0, { _name = "merc" }))
+	local merc_copy = C2.add(make_obj(611, 2, 0, 0, { _name = "merc" }))
+	C2.env.get_object_squad = function(o) return o:id() == 611 and hired or nil end
+	C2.env.txr_paid_companions.take_guard_money_2(C2.env.db.actor, merc_copy)
+	C2.env.dialogs_axr_companion.become_actor_companion(C2.env.db.actor, merc_copy)
+	C2.env.txr_paid_companions.register_paid_companion(C2.env.db.actor, merc_copy)
+	pump()
+	local e = H2.env.txr_paid_companions.paid_companions[610]
+	check(C2.env.txr_paid_companions.paid_companions[610] == nil, "a hire: not on the client's copy")
+	check(e ~= nil and e.guard_period == 172800, "a hire: the host's table runs the contract, for the days the client paid")
+
+	-- the contract ends on the host: the client's dialog menu must not keep a companion
+	merc._info.npcx_is_companion = true
+	merc_copy._info.npcx_is_companion = true
+	H2.env.coop_tasks = nil
+	NOW = NOW + 5000
+	H2.fire("actor_on_update")
+	pump()
+	check(HC._leaders()[610] == 500, "still hired: he keeps his leader")
+	H2.env.axr_companions.companion_squads[610] = nil
+	merc._info.npcx_is_companion = nil
+	NOW = NOW + 5000
+	H2.fire("actor_on_update")
+	pump()
+	check(HC._leaders()[610] == nil, "the contract ended: no leader")
+	check(not merc_copy:has_info("npcx_is_companion"), "...and the client's copy is told")
+end
+
 print("== a client machine is not touched")
 local CC = load_script(C, "coop_npc_companions")
 CC.on_game_start()

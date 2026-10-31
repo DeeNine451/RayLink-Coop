@@ -643,6 +643,22 @@ local function on_new_player()
 	end
 end
 
+-- Hidden Threat starts at a rank, read on db.actor: an army client who reaches it starts it the stock way.
+local function hidden_threat_rank()
+	if not C().is_host() or has_alife_info("hidden_threat_start") or has_alife_info("hidden_threat_disabled") then return end
+	local ht, u = C().mod("hidden_threat"), C().mod("utils_slht")
+	local rank = ht and u and C().find_local(ht, "cond_rank")
+	if type(rank) ~= "number" then return end
+	for _, p in ipairs(C().player_objects()) do
+		if faction_of(p.obj) == "army" and p.obj:character_rank() >= rank then
+			-- the quest's opening message is his: it names him and comes to his PDA
+			coop_npc_players.with_identity(p.obj, u.HTCreateNews, "kuznetsov", "st_sl_hidden_threat_msg_start", 0, true, true)
+			give_info("hidden_threat_start")
+			return
+		end
+	end
+end
+
 local poll = { next = 0, players = 1 }
 
 local function poll_players()
@@ -655,6 +671,8 @@ local function poll_players()
 		if not ok then C().report("nta", "new player", e) end
 	end
 	poll.players = n
+	local ok, e = pcall(hidden_threat_rank)
+	if not ok then C().report("nta", "hidden threat", e) end
 end
 
 -------------------------------------------------------------------------------
