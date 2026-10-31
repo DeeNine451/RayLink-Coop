@@ -71,5 +71,6 @@ item_device.device_binder                 = update
 ; and does not catch their errors in Release (script_callback_ex.h process_error is empty without XRAY_EXCEPTIONS). A
 ; puppet dies when the host says so, the player uses a corpse, nobody asked the player's game for these. The update of a
 ; dead mutant runs on a client as well (coop::rules::puppet_binder_runs): it offers the skinning.
-xr_motivator.motivator_binder         = death_callback, hit_callback, use_callback
+; update of the stalker binder: a puppet's never runs; on a client who leads his level (F3a) it does, and a Lua error stays a log line
+xr_motivator.motivator_binder         = death_callback, hit_callback, use_callback, update
 bind_monster.generic_object_binder    = death_callback, hit_callback, use_callback, update

@@ -1,0 +1,74 @@
+; Anomaly Coop - F3a multilevel, docs\SPLIT_LEVELS.md section 4: the domain `level`. What an object online on a level does runs on
+; the process that computes that level: the host for its level and, with split levels, a client who leads his. Everything else
+; of the world stays `host`: sim_board, smart_terrain, sim_squad_*, tasks_*, warfare*, xr_effects, xr_conditions, the story.
+;
+; These sections are no routes: a route says where a handler runs with one level for everybody, and the generated
+; coop_route_stock.ltx / coop_route_gamma.ltx stay as they are. These lines name, among what runs on the host, what is the behaviour
+; of an online object (xrCoop\coop_routes.h Table::level_behaviour). With coop_split_levels off nothing changes: `level` then runs
+; exactly where `host` does.
+
+[level_callbacks]
+; by the callback: an NPC, a mutant or a physics object does these where it is online
+npc_on_choose_weapon          = level
+npc_on_item_take              = level
+npc_on_item_take_from_box     = level
+npc_on_item_drop              = level
+npc_on_net_spawn              = level
+npc_on_net_destroy            = level
+npc_on_update                 = level
+npc_on_before_hit             = level
+npc_on_hit_callback           = level
+npc_on_death_callback         = level
+npc_on_fighting_actor         = level
+npc_on_weapon_strapped        = level
+npc_on_weapon_unstrapped      = level
+npc_on_weapon_drop            = level
+npc_on_hear_callback          = level
+npc_on_get_all_from_corpse    = level
+npc_on_eval_danger            = level
+npc_shot_dispersion           = level
+anomaly_on_before_activate    = level
+monster_on_update             = level
+monster_on_before_hit         = level
+monster_on_hit_callback       = level
+monster_on_net_spawn          = level
+monster_on_net_destroy        = level
+monster_on_death_callback     = level
+burer_on_before_weapon_drop   = level
+physic_object_on_hit_callback = level
+on_enemy_eval                 = level
+
+[level_scripts]
+; by the script: the stock schemes of online objects (their handlers are time events and the callbacks above)
+axr_beh                = level
+axr_npc_vs_box         = level
+bind_anomaly_field     = level
+bind_anomaly_zone      = level
+bind_container         = level
+bind_crow              = level
+bind_dynamo_hand       = level
+bind_monster           = level
+bind_red_forest_bridge = level
+ph_button              = level
+ph_car                 = level
+ph_door                = level
+ph_idle                = level
+ph_minigun             = level
+sr_light               = level
+sr_timer               = level
+stalker_generic        = level
+state_mgr_animation    = level
+state_mgr_pri_a15      = level
+xr_box                 = level
+xr_campfire_point      = level
+xr_corpse_detection    = level
+xr_cover               = level
+xr_eat_medkit          = level
+xr_gather_items        = level
+xr_hear                = level
+xr_help_wounded        = level
+xr_logic               = level
+xr_motivator           = level
+xr_reach_task          = level
+xr_wounded             = level
+xr_zones               = level

@@ -449,7 +449,7 @@ TEST(levels_wire_snapshot_and_entity_headers_leave_the_body)
 		we.u8(op);
 		LevelEntityHead e;
 		Reader re(we.ptr(), we.size());
-		const bool want = op <= LevelEntityHead::Item;
+		const bool want = op <= LevelEntityHead::Spawn;
 		CHECK_EQ(std::string("op ") + std::to_string(op) + (e.read(re) ? " read" : " refused"),
 		    std::string("op ") + std::to_string(op) + (want ? " read" : " refused"));
 	}

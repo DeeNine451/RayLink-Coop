@@ -67,6 +67,11 @@ local function on_client()
 	return api ~= nil and api.is_client()
 end
 
+-- F3a multilevel: a client who leads his level computes it: what "a client does not do" does not hold for him, the guards do.
+local function on_mirror()
+	return on_client() and (api.is_mirror == nil or api.is_mirror())
+end
+
 -------------------------------------------------------------------------------
 -- Policy: the Lua sections of the ltx
 -------------------------------------------------------------------------------
@@ -116,7 +121,7 @@ end
 local function make_noop(label)
 	return function(orig)
 		return function(self, ...)
-			if on_client() then
+			if on_mirror() then
 				skipped[label] = (skipped[label] or 0) + 1
 				return
 			end
@@ -129,7 +134,7 @@ local function make_pre(_, entry)
 	local pre = entry.pre
 	return function(orig)
 		return function(self, ...)
-			if on_client() then pre(self) end
+			if on_mirror() then pre(self) end
 			return orig(self, ...)
 		end
 	end

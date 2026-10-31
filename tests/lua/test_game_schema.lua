@@ -82,7 +82,8 @@ check(schema.CVARS[18] == "coop_split_levels" and schema.CVARS[19] == "coop_stor
 check(schema.CVARS[20] == "coop_finish_downed", "row 20 is the NPC AI rule: stalkers finish a downed player")
 for _, n in ipairs({ "coop_split_levels", "coop_story_together" }) do
 	local c = schema.CVAR[n]
-	check(c ~= nil and c.kind == "int" and c.min == 0 and c.max == 1 and c.def == 1, n .. ": an on/off console flag, on by default")
+	local want = n == "coop_split_levels" and 0 or 1 -- F3a multilevel: opt-in until the game has proved it
+	check(c ~= nil and c.kind == "int" and c.min == 0 and c.max == 1 and c.def == want, n .. ": an on/off console flag, default " .. want)
 end
 
 -- the engine's white list (coop::game::kGameCvars) is the same list in the same order
@@ -113,12 +114,12 @@ for _, key in ipairs({ SPLIT, STORY }) do
 	check(it ~= nil, key .. " is in the catalog")
 	if it then
 		check(it.tab == "party" and it.kind == "check" and it.src == "c" and it.cvar == key:sub(3), key .. ": a check on the group tab, a console variable")
-		check(it.def == true, key .. ": on by default")
+		check(it.def == (key == STORY), key .. ": default (the split levels are opt-in, F3a multilevel)")
 		check(it.when == "session" and schema.editable(key, true) and schema.editable(key, false),
 			key .. ": changed between sessions, editable on an existing game")
 		check(it.applies == "load", key .. ": starts to act when the game is loaded (" .. tostring(it.applies) .. ")")
 		check(it.range and it.range[1] == 0 and it.range[2] == 1 and it.int == true, key .. ": 0..1, whole")
-		check(schema.default(key) == true, key .. ": default()")
+		check(schema.default(key) == (key == STORY), key .. ": default()")
 	end
 end
 check(schema.item(SPLIT) ~= nil and schema.item(SPLIT).shown_if == nil, "the switch of the split levels is always shown")

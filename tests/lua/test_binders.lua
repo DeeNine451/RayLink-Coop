@@ -56,6 +56,7 @@ local function new_world(role, opts)
 			is_active = function() return W.role ~= "single" end,
 			is_live = function() return W.role == "client" or W.role == "host" end,
 		}
+		W.api = api
 	end
 
 	local G = {}
@@ -206,7 +207,7 @@ do
 	-- 3 skipped methods + 1 fix + the update of the 6 guarded classes the stub world has (actor, restrictor, physic object,
 	-- crow, item, artefact) + the death / hit / use callbacks of two creature binders (6); the engine has the 3 host-only
 	-- updates (25 of the 28 W10 patches are Lua's, the stub world misses 9 of them)
-	check(n == 16, "install returns the number of Lua patches on a client: " .. tostring(n))
+	check(n == 17, "install returns the number of Lua patches on a client: " .. tostring(n))
 	check(W.zone.spawn_artefact_randomly ~= z0 and W.zone.turn_off ~= t0, "anomaly zone methods replaced")
 	check(W.box.spawn_items ~= b0, "xr_box spawn_items replaced")
 	check(W.crow.update ~= cr0, "crow update replaced")
@@ -217,7 +218,8 @@ do
 	W.calls = {}
 	W.new(W.faction):update(100)
 	check(W.calls["faction.update"] == 1 and not W.calls.base_update, "faction update is the stock one in Lua (the engine decides whether to call it)")
-	check(W.motivator.update == mu0, "creature binder: update untouched (the engine suspends it)")
+	-- the engine suspends it for a puppet; a client who leads his level (F3a) runs it, and a Lua error there stays a log line
+	check(W.motivator.update ~= mu0, "creature binder: update guarded (a puppet's is suspended by the engine)")
 
 	-- F2-35: the update of the binders that keep running is guarded here
 	check(W.guard.bind_stalker.update ~= actor0, "actor_binder update replaced by the guard")
@@ -234,6 +236,13 @@ do
 		local rv = inst:update(1)
 		check(W.calls[mod .. ".update"] == 1 and inst.updates == 1 and rv == nil, "guard: a healthy " .. mod .. " update runs the stock code once (no return value through the guard)")
 	end
+	-- F3a multilevel: on a level he leads a client is no mirror: what "a client does not do" runs again, the guards stay
+	W.api.is_mirror = function() return false end
+	W.calls = {}
+	local lead_zone = W.new(W.zone)
+	check(lead_zone:spawn_artefact_randomly() == "spawned" and W.calls["zone.spawn"] == 1, "a client who leads runs what a mirror skips")
+	check(pcall(function() W.new(W.guard.bind_stalker):update(1) end), "a client who leads keeps the guard")
+	W.api.is_mirror = nil
 	-- the binder stays: one failed update does not stop the next ones, the instance keeps its state
 	local it = W.new(W.guard.bind_item)
 	it.fail_once = true

@@ -10,6 +10,9 @@
 	<string id="st_coop_levels_refused_cap">
 		<text>There is no room for one more map on the host's PC (limit: %s). Go to a map that is already open.</text>
 	</string>
+	<string id="st_coop_levels_refused_led">
+		<text>Another player leads that map, and you cannot join him there yet.</text>
+	</string>
 	<string id="st_coop_levels_refused_invalid">
 		<text>This exit cannot be used right now.</text>
 	</string>

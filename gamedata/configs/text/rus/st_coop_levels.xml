@@ -10,6 +10,9 @@
 	<string id="st_coop_levels_refused_cap">
 		<text>Ќа ѕ  хоста нет места ещЄ под одну карту (предел: %s). »дите на уже открытую карту.</text>
 	</string>
+	<string id="st_coop_levels_refused_led">
+		<text>Ётой картой уже управл€ет другой игрок, присоединитьс€ к нему пока нельз€.</text>
+	</string>
 	<string id="st_coop_levels_refused_invalid">
 		<text>Ётим выходом сейчас нельз€ воспользоватьс€.</text>
 	</string>

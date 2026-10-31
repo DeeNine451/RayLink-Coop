@@ -385,12 +385,33 @@ TEST(routes_parse)
 	CHECK_EQ(t.route("GUI_on_show", "ui_mod"), Domain::None); // a lowercased ltx key still matches
 }
 
+// F3a multilevel: the behaviour of online objects is named apart from the routes; the routes themselves stay what they are.
+TEST(routes_level_behaviour_names_what_a_leader_runs)
+{
+	Table t;
+	std::vector<std::string> errors;
+	std::vector<std::pair<std::string, std::string>> scripts = {{"sim_board", "host"}, {"xr_motivator", "host"}};
+	for (const Override& o : parse_section("route_scripts", scripts, &errors))
+		t.add(o);
+	t.add_level_script(" XR_motivator ");
+	t.add_level_callback("npc_on_update");
+	CHECK(t.route("npc_on_update", "xr_motivator") == Domain::Host);
+	CHECK(t.level_behaviour("npc_on_update", "xr_motivator"));
+	CHECK(t.level_behaviour("save_state", "XR_MOTIVATOR")); // a listed script, whatever it listens to
+	CHECK(t.level_behaviour("npc_on_update", "some_mod")); // a script without a rule follows its callback
+	CHECK(!t.level_behaviour("npc_on_update", "sim_board")); // a world script keeps the host
+	CHECK(!t.level_behaviour("save_state", "some_mod"));
+}
+
 TEST(routes_runs_here)
 {
 	CHECK(runs_here(Domain::Host, true));
 	CHECK(!runs_here(Domain::Host, false));
 	CHECK(runs_here(Domain::Level, true));
 	CHECK(!runs_here(Domain::Level, false));
+	CHECK(runs_here(Domain::Level, false, true)); // F3a multilevel: a client who leads his level
+	CHECK(!runs_here(Domain::Host, false, true)); // the world stays the host's
+	CHECK(!runs_here(Domain::None, true, true));
 	CHECK(runs_here(Domain::Owner, true));
 	CHECK(runs_here(Domain::Owner, false));
 	CHECK(runs_here(Domain::View, true));

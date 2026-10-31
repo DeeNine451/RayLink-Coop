@@ -265,6 +265,21 @@ TEST(vote_a_creature_on_its_way_back_stays_offline)
 	CHECK(!a.ask);
 }
 
+// ---------------------------------------------------------------- ids
+
+TEST(ids_each_player_has_his_slice_and_nobody_shares_it)
+{
+	CHECK_EQ(int(leader_ids_of(0)), 0); // the host keeps them out of his generator, he makes none of them
+	CHECK_EQ(int(leader_ids_of(8)), 0);
+	uint32_t next = kLeaderIdFirst;
+	for (uint32_t peer = 1; peer <= kLeaderSlots; ++peer)
+	{
+		CHECK_EQ(uint32_t(leader_ids_of(peer)), next);
+		next += kLeaderIdsEach;
+	}
+	CHECK(next - 1 < 0xffff); // 0xffff is no id
+}
+
 // ---------------------------------------------------------------- the world server's book
 
 TEST(keeper_a_take_marks_the_object_and_the_client_gets_its_state)
