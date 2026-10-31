@@ -449,7 +449,7 @@ TEST(levels_wire_snapshot_and_entity_headers_leave_the_body)
 		we.u8(op);
 		LevelEntityHead e;
 		Reader re(we.ptr(), we.size());
-		const bool want = op <= LevelEntityHead::Spawn;
+		const bool want = op <= LevelEntityHead::Report;
 		CHECK_EQ(std::string("op ") + std::to_string(op) + (e.read(re) ? " read" : " refused"),
 		    std::string("op ") + std::to_string(op) + (want ? " read" : " refused"));
 	}
@@ -581,6 +581,36 @@ TEST(levels_wire_xfer_down_roundtrip_and_cargo_limit)
 // ops of LevelXferDown, the Holder (the map server) the ops of LevelXferUp; Snapshot goes both ways (the map server's stream,
 // the world server's ack and the resync request of the auditor). Every op of the core must have a value in the message of its
 // direction: one that has none cannot be sent, and the transfer it belongs to hangs.
+TEST(levels_wire_report_body_roundtrip_and_limits)
+{
+	LevelReportBody m;
+	m.buckets = 0x80000001u;
+	m.rows.push_back({7, 900});
+	m.rows.push_back({70, 1});
+	Writer w;
+	CHECK(m.write(w));
+	Reader r(w.data().data(), w.data().size());
+	LevelReportBody back;
+	CHECK(back.read(r));
+	CHECK_EQ(back.buckets, m.buckets);
+	CHECK_EQ(back.rows.size(), size_t(2));
+	CHECK_EQ(back.rows[1].id, uint16_t(70));
+	CHECK_EQ(back.rows[0].gen, 900u);
+
+	LevelReportBody too_many;
+	too_many.rows.resize(LevelReportBody::kMaxRows + 1);
+	Writer none;
+	CHECK(!too_many.write(none));
+	CHECK(none.data().empty());
+
+	Writer cut;
+	cut.u32(1);
+	cut.u16(2); // two rows promised, none there
+	Reader short_of(cut.data().data(), cut.data().size());
+	CHECK(!back.read(short_of));
+	CHECK(back.rows.empty());
+}
+
 TEST(levels_wire_xfer_ops_cover_the_core)
 {
 	struct Row

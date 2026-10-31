@@ -508,6 +508,72 @@ TEST(keeper_a_new_world_forgets_everything_and_reuses_no_peer)
 	CHECK_EQ(r.keeper.ledger().next_peer(), before);
 }
 
+namespace
+{
+std::vector<xfer::Entry> report_of(const xfer::Holder& h) { return Keeper::bare(h.report()); }
+} // namespace
+
+TEST(keeper_audit_a_client_who_holds_what_the_ledger_says_is_clean)
+{
+	Rig r;
+	r.take(100, 5);
+	r.take(101, 6);
+	r.holder.take_events();
+	CHECK_EQ(r.keeper.differs(r.peer, xfer::hash_of(report_of(r.holder))), 0u);
+}
+
+// A stream change is no difference: the auditor asks who writes what, not how fresh the host's copy is.
+TEST(keeper_audit_does_not_compare_states)
+{
+	Rig r;
+	r.take(100, 5);
+	r.holder.take_events();
+	r.holder.changed(100, state_of(9), r.now); // not delivered
+	CHECK_EQ(r.keeper.differs(r.peer, xfer::hash_of(report_of(r.holder))), 0u);
+}
+
+// He lost it (a Holder that was replaced under the ledger): the ledger says it is his, he does not report it. It comes home, two-phase.
+TEST(keeper_audit_a_lost_object_comes_home)
+{
+	Rig r;
+	r.take(100, 5);
+	r.holder.take_events();
+	r.changes.clear();
+	const std::vector<xfer::Entry> reported;
+	const uint32_t mask = r.keeper.differs(r.peer, xfer::hash_of(reported));
+	CHECK(mask != 0u);
+	std::vector<xfer::Finding> found;
+	std::vector<xfer::Packet> down = r.keeper.audit(r.peer, reported, mask, found);
+	CHECK_EQ(found.size(), size_t(1));
+	CHECK(found[0].kind == xfer::Violation::Lost);
+	CHECK(r.keeper.away(100)); // until his answer: he may still hold it after all
+	r.holder = xfer::Holder(7);
+	r.to_client(down);
+	CHECK(!r.keeper.away(100));
+	CHECK(r.saw(Keeper::Kind::Unmark, 100));
+	CHECK_EQ(r.keeper.ledger().counters().violations, uint64_t(1));
+}
+
+// He writes something the ledger gives nobody: he is told to let it go.
+TEST(keeper_audit_a_duplicate_is_dropped_at_the_client)
+{
+	Rig r;
+	r.keeper.connect(3);
+	const xfer::Bytes fresh = state_of(5);
+	xfer::Packet up{xfer::Op::TakeReq, xfer::Key{100, 0}, 7, xfer::kWorld, {}};
+	r.keeper.on_up(3, up, &fresh, r.now);
+	r.drain();
+	std::vector<xfer::Entry> reported;
+	reported.push_back(Keeper::bare(xfer::Entry{100, 12345, xfer::kNoParent, true, 0}));
+	std::vector<xfer::Finding> found;
+	std::vector<xfer::Packet> down = r.keeper.audit(r.peer, reported, xfer::kAllBuckets, found);
+	CHECK_EQ(found.size(), size_t(1));
+	CHECK(found[0].kind == xfer::Violation::Duplicate);
+	CHECK(!down.empty());
+	CHECK(down[0].op == xfer::Op::Drop);
+	CHECK_EQ(r.keeper.session_of(down[0].to), r.peer);
+}
+
 // A grant nobody commits (the client went quiet) comes home by itself, and the host's simulation goes on with it.
 TEST(keeper_a_grant_lost_in_the_network_comes_home)
 {

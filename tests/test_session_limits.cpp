@@ -718,7 +718,8 @@ TEST(limits_client_rate_rules)
 		// F2 T12b: ids a client gives back (busy there, or its create was refused), paced by the client at 4 a second
 		{Msg::IdLeaseAck, 8, 250},
 		// F3a: a player leaves his level (one request per exit he steps into), and says his loading screen is up
-		{Msg::LevelMove, 4, 1000}, {Msg::LoadReady, 4, 1000}, {Msg::LevelXferUp, 2048, 2}, {Msg::LevelEntity, 512, 4}};
+		{Msg::LevelMove, 4, 1000}, {Msg::LoadReady, 4, 1000}, {Msg::LevelXferUp, 2048, 2}, {Msg::LevelEntity, 512, 4},
+		{Msg::LevelHash, 4, 5000}};
 	for (const Expected& e : expected)
 	{
 		const limits::RateRule* rule = nullptr;
