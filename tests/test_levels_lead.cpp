@@ -446,6 +446,20 @@ TEST(keeper_wire_every_op_of_both_directions)
 	CHECK(!down_of(xfer::Packet{xfer::Op::TakeReq, xfer::Key{9, 77}, xfer::kWorld, 1, {}}, d));
 }
 
+TEST(keeper_a_new_world_forgets_everything_and_reuses_no_peer)
+{
+	Rig r;
+	r.take(100, 5);
+	r.holder.take_events();
+	const xfer::Peer before = r.keeper.ledger().next_peer();
+	r.keeper.restart();
+	r.drain();
+	CHECK(!r.keeper.away(100));
+	CHECK_EQ(r.keeper.marked(), size_t(0));
+	CHECK(!r.keeper.connected(r.peer));
+	CHECK_EQ(r.keeper.ledger().next_peer(), before);
+}
+
 // A grant nobody commits (the client went quiet) comes home by itself, and the host's simulation goes on with it.
 TEST(keeper_a_grant_lost_in_the_network_comes_home)
 {

@@ -154,12 +154,15 @@ TEST(protocol_f3a_client_rate_rows)
 		CHECK_EQ(rule->burst, 4u);
 		CHECK_EQ(rule->refill_ms, 1000u);
 	}
-	// nothing else of the sixteen has a row: the rest is sent by the host or the bridge (a row for a message that a client
-	// never sends would be dead, and the session would kick the sender first)
+	// F3a multilevel: a client who leads his level sends these (Session::allow_trunk): he is a client of the same limits
+	for (Msg m : {Msg::LevelXferUp, Msg::LevelEntity})
+		CHECK(limits::client_rule(m) != nullptr);
+	// nothing else of the sixteen has a row: the rest is sent by the host (a row for a message that a client never sends would be
+	// dead, and the session would kick the sender first)
 	for (const F3aMsg& m : kF3a)
 	{
 		const bool has = limits::client_rule(m.type) != nullptr;
-		const bool want = m.type == Msg::LevelMove || m.type == Msg::LoadReady;
+		const bool want = m.type == Msg::LevelMove || m.type == Msg::LoadReady || m.type == Msg::LevelXferUp || m.type == Msg::LevelEntity;
 		CHECK_EQ(row(m, has ? "has a rate row" : "has none"), row(m, want ? "has a rate row" : "has none"));
 	}
 }

@@ -2,10 +2,10 @@
 //
 // Every coop module registers its game message handlers in two tables (engine/src/xrGame/coop/*.cpp):
 // install_server(Session&) for the world server, on the hosting session, and install_client(Endpoint&) for a client, on a
-// remote client's session or on the host player's LocalLink. A hosting session takes only ClientOnly and Either messages,
-// a client's session only HostOnly and Either ones (Session game_message refuses the rest before any handler; TrunkOnly
-// from everybody until F3a T9). So:
-//   - the server tables hold ClientOnly and Either types only, the client tables HostOnly and Either types only;
+// remote client's session or on the host player's LocalLink. A hosting session takes only ClientOnly and Either messages, and
+// TrunkOnly from a client who led a level (Session::allow_trunk), a client's session only HostOnly and Either ones (Session
+// game_message refuses the rest before any handler). So:
+//   - the server tables hold ClientOnly, Either and TrunkOnly types only, the client tables HostOnly and Either types only;
 //   - an Either type is in both: in one only, the other side drops it (no handler) where it used to run;
 //   - a type is registered by one module only per side (one handler per type, the last would win silently);
 //   - a file that defines one table defines the other.
@@ -237,7 +237,7 @@ std::vector<std::string> table_problems(const std::vector<Table>& tables)
 		{
 			by_side[t.server ? 1 : 0][type].push_back(t.file + " " + t.function);
 			const MsgSender s = msg_sender(static_cast<Msg>(type));
-			const bool fits = t.server ? (s == MsgSender::ClientOnly || s == MsgSender::Either)
+			const bool fits = t.server ? (s == MsgSender::ClientOnly || s == MsgSender::Either || s == MsgSender::TrunkOnly)
 			                           : (s == MsgSender::HostOnly || s == MsgSender::Either);
 			if (!fits)
 				problems.push_back(std::string(msg_name(type)) + " (" + sender_name(s) + ") in " + t.file + " " +
@@ -311,14 +311,14 @@ TEST(handler_tables_checker_catches_mistakes)
 									 "void install_client(Endpoint& e) { e.on(Msg::PlayerState, &b); }\n",
 		parse);
 	expect_problem(table_problems(m), "PlayerState (Either) only in the client tables");
-	// a ClientOnly type in a client table, a HostOnly one in a server table, a TrunkOnly one anywhere
-	m = tables_of("void install_server(Session& s) { s.on(Msg::TimeSync, &a); s.on(Msg::LevelSnapshot, &c); }\n"
-				  "void install_client(Endpoint& e) { e.on(Msg::ReqSpawn, &b); }\n",
+	// a ClientOnly type in a client table, a HostOnly one in a server table, a TrunkOnly one in a client table
+	m = tables_of("void install_server(Session& s) { s.on(Msg::TimeSync, &a); }\n"
+				  "void install_client(Endpoint& e) { e.on(Msg::ReqSpawn, &b); e.on(Msg::LevelSnapshot, &c); }\n",
 		parse);
 	const std::vector<std::string> p = table_problems(m);
 	expect_problem(p, "ReqSpawn (ClientOnly) in test.cpp install_client");
 	expect_problem(p, "TimeSync (HostOnly) in test.cpp install_server");
-	expect_problem(p, "LevelSnapshot (TrunkOnly) in test.cpp install_server");
+	expect_problem(p, "LevelSnapshot (TrunkOnly) in test.cpp install_client");
 	// a type registered by two modules on one side, a table without its pair, a name that is no message
 	m = tables_of("void install_server(Session& s) { s.on(Msg::ReqSpawn, &a); }\n"
 				  "void install_client(Endpoint& e) {}\n"
