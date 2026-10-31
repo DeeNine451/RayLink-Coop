@@ -256,6 +256,7 @@ TEST(takes_a_player_on_another_level_is_heard_for_the_world_and_his_own_data)
 	// his own data, for the save
 	CHECK(level_takes(Msg::PlayerVitals, true, false));
 	CHECK(level_takes(Msg::ItemState, true, false));
+	CHECK(level_takes(Msg::StateDumpRequest, true, false));
 	// on the host's level nothing changes
 	CHECK(level_takes(Msg::PlayerShot, true, true));
 }
