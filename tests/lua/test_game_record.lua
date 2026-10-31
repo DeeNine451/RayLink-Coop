@@ -216,7 +216,7 @@ local ENGINE = {
 	{ "coop_autosave_interval", "int", 0, 120, 10 }, -- coop_autosave.cpp:533 CCC_Integer 0..120
 	{ "coop_autosave_count", "int", 1, 50, 10 }, -- coop_autosave.cpp:534 CCC_Integer 1..50
 	{ "coop_death_share", "float", 0, 200, 100 }, -- build 10: CCC_Float 0..200, default 100
-	{ "coop_split_levels", "int", 0, 1, 1 }, -- F3a: CCC_Integer 0..1, on by default
+	{ "coop_split_levels", "int", 0, 1, 0 }, -- F3a: CCC_Integer 0..1, off by default (multilevel is opt-in until it is proved)
 	{ "coop_story_together", "int", 0, 1, 1 }, -- F3a: CCC_Integer 0..1, on by default
 	{ "coop_finish_downed", "int", 0, 1, 1 }, -- coop_ai.cpp: CCC_Integer 0..1, on = the stock behaviour of a stalker
 }

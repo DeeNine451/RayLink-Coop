@@ -388,7 +388,7 @@ TEST(levels_wire_move_result_roundtrip)
 			w.u8(verdict_byte);
 			w.u8(reason);
 			w.u16(3);
-			const bool want = verdict_byte <= LevelMoveResultMsg::Refused && reason <= LevelMoveResultMsg::Invalid &&
+			const bool want = verdict_byte <= LevelMoveResultMsg::Refused && reason <= LevelMoveResultMsg::Led &&
 			    ((verdict_byte == LevelMoveResultMsg::Refused) == (reason != LevelMoveResultMsg::None));
 			CHECK_EQ("verdict " + std::to_string(verdict_byte) + " reason " + std::to_string(reason) + " " +
 			        refused<LevelMoveResultMsg>(w),

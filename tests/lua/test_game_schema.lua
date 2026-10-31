@@ -1,6 +1,6 @@
 -- Anomaly Coop test (split levels, F3a task 3): the two new game rules and the new default in the catalog
 -- gamedata\scripts\coop_game_schema.script (docs\GAME_SETTINGS.md 1.2, 3.6, 8.2; docs\plans\2026-10-24-f3a-split-levels.md 3):
---   c|coop_split_levels      on / off, the switch of the split levels, on by default
+--   c|coop_split_levels      on / off, the switch of the split levels, off by default
 --   c|coop_story_together    on / off, only while the levels are split, on by default
 --   o|coop/coop_session/join_spawn   a new player appears at the base of the world's faction by default
 -- The catalog is loaded into a sealed environment (the standard library and nothing of the engine). The list of 20 console
