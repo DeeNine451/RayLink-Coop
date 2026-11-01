@@ -152,7 +152,7 @@ local function bake_taken(gs)
 		if se and se:section_name() ~= roll.s then
 			taken_rolls[id], roll_errors[id] = nil, nil
 		elseif se then
-			if not roll.applied and try_bake(gs, id, roll.s, roll.n) then
+			if not roll.applied and (try_bake(gs, id, roll.s, roll.n) or roll.far) then -- no object here: the owner's machine applies it
 				roll.applied = true
 				stats.baked = stats.baked + 1
 			end
@@ -195,20 +195,15 @@ local function bake_pending()
 	bake_taken(gs)
 end
 
--- Host: a player's character took an item (the client picked it up). Stock does this for the host actor.
-local function npc_on_item_take(npc, item)
-	if not (core.is_host() and npc and item) then return end
-	local peer = core.engine().peer_of_avatar(npc:id())
-	if peer == nil or peer == core.self_id() then return end
+-- World server: a player took world loot, on its level or on a map server's (far: there is no object of it here).
+local function world_item_taken(peer, id, section, far)
 	local gs = gs_ready()
 	if not gs then return end
-	local id = item:id()
 	local name = gs.world_itm_on[id]
 	if not name then return end
 	stats.peer_takes = stats.peer_takes + 1
-	local section = item:section()
 	local num = gs.world_itm_num[name]
-	if num then taken_rolls[id] = { s = section, n = num } end
+	if num then taken_rolls[id] = { s = section, n = num, far = far } end
 	-- Detach before spawning/baking: a new item at this spot must never inherit the old item's retry.
 	gs.world_itm_num[name] = nil
 	gs.world_itm_on[id] = nil
@@ -222,6 +217,21 @@ local function npc_on_item_take(npc, item)
 		core.send_clients("loot_taken", { id = id, t = info.typ })
 	end
 	core.log("world loot %s(%s) taken by %s", section, tostring(id), core.nick_of(peer))
+end
+
+-- Host: a player's character took an item (the client picked it up). Stock does this for the host actor. game_setup's table is the world
+-- server's: a map server tells it.
+local function npc_on_item_take(npc, item)
+	if not (npc and item) then return end
+	local map_server = core.is_map_server()
+	if not (core.is_host() or map_server) then return end
+	local peer = core.engine().peer_of_avatar(npc:id())
+	if peer == nil or peer == core.self_id() then return end
+	if map_server then
+		core.send("loot_took", { p = peer, id = item:id(), s = item:section() }, 0)
+		return
+	end
+	world_item_taken(peer, item:id(), item:section(), false)
 end
 
 local function patch_game_setup()
@@ -246,6 +256,11 @@ end
 -- Events, update, status, start
 -------------------------------------------------------------------------------
 local function register_events()
+	core.on("loot_took", function(t, from)
+		if not core.is_host() or type(from) ~= "number" or from < 0x100 then return end
+		local id, section, peer = core.int(t.id, 1, 65534), core.word(t.s, 128), core.num(t.p, 0)
+		if id and section and peer then world_item_taken(peer, id, section, true) end
+	end)
 	core.on("loot_roll", function(t, from)
 		if from ~= 0 or not core.is_client() then return end
 		local id, section, num = core.int(t.id, 1, 65534), core.word(t.s, 128), core.num(t.n, 0)

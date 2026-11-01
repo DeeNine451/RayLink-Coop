@@ -499,6 +499,12 @@ function with_target(id, peer, what, fn, ...)
 	return far.with_target(id, peer, what, fn, ...)
 end
 
+function at_home(fn, ...)
+	local far = far_mod()
+	if not far then return fn(...) end
+	return far.at_home(fn, ...)
+end
+
 -- The smart's field, seen from where the far view stands (a rewrite of the task scripts' `smart.online`).
 function online_of(se)
 	if not se then return false end
@@ -639,10 +645,11 @@ local function host_on_action(t, from)
 	action_stats.in_ = action_stats.in_ + 1
 	local ct = rawget(_G, "coop_tasks") or coop_tasks
 	local ok, err
+	-- what a player on another level asks of the world server runs here, on his level as the far view shows it
 	if ct and ct.run_as then
-		ok, err = pcall(ct.run_as, from, fn, from, t)
+		ok, err = pcall(with_level_of, from, ct.run_as, from, fn, from, t)
 	else
-		ok, err = pcall(fn, from, t)
+		ok, err = pcall(with_level_of, from, fn, from, t)
 	end
 	if not ok then report("core", "host action " .. tostring(t.a), err) end
 end

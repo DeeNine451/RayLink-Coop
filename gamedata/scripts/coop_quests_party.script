@@ -161,14 +161,20 @@ local function patch_check_task()
 		in_check = self.id
 		local args = { ... }
 		local function checked()
+			local far = qc.mod("coop_quests_far")
+			local s = far and far.in_scope()
+			-- on another level "the actor" of a stock functor is the player who stands there
+			local there = s and not fields.position and s.avatar and far.object(s.avatar)
+			if there then
+				fields.position = function() return there:position() end
+				fields.level_vertex_id = function() return there:level_vertex_id() end
+				fields.game_vertex_id = function() return there:game_vertex_id() end
+			end
 			ct().with_task_owner(self.id, function()
 				local okw, e = qc.with_actor(fields, orig, self, tm, unpack(args))
 				if not okw then error(e, 0) end
 			end)
-			if self.last_check_task == "fail" then
-				local far = qc.mod("coop_quests_far")
-				if far then far.note_fail(self.id) end
-			end
+			if self.last_check_task == "fail" and far then far.note_fail(self.id) end
 		end
 		-- the level of what it is about, for whoever stands there: one target for everybody, a companion on another level can do it
 		local okc, err = pcall(qc.with_target, target_of(self), ct().taker(self.id), self.id, checked)
@@ -565,7 +571,7 @@ function give_to_npc(sec, npc, count)
 	end
 end
 
-local function give_npc_here(from, t)
+local function host_give_npc(from, t)
 	local npc = tonumber(t.n) and level.object_by_id(tonumber(t.n))
 	if not (npc and type(t.s) == "string" and ini_sys:section_exist(t.s)) then return end
 	local count = math.floor(tonumber(t.c) or 1)
@@ -574,8 +580,6 @@ local function give_npc_here(from, t)
 	if who and npc:position():distance_to_sqr(who:position()) > 900 then return end
 	ct().with_recipient(from, give_to_npc, t.s, npc, count) -- the "item given" news goes to that player
 end
-
-local function host_give_npc(from, t) return qc.with_level_of(from, give_npc_here, from, t) end
 
 -------------------------------------------------------------------------------
 -- Client: quest items the player lacks come from the group

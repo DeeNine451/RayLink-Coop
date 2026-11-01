@@ -1057,12 +1057,53 @@ end
 -------------------------------------------------------------------------------
 -- Update
 -------------------------------------------------------------------------------
+-- The launcher's error reports read the last of these lines from the log: no nicks, no ids of players, no addresses.
+local CONTEXT_MS = 60000
+local CONTEXT_QUESTS = 8
+local context_next, context_last = 0, nil
+
+function context_line(t)
+	local quests = {}
+	for i = 1, math.min(CONTEXT_QUESTS, #t.quests) do quests[i] = t.quests[i] end
+	return string_format("[coop] context: role=%s level=%s players=%d split=%d protocol=%d quests=%s", tostring(t.role), tostring(t.level),
+		tonumber(t.players) or 0, t.split and 1 or 0, tonumber(t.protocol) or 0, table.concat(quests, ","))
+end
+
+local function context_now()
+	local list = {}
+	local ms = map_server()
+	if not ms then -- a map server has a copy of the tasks at most
+		local tm = rawget(_G, "task_manager") or task_manager
+		local mgr = tm and tm.get_task_manager and tm.get_task_manager()
+		if mgr and type(mgr.task_info) == "table" then
+			for id in pairs(mgr.task_info) do list[#list + 1] = tostring(id) end
+			table.sort(list)
+		end
+	end
+	local l = api.levels
+	return { role = ms and "mapserver" or api.is_host() and "host" or "client", level = level.name(), players = #(api.players() or {}),
+		split = l ~= nil and l.split ~= nil and l.split() == true, protocol = api.protocol and api.protocol() or 0, quests = list }
+end
+
+local function context_tick(tg)
+	if tg < context_next or not api.is_active() then return end
+	context_next = tg + CONTEXT_MS
+	local ok, t = pcall(context_now)
+	if not ok then return end
+	local line = context_line(t)
+	if line ~= context_last then
+		context_last = line
+		printf("%s", line)
+	end
+end
+
 local next_tick = 0
 
 local function actor_on_update()
 	if not api then return end
 	client_mode = api.is_client()
 	local tg = time_global()
+	context_tick(tg)
 	if tg < next_tick then return end
 	next_tick = tg + 250
 	if api.is_host() then

@@ -67,6 +67,7 @@ function engine() return api end
 function in_session() return api ~= nil and api.is_active() end
 function is_host() return api ~= nil and api.is_active() and api.is_host() end
 function is_client() return api ~= nil and api.is_active() and api.is_client() end
+function is_map_server() return api ~= nil and api.is_active() and api.is_map_server ~= nil and api.is_map_server() == true end
 -- Host, or a client that finished loading the host's world.
 function live() return api ~= nil and api.is_active() and api.is_live() end
 function self_id() return api and api.self_id() or -1 end
@@ -146,6 +147,15 @@ function send_clients(name, t, except)
 		end
 	end
 	return n
+end
+
+-- What a player asks of the logic of his level: func runs on its authority, from = he (coop_main.add_level_handler).
+function on_level(name, func)
+	local cm = rawget(_G, "coop_main") or mod("coop_main")
+	if not (cm and cm.add_level_handler) then return on(name, func) end
+	cm.add_level_handler(PREFIX .. name, function(payload, from)
+		func(coop_main.decode(payload), tonumber(from) or -1, payload)
+	end)
 end
 
 -- func(t, from, payload). Registered once per Lua state; coop_main runs it inside pcall.

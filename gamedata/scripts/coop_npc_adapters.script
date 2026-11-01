@@ -148,6 +148,19 @@ local function trader(C, P, active)
 		end
 		return old(npc, ...)
 	end
+	-- trader_autoinject's restock reads the supply level from "the actor" (goodwill, heavy pockets) a moment later, on a timer: on a map
+	-- server that is its ghost. The nearest player reads it, as trade_manager.update does for him (coop_core_world host_on_trader_req).
+	local ti = C.mod("trader_autoinject")
+	local timed = ti and ti.timed_update
+	if type(timed) == "function" then
+		ti.timed_update = function(npc, ...)
+			if P.is_map_server() and npc and not P.in_identity() then
+				local near = P.nearest(npc)
+				if near then return P.with_identity(near, timed, npc, ...) end
+			end
+			return timed(npc, ...)
+		end
+	end
 	return true
 end
 

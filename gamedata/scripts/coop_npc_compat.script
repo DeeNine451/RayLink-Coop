@@ -87,6 +87,21 @@ local REWRITES = {
 	tasks_skyfall = {
 		{ 'if who:section() == "actor" then', "if coop_npc_is_player_id(who:id()) then" },
 	},
+	-- split levels: a smart of a level a map server leads is not online here, and the far view cannot reach a field of a C++ class. A squad
+	-- it holds did its first update there (coop_levels_brain): online here means it is loaded, or the task waits for it for ever.
+	tasks_fate = {
+		{ "smrt and smrt.online then", "smrt and coop_quests_core.online_of(smrt) then" },
+	},
+	tasks_measure = {
+		{ "if (smart.online) and", "if (coop_quests_core.online_of(smart)) and" },
+	},
+	tasks_assault = {
+		{ "local is_online = v.online", "local is_online = coop_quests_core.online_of(v)" },
+		{ "if not ( squad.first_update ) then", "if not ( squad.first_update or squad.online ) then", all = true },
+	},
+	tasks_dominance = {
+		{ "if not ( squad.first_update ) then", "if not ( squad.first_update or squad.online ) then", all = true },
+	},
 	-- enemy audit F6 (2026-10-31): the psy drain under a controller asks the controller for an enemy; a client's copy of a
 	-- monster is a puppet without AI and has none. On a client the distance (10 m) decides.
 	gunslinger_controller = {
@@ -212,6 +227,8 @@ local function wrap_ai_rework()
 	end
 end
 
+local NIGHT_RADIUS = 75 -- night_mutants: safe_radius
+
 local function wrap_night_mutants()
 	local m = mod("night_mutants")
 	local f = m and m.se_obj_outside_spawn_radius
@@ -228,6 +245,10 @@ local function wrap_night_mutants()
 				return false
 			end
 		end
+		-- a player on another level has his record: the spawn is the world server's, on every level
+		local qc = coop_quests_core
+		local who, _, d = qc.nearest_body(se_obj, true)
+		if who and who.far and d <= NIGHT_RADIUS * NIGHT_RADIUS then return false end
 		return true
 	end
 	applied[#applied + 1] = "night_mutants"
@@ -590,6 +611,7 @@ function on_game_start()
 		installed = true
 		-- for rewritten mod code: this machine is a client (its monster puppets have no AI, so no enemy)
 		_G.coop_npc_on_client = function() return P.client_live() end
+		local _ = coop_quests_core -- the far view is in place before a rewrite loads a task script (tasks_chimera_scan keeps it in a local)
 		for name, list in pairs(REWRITES) do
 			local ok, err = pcall(apply_rewrite, name, list)
 			if not ok then report("rewrite " .. name, err) end

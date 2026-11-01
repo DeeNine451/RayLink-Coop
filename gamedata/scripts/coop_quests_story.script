@@ -198,6 +198,11 @@ local function patch_condlist_effects()
 					end
 					return orig(actor, npc, p, ...)
 				end
+				if qc.is_map_server() and SHARE[name] ~= nil then
+					-- its actor is a ghost: the reward of the group is the world server's to hand out
+					if qc.in_condlist() and story_scope() then qc.send("share", params_flat(p, { f = name }), 0) end
+					return
+				end
 				-- host: the outermost reward of a story condlist goes to everybody
 				local share = not in_reward and qc.in_condlist() and SHARE[name] ~= nil
 					and qc.host_party() and story_scope()
@@ -214,6 +219,16 @@ local function patch_condlist_effects()
 			end
 		end
 	end
+end
+
+-- World server: a condlist on a map server's level gave a story reward.
+local function host_on_share(t, from)
+	if not qc.is_host() or type(from) ~= "number" or from < 0x100 or type(t.f) ~= "string" or SHARE[t.f] == nil then return end
+	local f = qc.mod("xr_effects") and xr_effects[t.f]
+	if type(f) ~= "function" then return end
+	local p = params_of(t)
+	f(db.actor, nil, p)
+	share_reward(t.f, p)
 end
 
 -- Client: a story effect for this player's own actor (rank, reputation, random rifle, ...).

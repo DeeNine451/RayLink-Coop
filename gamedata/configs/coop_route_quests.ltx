@@ -15,3 +15,20 @@ drx_da_main                      = host
 grok_artefacts_random_spawner    = host   ; reads drx_da_main's tables, which are the host's: an error a client on every run
 drx_da_main_artefacts            = host
 drx_da_main_artefacts_movement   = host
+; the kills of these run on the world server by the death relay (coop_quests_far), not on the map server of the level
+tasks_brain_game                 = host
+tasks_dead_night                 = host
+tasks_gambling_with_life         = host
+tasks_vengence_amplified         = host
+
+; split levels: a level's anomalies are made where it is led, from the same tables; what happens to all of them after an emission is
+; decided once, on the world server (coop_mods_dao)
+[route_pairs]
+actor_on_first_update@drx_da_main = level
+actor_on_update@drx_da_main       = level
+monster_on_before_hit@drx_da_main = level
+npc_on_item_take@drx_da_main      = level
+on_game_load@drx_da_main          = level
+on_option_change@drx_da_main      = level
+time_event@drx_da_main            = level
+on_enemy_eval@guards_spawner      = level

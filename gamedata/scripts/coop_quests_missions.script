@@ -361,11 +361,6 @@ local function host_stash(from, t)
 	ct().with_recipient(from, make, t.ns == 1 or nil, hint, bonus, t.sl == 1 or nil, t.ib == 1 or nil)
 end
 
--- What a player on another level asks of the world server: it runs here, on his level as the far view shows it.
-local function on_his_level(fn)
-	return function(from, t) return qc.with_level_of(from, fn, from, t) end
-end
-
 -------------------------------------------------------------------------------
 -- "Wanna trade?" of an ordinary stalker (dialogs.is_trade_accept)
 -------------------------------------------------------------------------------
@@ -741,10 +736,10 @@ end
 
 function on_game_start()
 	if not qc.engine() then return end
-	qc.register_host_action("rly", on_his_level(host_relay))
-	qc.register_host_action("stash", on_his_level(host_stash))
+	qc.register_host_action("rly", host_relay)
+	qc.register_host_action("stash", host_stash)
 	qc.register_host_action("trade", host_trade)
-	qc.register_host_action("delivery", on_his_level(host_delivery))
+	qc.register_host_action("delivery", host_delivery)
 	qc.on("bribe_hit", on_bribe_hit, TAG)
 	qc.on("kill", client_on_kill, TAG)
 	qc.on("guide", client_on_guide, TAG)

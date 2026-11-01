@@ -1,0 +1,194 @@
+--[[
+	Anomaly Coop - split levels: the tables of the stock and of GAMMA a map server has to share with the world server (coop_levels_share).
+
+	trade_manager: when a trader was restocked. A map server restocks the traders of its level; the save is the world server's. Without this
+	every new map server found the old time and restocked them again, which takes away what the players sold.
+	Dynamic Anomalies Overhaul: each level's anomalies and artefacts are made by whoever leads it, from drx_da_main.updated_anomaly_levels. A
+	map server's row of it goes to the save. What an emission does to all of them is rolled once, on the world server: the levels map servers
+	lead take the part of "the level the actor stands on" (disabled now, cleaned when it loads again), the others stay as they are.
+	logic_enforcer: an NPC a task gave a logic to may stand on a map server's level.
+	guards_spawner: the squads it made since the map server started: its on_enemy_eval runs there.
+--]]
+
+local api = rawget(_G, "coop")
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+
+local EV_DAO = "coop_dao"
+
+local function qc() return coop_quests_core end
+local function levels() return api and api.levels end
+local function map_server() return api ~= nil and qc().is_map_server() end
+local function world_server() return api ~= nil and qc().is_host() end
+local function split()
+	local l = levels()
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+
+local function mod(name) return qc().mod(name) end
+
+-------------------------------------------------------------------------------
+-- Traders
+-------------------------------------------------------------------------------
+local function trade_table()
+	local tm = mod("trade_manager")
+	if not (tm and tm.trade_save) then return nil end
+	local t = {}
+	tm.trade_save(t)
+	return t.trade_manager
+end
+
+-- A map server: the rows of the NPCs that stand on its level. Those of other levels are not its to tell.
+local function trade_rows()
+	local all = trade_table()
+	if type(all) ~= "table" then return nil end
+	local rows = {}
+	for id, row in pairs(all) do
+		if type(row) == "table" and row.resupply_time and level.object_by_id(id) then rows[id] = row end
+	end
+	return rows
+end
+
+local function trade_merge(rows)
+	local all = trade_table()
+	if type(all) ~= "table" then return end
+	for id, row in pairs(rows) do
+		if type(id) == "number" and type(row) == "table" then all[id] = row end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Dynamic Anomalies Overhaul
+-------------------------------------------------------------------------------
+local dao = { orig = nil, in_interaction = false }
+
+local function led_levels()
+	local out = {}
+	local sim = alife()
+	for _, ms in ipairs(levels().map_servers()) do out[sim:level_name(ms.level)] = true end
+	return out
+end
+
+-- f with drx_da_main's table cut to the levels keep(name) says, the rows it did not get as they were.
+local function with_levels(da, keep, f, ...)
+	local all = da.updated_anomaly_levels
+	local cut = {}
+	for name, row in pairs(all) do
+		if keep(name) then cut[name] = row end
+	end
+	da.updated_anomaly_levels = cut
+	local function back(ok, ...)
+		for name, row in pairs(cut) do all[name] = row end
+		da.updated_anomaly_levels = all
+		if not ok then error((...), 0) end
+		return ...
+	end
+	return back(pcall(f, ...))
+end
+
+local function tell_map_servers(t)
+	local payload = coop_main.encode(t)
+	for _, ms in ipairs(levels().map_servers()) do api.send_event(EV_DAO, payload, ms.bridge) end
+end
+
+local function patch_dao()
+	local da = rawget(_G, "drx_da_main")
+	if type(da) ~= "table" or dao.orig then return end
+	local clean = da.clean_dynamic_anomalies_global
+	if type(clean) ~= "function" then return end
+	dao.orig = clean
+	da.clean_dynamic_anomalies_global = function(...)
+		if not (world_server() and split()) then return clean(...) end
+		local led = led_levels()
+		local r = with_levels(da, function(name) return not led[name] end, clean, ...)
+		tell_map_servers({ g = da.last_surge_time })
+		return r
+	end
+	local spawn = da.spawn_artefacts_on_level
+	if type(spawn) == "function" then
+		da.spawn_artefacts_on_level = function(...)
+			if dao.in_interaction and world_server() and split() then tell_map_servers({ a = true }) end
+			return spawn(...)
+		end
+	end
+	local C = coop_mods_core
+	local interact = da.actor_on_interaction
+	if type(interact) == "function" and C then
+		local wrapped = function(...)
+			dao.in_interaction = true
+			local ok, err = pcall(interact, ...)
+			dao.in_interaction = false
+			if not ok then error(err, 0) end
+		end
+		da.actor_on_interaction = wrapped
+		C.swap_callback("actor_on_interaction", interact, wrapped)
+	end
+end
+
+local function on_dao(payload, from)
+	if from ~= 0 or not map_server() then return end
+	local da = rawget(_G, "drx_da_main")
+	if type(da) ~= "table" or not dao.orig then return end
+	local t = coop_main.decode(payload)
+	local here = level.name()
+	if t.a == true then
+		da.clean_artefacts_on_level(here)
+		da.spawn_artefacts_on_level(here)
+	elseif tonumber(t.g) then
+		da.last_surge_time = tonumber(t.g)
+		-- the part of the level the actor stands on: disabled now, cleaned when it loads
+		with_levels(da, function(name) return name == here end, dao.orig)
+	else
+		return
+	end
+	da.build_anomalies_pos_tree()
+end
+
+local function dao_row()
+	local da = rawget(_G, "drx_da_main")
+	if type(da) ~= "table" or type(da.updated_anomaly_levels) ~= "table" then return nil end
+	return da.updated_anomaly_levels[level.name()]
+end
+
+local function dao_merge(row, lid)
+	local da = rawget(_G, "drx_da_main")
+	if type(da) ~= "table" or type(da.updated_anomaly_levels) ~= "table" or lid == nil then return end
+	da.updated_anomaly_levels[alife():level_name(lid)] = row
+end
+
+-------------------------------------------------------------------------------
+-- Start
+-------------------------------------------------------------------------------
+local function logic_get()
+	local le = mod("logic_enforcer")
+	if not (le and le.save_state) then return nil end
+	local t = {}
+	le.save_state(t)
+	return t.logic_assign
+end
+
+local function logic_set(v)
+	local le = mod("logic_enforcer")
+	if le and le.load_state then le.load_state({ logic_assign = v }) end
+end
+
+local function guards_get()
+	local g = mod("guards_spawner")
+	return g and g.guarded_smarts or nil
+end
+
+local function guards_set(v)
+	local g = mod("guards_spawner")
+	if g then g.guarded_smarts = v end
+end
+
+function on_game_start()
+	if not api then return end
+	local share = coop_levels_share
+	share.up("trade", trade_rows, trade_merge, 10000)
+	share.up("dao", dao_row, dao_merge, 5000)
+	share.down("logic", logic_get, logic_set)
+	share.down("guards", guards_get, guards_set, 15000)
+	coop_main.add_event_handler(EV_DAO, on_dao)
+	RegisterScriptCallback("actor_on_first_update", patch_dao)
+end

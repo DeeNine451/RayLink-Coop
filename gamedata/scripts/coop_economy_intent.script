@@ -65,7 +65,7 @@ function requester_avatar(peer)
 end
 
 function host_bridge(owner_id, key, value)
-	if not (core.is_host() or not core.in_session()) then return end
+	if not (core.is_host() or core.is_map_server() or not core.in_session()) then return end
 	if se_load_var(owner_id, nil, key) == value then return end
 	se_save_var(owner_id, nil, key, value)
 end
@@ -169,7 +169,7 @@ function mdata_box_resolver(table_key)
 end
 
 local function on_intent(t, from)
-	if not core.is_host() or from <= 0 then return end
+	if not (core.is_host() or core.is_map_server()) or from <= 0 then return end
 	local verb = core.word(t.v, 48)
 	local obj_id = core.int(t.o, 0, 65534)
 	local state = core.num(t.s, -1e9, 1e9) or 0
@@ -197,5 +197,5 @@ end
 
 function on_game_start()
 	if not core.engine() then return end
-	core.on("intent", on_intent)
+	core.on_level("intent", on_intent) -- what a verb does stands on the player's level
 end

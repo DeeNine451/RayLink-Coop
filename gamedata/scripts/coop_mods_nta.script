@@ -69,8 +69,10 @@ end
 
 local function nearest_standing(pos)
 	local best, best_d
+	local far_view = qc().far_seen and qc().far_seen()
 	for _, p in ipairs(C().player_objects()) do
-		if standing(p.obj) then
+		-- in a far view the world server's own actor stands on another level: his coordinates mean nothing there
+		if standing(p.obj) and not (far_view and p.obj:id() == 0) then
 			local d = p.obj:position():distance_to_sqr(pos)
 			if not best_d or d < best_d then best, best_d = p.obj, d end
 		end
@@ -145,14 +147,20 @@ end
 -------------------------------------------------------------------------------
 -- Status functors evaluated for the group
 -------------------------------------------------------------------------------
+-- Every other player, on any level: each pass looks at his level (as_his_level).
 local function others_here()
 	local out = {}
-	for _, p in ipairs(C().player_objects()) do
+	for _, p in ipairs(C().all_players()) do
 		if (not db.actor or p.obj:id() ~= db.actor:id()) and p.obj:alive() and standing(p.obj) then -- by id: no == in luabind
 			out[#out + 1] = p
 		end
 	end
 	return out
+end
+
+-- The functor as this player, on his level: level.name and the objects are his.
+local function as_his_level(p, f, ...)
+	return qc().with_level_of(p.peer, C().as_player, p.obj, f, ...)
 end
 
 local function party_functor(name, orig)
@@ -162,7 +170,7 @@ local function party_functor(name, orig)
 		local held, failed = false, false
 		pass_stage = pre
 		if standing(db.actor) then
-			local r = orig(tsk, task_id, ...)
+			local r = qc().at_home(orig, tsk, task_id, ...)
 			if tsk.stage ~= pre or (r ~= nil and r ~= "fail") then
 				pass_stage = nil
 				return r
@@ -170,7 +178,7 @@ local function party_functor(name, orig)
 			held, failed = r == nil, r == "fail"
 		end
 		for _, p in ipairs(others_here()) do
-			local ok, r2 = C().as_player(p.obj, orig, tsk, task_id, ...)
+			local ok, r2 = as_his_level(p, orig, tsk, task_id, ...)
 			if not ok then
 				st.errors = st.errors + 1
 				C().report("nta", name, r2)

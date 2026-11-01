@@ -49,6 +49,7 @@ local MISSES_KEPT = 3
 
 local function qc() return coop_quests_core end
 local function levels() return api and api.levels end
+local function q_mod(name) return qc().mod(name) end
 
 local function log(fmt, ...)
 	local ok, line = pcall(string.format, fmt, ...)
@@ -238,12 +239,19 @@ function class:distance_to_sqr(o) return self[1]:distance_to_sqr(o) end
 function class:relation(who) return game_object and game_object.neutral or 1 end
 function class:money() return se_call(self, "money") or 0 end
 
+-- Id of a side of a change: on a map server id 0 is its ghost, the player of the scope stands for "the actor".
+local function id_there(who)
+	local id = type(who) == "number" and who or (who and who:id())
+	if id == 0 and scope and scope.avatar then return scope.avatar end
+	return id
+end
+
 -- The changes: orders to the map server (below).
-function class:kill(who) order(self[4], "kill", who and who:id()) end
+function class:kill(who) order(self[4], "kill", id_there(who)) end
 function class:give_info_portion(name) order(self[4], "info", name) return true end
 function class:disable_info_portion(name) order(self[4], "uninfo", name) end
-function class:set_relation(rel, who) order(self[4], "relation", rel, who and who:id()) end
-function class:force_set_goodwill(v, who) order(self[4], "goodwill", v, type(who) == "number" and who or (who and who:id())) end
+function class:set_relation(rel, who) order(self[4], "relation", rel, id_there(who)) end
+function class:force_set_goodwill(v, who) order(self[4], "goodwill", v, id_there(who)) end
 function class:set_community_goodwill(comm, v) order(self[4], "comm_goodwill", comm, v) end
 function class:set_character_community(comm, rank, rep) order(self[4], "community", comm, rank, rep) end
 function class:set_health_ex(v) order(self[4], "health", v) end
@@ -252,7 +260,7 @@ function class:set_npc_position(pos) order(self[4], "place", pos.x, pos.y, pos.z
 function class:force_set_position(pos) order(self[4], "place", pos.x, pos.y, pos.z) end
 function class:hit(h)
 	local who = h and h.draftsman
-	order(self[4], "hit", tonumber(h and h.power) or 0, tonumber(h and h.type) or 0, who and who:id())
+	order(self[4], "hit", tonumber(h and h.power) or 0, tonumber(h and h.type) or 0, id_there(who))
 end
 
 function make(id, se)
@@ -369,10 +377,7 @@ local function open(lid, peer, what)
 			return se and make(id, se) or nil
 		end,
 		on_actor_level = function(se) return se ~= nil and vertex_level(se.m_game_vertex_id) == s.id end,
-		online = function(se)
-			if level_of_id(se.id) ~= s.id then return false end
-			return object_there(s, se.id) ~= nil
-		end,
+		online = function(se) return level_of_id(se.id) == s.id end, -- a smart is online on the level the actor stands on
 	}
 	db.anomaly_by_name = names_table(s, "a")
 	_G.alife = function() return s.sim_view end
@@ -428,6 +433,26 @@ function with_target(id, peer, what, fn, ...)
 	end
 	if not usable(lid) then return fn(...) end
 	return finish(open(lid, who, what), pcall(fn, ...))
+end
+
+-- fn on the world server's own level, from inside a scope: the pass of its own actor.
+function at_home(fn, ...)
+	local s = scope
+	if not s then return fn(...) end
+	local anomalies, sim = db.anomaly_by_name, _G.alife
+	scope = nil
+	db.anomaly_by_name = s.anomalies
+	_G.alife = s.sim
+	qc().set_far_view(nil)
+	local function back(ok, ...)
+		scope = s
+		db.anomaly_by_name = anomalies
+		_G.alife = sim
+		qc().set_far_view(s.view)
+		if not ok then error((...), 0) end
+		return ...
+	end
+	return back(pcall(fn, ...))
 end
 
 -- The one line of a task that failed in a scope: what it looked for and what it got.
@@ -492,6 +517,10 @@ local DO = {
 	health = function(obj, t) obj:set_health_ex(t.a) end,
 	money = function(obj, t) obj:give_money(t.a) end,
 	place = function(obj, t) obj:set_npc_position(vector():set(t.a, t.b, t.c)) end,
+	companion = function(obj, t)
+		local st = db.storage[obj:id()]
+		if st then axr_companions.setup_companion_logic(obj, st, false, true) end
+	end,
 	hit = function(obj, t)
 		local h = hit()
 		h.power = t.a
@@ -762,9 +791,21 @@ function _tick() next_tick = 0; tick() end
 function _stats() return stats end
 function _names_of() return names_of end
 
+-- The logic of a companion is an NPC's on the level he stands on: tasks_agent_rescue makes the spy one from a status functor.
+local function patch_companions()
+	local ac = q_mod("axr_companions")
+	local f = ac and ac.setup_companion_logic
+	if type(f) ~= "function" then return end
+	ac.setup_companion_logic = function(npc, st, ...)
+		if npc and npc.far then return order(npc:id(), "companion") end
+		return f(npc, st, ...)
+	end
+end
+
 function on_game_start()
 	if not api then return end
 	local q = qc()
+	RegisterScriptCallback("actor_on_first_update", patch_companions)
 	q.on("far_do", on_do, TAG)
 	q.on("far_ack", on_ack, TAG)
 	q.on("far_car", on_vehicle_death, TAG)

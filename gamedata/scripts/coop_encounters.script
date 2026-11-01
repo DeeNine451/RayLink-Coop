@@ -89,9 +89,9 @@ function add(e)
 	recs[e.id] = {}
 end
 
--- Host in the checkpoint mode.
+-- World server in the checkpoint mode: the tasks and their rollback are its own, a map server has a copy.
 local function ruled()
-	if not P.is_host() then return false end
+	if not P.is_world_server() then return false end
 	local f = rawget(_G, "get_console_cmd")
 	if type(f) ~= "function" then return false end
 	local ok, v = pcall(f, 0, "coop_death_mode")
@@ -109,17 +109,33 @@ local function task_of(id)
 	return type(info) == "table" and info[id] or nil
 end
 
-local function anyone_standing()
-	for _, o in ipairs(P.everyone()) do
+-- The players on a level, wherever it is led: their objects here, their records for those on another level. lvl nil: every level.
+local function bodies_on(lvl)
+	local l = rawget(_G, "coop") and coop.levels
+	if not (l and l.split and l.split() == true) then
+		if lvl and lvl ~= level.name() then return {} end
+		return P.everyone()
+	end
+	local out = {}
+	local gg, sim = game_graph(), alife()
+	for _, c in ipairs(coop_quests_core.bodies()) do
+		local ok, name = pcall(function() return sim:level_name(gg:vertex(c.obj:game_vertex_id()):level_id()) end)
+		if lvl == nil or (ok and name == lvl) then out[#out + 1] = c.obj end
+	end
+	return out
+end
+
+local function anyone_standing(lvl)
+	for _, o in ipairs(bodies_on(lvl)) do
 		if P.standing(o) then return true end
 	end
 	return false
 end
 
--- A standing player within r of pos.
-function standing_near(pos, r)
+-- A standing player within r of pos, on level lvl when it is known: coordinates of two levels mean nothing to each other.
+function standing_near(pos, r, lvl)
 	local rr = r * r
-	for _, o in ipairs(P.everyone()) do
+	for _, o in ipairs(lvl and bodies_on(lvl) or P.everyone()) do
 		if P.standing(o) and o:position():distance_to_sqr(pos) <= rr then return true end
 	end
 	return false
@@ -132,11 +148,11 @@ end
 
 local function present_at(e, tsk)
 	local lvl = level_of(e, tsk)
-	if lvl and lvl ~= level.name() then return false end
+	if lvl and #bodies_on(lvl) == 0 then return false end
 	local pos, r = e.zone(tsk, e)
 	if pos == nil then return true end -- no place known: nothing is decided
-	if r == nil then return anyone_standing() end -- the level is the zone
-	return standing_near(pos, r)
+	if r == nil then return anyone_standing(lvl) end -- the level is the zone
+	return standing_near(pos, r, lvl)
 end
 
 local function roll_back(e, tsk)
@@ -161,7 +177,8 @@ end
 function left_level(id, tsk)
 	local e = by_id[id]
 	if not (e and ruled() and in_progress(tsk) and e.live(tsk, e) == true) then return false end
-	if level_of(e, tsk) == level.name() then return false end
+	local lvl = level_of(e, tsk)
+	if lvl == level.name() or #bodies_on(lvl) > 0 then return false end
 	roll_back(e, tsk)
 	return true
 end
@@ -436,12 +453,14 @@ local function ht_tick()
 	for id in pairs(guarded) do guarded[id] = nil end
 	if not in_progress(task_of(HT_TASK)) then return end
 	local se = get_story_squad and get_story_squad(HT_SQUAD)
-	if not (se and se.position) or standing_near(se.position, HT_RADIUS) then return end
+	if not (se and se.position) then return end
+	local lvl = se.m_game_vertex_id and alife():level_name(game_graph():vertex(se.m_game_vertex_id):level_id()) or nil
+	if standing_near(se.position, HT_RADIUS, lvl) then return end
 	for k in se:squad_members() do guarded[k.id] = true end
 end
 
 local function npc_on_before_hit(npc, s_hit)
-	if next(guarded) == nil or not (ruled() and npc and s_hit and guarded[npc:id()]) then return end
+	if next(guarded) == nil or not (P.is_host() and npc and s_hit and guarded[npc:id()]) then return end
 	s_hit.power = 0
 	stats.guarded_hits = stats.guarded_hits + 1
 end
@@ -549,6 +568,14 @@ function on_game_start()
 	install_entries()
 	local ok, err = pcall(install_arena_gear) -- axr_main runs every on_game_start in one unprotected loop
 	if not ok then report("arena", err) end
+	-- the squad a task keeps alive stands on a level a map server may lead: who is held off is the world server's to say
+	local share = rawget(_G, "coop_levels_share") or coop_levels_share
+	if share then
+		share.down("guarded", function() return guarded end, function(t)
+			for id in pairs(guarded) do guarded[id] = nil end
+			for id in pairs(t) do guarded[id] = true end
+		end)
+	end
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
 	RegisterScriptCallback("coop_respawned", on_respawned)

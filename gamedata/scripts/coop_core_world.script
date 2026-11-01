@@ -822,7 +822,7 @@ end
 
 -- Host: the looted flag of a corpse changed; every client takes it over.
 local function edge(id, looted)
-	if not is_host() then return end
+	if not leads_level() then return end
 	if api.send_event(EV_MLOOT_EDGE, codec().encode({ id = id, l = looted and true or false }), -1) then
 		stats.mloot_edges = stats.mloot_edges + 1
 	end
@@ -915,7 +915,7 @@ local function release_locks(pred)
 end
 
 function on_peer_left(peer)
-	if is_host() then release_locks(function(l) return l.peer == peer end) end
+	if leads_level() then release_locks(function(l) return l.peer == peer end) end
 end
 
 local function client_open(obj)
@@ -1037,7 +1037,7 @@ local function install_mutant_loot()
 	local orig_loot = ml.loot_mutant
 	ml.loot_mutant = function(section, cls_id, loot_table, npc, dont_create, victim)
 		local r = orig_loot(section, cls_id, loot_table, npc, dont_create, victim)
-		if is_host() and victim and npc and not dont_create and npc:id() ~= AC_ID then
+		if leads_level() and victim and npc and not dont_create and npc:id() ~= AC_ID then
 			pcall(edge, victim:id(), true) -- an NPC cut it up; the caller sets "looted" right after this
 		end
 		return r
@@ -1130,7 +1130,15 @@ local function host_on_trader_req(payload, from)
 	local npc = id and level.object_by_id(id)
 	local tm = rawget(_G, "trade_manager") or trade_manager
 	if not (npc and tm and npc:alive()) then return end
-	pcall(tm.update, npc, false) -- the stock restock check, now: the client trades the current stock
+	-- the stock restock check, now: the client trades the current stock. The supply level reads "the actor" (goodwill, heavy pockets):
+	-- the player at the trader, not this machine's actor (a map server's is a ghost).
+	local P = module_of("coop_npc_players")
+	local who = P and P.object_of_peer(from)
+	if who then
+		pcall(P.with_identity, who, tm.update, npc, false)
+	else
+		pcall(tm.update, npc, false)
+	end
 	local cfg = tm.get_trade_profile(id, "cfg_ltx")
 	if type(cfg) ~= "string" then return end
 	api.send_event(EV_TRADER_CFG, codec().encode({ id = id, cfg = cfg }), from)
@@ -1167,7 +1175,7 @@ local function actor_on_update()
 	local tg = time_global()
 	if tg < next_tick then return end
 	next_tick = tg + TICK_MS
-	if api.is_host() then
+	if leads_level() then
 		release_locks(function(l) return tg - l.at > MLOOT_LOCK_MS end)
 		local ok, err = pcall(keep_news_wrapped)
 		if not ok then log("! news: %s", tostring(err)) end
