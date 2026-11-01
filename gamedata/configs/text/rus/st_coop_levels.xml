@@ -8,10 +8,16 @@
 		<text>%s: лучше вместе — %s</text>
 	</string>
 	<string id="st_coop_levels_refused_cap">
-		<text>На ПК хоста нет места ещё под одну карту (предел: %s). Идите на уже открытую карту.</text>
+		<text>На ПК хоста нет места ещё для одной карты. Иди на уже открытую карту.</text>
 	</string>
-	<string id="st_coop_levels_refused_led">
-		<text>Этой картой уже управляет другой игрок, присоединиться к нему пока нельзя.</text>
+	<string id="st_coop_levels_server_restart">
+		<text>Сервер карты упал и перезапускается: карта загрузится заново.</text>
+	</string>
+	<string id="st_coop_levels_server_failed">
+		<text>Сервер этой карты не запускается: ты возвращаешься на карту хоста.</text>
+	</string>
+	<string id="st_coop_load_server">
+		<text>Ждём сервер карты...</text>
 	</string>
 	<string id="st_coop_levels_refused_invalid">
 		<text>Этим выходом сейчас нельзя воспользоваться.</text>

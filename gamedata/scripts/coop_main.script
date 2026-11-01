@@ -825,8 +825,8 @@ end
 -- SIMBOARD:create_squad). That is world simulation, the host's job: on a client alife():create is refused
 -- (nil) and the stock sim_board.create_squad indexes the result -> FATAL in a binder update. Binders are
 -- object classes, not callbacks, so the domain filter does not cover them.
--- F3a multilevel (docs\SPLIT_LEVELS.md section 4): a client who leads his level runs the jobs of its smarts, the NPCs there are his;
--- who respawns where stays the host's: its offline world creates the squads, and they come to him through the transfers.
+-- F3a (docs\SPLIT_LEVELS.md section 4): a map server runs the jobs of its level's smarts, the NPCs there are its own; who respawns
+-- where stays the world server's: its offline world creates the squads, and they come over through the transfers.
 local function leads_level()
 	return api ~= nil and api.is_client() and api.is_mirror ~= nil and not api.is_mirror()
 end

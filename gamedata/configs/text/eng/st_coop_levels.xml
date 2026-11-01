@@ -8,10 +8,16 @@
 		<text>%s: better together - %s</text>
 	</string>
 	<string id="st_coop_levels_refused_cap">
-		<text>There is no room for one more map on the host's PC (limit: %s). Go to a map that is already open.</text>
+		<text>There is no room for one more map on the host's PC. Go to a map that is already open.</text>
 	</string>
-	<string id="st_coop_levels_refused_led">
-		<text>Another player leads that map, and you cannot join him there yet.</text>
+	<string id="st_coop_levels_server_restart">
+		<text>The map server crashed and is restarting: the map loads again.</text>
+	</string>
+	<string id="st_coop_levels_server_failed">
+		<text>The server of this map does not start: you go back to the host's map.</text>
+	</string>
+	<string id="st_coop_load_server">
+		<text>Waiting for the map server...</text>
 	</string>
 	<string id="st_coop_levels_refused_invalid">
 		<text>This exit cannot be used right now.</text>

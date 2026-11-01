@@ -67,7 +67,7 @@ local function on_client()
 	return api ~= nil and api.is_client()
 end
 
--- F3a multilevel: a client who leads his level computes it: what "a client does not do" does not hold for him, the guards do.
+-- F3a: a map server computes its level: what "a client does not do" does not hold for it, the guards do.
 local function on_mirror()
 	return on_client() and (api.is_mirror == nil or api.is_mirror())
 end

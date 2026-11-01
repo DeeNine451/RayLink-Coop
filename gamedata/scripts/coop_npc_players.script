@@ -70,7 +70,7 @@ function is_host()
 end
 
 function is_client()
-	-- F3a multilevel: on a level he leads a client's NPCs are his own: the stock logic runs, as on a machine without co-op
+	-- F3a: a map server's NPCs are its own: the stock logic runs, as on the host's process
 	return active() and api.is_client() == true and (api.is_mirror == nil or api.is_mirror() == true)
 end
 
