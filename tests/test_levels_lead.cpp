@@ -322,6 +322,44 @@ TEST(keeper_a_take_marks_the_object_and_the_client_gets_its_state)
 	CHECK_EQ(r.keeper.ledger().journal_size(), size_t(0));
 }
 
+// Requirement 2: a save in the middle of a transfer, the host's load of it: every object exactly once, the handed-back state not lost.
+TEST(keeper_a_journal_brings_a_release_in_flight_through_a_load)
+{
+	Rig r;
+	r.take(50, 10);
+	r.take(51, 20);
+	CHECK(r.keeper.ledger().owner(50) != xfer::kWorld);
+
+	// the world took the state of 50 and the map server's answer never came: the save falls here
+	const xfer::Bytes last = state_of(77);
+	r.holder.take_events();
+	std::vector<xfer::Packet> up = r.holder.want_offline(50, last, r.now);
+	CHECK(!up.empty());
+	(void)r.keeper.on_up(r.peer, up.front(), nullptr, r.now);
+	r.drain();
+	const std::string text = r.keeper.journal();
+	CHECK(text.find("[coop_xfer]") != std::string::npos);
+	CHECK(text.find("n = 1") != std::string::npos);
+
+	r.changes.clear();
+	Keeper loaded;
+	const uint32_t peer_before = r.keeper.ledger().next_peer();
+	loaded.connect(0x102); // a process of the old world
+	CHECK(loaded.resume(text));
+	CHECK(!loaded.connected(0x102));
+	std::vector<Keeper::Change> changes = loaded.take_changes();
+	CHECK_EQ(changes.size(), size_t(1));
+	CHECK(changes[0].kind == Keeper::Kind::State && changes[0].id == 50 && changes[0].state == last);
+	CHECK(loaded.ledger().owner(50) == xfer::kWorld);
+	CHECK(loaded.ledger().owner_count(50) <= 1);
+	CHECK(loaded.ledger().next_peer() >= peer_before);
+	// a garbled text changes nothing
+	Keeper same;
+	same.connect(0x101);
+	CHECK(!same.resume("[coop_xfer]\nv = 9\n"));
+	CHECK(same.connected(0x101));
+}
+
 TEST(keeper_a_release_brings_the_state_home_once)
 {
 	Rig r;
