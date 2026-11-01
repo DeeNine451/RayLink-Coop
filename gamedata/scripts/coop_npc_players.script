@@ -17,6 +17,7 @@
 	  everyone()              -> db.actor (if alive) + others() (cached per frame, do not modify)
 	  peer_of(obj_or_id)      -> peer id of the player that object stands for, or nil
 	  object_of_peer(peer)    -> that player's character on this machine (db.actor for self), or nil
+	  avatar_of_peer(peer)    -> the id of his character, also of one standing on another level; nil if he is not in the session
 	  is_player_id(id)        -> true for the local actor and for any player avatar
 	  nearest(pos)            -> nearest player object, squared distance (math.huge if nobody)
 	  nearest_dist_sqr(pos)   -> squared distance to the nearest player
@@ -208,6 +209,15 @@ function object_of_peer(peer)
 	local ok, id = pcall(api.avatar_of, peer)
 	if not (ok and type(id) == "number") then return nil end
 	return level.object_by_id(id)
+end
+
+-- That player's character here, on whatever level it stands: its id from the list of players, which needs no object on this level.
+function avatar_of_peer(peer)
+	if type(peer) ~= "number" then return nil end
+	for _, p in ipairs(players()) do
+		if p.id == peer then return type(p.avatar_id) == "number" and p.avatar_id or nil end
+	end
+	return nil
 end
 
 function is_player_id(id)

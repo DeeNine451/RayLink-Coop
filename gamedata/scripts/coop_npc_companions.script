@@ -426,12 +426,12 @@ end
 -- The squads added since `before` are led by the player. Returns how many. Several for one recruit: Useful Idiots splits a
 -- recruited squad into one per member.
 local function claim_new_squads(before, peer)
-	local who = P.object_of_peer(peer)
+	local who = P.avatar_of_peer(peer)
 	local n = 0
 	if not who then return n end
 	for id in pairs(squad_ids()) do
 		if not before[id] then
-			leaders[id] = who:id()
+			leaders[id] = who
 			n = n + 1
 		end
 	end

@@ -109,6 +109,22 @@ H.env.xr_effects.setup_companion_task(H.env.db.actor, nil, { "360", "esc_smart" 
 check(L()[360] == nil, "the taker is gone: no leader entry")
 TAKER = 1
 
+print("== split levels: the taker stands on another level, this process has no object of him")
+do
+	local here = H.objects[500]
+	H.objects[500] = nil
+	H.env.coop_npc_players.invalidate()
+	check(H.env.coop_npc_players.object_of_peer(1) == nil, "(no object of his character here)")
+	check(H.env.coop_npc_players.avatar_of_peer(1) == 500, "avatar_of_peer: the character's id from the list of players")
+	check(H.env.coop_npc_players.avatar_of_peer(0) == 0, "avatar_of_peer: this player's own actor is 0")
+	check(H.env.coop_npc_players.avatar_of_peer(7) == nil, "avatar_of_peer: nobody of the session")
+	check(H.env.coop_npc_players.avatar_of_peer("1") == nil, "avatar_of_peer: not a peer")
+	H.env.xr_effects.setup_companion_task(H.env.db.actor, nil, { "365", "esc_smart" })
+	check(L()[365] == 500, "the taker leads the squad all the same: the id comes from the list of players, no object is needed")
+	H.objects[500] = here
+	H.env.coop_npc_players.invalidate()
+end
+
 print("== an old companion squad stays with its leader")
 -- the squad was a companion before the call: only the squads a call adds are claimed
 H.env.axr_companions.companion_squads[370] = new_squad(370)
