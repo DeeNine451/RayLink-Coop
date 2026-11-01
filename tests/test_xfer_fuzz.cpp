@@ -11,7 +11,9 @@
 //             drained and stopped, a restart (a new peer id, or the old one when nothing of it is in flight), a save
 //             (the world's objects plus the journal) and a load (a fresh Ledger, load_journal, resolve_after_load,
 //             set_peer_floor with the live ledger's counter as the engine will, every map server restarted empty; half
-//             the runs keep the packets of the old connections in flight);
+//             the runs keep the packets of the old connections in flight), the host's process reloading with its map
+//             servers alive (R13: one may close first; the world hears nothing and says nothing for a while, what reaches it
+//             waits in order, the clock jumps, the ledger goes on);
 //   ce1     - the mix that found review C1: 30 % takes, 25 % edge of the radius, 30 % world aborts (half of them aimed
 //             at a grant whose map server is committing a release or destroying the id), one map server, one object,
 //             no random quiet;
@@ -122,6 +124,7 @@ enum class Do : uint8_t
 	Restart,
 	Save,
 	Load,
+	HostReload,
 	Reuse,
 	Idle,
 };
@@ -137,7 +140,7 @@ const std::vector<Weight>& mix(Profile p)
 	static const std::vector<Weight> base = {{Do::Take, 22}, {Do::Release, 12}, {Do::Change, 12}, {Do::WorldChange, 4},
 		{Do::Spawn, 6}, {Do::Destroy, 4}, {Do::WorldDestroy, 2}, {Do::Move, 6}, {Do::Edge, 2}, {Do::Squad, 3},
 		{Do::Teleport, 3}, {Do::Leave, 4}, {Do::Abort, 3}, {Do::Crash, 2}, {Do::Bridge, 1}, {Do::Drain, 2},
-		{Do::Restart, 2}, {Do::Save, 3}, {Do::Load, 2}, {Do::Idle, 5}};
+		{Do::Restart, 2}, {Do::Save, 3}, {Do::Load, 2}, {Do::HostReload, 2}, {Do::Idle, 5}};
 	static const std::vector<Weight> ce1 = {{Do::Take, 30}, {Do::Edge, 25}, {Do::Abort, 30}, {Do::Release, 4},
 		{Do::Change, 3}, {Do::Spawn, 2}, {Do::Destroy, 1}, {Do::Crash, 1}, {Do::Save, 2}, {Do::Load, 1}, {Do::Idle, 1}};
 	static const std::vector<Weight> reuse = [] {
@@ -234,6 +237,7 @@ struct Worst
 
 struct Stats
 {
+	uint64_t reloads = 0; // R13
 	uint64_t runs = 0, big = 0, saves = 0, loads = 0, crashes = 0, drains = 0, quiets = 0, audits = 0, dup_faults = 0,
 	         lose_faults = 0, healed = 0, drifts = 0, journal_full = 0, reused = 0, refusals = 0;
 
@@ -246,6 +250,7 @@ struct Stats
 		crashes += o.crashes;
 		drains += o.drains;
 		quiets += o.quiets;
+		reloads += o.reloads;
 		audits += o.audits;
 		dup_faults += o.dup_faults;
 		lose_faults += o.lose_faults;
@@ -283,6 +288,8 @@ public:
 		{
 			++m_res.step;
 			m_now += 1 + m_r.below(200);
+			if (m_away_ops && --m_away_ops == 0)
+				world_back();
 			random_op();
 			if (!m_res.ok)
 				break;
@@ -291,12 +298,14 @@ public:
 			deliver(m_r.below(8));
 			tick_all();
 			housekeeping();
-			if (m_audits && m_r.percent(m_audit_pct))
+			if (m_audits && !m_away_ops && m_r.percent(m_audit_pct))
 				audit_round(false);
 			check_step(m_res.step % kFullCheckEvery == 0);
-			if (m_res.ok && m_random_quiet && m_r.percent(2))
+			if (m_res.ok && m_random_quiet && !m_away_ops && m_r.percent(2))
 				quiet();
 		}
+		if (m_res.ok)
+			world_back();
 		if (m_res.ok)
 			quiet();
 		return m_res;
@@ -353,6 +362,9 @@ private:
 	uint16_t m_next_id = 1000;
 	// The model: what the game did and what the replies said, kept apart from the ledger.
 	std::set<uint16_t> m_reg; // registered: made by the world, or a spawn the world answered
+	uint32_t m_away_ops = 0; // R13: the host's process is reloading for this many operations more
+	uint64_t m_away_jump = 0; // ... and its clock jumps by this when it is back
+	std::deque<Packet> m_parked; // ... what reached it meanwhile
 	std::set<uint16_t> m_dead; // destroyed (a destroy the world answered, or the world's own)
 	std::map<uint16_t, Peer> m_spawning; // spawned at a map server, not answered yet
 	std::map<uint16_t, uint32_t> m_conf; // the last confirmed state version (the world's copy)
@@ -566,6 +578,11 @@ private:
 	{
 		log(describe_packet(p));
 		const uint16_t id = p.key.id;
+		if (p.to == kWorld && m_away_ops)
+		{
+			m_parked.push_back(p); // R13: the connection is parked, what it says waits in order
+			return;
+		}
 		if (p.to == kWorld)
 		{
 			std::vector<Packet> out = m_w->on_packet(p, m_now);
@@ -723,7 +740,8 @@ private:
 
 	void tick_all()
 	{
-		send(m_w->tick(m_now));
+		if (!m_away_ops)
+			send(m_w->tick(m_now));
 		for (size_t k = 0; k < m_maps.size(); ++k)
 			if (m_maps[k].up)
 			{
@@ -901,6 +919,8 @@ private:
 
 	void housekeeping()
 	{
+		if (m_away_ops)
+			return; // what is done here is the world's
 		for (size_t k = 0; k < m_maps.size() && m_res.ok; ++k)
 		{
 			Map& m = m_maps[k];
@@ -1122,6 +1142,24 @@ private:
 			uint16_t& id;
 			~Touch() { sim.touch(id); }
 		} touched{*this, id};
+		if (m_away_ops)
+			switch (what)
+			{
+			case Do::WorldChange:
+			case Do::WorldDestroy:
+			case Do::Teleport:
+			case Do::Abort:
+			case Do::Crash:
+			case Do::Bridge:
+			case Do::Restart:
+			case Do::Save:
+			case Do::Load:
+			case Do::HostReload:
+			case Do::Reuse:
+				what = Do::Idle; // the world's: it is not there (a map server that dies meanwhile is the world's news after it)
+				break;
+			default: break;
+			}
 		switch (what)
 		{
 		case Do::Take:
@@ -1323,6 +1361,18 @@ private:
 			if (m_save)
 				load();
 			break;
+		case Do::HostReload:
+		{
+			// R13, the host's move: the map server of the level it goes to closes first, the others stay and notice nothing
+			log("op the host's process reloads");
+			const int k = m_r.percent(30) ? live_map() : -1;
+			if (k >= 0)
+				stop(size_t(k));
+			m_away_ops = 1 + m_r.below(16);
+			m_away_jump = m_r.below(90000);
+			++m_res.stats.reloads;
+			break;
+		}
 		case Do::Reuse:
 			if (!pick(m_dead, id))
 				break;
@@ -1364,6 +1414,22 @@ private:
 	}
 
 	// ---- save and load ----------------------------------------------------------------------------------------------
+
+	// R13: the parking ends. The world is the same book, later: everything it missed runs in the order it came.
+	void world_back()
+	{
+		if (!m_away_ops && m_parked.empty() && !m_away_jump)
+			return;
+		m_away_ops = 0;
+		m_now += m_away_jump;
+		m_away_jump = 0;
+		log("the world is back, " + std::to_string(m_parked.size()) + " packet(s) waited");
+		std::deque<Packet> parked;
+		parked.swap(m_parked);
+		for (const Packet& p : parked)
+			if (m_res.ok)
+				dispatch(p);
+	}
 
 	void save()
 	{
@@ -1443,6 +1509,7 @@ private:
 			return;
 		log("quiet");
 		++m_res.stats.quiets;
+		world_back();
 		m_teleport.clear();
 		const uint64_t start = m_now;
 		for (uint32_t i = 0; m_res.ok && !settled(); ++i)
@@ -1668,10 +1735,10 @@ TEST(xfer_fuzz)
 		if (!s.runs)
 			continue;
 		std::printf("    %-7s %7" PRIu64 " runs (%" PRIu64 " full-size): %" PRIu64 " saves, %" PRIu64 " loads, %" PRIu64
-		            " crashes, %" PRIu64 " drains, %" PRIu64 " quiets, %" PRIu64 " audits, faults %" PRIu64
+		            " crashes, %" PRIu64 " drains, %" PRIu64 " host reloads, %" PRIu64 " quiets, %" PRIu64 " audits, faults %" PRIu64
 		            " dup / %" PRIu64 " lost, healed %" PRIu64 ", drifts %" PRIu64 ", ids reused %" PRIu64
 		            ", refusals %" PRIu64 ", steps with a full journal %" PRIu64 "\n",
-			profile_name(Profile(p)), s.runs, s.big, s.saves, s.loads, s.crashes, s.drains, s.quiets, s.audits,
+			profile_name(Profile(p)), s.runs, s.big, s.saves, s.loads, s.crashes, s.drains, s.reloads, s.quiets, s.audits,
 			s.dup_faults, s.lose_faults, s.healed, s.drifts, s.reused, s.refusals, s.journal_full);
 	}
 	std::printf("    worst: %zu packets in flight, %zu journal entries, %zu ids at one map server, %" PRIu64

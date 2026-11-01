@@ -382,6 +382,55 @@ TEST(keeper_a_journal_brings_a_release_in_flight_through_a_load)
 	CHECK(same.connected(0x101));
 }
 
+// R13, the host's move: the process reloads, the map server lives. The book is not touched, whatever a save of it says.
+TEST(keeper_the_book_goes_through_a_reload_that_keeps_the_map_server)
+{
+	Rig r;
+	r.take(50, 10);
+	r.take(51, 20);
+	const uint32_t gen = r.keeper.ledger().gen(50);
+	const std::vector<uint16_t> marks = r.keeper.marks();
+	CHECK_EQ(marks.size(), size_t(2)); // the new simulator hears of both before its first update
+	CHECK(r.keeper.connected(r.peer));
+	CHECK(r.keeper.away(50));
+	CHECK_EQ(r.keeper.ledger().gen(50), gen);
+	// what the map server does meanwhile waits and then runs as it would have
+	r.holder.take_events();
+	r.to_world(r.holder.want_offline(50, state_of(77), r.now));
+	CHECK(!r.keeper.away(50));
+	CHECK(r.saw(Keeper::Kind::Unmark, 50));
+	CHECK(r.keeper.ledger().owner(51) != xfer::kWorld);
+}
+
+// R13: the book knows a grant the save does not; the object is marked, and the commit that comes after the reload finds it as it was.
+TEST(keeper_a_grant_open_at_the_save_goes_on_after_the_reload)
+{
+	Rig r;
+	const xfer::Bytes fresh = state_of(3);
+	std::vector<xfer::Packet> down;
+	for (const xfer::Packet& p : r.holder.want_online(60, r.now))
+		down = r.keeper.on_up(r.peer, p, &fresh, r.now);
+	r.drain();
+	CHECK(r.keeper.away(60));
+	CHECK_EQ(r.keeper.marks().size(), size_t(1));
+	r.to_client(down); // parked until the world is back: the commit comes now
+	CHECK(r.keeper.ledger().owner(60) != xfer::kWorld);
+	CHECK_EQ(r.keeper.ledger().journal_size(), size_t(0));
+}
+
+// R13: the map server of the level the host goes to did not hand everything over in its 15 s: it does not stay, its objects come home.
+TEST(keeper_a_map_server_that_does_not_stay_brings_its_objects_home_in_the_new_world)
+{
+	Rig r;
+	r.take(70, 1);
+	r.changes.clear();
+	CHECK_EQ(r.keeper.marks().size(), size_t(1));
+	r.keeper.disconnect(r.peer, r.now);
+	r.drain();
+	CHECK(r.saw(Keeper::Kind::Unmark, 70));
+	CHECK(r.keeper.marks().empty());
+}
+
 TEST(keeper_a_release_brings_the_state_home_once)
 {
 	Rig r;
