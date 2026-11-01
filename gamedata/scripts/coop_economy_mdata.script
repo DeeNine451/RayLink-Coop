@@ -182,7 +182,7 @@ local function on_se(t, from)
 	for _, e in ipairs(read_batch(t)) do
 		if not_sent(e.key) then
 			-- ignore
-		elseif host and not client_may_write(from, e.id, e.key) then
+		elseif host and from < 0x100 and not client_may_write(from, e.id, e.key) then -- 0x100 up: a map server, an authority of its level
 			stats.se_refused = stats.se_refused + 1
 		else
 			local lid = host and e.id or core.local_id(e.id)

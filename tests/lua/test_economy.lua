@@ -572,6 +572,12 @@ do
 	tick(A, 400) deliver_all()
 	check(H.se_load_var(810, nil, "companion") == nil and B.se_load_var(810, nil, "companion") == nil
 		and H.se_load_var(501, nil, "companion_cannot_teleport") == nil, "client cannot set companion flags")
+	-- a map server leads the NPCs of its level: a recruit there reaches the save of the world server
+	A.se_save_var(810, nil, "companion_cannot_dismiss", true)
+	tick(A, 400)
+	for _, m in ipairs(QUEUE) do m.from = 0x101 end
+	deliver_all()
+	check(H.se_load_var(810, nil, "companion_cannot_dismiss") == true, "a map server's companion flag is accepted")
 	-- a world flag (looted) is accepted
 	A.se_save_var(810, nil, "looted", true)
 	tick(A, 400) deliver_all()
