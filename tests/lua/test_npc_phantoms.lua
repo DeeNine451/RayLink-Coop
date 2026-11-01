@@ -295,7 +295,7 @@ do
 	local fh = assert(io.open("gamedata/configs/coop_route_npc.ltx", "r"))
 	local route = fh:read("*a")
 	fh:close()
-	check(route:find("monster_on_update@coop_npc_phantoms%s*=%s*host") ~= nil, "the route keeps the wrapper on the host")
+	check(route:find("monster_on_update@coop_npc_phantoms%s*=%s*level") ~= nil, "the route keeps the wrapper on who leads the level")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

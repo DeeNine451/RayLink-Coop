@@ -114,7 +114,7 @@ check(domain_of("on_key_press", "ish_toggle_scope") == "owner" and domain_of("lo
 -- object register): the script rule beats a callback's own default, so each stays on the host by a pair.
 for _, cb in ipairs({ "npc_on_update", "npc_on_hit_callback", "anomaly_on_before_activate", "server_object_on_register",
 		"game_object_on_net_spawn", "game_object_on_net_destroy", "actor_on_update" }) do
-	check(domain_of(cb, "aaaa_script_fixes_mp") == "host", "aaaa_script_fixes_mp: " .. cb .. " stays host-only")
+	check(domain_of(cb, "aaaa_script_fixes_mp") == "level", "aaaa_script_fixes_mp: " .. cb .. " stays with who leads the level")
 end
 for _, cb in ipairs({ "actor_on_first_update", "on_loading_screen_dismissed", "ActorMenu_on_item_focus_receive" }) do
 	check(domain_of(cb, "aaaa_script_fixes_mp") ~= "host", "aaaa_script_fixes_mp: " .. cb .. " runs on a client")
@@ -134,7 +134,7 @@ check(domain_of("actor_on_update", "tb_coordinate_based_safe_zones") == "owner",
 check(domain_of("on_game_load", "tb_coordinate_based_safe_zones") == "host", "tb_coordinate_based_safe_zones: the rest stays host-only")
 -- Native wrappers retain the authority of the original mod callback despite coop_* = view.
 for _, cb in ipairs({ "npc_on_hit_callback", "npc_on_before_hit" }) do
-	check(domain_of(cb, "coop_npc_adapters") == "host", "native adapter preserves host authority: " .. cb)
+	check(domain_of(cb, "coop_npc_adapters") == "level", "native adapter stays with who leads the level: " .. cb)
 	RegisterScriptCallback(cb, from_script("coop_npc_adapters", "return function() RAN.native_host_callback = true end"))
 	SendScriptCallback(cb)
 	check(RAN.native_host_callback == nil, "client does not execute original host callback through native wrapper: " .. cb)
