@@ -13,6 +13,10 @@
 	- A player is nobody to talk to: no mark of ui_hud_dotmarks on a player's character (the dot and "[F] Talk: <nick>", owner
 	  2026-11-01). Muting him is not enough: the mod reads the flag on a throttled check and keeps the prompt of the object it
 	  has locked on. A mark made before the character was known goes on the next tick.
+	- An open stash, corpse or companion follows what other players do (owner 2026-11-01: "I take something and it stays with
+	  the others"). GAMMA's window for them is the Lua ui_inventory, the engine's menu with its live refresh
+	  (coop_trade refresh_actor_menu) never shows. LMode_RefreshInventories is the stock's own step after a move: it adds and
+	  removes cells by id, so it runs here on a timer, not while the player holds an item or its menu is open.
 	Everything here is a no-op outside a co-op session, on the host the stock code runs.
 --]]
 
@@ -25,11 +29,13 @@ local P -- coop_npc_players
 
 local function report(what, err) P.report(TAG, what, err) end
 
-local stats = { rankings = 0, hotkeys = 0, mines = 0, marks = 0 }
+local stats = { rankings = 0, hotkeys = 0, mines = 0, marks = 0, loot_refreshes = 0 }
 local AVATAR = "coop_player_avatar"
 local MARKS_EVERY_MS = 1000
 local dotmarks = nil -- ui_hud_dotmarks with what drop_player_marks needs
 local next_marks = 0
+local LOOT_EVERY_MS = 250
+local next_loot = 0
 
 local function module_of(name)
 	local m = rawget(_G, name)
@@ -149,6 +155,22 @@ local function patch_dotmarks()
 	patch_marks(dm)
 end
 
+local function refresh_open_loot()
+	local now = time_global()
+	if now < next_loot or not P.active() then return end
+	next_loot = now + LOOT_EVERY_MS
+	local inv = module_of("ui_inventory")
+	local gui = type(inv) == "table" and inv.GUI
+	if not gui then return end
+	local ok, err = pcall(function()
+		if not (gui:IsShown() and gui.mode == "loot" and gui:GetPartner()) then return end
+		if gui.item_in_hold or gui.item_props:IsShown() or gui.box_init_update.state then return end
+		stats.loot_refreshes = stats.loot_refreshes + 1
+		gui:LMode_RefreshInventories()
+	end)
+	if not ok then report("open container", err) end
+end
+
 local function drop_player_marks()
 	local now = time_global()
 	if not dotmarks or now < next_marks then return end
@@ -181,4 +203,5 @@ function on_game_start()
 	RegisterScriptCallback("actor_on_info_callback", actor_on_info_callback)
 	RegisterScriptCallback("on_key_release", on_key_release)
 	RegisterScriptCallback("actor_on_update", drop_player_marks)
+	RegisterScriptCallback("actor_on_update", refresh_open_loot)
 end

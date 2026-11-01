@@ -180,6 +180,46 @@ do
 	check(dropped[1] == "dotmark_822", "a mark made before the character was known goes on the next tick")
 	C.env.coop_npc_players.others = others
 
+	-- an open stash, corpse or companion in GAMMA's Lua window follows the others
+	local refreshes, holding, props, shown, partner, mode = 0, nil, false, true, {}, "loot"
+	C.env.ui_inventory = { GUI = {
+		IsShown = function() return shown end,
+		GetPartner = function() return partner end,
+		LMode_RefreshInventories = function() refreshes = refreshes + 1 end,
+		item_props = { IsShown = function() return props end },
+		box_init_update = { state = false },
+	} }
+	local gui = C.env.ui_inventory.GUI
+	gui.mode = mode
+	local function step() NOW = NOW + 300; C.fire("actor_on_update") end
+	step()
+	check(refreshes == 1, "an open loot window refreshes on the timer")
+	C.fire("actor_on_update")
+	check(refreshes == 1, "and not more often")
+	gui.item_in_hold = true
+	step()
+	check(refreshes == 1, "not while the player holds an item")
+	gui.item_in_hold = nil
+	props = true
+	step()
+	check(refreshes == 1, "not while an item's menu is open")
+	props = false
+	gui.box_init_update.state = true
+	step()
+	check(refreshes == 1, "not while a box fills on opening")
+	gui.box_init_update.state = false
+	gui.mode = "trade"
+	step()
+	check(refreshes == 1, "the trade window keeps its own deal")
+	gui.mode = "loot"
+	partner = nil
+	step()
+	check(refreshes == 1, "a partner that is gone: nothing to read")
+	partner = {}
+	shown = false
+	step()
+	check(refreshes == 1, "a closed window: nothing")
+
 	local item = C.add(make_obj(900, 0, 0, 0))
 	C.env.ui_hud_dotmarks.replace_invitem_with_bomb(900, 2, 5)
 	check(planted[1] and planted[1][1] == 900 and planted[1][2] == 2 and planted[1][3] == 5, "a client's remote planting goes the way of txr_mines.plant_bomb")
