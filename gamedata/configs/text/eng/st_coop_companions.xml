@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Anomaly Coop - companions: who holds control (coop_npc_companions, modxml_coop_companions). -->
+<string_table>
+	<string id="st_coop_comp_caption">
+		<text>Companion</text>
+	</string>
+	<string id="st_coop_comp_cmd_hand">
+		<text>[Hand control to another player]</text>
+	</string>
+	<string id="st_coop_comp_cmd_whom">
+		<text>Who do I listen to now?</text>
+	</string>
+	<string id="st_coop_comp_cmd_take">
+		<text>[Take control]</text>
+	</string>
+	<string id="st_coop_comp_you_gave">
+		<text>%s now follows %s.</text>
+	</string>
+	<string id="st_coop_comp_gave_you">
+		<text>%s now follows you: %s handed you control.</text>
+	</string>
+	<string id="st_coop_comp_you_took">
+		<text>%s now follows you.</text>
+	</string>
+	<string id="st_coop_comp_took_from_you">
+		<text>%s now follows %s, who took control.</text>
+	</string>
+	<string id="st_coop_comp_refused_nobody">
+		<text>This is no companion of the group.</text>
+	</string>
+	<string id="st_coop_comp_refused_far">
+		<text>The companion is too far away.</text>
+	</string>
+	<string id="st_coop_comp_refused_not_yours">
+		<text>Another player controls this companion now.</text>
+	</string>
+	<string id="st_coop_comp_refused_player">
+		<text>That player is not in the game now.</text>
+	</string>
+</string_table>

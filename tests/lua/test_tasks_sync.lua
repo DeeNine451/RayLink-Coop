@@ -17,7 +17,7 @@ local function setup_world(M)
 	end
 	M.ObjMT.money = function(self) return self._money or 0 end
 	M.on_complete = {}
-	for _, id in ipairs({ "t_a", "t_b", "t_c", "t_d", "t_e", "t_f", "t_g", "a", "a_b", "a0", "t_mf", "t_story" }) do M.ini[id] = {} end
+	for _, id in ipairs({ "t_a", "t_b", "t_c", "t_d", "t_e", "t_f", "t_fs", "t_g", "a", "a_b", "a0", "t_mf", "t_story" }) do M.ini[id] = {} end
 	M.ini.t_story.storyline = true
 	M.ini.t_mf = { status_functor = "multifetch_status_functor", required_item_1 = "bread", required_item_2 = "vodka",
 		optional_item_1 = "medkit" }
@@ -328,6 +328,33 @@ do
 	Cm.env.coop.send_event("coop_tl_req", "", 0)
 	pump()
 	check(Cm.faction == nil and #Cm.stats == stats0 + 1, "answered effects are not sent again")
+end
+
+print("== C15: what waits for an answer goes with the host's save")
+do
+	Cm.tm:give_task("t_fs", 9)
+	pump()
+	Hm.on_complete.t_fs = function() Hm.env.xr_effects.drx_sl_change_factions(Hm.actor, nil, { "ecolog" }) end
+	Cm.tm:set_task_completed("t_fs")
+	pump()
+	local actor = Cm.env.db.actor
+	Cm.env.db.actor = nil
+	engine_check(Hm)
+	pump()
+	Cm.env.db.actor = actor
+	local saved = {}
+	fire(Hm, "save_state", saved)
+	check(type(saved.coop_task_fx) == "table", "the host's save holds the effect nobody answered")
+	fire(Hm, "load_state", {})
+	Cm.env.coop.send_event("coop_tl_req", "", 0)
+	pump()
+	check(Cm.faction ~= "ecolog", "a save without it: nothing waits")
+	fire(Hm, "load_state", saved)
+	check(saved.coop_task_fx == nil, "the key is read once")
+	Cm.env.coop.send_event("coop_tl_req", "", 0)
+	pump()
+	check(Cm.faction == "ecolog", "after the host's restart the effect reaches the player")
+	Cm.faction = nil
 end
 
 -- ---------------------------------------------------------------- C4

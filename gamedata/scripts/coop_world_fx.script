@@ -30,6 +30,7 @@
 	  world.mark { t = texture, x, y, z, dx, dy, dz, r, s, l, o = object }   near the point
 	  world.snd  { s = path, x, y, z | nothing, v, q }        near the point, or everybody for a 2D sound
 	  world.cfx  { k = cam | uncam | pp | unpp | cpx | uncpx, n = name, i = id, l = loop }   everybody
+	  world.flare { i = object, on = 1 | 0 }                   everybody: the smoke of an emission flare (its light is a lamp, coop_lamps)
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -44,7 +45,8 @@ local P -- coop_npc_players
 local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err) P.report(TAG, what, err) end
 
-local EV_PART, EV_MARK, EV_SND, EV_CFX = "world.part", "world.mark", "world.snd", "world.cfx"
+local EV_PART, EV_MARK, EV_SND, EV_CFX, EV_FLARE = "world.part", "world.mark", "world.snd", "world.cfx", "world.flare"
+local FLARE_TRAIL = "weapons\\light_signal"
 
 local PARTICLE_RADIUS, SOUND_RADIUS = 120, 300
 local TICK_MS = 500
@@ -396,6 +398,37 @@ local function wrap_explode()
 	end
 end
 
+-- An emission flare's binder runs on the host (launch_rockets): it rises on the host's poses, the smoke is a client's own.
+local flares = {} -- host: object id -> true while its smoke is on
+local function wrap_flares()
+	local m = module_of("bind_signal_light")
+	local class = type(m) == "table" and m.signal_light_binder
+	if not class then return end
+	local launch, slow_fly, stop_light = class.launch, class.slow_fly, class.stop_light
+	local function send(self, on)
+		if host_on then cast(EV_FLARE, { i = self.object:id(), on = on }) end
+	end
+	class.launch = function(self, ...)
+		local started = launch(self, ...)
+		if started == true then
+			flares[self.object:id()] = true
+			send(self, 1)
+		end
+		return started
+	end
+	class.slow_fly = function(self, ...)
+		if flares[self.object:id()] then send(self, 1) end
+		return slow_fly(self, ...)
+	end
+	class.stop_light = function(self, ...) -- every frame for the last 8 s of a flight
+		if flares[self.object:id()] then
+			flares[self.object:id()] = nil
+			send(self, 0)
+		end
+		return stop_light(self, ...)
+	end
+end
+
 local function install()
 	local n = 0
 	for _, name in ipairs(EFFECT_SCRIPTS) do
@@ -418,6 +451,7 @@ local function install()
 	wrap_mute(module_of("new_tasks_addon_tasks_utils"), "teleport_visual")
 	wrap_mute(module_of("tasks_the_living_fire"), "earthquake_effect")
 	wrap_explode()
+	wrap_flares()
 end
 
 -------------------------------------------------------------------------------
@@ -481,6 +515,12 @@ local function client_effector(t)
 	end
 end
 
+local function client_flare(t)
+	local obj = tonumber(t.i) and level.object_by_id(P.to_local(t.i))
+	if not obj then return end
+	if t.on == 1 then obj:start_particles(FLARE_TRAIL, "link") else obj:stop_particles(FLARE_TRAIL, "link") end
+end
+
 local function on_effect(f, what)
 	return function(args, from)
 		if from ~= 0 or not P.is_client() then return end
@@ -523,6 +563,7 @@ function on_game_start()
 	api.sync.on(EV_MARK, on_effect(client_mark, "wallmark"))
 	api.sync.on(EV_SND, on_effect(client_sound, "sound"))
 	api.sync.on(EV_CFX, on_effect(client_effector, "effector"))
+	api.sync.on(EV_FLARE, on_effect(client_flare, "flare"))
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 end
 

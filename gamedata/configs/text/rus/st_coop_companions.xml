@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Anomaly Coop - companions: who holds control (coop_npc_companions, modxml_coop_companions). -->
+<string_table>
+	<string id="st_coop_comp_caption">
+		<text>Напарник</text>
+	</string>
+	<string id="st_coop_comp_cmd_hand">
+		<text>[Передать управление другому игроку]</text>
+	</string>
+	<string id="st_coop_comp_cmd_whom">
+		<text>Кого мне теперь слушать?</text>
+	</string>
+	<string id="st_coop_comp_cmd_take">
+		<text>[Взять управление на себя]</text>
+	</string>
+	<string id="st_coop_comp_you_gave">
+		<text>%s теперь идёт за игроком %s.</text>
+	</string>
+	<string id="st_coop_comp_gave_you">
+		<text>%s теперь идёт за вами: управление передал игрок %s.</text>
+	</string>
+	<string id="st_coop_comp_you_took">
+		<text>%s теперь идёт за вами.</text>
+	</string>
+	<string id="st_coop_comp_took_from_you">
+		<text>%s теперь идёт за игроком %s: он взял управление.</text>
+	</string>
+	<string id="st_coop_comp_refused_nobody">
+		<text>Это не напарник группы.</text>
+	</string>
+	<string id="st_coop_comp_refused_far">
+		<text>Напарник слишком далеко.</text>
+	</string>
+	<string id="st_coop_comp_refused_not_yours">
+		<text>Этим напарником сейчас управляет другой игрок.</text>
+	</string>
+	<string id="st_coop_comp_refused_player">
+		<text>Этого игрока сейчас нет в игре.</text>
+	</string>
+</string_table>

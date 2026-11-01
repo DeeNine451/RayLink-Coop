@@ -13,9 +13,8 @@
 	24 in all. Bad coordinates, another level, a relay that did not come from the host: dropped and counted.
 	On arrival: a quiet stock interface click. On the compass: coop_hud_markers' "pings" source. In the world: a ring in the
 	author's colour around a cyan dot over the point, with the distance (game.world2ui), hidden off screen and with the HUD.
-	Default key: mouse 5 (free in GAMMA 2026-10-23: not in its user.ltx binds, default_controls.ltx or any MCM key_bind
-	default), set once with "bind chat_team mouse5" when chat_team has no key and mouse 5 does nothing; the player's own
-	choice is never changed again (coop/coop_player/ping_key_set).
+	Default key: F8, set in a session with "bind chat_team kF8" when chat_team has no key and F8 does nothing; a key the player
+	chose stays. Not mouse 5: it is GAMMA's Free Zoom key (an MCM key, which dik_to_bind cannot see), H, comma and + are too.
 
 	For other scripts:
 		coop_hud_ping.active([tg]) -> { { key, peer, n, pos = {x, y, z}, at, nick }, ... }   live pings
@@ -38,8 +37,7 @@ LIFE_MS = 20000
 RANGE = 300
 MAX_PER_AUTHOR = 3
 MAX_TOTAL = 24
-KEY_DEFAULT = "mouse5"
-OPT_KEY_SET = "coop/coop_player/ping_key_set"
+KEY_DEFAULT = "kF8"
 XML_FILE = "ui_coop_compass.xml"
 local COORD_MAX = 100000
 local SOUND = "interface\\inv_properties"
@@ -422,26 +420,19 @@ local function action_key(kb)
 	return ok and tonumber(dik) or nil
 end
 
--- Once: the ping key on mouse 5 when the action has no key and mouse 5 does nothing.
+-- The ping key on F8 when the action has no key and F8 does nothing. Keys live in user.ltx, one per profile, and
+-- axr_options.ltx is one file of the game folder: a "done once" flag there left every other profile with no key at all
+-- (live 2026-11-01: the host's profile could not ping).
 local function default_key()
-	local cfg = axr_main and axr_main.config
 	local kb = key_bindings and key_bindings.kCHAT_TEAM
-	if not (cfg and kb) then return end
-	local ok_v, set = pcall(cfg.r_value, cfg, "options", OPT_KEY_SET, 1)
-	if ok_v and set == true then return end
-	local function remember()
-		pcall(cfg.w_value, cfg, "options", OPT_KEY_SET, true)
-		pcall(cfg.save, cfg)
-	end
+	if not kb or not live() then return end
 	local have = action_key(kb)
-	if have == nil then return end
-	if have ~= 0 then return remember() end -- the player bound it already
-	local m5 = DIK_keys and DIK_keys.MOUSE_5
+	if have == nil or have ~= 0 then return end -- unknown, or the player bound it already
+	local key = DIK_keys and DIK_keys.DIK_F8
 	local ok_n, none = pcall(dik_to_bind, DIK_keys.DIK_F15) -- a key nobody binds: "no action"
-	local ok_m, cur = pcall(dik_to_bind, m5)
-	if not (m5 and ok_n and ok_m) or cur ~= none then return end -- taken: no binding, the options line says where to set it
+	local ok_m, cur = pcall(dik_to_bind, key)
+	if not (key and ok_n and ok_m) or cur ~= none then return end -- taken: no binding, the options line says where to set it
 	exec_console_cmd("bind chat_team " .. KEY_DEFAULT)
-	remember()
 	log("ping key: chat_team bound to %s (Options > Controls > Common, Co-op: ping)", KEY_DEFAULT)
 end
 

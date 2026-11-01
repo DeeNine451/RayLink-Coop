@@ -113,14 +113,26 @@ local function class_stub(name)
 end
 local CUIScriptWnd = { OnKeyboard = function() return false end, Update = function() end }
 
+-- coop.route.of as the engine answers it: the script's rule, else the default of the callback.
+local ROUTE_RULES = { dynamic_news_manager = "host", tasks_defense = "host", tasks_pump_station_defense = "host",
+	tasks_guide = "host", operacia_monolith = "host", surge_manager = "host", tasks_skyfall = "host", game_relations = "host",
+	dialogs_bar = "host", xr_effects_lines = "host", tasks_assault = "host", game_statistics = "owner", utils_slht = "view",
+	closecaption = "view", coop_stub_line = "view", coop_core_world = "view" }
+local function route_of(callback, f)
+	local script = (debug.getinfo(f, "S").source or ""):lower():match("([^\\/]+)%.script$") or "?"
+	local d = ROUTE_RULES[script]
+	if not d then d = callback:find("^npc_") and "host" or "owner" end
+	return d, script
+end
+
 -- ---------------------------------------------------------------- one machine
 local SCRIPTS = { "coop_main", "coop_core_chat", "coop_core_hud", "coop_core_player", "coop_core_world",
 	"coop_allies", "coop_allies_map", "modxml_coop_allies", "coop_hud_layout" }
 
 local function machine(role, peer, nick, opts)
 	opts = opts or {}
-	local M = { role = role, peer = peer, nick = nick, log = {}, cb = {}, timers = {}, news = {}, tips = {},
-		msgs = {}, sounds = {}, console = {}, spots = {}, chat_sent = 0, consumed = {} }
+	local M = { role = role, peer = peer, nick = nick, log = {}, cb = {}, timers = {}, news = {}, ggn = {}, tips = {},
+		msgs = {}, hud_calls = {}, sounds = {}, console = {}, spots = {}, chat_sent = 0, consumed = {}, handlers = {} }
 	local env = setmetatable({}, { __index = _G })
 	env._G = env
 	M.env = env
@@ -185,7 +197,13 @@ local function machine(role, peer, nick, opts)
 	end
 	function ObjMT:character_icon() return self._icon or "ui_npc_icon" end
 	function ObjMT:character_community() return self._comm or "stalker" end
-	function ObjMT:give_game_news(cap, text) M.news[#M.news + 1] = text end
+	function ObjMT:give_game_news(cap, text, ...)
+		M.news[#M.news + 1] = text
+		local icon, delay, show, ty = ...
+		M.ggn[#M.ggn + 1] = { c = cap, t = text, i = icon, d = delay, s = show, ty = ty, n = select("#", ...) }
+	end
+	function ObjMT:is_talking() return M.talking_now == true end
+	env.game_object = ObjMT -- luabind: a method set on the class is what every object finds
 	function ObjMT:get_talking_npc() return M.talking end
 	function ObjMT:cast_Actor() return self._is_actor and { conditions = function() return M.cond end } or nil end
 	M.objects = objects
@@ -238,7 +256,10 @@ local function machine(role, peer, nick, opts)
 	env.se_load_var = function(id, name, k) return M.se[id .. k] end
 	env.xr_corpse_detection = { set_valuable_loot = function(id, v) M.valuable = v end }
 	env.xr_sound = { set_sound_play = function(id, s) M.sounds[#M.sounds + 1] = s end }
-	env.actor_menu = { set_msg = function(_, t) M.msgs[#M.msgs + 1] = t end, is_hud_free = function() return M.busy ~= true end }
+	env.actor_menu = { set_msg = function(ty, t, tm)
+		M.msgs[#M.msgs + 1] = t
+		M.hud_calls[#M.hud_calls + 1] = { ty = ty, t = t, tm = tm }
+	end, is_hud_free = function() return M.busy ~= true end }
 	env.SendScriptCallback = function(name, ...)
 		if name == "on_before_save_input" then
 			local flags = ...
@@ -303,8 +324,11 @@ local function machine(role, peer, nick, opts)
 	env.news_manager = {
 		send_tip = function(a, id, to, s, st, sid)
 			local tex = type(s) == "string" and s or ((s and s:clsid() == 1) and s:character_icon() or nil)
+			if sid == "boom_sender" then error("boom in send_tip") end
+			if sid == "dead_sender" then return false end -- stock: "Cannot send tips, sender is dead"
 			M.tips[#M.tips + 1] = id
 			M.tip_calls[#M.tip_calls + 1] = { id = id, to = to, s = s, tex = tex, st = st, sid = sid }
+			a:give_game_news("st_tip", tostring(id), tex or "ui_iconsTotal_grouping", 0, st or 5000, 0)
 			return true
 		end,
 		send_sound = function(npc, f, p, s, s2, d)
@@ -320,9 +344,11 @@ local function machine(role, peer, nick, opts)
 		send_tip = function(m, h, to, st, s, snd, ib)
 			M.tips[#M.tips + 1] = "dyn:" .. tostring(m)
 			M.dyn_calls[#M.dyn_calls + 1] = { m = m, h = h, to = to, st = st, s = s, snd = snd, ib = ib }
+			env.db.actor:give_game_news(h or "st_tip", tostring(m), s or "default", 0, 7000)
 			return true
 		end,
 	}
+	env.stock_dyn_show = env.dynamic_news_helper.send_tip
 	env.item_device = { is_pda_charged = function() return M.no_pda ~= true end }
 	M.trade = { tm = { [900] = { cfg_ltx = "items\\trade\\trade_generic.ltx" } }, init = {}, setup = 0, update = 0 }
 	env.trade_manager = {
@@ -372,6 +398,7 @@ local function machine(role, peer, nick, opts)
 		is_live = function() return M.active ~= false end,
 		self_id = function() return peer end,
 		players = function() return M.players end,
+		route = { of = route_of },
 		avatar_of = function(p)
 			for _, x in ipairs(M.players) do if x.id == p then return x.avatar_id end end
 		end,
@@ -411,16 +438,18 @@ local function machine(role, peer, nick, opts)
 	}
 
 	-- stock news scripts (stand-ins with the stock call flow); some copy send_tip into a local when they load
+	env.coop_route = { handler_domain = function(f) return M.handlers[f] end }
 	local NEWS_STOCK = dofile("tests/lua/fixtures/news_stock.lua")
-	local function load_stock(name)
+	local function load_stock(name, as_script)
 		local mod = setmetatable({}, { __index = env })
 		env[name] = mod
-		local f = assert(loadstring(NEWS_STOCK[name], "@D:\\Games\\Anomaly\\gamedata\\scripts\\" .. name .. ".script"))
+		local f = assert(loadstring(NEWS_STOCK[name], "@D:\\Games\\Anomaly\\gamedata\\scripts\\" .. (as_script or name) .. ".script"))
 		setfenv(f, mod)
 		f()
 	end
 	env.xr_effects = env.xr_effects or {} -- the stock table scripts define effects into
 	if opts.alias_first then
+		load_stock("tasks_guide")
 		load_stock("tasks_defense")
 		load_stock("tasks_pump_station_defense")
 		load_stock("z_barrier_defense_emission_fix")
@@ -439,9 +468,20 @@ local function machine(role, peer, nick, opts)
 	end
 	load_stock("dynamic_news_manager")
 	if not opts.alias_first then
+		load_stock("tasks_guide")
 		load_stock("tasks_defense")
 		load_stock("tasks_pump_station_defense")
 		load_stock("z_barrier_defense_emission_fix")
+	end
+	for _, name in ipairs({ "operacia_monolith", "surge_manager", "tasks_skyfall", "game_relations", "dialogs_bar",
+		"xr_effects_lines", "tasks_assault", "utils_slht", "mod_watch", "closecaption", "coop_stub_line" }) do
+		load_stock(name)
+	end
+	load_stock("news_manager_lines", "news_manager")
+	load_stock("game_statistics_lines", "game_statistics")
+	if opts.gamma then -- loaded after coop_core_world, alphabetically
+		load_stock("dynamic_news_manager_patch_dmg")
+		load_stock("zzz_tasks_guide")
 	end
 	M.main, M.chat, M.hud_m, M.player, M.world =
 		env.coop_main, env.coop_core_chat, env.coop_core_hud, env.coop_core_player, env.coop_core_world
@@ -891,24 +931,36 @@ hi:TickNews()
 pump()
 check(has(C.tips, "dyn:random FOUND"), "the text is the final (translated) one the host showed")
 
--- personal: companions, task gossip, the player's trades (queued) and the reply to a trade
+-- personal: companions and task gossip by the host's name (queued)
 local nc = #C.tips
 hi:CompanionAboutLife()
 hi:TickNews()
 hi:GossipTaskLL()
 hi:TickNews()
+pump()
+check(has(H.tips, "dyn:companion: life is hard") and has(H.tips, "dyn:gossip: living legend"), "the host sees them")
+check(#C.tips == nc, "companion talk and task gossip stay personal")
+-- BoughtItems / UpgradedItems are an NPC talking about the NPC trader who served him (axr_trade_manager): world news,
+-- not the player's trade
+tick(11000)
 hi:BoughtItems(nil, nil, {})
 hi:TickNews()
 hi:TickQuick()
 hi:UpgradedItems(nil, nil, nil, {})
 hi:TickNews()
 pump()
-check(has(H.tips, "dyn:companion: life is hard") and has(H.tips, "dyn:gossip: living legend")
-	and has(H.tips, "dyn:gossip: HOST bought a vss") and has(H.tips, "dyn:reply: nice trade")
-	and has(H.tips, "dyn:gossip: upgrade"), "the host sees all of them")
-check(#C.tips == nc, "companion talk, task gossip, trade gossip and its reply stay personal")
+check(has(C.tips, "dyn:gossip: HOST bought a vss") and has(C.tips, "dyn:reply: nice trade") and has(C.tips, "dyn:gossip: upgrade"),
+	"an NPC's trade gossip and the reply to it reach the client")
+-- TickTask: the bounty gossip it calls is world, its own line calls the host by name
+tick(11000)
+hi:TickTask()
+hi:TickNews()
+pump()
+check(has(C.tips, "dyn:gossip: the bounty target was seen") and has(H.tips, "dyn:degtyarev calls HOSTNAME")
+	and not has(C.tips, "degtyarev calls"), "TickTask: the bounty gossip reaches the client, Degtyarev's call by name does not")
 
 -- world: a reply (TickQuick) to a world message
+tick(11000)
 hi:FoundArtefact(nil, nil)
 hi:TickNews()
 hi:TickQuick()
@@ -924,26 +976,31 @@ pump()
 check(has(C.tips, "dyn:Communication lost") and has(C.tips, "dyn:the surge is over"), "NewsToggle and GossipEmissionEnd messages reach the client")
 check(not has(C.tips, "drx start"), "a direct personal sender (task start talk) stays on the host")
 
--- outside any generator: the host player's own news, other stock callers
+-- what the list keeps: the host player's dialogs (more in "everybody by default")
 local nc2 = #C.tips
-H.env.dynamic_news_helper.send_tip("st_host_own", "Hdr")
-H.env.news_manager.send_tip(H.actor, "st_arena_fight_begin", nil, "arena")
+H.env.dialogs_bar.say_dyn()
+H.env.xr_effects.arena()
 pump()
-check(has(H.tips, "dyn:st_host_own") and #C.tips == nc2, "dialogs, arena (no generator scope) stay on the host")
+check(has(H.tips, "dyn:dialog dyn") and #C.tips == nc2, "dialogs, arena stay on the host")
 -- live 2026-10-25 (owner): the pump station call ("guys, come here, pseudodogs attack us north of the pump station") came
 -- to the host only. It calls the whole group: tasks_pump_station_defense keeps send_tip in a local `news` - handed over.
 H.env.tasks_pump_station_defense.chatter()
 pump()
 check(has(C.tips, "dyn:pump station chatter"), "the pump station defense call reaches the client")
+-- live 2026-11-01 (owner): the guide's ad came to the host only, and any player may take that job
+local guide_before = #C.tips
+H.env.tasks_guide.prepare_follower()
+pump()
+check(#C.tips == guide_before + 1, "the guide's ad reaches the client")
 
 -- error inside a scoped method: the error goes on and the scope is closed
 hi.boom = true
 local okb, errb = pcall(hi.NewsToggle, hi)
 hi.boom = false
 check(okb == false and tostring(errb):find("boom in NewsToggle", 1, true), "an error in a wrapped method reaches the caller unchanged")
-H.env.dynamic_news_helper.send_tip("after the error", "Hdr")
+H.env.dialogs_bar.say_dyn()
 pump()
-check(not has(C.tips, "after the error"), "the scope is closed after an error")
+check(not has(C.tips, "dyn:dialog dyn"), "the scope is closed after an error: a personal line is personal again")
 
 -- nested scopes: PushToChannel calls NewsToggle (world) inside a personal generator, then back to personal
 local nc3 = #C.tips
@@ -998,11 +1055,8 @@ check(snd_of(C, "mutant_msg").tex == snd_of(H, "mutant_msg").tex and snd_of(C, "
 check(snd_of(C, "radio_msg").f == "dolg" and snd_of(C, "radio_msg").s2 == "st_radio_msg" and snd_of(C, "radio_msg").d == 0.5
 	and snd_of(C, "plain_msg").p == "some_point", "faction, text keys, delay and point are kept")
 
--- tips: news_manager.send_tip is passed on only from a world scope, with the sender's portrait
+-- tips: passed on with the sender's portrait
 H.tip_calls, C.tip_calls = {}, {}
-H.env.news_manager.send_tip(H.actor, "st_not_in_scope", nil, "arena")
-pump()
-check(#C.tip_calls == 0, "news_manager.send_tip outside a scope stays on the host")
 hi.tip_notice, hi.tip_sender = "st_world_tip", stalker
 hi:NewsToggle()
 hi.tip_notice, hi.tip_sender = "st_world_tip_icon", "csky"
@@ -1080,11 +1134,11 @@ QUEUE = {}
 
 -- the log tells what went out and what stayed (live test aid), and the status line shows the install state
 check(count_log(H, "news sent (dyn): gossip: rain") >= 1 and count_log(H, "news kept, personal talk: companion: life is hard") >= 1
-	and count_log(H, "news kept, outside a world generator: st_host_own") == 1 and count_log(H, "news sent (snd): radio_msg") == 1,
+	and count_log(H, "news kept, the host player's own: dialog dyn") >= 1 and count_log(H, "news sent (snd): radio_msg") == 1,
 	"the log names the news that went to the players and those kept on the host")
-check(count_log(H, "news relay: senders wrapped, DynamicNewsManager partly patched (11/18 methods), world aliases handed over 3") == 1
-	and count_log(H, "! news: DynamicNewsManager.GossipBounty not patched") == 1,
-	"the install report: senders, the 11 methods the stand-in has (of 18), 3 aliases; a missing method is named")
+check(count_log(H, "news relay: senders wrapped, DynamicNewsManager partly patched (11/16 methods), world aliases handed over 3") == 1
+	and count_log(H, "! news: DynamicNewsManager.GossipAlphaSquad not patched") == 1,
+	"the install report: senders, the 11 methods the stand-in has (of 16), 3 aliases; a missing method is named")
 H.world.print_status()
 C.world.print_status()
 check(count_log(H, "world: news out ") == 1 and count_log(C, "world: news out ") == 1, "print_status works on both sides")
@@ -1099,6 +1153,282 @@ H.env.tasks_defense.f_chatter("monolith", 3)
 check(#QUEUE == 0 and #H.tips > nsp, "no session: news are shown as before, nothing is sent")
 H.active = nil
 C.active = nil
+
+-- ================================================================ news: everybody by default
+print("== news: everybody by default")
+tick(11000)
+local function fresh()
+	H.tips, C.tips, H.tip_calls, C.tip_calls, H.dyn_calls, C.dyn_calls = {}, {}, {}, {}, {}, {}
+	H.hud_calls, C.hud_calls, H.msgs, C.msgs, H.ggn, C.ggn = {}, {}, {}, {}, {}, {}
+	QUEUE = {}
+	tick(11000) -- the rate windows and the repeat filter start over
+end
+local function news_sent(M, what)
+	local n = 0
+	for _, q in ipairs(QUEUE) do
+		if q.name == "core.news" and q.to ~= M then
+			local t = M.main.decode(q.payload)
+			if not what or t.m == what or t.id == what or t.t == what then n = n + 1 end
+		end
+	end
+	return n
+end
+local function tip_ids(M) local t = {} for _, c in ipairs(M.tip_calls) do t[#t + 1] = c.id end return t end
+local function hud_texts(M) local t = {} for _, c in ipairs(M.hud_calls) do t[#t + 1] = c.t end return t end
+local function news_of(M, text) for _, n in ipairs(M.ggn) do if n.t == text then return n end end end
+local function game_tick(M) tick(600) fire(M, "actor_on_update") end
+
+-- GAMMA (live, owner 2026-11-01: "A stalker died" reached nobody): dynamic_news_manager_patch_dmg replaces
+-- dynamic_news_helper.send_tip when it loads, after our wrapper, so the wrapper was gone for the whole game
+do
+	local G = machine("host", 0, "gamma_host", { gamma = true })
+	G.players = H.players
+	for _, name in ipairs(SCRIPTS) do
+		local m = G.env[name]
+		if m.on_game_start then m.on_game_start() end
+	end
+	local gi = dnm(G)
+	gi:PushToChannel("general", { Mg = "Stalker death report", Ic = "common", Snd = "no_sound", Se = "Sender", It = "gr" })
+	G.sent_count = 0
+	gi:TickNews()
+	check(G.last_sent and G.main.decode(G.last_sent.payload).m == "Stalker death report", "GAMMA: a queued death report goes out")
+	check(G.sent_count == 1 and has(G.tips, "dyn:Stalker death report"), "... once, and the host shows it through GAMMA's sender")
+	G.sent_count = 0
+	G.env.tasks_defense.f_chatter("zombie", 3)
+	check(G.sent_count == 1, "GAMMA: an alias handed over reaches the same relay")
+	-- zzz_tasks_guide wraps send_tip: one message, one relay, and its nil result does not hide the shown one
+	G.sent_count = 0
+	G.env.operacia_monolith.formatted()
+	check(G.sent_count == 1 and G.main.decode(G.last_sent.payload).id == "Formatted text of the host", "GAMMA: a tip through a mod's wrapper goes out once")
+	G.sent_count = 0
+	G.env.news_manager.send_tip(G.actor, "st_dead_sender_tip", nil, nil, nil, "dead_sender")
+	check(G.sent_count == 0, "... a tip the stock refused (dead sender) does not, though the mod's wrapper returns nothing")
+	-- a script may replace a sender later: the next tick takes it over, and an error leaves nothing half open
+	local later = function(m, h) return G.env.stock_dyn_show(m, h, 0, 7, "default", nil, "gr") end
+	G.env.dynamic_news_helper.send_tip = later
+	G.cb.actor_on_update = G.cb.actor_on_update or {}
+	tick(600)
+	fire(G, "actor_on_update")
+	G.sent_count = 0
+	G.env.tasks_skyfall.status()
+	check(G.sent_count == 1 and G.env.dynamic_news_helper.send_tip ~= later, "a sender replaced in play is wrapped again by the tick")
+	QUEUE = {}
+end
+
+-- the owner's rule: a host-side message nobody listed goes to everybody
+fresh()
+H.env.operacia_monolith.actor_on_update()
+H.env.tasks_skyfall.status()
+H.env.game_relations.send_news()
+H.env.surge_manager.skip_surge()
+H.env.tasks_guide.prepare_follower()
+pump()
+check(has(C.tips, "cs_task1_news") and has(H.tips, "cs_task1_news"), "an unknown host script's tip reaches the client")
+check(has(C.tips, "dyn:skyfall_run_fail_message"), "... task-giver chatter (dynamic_news_helper)")
+check(has(C.tips, "Duty and Freedom declared war"), "... faction relations")
+check(has(C.tips, "st_surge_while_asleep"), "... the surge slept through")
+check(has(C.tips, "the guide's ad"), "... the guide's ad, without a list")
+local world_tip = tip_ids(C)
+check(C.tip_calls[1].to == 4 and C.tip_calls[1].st == 30000 and C.tip_calls[1].tex == "csky", "timeout, show time and icon are kept")
+fresh()
+H.env.surge_manager.skip_surge()
+check(H.main.decode(QUEUE[1].payload).id == "st_surge_while_asleep", "a string id crosses as the id: the client reads its own language")
+pump()
+
+-- personal: the list, anywhere on the stack
+fresh()
+H.env.dialogs_bar.give_tip()
+H.env.dialogs_bar.say_dyn()
+H.env.dialogs_bar.through_effect()
+H.env.dialogs_bar.hud()
+H.env.dialogs_bar.direct()
+check(news_sent(H) == 0 and has(H.tips, "st_dialog_tip") and has(H.tips, "dyn:dialog dyn") and has(H.tips, "st_dialog_effect"),
+	"the host player's dialogs stay his, also through an effect they call")
+check(has(H.msgs, "st_dialog_hud"), "... and are shown there")
+fresh()
+H.env.xr_effects.arena()
+H.env.xr_effects.send_tip(nil, nil, { "st_scene_tip", "default" })
+check(news_sent(H) == 0 and has(H.tips, "bar_arena_fight_begin"), "arena lines stay on the host (by the string id)")
+check(has(H.tips, "st_scene_tip"), "a scene's send_tip stays: npc.cfx relays it, a second relay would double it")
+
+-- made on every machine: the client makes it itself
+fresh()
+H.env.game_statistics.rank_up()
+H.env.tasks_assault.reward()
+H.env.coop_stub_line.say()
+H.env.closecaption.cc_display_radio()
+pump()
+check(not has(C.tips, "st_rank_increased") and has(H.tips, "st_rank_increased"), "rank lines: game_statistics runs on each machine")
+check(not has(C.tips, "a co-op script's line"), "a co-op script answers for its own lines")
+check(not news_of(C, "a subtitle"), "subtitles: the client's own npc.snd replay shows them")
+
+-- a helper is not a generator: the caller decides
+fresh()
+H.env.operacia_monolith.by_helper("helper line")
+pump()
+check(has(C.tips, "dyn:helper line"), "a utils_* helper called by a host script: its caller's rule")
+
+-- no rule: the handler's callback decides
+fresh()
+H.handlers[H.env.mod_watch.npc_on_death_callback] = "host"
+H.handlers[H.env.mod_watch.actor_on_item_use] = "owner"
+H.env.mod_watch.npc_on_death_callback()
+H.env.mod_watch.actor_on_item_use()
+pump()
+check(has(C.tips, "a mechanic died") and not has(C.tips, "your tool broke"), "a script with no rule: by the domain of its handler")
+fresh()
+H.env.mod_watch.direct_call()
+pump()
+check(has(C.tips, "a mod's own line"), "nothing known at all: everybody")
+fresh()
+H.talking_now = true
+H.env.mod_watch.direct_call()
+H.env.xr_effects.line_tip(nil, nil, { "st_talk_effect" })
+H.env.mod_watch.npc_on_death_callback()
+H.talking_now = false
+pump()
+check(not has(C.tips, "a mod's own line") and not has(C.tips, "st_talk_effect"), "... while the host player talks, no handler running: his dialog")
+check(has(C.tips, "a mechanic died"), "... a host handler goes on regardless of his dialog")
+
+-- a window of the host player's open: a rule-less script with no handler is his click (ui_inventory calling a mod's menu)
+fresh()
+H.busy = true
+H.env.mod_watch.direct_call()
+H.env.operacia_monolith.formatted()
+H.busy = false
+pump()
+check(not has(C.tips, "a mod's own line") and has(H.tips, "a mod's own line"), "a window open, a rule-less script with no handler: his")
+check(has(C.tips, "Formatted text of the host"), "... a host script's line goes on: the logic does not wait for his inventory")
+
+-- no answer from the router: nothing can be told, nothing leaks
+fresh()
+local route_saved = H.env.coop.route
+H.env.coop.route = nil
+H.env.operacia_monolith.actor_on_update()
+H.env.coop.route = route_saved
+check(news_sent(H) == 0 and has(H.tips, "cs_task1_news"), "an exe without coop.route: the host keeps it")
+
+-- the HUD line over the game
+fresh()
+H.env.operacia_monolith.warning()
+pump()
+check(has(hud_texts(C), "st_psd_warning") and has(hud_texts(H), "st_psd_warning"), "actor_menu.set_msg of a host generator reaches the client")
+check(C.hud_calls[1].ty == 1 and C.hud_calls[1].tm == 10, "... with its type and seconds")
+fresh()
+for _ = 1, 5 do H.env.operacia_monolith.warning() end
+check(news_sent(H) == 1, "a line repeated by an update loop goes once")
+
+-- direct give_game_news: nobody can list those, the class method catches them
+fresh()
+game_tick(H)
+game_tick(C)
+H.env.operacia_monolith.direct()
+H.env.operacia_monolith.direct_radio()
+pump()
+local story = news_of(C, "the story line")
+check(story and story.c == "Strelok" and story.i == "ui_inGame2_strelok_ico" and story.d == 3000 and story.s == 20000 and story.n == 3,
+	"a direct give_game_news reaches the client: caption, text, icon, delay, time")
+check(news_of(H, "the story line") ~= nil and news_of(H, "the story line").n == 3, "the host shows it, with the arguments it was given (luabind picks the overload by their number)")
+local radio = news_of(C, "the radio line")
+check(radio and radio.ty == 1 and radio.n == 4, "... the form with a type too")
+check(has(C.sounds, "pda_tips"), "... with the PDA sound the client would miss")
+fresh()
+H.env.operacia_monolith.actor_on_update()
+check(news_sent(H) == 1 and news_of(H, "cs_task1_news") ~= nil, "a wrapped sender is not caught a second time inside")
+fresh()
+H.env.news_manager.relocate_item(H.actor, "in", "item_x")
+check(news_sent(H) == 0, "item, money and task lines stay: coop_tasks has their channels")
+check(count_log(H, "news relay: give_game_news wrapped") == 1 and count_log(C, "give_game_news wrapped") == 0, "wrapped on the host, not on a client")
+
+-- a player's own doing runs under his identity on the host: it goes to him, not to everybody and not to the host's screen
+fresh()
+local identity_on = false
+H.env.coop_npc_players = {
+	in_identity = function() return identity_on end,
+	peer_of = function(o) return o == H.env.db.actor and 1 or nil end,
+}
+identity_on = true
+H.env.operacia_monolith.actor_on_update()
+H.env.operacia_monolith.warning()
+H.env.operacia_monolith.direct()
+H.env.dialogs_bar.say_dyn()
+identity_on = false
+check(#QUEUE == 4, "under a client's identity: one message each to that client")
+for _, q in ipairs(QUEUE) do check(q.to == C, "... that client only") end
+check(H.last_sent.target == 1, "... addressed by its peer")
+pump()
+check(#H.tips == 0 and #H.msgs == 0 and #H.ggn == 0, "the host's screen stays clean")
+check(has(C.tips, "cs_task1_news") and has(C.msgs, "st_psd_warning") and news_of(C, "the story line") and has(C.tips, "dyn:dialog dyn"),
+	"the client shows all four")
+fresh()
+H.env.coop_npc_players.peer_of = function() return 0 end
+identity_on = true
+H.env.operacia_monolith.actor_on_update()
+pump()
+check(has(H.tips, "cs_task1_news") and has(C.tips, "cs_task1_news"), "the host's own identity changes nothing")
+fresh()
+H.env.coop_npc_players.peer_of = function() return 1 end
+H.world.in_world_scope(H.env.operacia_monolith.actor_on_update)
+pump()
+check(has(H.tips, "cs_task1_news") and has(C.tips, "cs_task1_news"), "a world scope is world under an identity too")
+fresh()
+hi.queue.general = {}
+H.env.news_manager.send_sound(nil, "dolg", nil, "radio_under_identity", nil, 0)
+pump()
+check(has(C.tips, "snd:radio_under_identity") and has(H.tips, "snd:radio_under_identity"), "faction radio stays world")
+identity_on = false
+H.env.coop_npc_players = nil
+
+-- limits, and no loops
+fresh()
+for i = 1, 20 do H.env.news_manager.send_tip(H.actor, "st_tip_" .. i) end
+check(news_sent(H) <= 8, "new messages obey the same limit")
+fresh()
+for i = 1, 30 do C.main.on_event("core.news", C.main.encode({ k = "hud", m = "hud burst " .. i, ty = 1, tm = 3 }), 0) end
+check(#C.msgs <= 8, "client: the HUD line has its own limit")
+fresh()
+C.main.on_event("core.news", C.main.encode({ k = "hud", m = "hud stranger" }), 2)
+C.main.on_event("core.news", C.main.encode({ k = "ggn", t = "direct stranger" }), 2)
+C.main.on_event("core.news", C.main.encode({ k = "hud", m = string.rep("x", 5000) }), 0)
+C.main.on_event("core.news", C.main.encode({ k = "ggn", c = "only a caption" }), 0)
+check(#C.msgs == 0 and #C.ggn == 0, "new kinds: only the host, bounded text, complete fields")
+fresh()
+C.env.operacia_monolith.actor_on_update()
+C.env.operacia_monolith.warning()
+C.env.operacia_monolith.direct()
+C.main.on_event("core.news", C.main.encode({ k = "tip", id = "st_from_host" }), 0)
+C.main.on_event("core.news", C.main.encode({ k = "hud", m = "hud from host", ty = 1, tm = 3 }), 0)
+pump()
+check(#QUEUE == 0 and not has(H.tips, "st_from_host") and not has(H.tips, "cs_task1_news") and #H.msgs == 0, "a client sends nothing back: no loop")
+
+-- an error in a sender leaves nothing open
+fresh()
+local oke, erre = pcall(H.env.operacia_monolith.boom)
+check(oke == false and tostring(erre):find("boom in send_tip", 1, true), "an error in a sender reaches the caller unchanged")
+H.env.operacia_monolith.actor_on_update()
+check(news_sent(H, "cs_task1_news") == 1, "... the next message goes out as usual")
+
+-- no session: stock
+fresh()
+H.active = false
+H.env.operacia_monolith.actor_on_update()
+H.env.operacia_monolith.warning()
+H.env.operacia_monolith.direct()
+check(#QUEUE == 0 and has(H.tips, "cs_task1_news") and has(H.msgs, "st_psd_warning") and news_of(H, "the story line") ~= nil,
+	"no session: shown as before, nothing sent")
+H.active = nil
+do
+	local S = machine("host", 0, "single", {})
+	S.active = false
+	for _, name in ipairs(SCRIPTS) do
+		local m = S.env[name]
+		if m.on_game_start then m.on_game_start() end
+	end
+	local method = S.env.game_object.give_game_news
+	for _ = 1, 3 do tick(600) fire(S, "actor_on_update") end
+	check(S.env.game_object.give_game_news == method, "single player: give_game_news stays the engine's method")
+end
+fresh()
 
 -- ================================================================ mutant loot
 print("== mutant loot")

@@ -21,6 +21,7 @@
 | `coop.avatar_of(peer)`, `coop.peer_of_avatar(id)` | персонаж игрока и обратно, в нумерации этой машины |
 | `coop.owners_known()` | клиент уже знает, кто играет каким персонажем |
 | `coop.to_host_id(id)`, `coop.to_local_id(id)` | перевод id объекта между нумерацией хоста и своей (у клиента меняются местами 0 и id его персонажа) |
+| `coop.out_of_run(id)` | хост: персонаж (0 = свой) вне хардкор-забега, слово мира; `coop_reward_group` не считает такого в группе |
 | `coop.life_of(id)`, `coop.bleed_left(id)`, `coop.player_safemode(peer)` | состояние игрока: жив / ранен / мёртв, остаток кровотечения, оружие опущено |
 | `coop.revive_progress()` | HUD v2, часть 2: удержания USE при поднятии. `nil` — нечего показывать или нет сессии. Иначе таблица с теми частями, что есть: `reviving = {peer, avatar_id, nick, progress 0..1, ms_left, item "medkit"\|"stimpack", section, sent}` (я поднимаю; `sent` — удержание кончилось, запрос ушёл, до `coop_revive_done` не больше 3 с), `revived_by = {peer, avatar_id, nick, progress, ms_left}` (меня поднимает союзник; я ранен), `give_up = {progress, ms_left}` (я удерживаю USE, чтобы сдаться), `bleed = {left_ms, total_ms}` (я ранен). Вызов говорит движку, что Lua-HUD рисует состояние «ранен / поднимают» сам: свой экранный текст движок прячет. Событие `coop_revive_done(target_peer, medkit_section)` приходит на машину поднимавшего, когда хост поднял игрока |
 | `coop.talk_holder(npc)` | хост: кто сейчас говорит с NPC |

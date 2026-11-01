@@ -15,7 +15,7 @@
 	   inventory and sends changed entries; the host stores and relays them. Addons declare keys with
 	   coop_economy_mdata.declare_item_key(key, { apply = function(id, value) end }).
 	3. Per-player m_data of stock scripts (sleepiness, thirst, psy health of arszi_psy, disguise, detector,
-	   radio frequency: MANIFEST): a client never saves, and its world comes from the host's save, where these
+	   radio frequency, items at a mechanic: MANIFEST): a client never saves, and its world comes from the host's save, where these
 	   keys hold the HOST's values. The client sends its own values to the host every 15 s when they changed;
 	   the host keeps them in its m_data under coop_peer_mdata[<character id>] (inside the host save, P4).
 	   When a client loads the host's world, its own values replace the host's in m_data right after the
@@ -51,6 +51,7 @@ local installed = false
 local applying = false -- writing data that came from the network: do not send it again
 local orig_save_var = nil
 
+local pmd_next_poll = 0 -- time of the next look at the per-player keys
 local stats = {
 	se_out = 0, se_in = 0, se_refused = 0, se_pending = 0,
 	imd_out = 0, imd_in = 0, imd_refused = 0,
@@ -337,10 +338,16 @@ MANIFEST = {
 	disguise_state = false, -- gameplay_disguise (live m_data entry)
 	detector_was_active = false, -- actor_effects
 	RF_freq = false, -- item_radio frequency
+	RepairItemList = from_save_state("inventory_upgrades", "RepairItemList"), -- items lent to a mechanic, ids are the world's
 }
 
 function register_player_key(key, provider)
 	if type(key) == "string" then MANIFEST[key] = type(provider) == "function" and provider or false end
+end
+
+-- Client: a value that must not wait for the 15 s poll (it may be all he has when his game goes down).
+function send_player_keys()
+	pmd_next_poll = 0
 end
 
 local function owned_elsewhere(key)
@@ -351,7 +358,6 @@ local function owned_elsewhere(key)
 end
 
 local pmd_sig = {} -- key -> packed value last sent
-local pmd_next_poll = 0
 local pmd_loaded_for = nil -- m_data table the surrogate was applied to
 
 local function pmd_current(m, key)

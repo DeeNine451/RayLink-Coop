@@ -38,6 +38,7 @@
 		coop_route.wrapper_of(callback, fn) -> wrapper | nil
 		coop_route.intercepts() -> axr_main's callback table | nil
 		coop_route.script_of(fn) -> script key ("?" without the router)
+		coop_route.handler_domain(fn) -> domain of a function registered as a handler, nil for any other function
 		coop_route.print_status()
 --]]
 
@@ -66,6 +67,7 @@ if type(wrappers) ~= "table" then
 	rawset(_G, "_coop_route_wrappers", wrappers)
 end
 local origin = setmetatable({}, { __mode = "k" }) -- wrapper -> { fn = handler, script, domain, callback }
+local handler_dom = setmetatable({}, { __mode = "k" }) -- handler function (the method of an object) -> domain
 local wrapped = {} -- callback -> { [handler] = wrapper }
 local uc_wrap = setmetatable({}, { __mode = "kv" }) -- AddUniqueCall: function -> wrapper
 local te_wrap = setmetatable({}, { __mode = "kv" }) -- CreateTimeEvent: function -> wrapper
@@ -183,6 +185,7 @@ local function wrap_entry(name, fu)
 	end
 	local d, script = route_of(name, f)
 	if not d then return fu end
+	handler_dom[f] = d
 	if tf == "function" then
 		w = guard(fu, d, script, name, nil, nil)
 	else
@@ -290,6 +293,7 @@ local function wrap_once(cache, f, what, skip_ret)
 	if w then return w end
 	local d, script = route_of(what, f)
 	if not d then return nil end
+	handler_dom[f] = d
 	w = guard(f, d, script, what, skip_ret, true) -- a broken one returns true: not called again
 	cache[f] = w
 	remember(w, f, d, script, what)
@@ -390,6 +394,12 @@ function script_of(fn)
 	if not route then return "?" end
 	local ok, _, script = pcall(route.of, "", fn)
 	return ok and script or "?"
+end
+
+-- On the host a guard leaves the stack by a tail call and the handler stays on it: this tells the code a handler runs
+-- under where it runs (coop_core_world, news).
+function handler_domain(fn)
+	return fn ~= nil and handler_dom[fn] or nil
 end
 
 function print_status()

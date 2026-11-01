@@ -278,6 +278,45 @@ check(Cl.FIRED == 1, "on_option_change fired on the client after the delta")
 tick(H, 4000)
 check(#H.SENT == 0, "no delta when nothing changed")
 
+-- Free Zoom and LAM keep the console's fov and hud_fov from on_option_change as the player's values. The stock game sends it
+-- from a menu; the host's settings come in the middle of a talk, and a talk has those two lowered (live 2026-11-01).
+do
+	local seen = { zoom = 0, lam = 0, other = 0 }
+	local zoom = function() seen.zoom = seen.zoom + 1 end
+	local lam = function() seen.lam = seen.lam + 1 end
+	local other = function() seen.other = seen.other + 1 end
+	for _, f in ipairs({ zoom, lam, other }) do Cl.RegisterScriptCallback("on_option_change", f) end
+	Cl.UnregisterScriptCallback = function(n, f)
+		for i, g in ipairs(Cl.cbs[n] or {}) do
+			if g == f then table.remove(Cl.cbs[n], i); return end
+		end
+	end
+	Cl.coop_route = {
+		handlers_of = function(callback, script)
+			local own = { free_zoomv2_mcm = zoom, lam_fov_manager = lam }
+			local f = callback == "on_option_change" and own[script]
+			for _, g in ipairs(f and Cl.cbs[callback] or {}) do
+				if g == f then return { f } end
+			end
+			return {}
+		end,
+	}
+	H.axr_main.config:w_value("options", "gameplay/general/npc_loot_distance", 9)
+	H.SendScriptCallback("on_option_change")
+	tick(H)
+	deliver(H, 0, Cl, 1)
+	check(Cl.ui_options.get("gameplay/general/npc_loot_distance") == 9, "the host's setting arrived")
+	check(seen.other == 1, "the host's settings reach a handler that reads them")
+	check(seen.zoom == 0 and seen.lam == 0, "the host's settings pass by the handlers that read the player's console")
+	Cl.SendScriptCallback("on_option_change")
+	check(seen.zoom == 1 and seen.lam == 1, "the player's own menu still reaches them")
+	Cl.UnregisterScriptCallback("on_option_change", zoom)
+	Cl.UnregisterScriptCallback("on_option_change", lam)
+	Cl.UnregisterScriptCallback("on_option_change", other)
+	Cl.coop_route, Cl.UnregisterScriptCallback = nil, nil
+	tick(H, 4000)
+end
+
 -- level load: a new Lua state on the client restores from the stash before any network message
 local C2 = make_world("client", { ["gameplay/general/max_tasks"] = "2" }, {}, { g = {}, e = {} })
 C2.STASH = Cl.STASH

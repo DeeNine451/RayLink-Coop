@@ -118,6 +118,30 @@
 	<string id="st_coop_menu_reason_start">
 		<text>could not start</text>
 	</string>
+	<string id="st_coop_menu_reason_host_left">
+		<text>the host stopped the game</text>
+	</string>
+	<string id="st_coop_end_title_host_left">
+		<text>The host stopped the game</text>
+	</string>
+	<string id="st_coop_end_text_host_left">
+		<text>The host ended the session, and you are back in the main menu.</text>
+	</string>
+	<string id="st_coop_end_hint_host_left">
+		<text>To play on, join again once the host is back in the game.</text>
+	</string>
+	<string id="st_coop_end_title_lost">
+		<text>Connection lost</text>
+	</string>
+	<string id="st_coop_end_text_lost">
+		<text>The host stopped answering, and the connection was lost.</text>
+	</string>
+	<string id="st_coop_end_hint_lost">
+		<text>The network may have dropped on your side or the host's, or the host's game may have closed. Join again once the host is back.</text>
+	</string>
+	<string id="st_coop_end_title_failed">
+		<text>The session was interrupted</text>
+	</string>
 	<string id="st_coop_menu_pending_title">
 		<text>Waiting for the world to load</text>
 	</string>

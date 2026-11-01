@@ -102,10 +102,22 @@ end
 function DynamicNewsManager:GossipTaskDRX()
 	dynamic_news_helper.send_tip("drx start HOSTNAME", "Leader", 0, 20, "ui_leader", "news", "npc")
 end
+-- TickTask calls the bounty gossip (world) and has a line of its own (Degtyarev, by the player's name)
+function DynamicNewsManager:GossipBounty()
+	self:PushToChannel("general", { Mg = "gossip: the bounty target was seen", Ic = "ui_npc_g", Snd = "news", Se = "Gossip", It = "npc" })
+end
+function DynamicNewsManager:TickTask()
+	self:GossipBounty()
+	dynamic_news_helper.send_tip("degtyarev calls HOSTNAME", "Degtyarev", 10, 20, "ui_inGame2_Hero", "news", "npc")
+	return false
+end
 -- world, direct
 function DynamicNewsManager:GossipEmissionEnd(what)
 	dynamic_news_helper.send_tip("the surge is over", "Sender", 12, 8, "ui_npc_s", "beep_1", "npc")
 end
+]],
+	tasks_guide = [[
+function prepare_follower() news_manager.send_tip(db.actor, "the guide's ad", nil, nil, 15000) end
 ]],
 	tasks_defense = [[
 local send_tip = dynamic_news_helper.send_tip
@@ -127,5 +139,74 @@ local send_tip = dynamic_news_helper.send_tip
 function xr_effects.barrier_defense_news(a, b, c)
 	send_tip("lukash " .. tostring(c and c[1]), "Lukash", nil, nil, "ui_inGame2_lukash", nil, "npc")
 end
+]],
+	-- GAMMA's Dynamic News Manager Fixes: defines its own dynamic_news_helper.send_tip when it loads, after coop_core_world
+	dynamic_news_manager_patch_dmg = [[
+function dynamic_news_helper.send_tip(m, h, to, st, s, snd, ib)
+	return stock_dyn_show(m, h, to, st, s, snd, ib)
+end
+]],
+	-- GAMMA's guide tweak: wraps send_tip and, like the real one, returns nothing
+	zzz_tasks_guide = [[
+local news_manager_send_tip = news_manager.send_tip
+function news_manager.send_tip(...)
+	news_manager_send_tip(...)
+end
+]],
+	-- generators of the default rule; their routes are ROUTE_RULES in test_core.lua
+	operacia_monolith = [[
+function actor_on_update() news_manager.send_tip(db.actor, "cs_task1_news", 4, "csky", 30000) end
+function formatted() news_manager.send_tip(db.actor, "Formatted text of the host") end
+function warning() actor_menu.set_msg(1, "st_psd_warning", 10) end
+function direct() db.actor:give_game_news("Strelok", "the story line", "ui_inGame2_strelok_ico", 3000, 20000) end
+function direct_radio() db.actor:give_game_news("Radio", "the radio line", "ui_inGame2_Radiopomehi", 0, 9000, 1) end
+function by_helper(x) utils_slht.say(x) end
+function boom() news_manager.send_tip(db.actor, "boom", nil, nil, 1, "boom_sender") end
+]],
+	surge_manager = [[
+function skip_surge() news_manager.send_tip(db.actor, "st_surge_while_asleep", nil, "recent_surge", nil, nil) end
+]],
+	tasks_skyfall = [[
+function status() dynamic_news_helper.send_tip("skyfall_run_fail_message", "Commander", nil, nil, "ui_npc_c", nil, "npc") end
+]],
+	game_relations = [[
+function send_news() news_manager.send_tip(db.actor, "Duty and Freedom declared war", nil, "patriarch", nil, nil) end
+]],
+	dialogs_bar = [[
+function give_tip() news_manager.send_tip(db.actor, "st_dialog_tip", nil, "barman") end
+function say_dyn() dynamic_news_helper.send_tip("dialog dyn", "Barman", nil, nil, "ui_npc_b", nil, "npc") end
+function through_effect() xr_effects.line_tip(nil, nil, { "st_dialog_effect" }) end
+function hud() actor_menu.set_msg(1, "st_dialog_hud", 4) end
+function direct() db.actor:give_game_news("Barman", "dialog direct", "ui_npc_b", 0, 3000) end
+]],
+	xr_effects_lines = [[
+function xr_effects.line_tip(a, n, p) news_manager.send_tip(db.actor, p[1], nil, "default") end
+function xr_effects.send_tip(a, n, p) news_manager.send_tip(db.actor, p[1], nil, p[2]) end
+function xr_effects.arena() news_manager.send_tip(db.actor, "bar_arena_fight_begin", nil, "arena") end
+]],
+	game_statistics_lines = [[
+function game_statistics.rank_up() news_manager.send_tip(db.actor, "st_rank_increased", nil, "rank_change", nil, nil) end
+]],
+	tasks_assault = [[
+function reward() game_statistics.rank_up() end
+]],
+	utils_slht = [[
+function say(x) dynamic_news_helper.send_tip(x, "Helper", nil, nil, "ui_npc_h", nil, "npc") end
+]],
+	-- no route rule: its handlers follow their callbacks, and nothing says what a direct call is
+	mod_watch = [[
+function npc_on_death_callback() news_manager.send_tip(db.actor, "a mechanic died") end
+function actor_on_item_use() news_manager.send_tip(db.actor, "your tool broke") end
+function direct_call() news_manager.send_tip(db.actor, "a mod's own line") end
+]],
+	closecaption = [[
+function cc_display_radio() db.actor:give_game_news("Voice", "a subtitle", "ui_npc_c", 0, 3000) end
+]],
+	coop_stub_line = [[
+function say() news_manager.send_tip(db.actor, "a co-op script's line") end
+]],
+	-- the unwrapped stock lines of news_manager: tasks and items have their own channels (coop_tasks)
+	news_manager_lines = [[
+function news_manager.relocate_item(actor, ty, item) actor:give_game_news("general_in_item", item, "ui_inGame2_Predmet_poluchen", 0, 3000) end
 ]],
 }

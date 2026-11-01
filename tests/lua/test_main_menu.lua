@@ -343,6 +343,23 @@ step(v12, 1)
 check(v12.rows[1].title.talpha == 255, "everything stands at once")
 use_theme(gamma)
 
+print("== built while the game is away (a session ended behind a fullscreen client): frames run, the clock stands")
+do
+	local m14 = new_menu(COLD)
+	mm.attach(m14)
+	local v14 = m14.coop_view
+	for _ = 1, 60 do v14:update() end
+	check(v14.rows[1].title.talpha == 0, "the entrance waits for the player")
+	for _ = 1, 150 do step(v14, 16) end
+	check(v14.rows[1].title.talpha == 255, "and plays when he is back")
+	v14.rows[6].hit.hot = true
+	step(v14)
+	CURSOR.x = CURSOR.x + 10
+	for _ = 1, 100 do step(v14, 16) end
+	check(v14.on == 6, "the pointer picks")
+	check(v14.rows[1].title.talpha == 255 and v14.rows[6].title.talpha == 255 and v14.rows[6].sub.talpha == 255, "and the titles stay")
+end
+
 print("== the embers")
 local m13 = new_menu(COLD)
 mm.attach(m13)

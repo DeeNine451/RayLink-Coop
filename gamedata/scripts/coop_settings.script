@@ -865,15 +865,42 @@ local function apply_factors(reason)
 	return apply_factor_table(ov, reason)
 end
 
+-- Free Zoom and LAM's hud_fov manager keep the console's fov, hud_fov and mouse_sens from this callback as the player's values
+-- and write them back later: Free Zoom when the item in the hands changes (its actor_on_update), LAM when an animation ends
+-- (lam_fov_manager.restore_fov). The stock game sends the callback from a menu, with those values at rest. The host's settings
+-- come at any moment, and the console then holds what a talk (dialog_fov: fov 80 to 42, hud_fov 0.65 to 0.34), a free zoom or
+-- an animation has put there for a while: every weapon drawn after that shrank the view (live 2026-11-01). Nothing the host
+-- sets is theirs (free_zoom/* and the console are the player's), so the host's settings pass them by.
+local OWN_CONSOLE_READERS = { "free_zoomv2_mcm", "lam_fov_manager" }
+
+local function hold_console_readers()
+	local held = {}
+	local route = mod("coop_route")
+	if not (route and route.handlers_of) then return held end
+	for _, script in ipairs(OWN_CONSOLE_READERS) do
+		for _, f in ipairs(route.handlers_of("on_option_change", script)) do
+			UnregisterScriptCallback("on_option_change", f)
+			held[#held + 1] = f
+		end
+	end
+	return held
+end
+
 local function fire_option_change()
 	if not (db and db.actor) then
 		fire_pending = true
 		return
 	end
 	fire_pending = false
+	local console = rawget(_G, "get_console_cmd")
+	if console then -- for the next log: was a talk or a zoom on when they came?
+		log("host's settings go to the scripts at fov %s, hud_fov %s", tostring(console(2, "fov")), tostring(console(2, "hud_fov")))
+	end
+	local held = hold_console_readers()
 	firing = true
 	local ok, err = pcall(SendScriptCallback, "on_option_change")
 	firing = false
+	for _, f in ipairs(held) do RegisterScriptCallback("on_option_change", f) end
 	if not ok then
 		stats.errors = stats.errors + 1
 		log("! on_option_change after the host's settings: %s", tostring(err))

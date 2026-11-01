@@ -634,6 +634,18 @@ do
 	A.alife_storage_manager.on_before_load_state()
 	check(save.sleep.last_sleep == 1234 and save.psy_table.actor_psy_health == 0.4, "client loading the host save gets its own values")
 	check(A.BEFORE_LOAD == 1, "stock on_before_load_state still runs")
+	-- a mechanic holds his item: the stock list lives in a file local of inventory_upgrades, read through its save_state
+	A.inventory_upgrades = { save_state = function(m) m.RepairItemList = { stalker_mechanic = { [905] = { rt = 3600 } } } end }
+	tick(A, 16000)
+	deliver_all()
+	local lent = H.coop_economy_mdata.player_value(501, "RepairItemList")
+	check(lent and lent.stalker_mechanic and lent.stalker_mechanic[905].rt == 3600, "an item lent for repair is kept with his character")
+	local lent_save = { se_object = {}, RepairItemList = { host_mechanic = {} }, coop_peer_mdata = H.MDATA.coop_peer_mdata }
+	A.MDATA = lent_save
+	A.alife_storage_manager.on_before_load_state()
+	check(lent_save.RepairItemList.stalker_mechanic ~= nil and lent_save.RepairItemList.host_mechanic == nil,
+		"a rejoin: his own list reaches inventory_upgrades.load_state, not the host's")
+	A.inventory_upgrades = nil
 	-- a first visit clears the host's values
 	PLAYERS[1].proxy = 777
 	add_entity(A, 777, "coop_player_avatar", nil)

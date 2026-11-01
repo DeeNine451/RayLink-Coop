@@ -1,6 +1,6 @@
 -- Anomaly Coop test (split levels, F3a task 3): the two new game rules and the new default in the catalog
 -- gamedata\scripts\coop_game_schema.script (docs\GAME_SETTINGS.md 1.2, 3.6, 8.2; docs\plans\2026-10-24-f3a-split-levels.md 3):
---   c|coop_split_levels      on / off, the switch of the split levels, off by default
+--   c|coop_split_levels      on / off, the switch of the split levels, off and out of the menu until a map server exists
 --   c|coop_story_together    on / off, only while the levels are split, on by default
 --   o|coop/coop_session/join_spawn   a new player appears at the base of the world's faction by default
 -- The catalog is loaded into a sealed environment (the standard library and nothing of the engine). The list of 20 console
@@ -80,10 +80,9 @@ end
 check(same, "the first 17 names keep their order")
 check(schema.CVARS[18] == "coop_split_levels" and schema.CVARS[19] == "coop_story_together", "rows 18 and 19 are the split-levels rules")
 check(schema.CVARS[20] == "coop_finish_downed", "row 20 is the NPC AI rule: stalkers finish a downed player")
-for _, n in ipairs({ "coop_split_levels", "coop_story_together" }) do
+for n, def in pairs({ coop_split_levels = 0, coop_story_together = 1 }) do
 	local c = schema.CVAR[n]
-	local want = n == "coop_split_levels" and 0 or 1 -- F3a multilevel: opt-in until the game has proved it
-	check(c ~= nil and c.kind == "int" and c.min == 0 and c.max == 1 and c.def == want, n .. ": an on/off console flag, default " .. want)
+	check(c ~= nil and c.kind == "int" and c.min == 0 and c.max == 1 and c.def == def, n .. ": an on/off console flag, default " .. def)
 end
 
 -- the engine's white list (coop::game::kGameCvars) is the same list in the same order
@@ -114,7 +113,7 @@ for _, key in ipairs({ SPLIT, STORY }) do
 	check(it ~= nil, key .. " is in the catalog")
 	if it then
 		check(it.tab == "party" and it.kind == "check" and it.src == "c" and it.cvar == key:sub(3), key .. ": a check on the group tab, a console variable")
-		check(it.def == (key == STORY), key .. ": default (the split levels are opt-in, F3a multilevel)")
+		check(it.def == (key == STORY), key .. ": default")
 		check(it.when == "session" and schema.editable(key, true) and schema.editable(key, false),
 			key .. ": changed between sessions, editable on an existing game")
 		check(it.applies == "load", key .. ": starts to act when the game is loaded (" .. tostring(it.applies) .. ")")
@@ -122,7 +121,9 @@ for _, key in ipairs({ SPLIT, STORY }) do
 		check(schema.default(key) == (key == STORY), key .. ": default()")
 	end
 end
-check(schema.item(SPLIT) ~= nil and schema.item(SPLIT).shown_if == nil, "the switch of the split levels is always shown")
+local own = (schema.item(SPLIT) or {}).shown_if
+check(own and own.key == SPLIT and #own.any == 1 and own.any[1] == true,
+	"the switch of the split levels is shown only in a world that holds it on: no map server yet")
 local shown = (schema.item(STORY) or {}).shown_if
 check(shown and shown.key == SPLIT and #shown.any == 1 and shown.any[1] == true,
 	"story levels together is shown while the levels are split")

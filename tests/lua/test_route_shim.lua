@@ -170,7 +170,27 @@ check(same, "each one is replaced in place by its wrapper with the same priority
 check(axr_main.count("actor_on_update") == 4, "nothing added or lost")
 local hs = coop_route.handlers_of("actor_on_update", "treasure_manager")
 check(#hs == 1 and hs[1] == PRE.host, "handlers_of finds a reclassified handler")
+check(coop_route.handler_domain(PRE.host) == "host" and coop_route.handler_domain(PRE.view) == "view"
+	and coop_route.handler_domain(PRE.owner) == "owner", "handler_domain: the domain of a registered function")
+check(coop_route.handler_domain(PRE.obj.actor_on_update) ~= nil, "... of an object's method too")
+check(coop_route.handler_domain(print) == nil and coop_route.handler_domain(nil) == nil, "... nil for anything else")
 check(coop_route.install() == true and axr_main.count("actor_on_update") == 4, "a second install changes nothing")
+
+-- coop_core_world tells a script with a rule of its own from one that follows its callback by these two callbacks: their
+-- defaults differ, and the shipped rules must not touch them
+print("== route_shim_rule_probe")
+for script, rule in pairs({ treasure_manager = "host", dynamic_news_manager = "host", tasks_defense = "host", xr_effects = "host",
+	dialogs = "host", actor_effects = "owner", game_statistics = "owner", ui_inventory = "view", coop_tasks = "view",
+	closecaption = "view", utils_data = "view", zzz_dit = false, mob_remark = false, ammo_maker = false }) do
+	local f = from_script(script, "return function() end")
+	local a, b = coop.route.of("npc_on_update", f), coop.route.of("actor_on_update", f)
+	if rule then
+		check(a == rule and b == rule, script .. ": both callbacks answer its rule " .. rule)
+	else
+		check(a == "host" and b == "owner", script .. ": no rule, the answers differ")
+	end
+end
+check(select(2, coop.route.of("", from_script("_g", "return function() end"))) == "_g", "the key of _g.script is _g")
 
 print("== route_shim_none_on_host")
 boot("host")

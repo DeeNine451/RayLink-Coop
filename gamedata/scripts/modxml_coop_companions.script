@@ -1,0 +1,43 @@
+--[[
+	Anomaly Coop - companions: the "take control" dialog (gamedata\scripts\modxml_coop_companions.script).
+	The modxml_ prefix makes dxml_core load this script and call on_xml_read() at script start-up, before the engine reads
+	gameplay\dialogs.xml and the first character. A dialog of its own and not a line of dm_is_actor_companion_dialog: that
+	dialog opens on the npcx_is_companion flag, which only the leader's machine has, and its list of commands is the leader's
+	(coop_npc_companions: the "hand over" line goes there by script). This one opens for every other player of the session.
+	Every character that can be a companion gets it. Nothing happens on an exe without co-op.
+--]]
+
+local DIALOGS = [[gameplay\dialogs.xml]]
+local ID = "dm_coop_companion_take"
+
+local DIALOG = [[
+<dialog id="dm_coop_companion_take">
+	<precondition>coop_npc_companions.dlg_can_take</precondition>
+	<phrase_list>
+		<phrase id="0">
+			<text>st_coop_comp_cmd_take</text>
+			<action>coop_npc_companions.dlg_take</action>
+			<next>1</next>
+		</phrase>
+		<phrase id="1">
+			<text>axr_phrase_companion_acknowledge_1</text>
+		</phrase>
+	</phrase_list>
+</dialog>
+]]
+
+local function on_read(xml_file_name, xml_obj)
+	if xml_file_name ~= DIALOGS then return end
+	if #xml_obj:query("dialog[id=" .. ID .. "]") > 0 then return end
+	xml_obj:insertFromXMLString(DIALOG)
+end
+
+local function on_dialog_list(character_id, dialog_list)
+	if dialog_list:has("dm_is_actor_companion_dialog") then dialog_list:add(ID) end
+end
+
+function on_xml_read()
+	if not rawget(_G, "coop") then return end
+	RegisterScriptCallback("on_xml_read", on_read)
+	RegisterScriptCallback("on_specific_character_dialog_list", on_dialog_list)
+end

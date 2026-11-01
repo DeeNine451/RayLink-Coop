@@ -7,6 +7,8 @@
 			info = { reason, code, text, missing, extra, differ, missing_total, extra_total, differ_total,
 			         key_path, log_path }
 			missing/extra/differ: first files of each list (the engine log has all of them)
+		coop_ui.on_session_end(info)   a client is back in the main menu from a session he did not leave himself
+			info = { code, text }: "host_left", "lost", "failed" or a refusal's name; text: the engine's own words
 	For other scripts:
 		coop_ui.show(title, summary, lines, footer)   lines: { "text" | { text = "...", color = <argb> }, ... }
 
@@ -339,6 +341,31 @@ function on_rejected(info)
 	log("host refusal shown: %s (missing %s, extra %s, different %s)", tostring(info.reason),
 		tostring(info.missing_total or 0), tostring(info.extra_total or 0), tostring(info.differ_total or 0))
 	show(title, summary, lines, footer)
+end
+
+-- The words for info.code: the host's Bye, the link gone, a join that broke down, else the name of a refusal after joining.
+local function session_end(info)
+	local text = tostring(info.text or "")
+	if info.code == "host_left" then
+		return T("st_coop_end_title_host_left", "The host stopped the game"),
+			T("st_coop_end_text_host_left", "The host ended the session, and you are back in the main menu."),
+			{ T("st_coop_end_hint_host_left", "To play on, join again once the host is back in the game.") }
+	elseif info.code == "lost" then
+		return T("st_coop_end_title_lost", "Connection lost"),
+			T("st_coop_end_text_lost", "The host stopped answering, and the connection was lost."),
+			{ T("st_coop_end_hint_lost",
+				"The network may have dropped on your side or the host's, or the host's game may have closed. Join again once the host is back.") }
+	elseif info.code == "failed" then
+		return T("st_coop_end_title_failed", "The session was interrupted"), text
+	end
+	return generic({ reason = info.code, text = text })
+end
+
+-- Engine entry (coop_script.cpp): a session sent this client out of a world and the main menu is back.
+function on_session_end(info)
+	if type(info) ~= "table" then return end
+	log("end of the session shown: %s (%s)", tostring(info.code), tostring(info.text))
+	show(session_end(info))
 end
 
 -------------------------------------------------------------------------------

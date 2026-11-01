@@ -4,9 +4,66 @@
 
 #include "coop_relay_rules.h"
 
+#include <cmath>
+
 using namespace coop::relay;
 using coop::Reader;
 using coop::Writer;
+
+TEST(relay_bolt_round_trip)
+{
+	BoltMsg in;
+	in.id = "thunderbolts_rain";
+	in.period = 12.5f;
+	in.duration = 0.75f;
+	in.seed = 0xA1B2C3D4u;
+	Writer w(32);
+	write_bolt(w, in);
+	Reader r(w.ptr(), w.size());
+	BoltMsg out;
+	CHECK(read_bolt(r, out));
+	CHECK(out.id == in.id);
+	CHECK(out.period == in.period);
+	CHECK(out.duration == in.duration);
+	CHECK(out.seed == in.seed);
+	CHECK_EQ(r.remaining(), size_t(0));
+}
+
+TEST(relay_bolt_refuses_what_could_not_be_a_bolt)
+{
+	BoltMsg out;
+	{
+		Writer w(8);
+		w.str("x"); // no numbers
+		Reader r(w.ptr(), w.size());
+		CHECK(!read_bolt(r, out));
+	}
+	{
+		BoltMsg in; // no collection: the engine would look it up and find nothing
+		Writer w(32);
+		write_bolt(w, in);
+		Reader r(w.ptr(), w.size());
+		CHECK(!read_bolt(r, out));
+	}
+	{
+		BoltMsg in;
+		in.id = "a";
+		in.period = std::nanf("");
+		Writer w(32);
+		write_bolt(w, in);
+		Reader r(w.ptr(), w.size());
+		CHECK(!read_bolt(r, out));
+	}
+	{
+		BoltMsg in;
+		in.id = "a";
+		in.duration = -1.f; // a negative life time never ends
+		Writer w(32);
+		write_bolt(w, in);
+		Reader r(w.ptr(), w.size());
+		CHECK(!read_bolt(r, out));
+	}
+}
 
 TEST(relay_bucket_starts_full_and_refills_by_the_clock)
 {
@@ -152,6 +209,16 @@ TEST(relay_heli_health_byte_round_trips_within_a_step)
 	CHECK_EQ(int(heli_health_byte(-3.f)), 0);
 	CHECK_EQ(int(heli_health_byte(7.f)), 255);
 	CHECK(std::fabs(heli_health(heli_health_byte(0.5f)) - 0.5f) < 0.01f);
+}
+
+TEST(relay_a_heli_barrel_outlasts_one_lost_report)
+{
+	CHECK(kHeliTrackMs > 2 * kHeliStateMs);
+	CHECK(HeliAiming != HeliEngine && HeliAiming != HeliLight && HeliAiming != HeliSmoke && HeliAiming != HeliDead);
+	HeliReport r;
+	CHECK(r.due(1000, HeliEngine, 200));
+	CHECK(!r.due(1100, HeliEngine, 200));
+	CHECK(r.due(1200, HeliEngine | HeliAiming, 200)); // it took a target: at once, not at the next second
 }
 
 TEST(relay_heli_state_goes_out_on_change_and_every_second)

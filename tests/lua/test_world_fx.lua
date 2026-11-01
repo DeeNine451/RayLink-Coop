@@ -255,6 +255,49 @@ do
 	check(#C.parts == 2, "no squad: a plain kill, nothing to show")
 end
 
+print("== emission flares: the smoke trail")
+do
+	local H, C = world_pair()
+	engine_fx(H)
+	engine_fx(C)
+	local flare = [[
+signal_light_binder = {}
+function signal_light_binder:launch() if self.flying then return false end self.flying = true return true end
+function signal_light_binder:slow_fly() end
+function signal_light_binder:stop_light() end
+]]
+	fixture(H, "bind_signal_light", flare)
+	fixture(C, "bind_signal_light", flare)
+	H.env.surge_manager, C.env.surge_manager = {}, {}
+	local FH, FC = load_script(H, "coop_world_fx"), load_script(C, "coop_world_fx")
+	FH.on_game_start()
+	FC.on_game_start()
+	FH._set_host_on(true)
+	local trail = {}
+	local copy = make_obj(900, 0, 50, 0)
+	function copy:start_particles(name, bone) trail[#trail + 1] = "on " .. name .. " " .. bone end
+	function copy:stop_particles(name, bone) trail[#trail + 1] = "off " .. name .. " " .. bone end
+	C.add(copy)
+	local cls = H.env.bind_signal_light.signal_light_binder
+	local binder = setmetatable({ object = make_obj(900, 0, 50, 0) }, { __index = cls })
+	check(binder:launch() == true, "the stock launch answers")
+	world_pump()
+	check(trail[1] == "on weapons\\light_signal link", "a client's copy of the flare smokes")
+	check(binder:launch() == false, "a second launch of a flying flare")
+	world_pump()
+	check(#trail == 1, "...sends nothing")
+	binder:slow_fly()
+	world_pump()
+	check(#trail == 2, "the second start of the trail, as in stock")
+	binder:stop_light()
+	binder:stop_light() -- the stock binder calls it every frame for 8 s
+	world_pump()
+	check(trail[3] == "off weapons\\light_signal link" and #trail == 3, "it goes out once")
+	binder:slow_fly()
+	world_pump()
+	check(#trail == 3, "a flare that was never launched here sends nothing")
+end
+
 print("== alone, single player, client")
 do
 	local H, C, FH = stage()

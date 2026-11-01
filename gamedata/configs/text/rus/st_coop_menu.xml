@@ -118,6 +118,30 @@
 	<string id="st_coop_menu_reason_start">
 		<text>не удалось начать</text>
 	</string>
+	<string id="st_coop_menu_reason_host_left">
+		<text>хост остановил игру</text>
+	</string>
+	<string id="st_coop_end_title_host_left">
+		<text>Хост остановил игру</text>
+	</string>
+	<string id="st_coop_end_text_host_left">
+		<text>Хост завершил сессию, и вы вернулись в главное меню.</text>
+	</string>
+	<string id="st_coop_end_hint_host_left">
+		<text>Чтобы продолжить, подключитесь снова, когда хост вернётся в игру.</text>
+	</string>
+	<string id="st_coop_end_title_lost">
+		<text>Соединение потеряно</text>
+	</string>
+	<string id="st_coop_end_text_lost">
+		<text>Хост перестал отвечать, и связь оборвалась.</text>
+	</string>
+	<string id="st_coop_end_hint_lost">
+		<text>Возможно, пропала сеть у вас или у хоста либо игра хоста закрылась. Подключитесь снова, когда хост вернётся.</text>
+	</string>
+	<string id="st_coop_end_title_failed">
+		<text>Сессия прервана</text>
+	</string>
 	<string id="st_coop_menu_pending_title">
 		<text>Ждём загрузки мира</text>
 	</string>
