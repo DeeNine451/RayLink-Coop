@@ -703,5 +703,22 @@ do
 	check(key_press(S) == false, "no session: USE is not touched")
 end
 
+print("== split levels: a map server's bodies are its own")
+do
+	local Ms = machine("client", 0x101)
+	setup_world(Ms)
+	Ms.env.coop.is_map_server = function() return true end
+	Ms.players = { { id = 1, is_self = false, avatar_id = 500 } }
+	Ms.victim = stalker(Ms, 701, vec(10, 0, 0))
+	Ms.victim._dead = true
+	Ms.killer = stalker(Ms, 801, vec(20, 0, 0), "bandit")
+	Ms.proxy = stalker(Ms, 500, vec(11, 0, 0), "actor_stalker")
+	boot(Ms)
+	local LM = Ms.env.coop_loot_claim
+	fire(Ms, "npc_on_death_callback", Ms.victim, Ms.killer)
+	check(LM.claim_of(701) == 801, "a stalker's kill on a map server's level is claimed there")
+	check(LM.claim_count() == 1, "in its own table")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

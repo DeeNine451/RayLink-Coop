@@ -13,6 +13,9 @@
 	  - a story character, or the victim is one.
 	A kill by any other stalker is a claim: victim id -> killer id.
 
+	Split levels: the rows of a level are its authority's, as its bodies and killers are: a map server keeps its own table, a player
+	asks and deals with the authority of his level. What it holds is not saved: a row lives as long as its killer stays online.
+
 	The table. It belongs to the host: it is saved in m_data (coop_loot_claims) and kept small: at most MAX_CLAIMS rows, the
 	oldest one is dropped for a new one, and a row goes as soon as it is useless (the killer is dead or offline, the victim
 	is gone or alive again; the host looks every SCAN_MS). A client gets every change as an event and the whole table
@@ -213,8 +216,13 @@ local function claiming_killer(victim, killer)
 	return kid
 end
 
+-- This process leads a level: its deaths, its bodies, its killers are here.
+local function leads()
+	return qc.is_host() or qc.is_map_server()
+end
+
 local function on_death(victim, killer)
-	if not (qc.is_host() and rule_on()) then return end
+	if not (leads() and rule_on()) then return end
 	local ok, kid = pcall(claiming_killer, victim, killer)
 	if not ok then
 		qc.report(TAG, "death", kid)
@@ -519,12 +527,12 @@ local function snapshot()
 end
 
 local function host_on_ask(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
+	if not leads() or type(from) ~= "number" or from == 0 then return end
 	if qc.send("loot_snap", { r = snapshot() }, from) then stats.snaps_out = stats.snaps_out + 1 end
 end
 
 local function host_on_deal(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
+	if not leads() or type(from) ~= "number" or from == 0 then return end
 	local ans = decide(from, id16(t.v))
 	if ans then qc.send("loot_say", ans, from) end
 end
@@ -570,7 +578,7 @@ end
 local function on_update()
 	if not qc.active() then return end
 	local now = time_global()
-	if qc.is_host() then
+	if leads() then
 		if now >= next_scan then
 			next_scan = now + SCAN_MS
 			if next(claims) ~= nil then host_scan() end
@@ -623,11 +631,11 @@ function claim_count() return count end
 function on_game_start()
 	if not qc.engine() then return end
 	local ok, err = pcall(function()
-		qc.on("loot_ask", host_on_ask, TAG)
+		qc.on_level("loot_ask", host_on_ask, TAG)
 		qc.on("loot_snap", client_on_snap, TAG)
 		qc.on("loot_claim", client_on_claim, TAG)
 		qc.on("loot_free", client_on_free, TAG)
-		qc.on("loot_deal", host_on_deal, TAG)
+		qc.on_level("loot_deal", host_on_deal, TAG)
 		qc.on("loot_say", client_on_say, TAG)
 		RegisterScriptCallback("npc_on_death_callback", on_death)
 		RegisterScriptCallback("monster_on_death_callback", on_death)

@@ -234,6 +234,16 @@ function on(name, fn, tag)
 	end)
 end
 
+-- What a player asks of the level he stands on: fn runs on its authority (coop_main.add_level_handler), from = he.
+function on_level(name, fn, tag)
+	local m = cm()
+	if not (m and m.add_level_handler) then return on(name, fn, tag) end
+	return m.add_level_handler(EVENT_PREFIX .. name, function(payload, from)
+		local ok, err = pcall(fn, decode(payload), tonumber(from), payload)
+		if not ok then report(tag or "event", name, err) end
+	end)
+end
+
 -------------------------------------------------------------------------------
 -- The group's characters on this machine
 -------------------------------------------------------------------------------
