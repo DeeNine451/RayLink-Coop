@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Anomaly Coop: the glare of another player's head torch (scripts\coop_hud_glare.script). This file gives the texture;
+     the script places, sizes and fades the spots, one per player, at the world2ui point of his lamp. No _16 file: the
+     script keeps the spots round on any screen. -->
+<w>
+	<coop_glare x="0" y="0" width="1024" height="768">
+		<spot x="0" y="0" width="128" height="128" stretch="1">
+			<texture>coop_glare_spot</texture>
+		</spot>
+	</coop_glare>
+</w>

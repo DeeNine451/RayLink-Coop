@@ -173,6 +173,8 @@ def test_package_archive_layout() -> None:
             "fomod/info.xml",
             f"{ENGINE}/bin/AnomalyCoopDX11AVX.exe",
             f"{CORE}/gamedata/scripts/coop_main.script",
+            f"{CORE}/gamedata/textures/ui/coop/ui_coop_hud.dds",
+            f"{CORE}/gamedata/textures/ui/coop/ui_coop_glare.dds",
             f"{GAMMA}/readme_gamma.txt",
             "anomaly-coop-release.txt",
             "readme_eng.txt",

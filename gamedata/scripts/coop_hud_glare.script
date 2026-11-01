@@ -1,0 +1,289 @@
+--[[
+	Anomaly Coop - HUD v2: the glare of another player's head torch (gamedata\scripts\coop_hud_glare.script).
+
+	A friend's head torch shining in my face dazzles a little: a soft warm spot at his head, over the world. A cosmetic: at
+	most 0.45 opaque, and it needs both of us to look at each other. The engine's own glow of the lamp (l->glow,
+	coop_equip.cpp) is never seen: only R1 renders glows and the game ships R4, so this is a HUD element.
+
+	Only a player's character is looked at (coop.players(), not me): a torch of an NPC never counts. The torch and its beam
+	come from coop.avatar_headlamp(id). The strength is strength() of the two angles and the distance, up to 20 m; a ray
+	from my camera to his head (level and objects, at most one in 100 ms per player, none while the strength is 0) keeps it
+	behind walls and people. The spot rises and falls in about 150 ms, so that nothing blinks.
+	Nothing shows in a menu, the PDA or with the HUD hidden (main_hud_shown()), while I am down or dead: then the spots go at
+	once. A friend who is down or dead does not shine: his spot fades.
+	Runs on the host and on the clients (view, through coop_* of configs\coop_route.ltx). An exe older than the export: off.
+	Layout configs\ui\ui_coop_glare.xml, texture textures\ui\coop\ui_coop_glare.dds (tools\make_glare_texture.py).
+
+	For other scripts:
+		coop_hud_glare.strength(cam, view, lamp, beam) -> 0..1   cam, lamp: points; view, beam: unit directions
+		coop_hud_glare.fade(value, target, dt) -> value          dt in ms
+		coop_hud_glare.opacity(value), coop_hud_glare.spot_size(value)   -> 0..0.45, px at 768 high
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tostring, type, ipairs, pairs, pcall = tostring, type, ipairs, pairs, pcall
+local math_floor, math_max, math_min, math_sqrt = math.floor, math.max, math.min, math.sqrt
+local string_format = string.format
+
+RANGE = 20 -- m: no glare from here on
+MAX_ALPHA = 0.45
+FADE_MS = 150
+RAY_GAP_MS = 100 -- one ray per player at the most
+XML_FILE = "ui_coop_glare.xml"
+
+local NEAR = 3 -- m: full strength from here in
+-- Cosines of the angle off the straight line between us: nothing at EDGE, full at FULL. The stock torch's cone is 60 deg.
+local BEAM_EDGE, BEAM_FULL = 0.866, 0.990 -- 30 and 8 deg off his beam
+local VIEW_EDGE, VIEW_FULL = 0.819, 0.995 -- 35 and 6 deg off my view: it goes before he leaves the screen
+local SPOT_MIN, SPOT_MAX = 72, 220 -- px at 768 high
+local SLOTS = 7 -- kMaxPlayers without me
+local HEAD_BONE = "bip01_head"
+local LAMP_UP, LAMP_AHEAD = 0.1, 0.15 -- m from the head bone: where the lamp sits (coop_equip.cpp kHeadLampOffset)
+local RAY_FLAGS = 3 -- rq_target: rqtObject + rqtStatic, a closed door counts too
+local RAY_SHORT = 0.3 -- m: the ray stops before his head
+local LIST_GAP_MS = 100 -- coop.players() builds a table: not on every frame
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("[coop-hud] %s", ok and line or tostring(fmt))
+end
+
+local function live()
+	if not api then return false end
+	local ok, on = pcall(function() return api.is_active() and (api.is_host() or api.is_live()) end)
+	return ok and on == true
+end
+
+-------------------------------------------------------------------------------
+-- The strength: pure
+-------------------------------------------------------------------------------
+-- 0 at edge, 1 at full (either order), smooth between. A NaN is 0.
+local function ramp(v, edge, full)
+	local t = (v - edge) / (full - edge)
+	if not (t > 0) then return 0 end
+	if t >= 1 then return 1 end
+	return t * t * (3 - 2 * t)
+end
+
+function strength(cam, view, lamp, beam)
+	local dx, dy, dz = cam.x - lamp.x, cam.y - lamp.y, cam.z - lamp.z
+	local d = math_sqrt(dx * dx + dy * dy + dz * dz)
+	if not (d > 1e-3 and d < RANGE) then return 0 end
+	dx, dy, dz = dx / d, dy / d, dz / d
+	local at_me = beam.x * dx + beam.y * dy + beam.z * dz
+	local at_lamp = -(view.x * dx + view.y * dy + view.z * dz)
+	return ramp(at_me, BEAM_EDGE, BEAM_FULL) * ramp(at_lamp, VIEW_EDGE, VIEW_FULL) * ramp(d, RANGE, NEAR)
+end
+
+function fade(value, target, dt)
+	if not (dt > 0) then return value end
+	local step = dt / FADE_MS
+	if value < target then return math_min(target, value + step) end
+	return math_max(target, value - step)
+end
+
+function opacity(value)
+	return MAX_ALPHA * math_min(1, value)
+end
+
+function spot_size(value)
+	return SPOT_MIN + (SPOT_MAX - SPOT_MIN) * value
+end
+
+-------------------------------------------------------------------------------
+-- What the game says
+-------------------------------------------------------------------------------
+local function hud_visible()
+	local f = rawget(_G, "main_hud_shown")
+	if not f then return true end
+	local ok, v = pcall(f)
+	return not ok or v == true
+end
+
+-- Not down, dead or waiting to respawn; 0 = me.
+local function upright(id)
+	local ok, s = pcall(api.life_of, id)
+	return not ok or s == nil or s == "alive"
+end
+
+-- Local ids of the other players' characters.
+local function other_avatars()
+	local ids = {}
+	local ok, list = pcall(api.players)
+	if ok and type(list) == "table" then
+		for _, p in ipairs(list) do
+			if not p.is_self and type(p.avatar_id) == "number" and p.avatar_id ~= 0 then ids[#ids + 1] = p.avatar_id end
+		end
+	end
+	return ids
+end
+
+-- Nothing between my camera and the lamp of character `id`. His own body is no wall (the ray can touch his shoulder).
+local function line_clear(cam, lamp, id)
+	local dx, dy, dz = lamp.x - cam.x, lamp.y - cam.y, lamp.z - cam.z
+	local d = math_sqrt(dx * dx + dy * dy + dz * dz)
+	if d <= RAY_SHORT then return true end
+	local ray = ray_pick()
+	ray:set_flags(RAY_FLAGS)
+	ray:set_range(d - RAY_SHORT)
+	ray:set_position(vector():set(cam.x, cam.y, cam.z))
+	ray:set_direction(vector():set(dx / d, dy / d, dz / d))
+	ray:set_ignore_object(db.actor)
+	if not ray:query() then return true end
+	local obj = ray:get_object()
+	return obj ~= nil and obj:id() == id
+end
+
+-------------------------------------------------------------------------------
+-- The overlay
+-------------------------------------------------------------------------------
+local WORLD -- the window while it is on the HUD
+local ray_failed = false
+
+class "UICoopGlare" (CUIScriptWnd)
+
+function UICoopGlare:__init() super()
+	local xml = CScriptXmlInit()
+	xml:ParseFile(XML_FILE)
+	self.root = xml:InitStatic("coop_glare", self)
+	self.spots = {}
+	for i = 1, SLOTS do
+		self.spots[i] = xml:InitStatic("coop_glare:spot", self.root)
+		self.spots[i]:Show(false)
+	end
+	self.glares = {} -- character id -> { value, lamp = {x, y, z}, beam = {x, y, z}, ray_at, clear }
+	self.ids = {}
+	self.point = vector()
+end
+
+function UICoopGlare:__finalize()
+end
+
+function UICoopGlare:AvatarIds(tg)
+	if self.ids_at and tg >= self.ids_at and tg - self.ids_at < LIST_GAP_MS then return self.ids end
+	self.ids_at = tg
+	self.ids = other_avatars()
+	local kept = {}
+	for _, id in ipairs(self.ids) do kept[id] = self.glares[id] or { value = 0 } end
+	self.glares = kept
+	return self.ids
+end
+
+-- What character `id` deserves now, 0..1. Keeps the place of his lamp in g.
+function UICoopGlare:GlareOf(id, g, cam, view, tg)
+	local ok, on, bx, by, bz = pcall(api.avatar_headlamp, id)
+	if not (ok and on == true) or not upright(id) then return 0 end
+	local obj = level.object_by_id(id)
+	if not obj then return 0 end
+	local okh, head = pcall(obj.bone_position, obj, HEAD_BONE)
+	if not (okh and head) then return 0 end
+	local lamp, beam = g.lamp or {}, g.beam or {}
+	g.lamp, g.beam = lamp, beam
+	beam.x, beam.y, beam.z = bx, by, bz
+	lamp.x, lamp.y, lamp.z = head.x + bx * LAMP_AHEAD, head.y + LAMP_UP + by * LAMP_AHEAD, head.z + bz * LAMP_AHEAD
+	local s = strength(cam, view, lamp, beam)
+	if s <= 0 then return 0 end
+	if not (g.ray_at and tg >= g.ray_at and tg - g.ray_at < RAY_GAP_MS) then
+		g.ray_at = tg
+		local okr, clear = pcall(line_clear, cam, lamp, id)
+		if not okr and not ray_failed then
+			ray_failed = true
+			log("! glare: the ray failed, no spots: %s", tostring(clear))
+		end
+		g.clear = okr and clear == true
+	end
+	return g.clear and s or 0
+end
+
+-- Number of spots shown.
+function UICoopGlare:DrawSpots(dev, tg, dt)
+	local used = 0
+	local w2ui = game and game.world2ui
+	local cam, view = dev.cam_pos, dev.cam_dir
+	if not (w2ui and cam and view) then return 0 end
+	for _, id in ipairs(self:AvatarIds(tg)) do
+		local g = self.glares[id]
+		g.value = fade(g.value, self:GlareOf(id, g, cam, view, tg), dt)
+		if g.value > 0 and g.lamp and used < SLOTS then
+			local ok, s = pcall(w2ui, self.point:set(g.lamp.x, g.lamp.y, g.lamp.z), false, false)
+			if ok and s and s.x and s.x > -9000 then
+				used = used + 1
+				local w = self.spots[used]
+				local size = spot_size(g.value)
+				w:SetWndSize(vector2():set(size * self.kx, size))
+				w:SetWndPos(vector2():set(s.x - size * self.kx / 2, s.y - size / 2))
+				w:SetTextureColor(GetARGB(math_floor(255 * opacity(g.value)), 255, 255, 255))
+				if not w:IsShown() then w:Show(true) end
+			end
+		end
+	end
+	return used
+end
+
+function UICoopGlare:HideSpots(from)
+	for i = from, SLOTS do
+		if self.spots[i]:IsShown() then self.spots[i]:Show(false) end
+	end
+end
+
+function UICoopGlare:Frame(tg)
+	local dev = device()
+	if self.size_w ~= dev.width or self.size_h ~= dev.height then
+		self.size_w, self.size_h = dev.width, dev.height
+		self.kx = 1024 * dev.height / (768 * dev.width)
+	end
+	local dt = self.at and tg - self.at or 0
+	self.at = tg
+	local used = 0
+	if db.actor and hud_visible() and upright(0) then
+		used = self:DrawSpots(dev, tg, dt)
+	else
+		self.glares, self.ids_at = {}, nil -- gone at once: nothing fades out of a menu
+	end
+	self:HideSpots(used + 1)
+end
+
+function UICoopGlare:Update()
+	CUIScriptWnd.Update(self)
+	local tg = time_global()
+	if self.off_until and tg < self.off_until then return end
+	local M = rawget(_G, "coop_hud_markers")
+	local pf = M and M.perf_start and M.perf_start("glare")
+	local ok, err = pcall(self.Frame, self, tg)
+	if pf then M.perf_stop(pf) end
+	if not ok then
+		self.off_until = tg + 5000
+		self:HideSpots(1)
+		log("! glare overlay frame failed: %s", tostring(err))
+	end
+end
+
+local function world_on()
+	if WORLD then return end
+	local ok, err = pcall(function()
+		WORLD = UICoopGlare()
+		get_hud():AddDialogToRender(WORLD)
+	end)
+	if not ok then
+		WORLD = nil
+		log("! glare overlay failed: %s", tostring(err))
+	end
+end
+
+local function world_off()
+	if not WORLD then return end
+	local w = WORLD
+	WORLD = nil
+	pcall(function() get_hud():RemoveDialogToRender(w) end)
+end
+
+local function actor_on_update()
+	if live() then world_on() else world_off() end
+end
+
+function on_game_start()
+	if not (api and api.avatar_headlamp) then return end -- an exe without co-op, or older than the export
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_net_destroy", world_off)
+end
