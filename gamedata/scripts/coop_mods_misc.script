@@ -23,7 +23,8 @@
 	                                           named by the nick.
 	Body Health System (zzz_player_injuries)   after a co-op revive head/torso get back above zero and the medkit
 	                                           heals the limbs (the mod's own heal never runs on a revive);
-	                                           head_tbl is per player.
+	                                           head_tbl is per player. Its concussion waits until the player stands:
+	                                           hits on a body turned the volume down and up again and again.
 	Oleh's Extended MovementSFX                footsteps of other players' characters (when the engine reports
 	                                           avatar steps through coop_mods_core.on_avatar_step).
 --]]
@@ -375,9 +376,20 @@ local function bhs_save(b)
 	end
 end
 
+-- What a concussion left behind when the player fell: the volume, its two effectors, the head's last value.
+local function bhs_clear_concussion(b)
+	local head = C().find_local(b, "head_tbl")
+	if type(head) ~= "table" then return end
+	head.previous, head.stage = nil, 0
+	if head.volume then exec_console_cmd("snd_volume_eff " .. tostring(head.volume)) end
+	level.remove_pp_effector(99123)
+	level.remove_pp_effector(99133)
+end
+
 local function bhs_on_revived(reviver, section)
 	local b = C().mod("zzz_player_injuries")
 	if not (bhs_tables(b) and db.actor) then return end
+	bhs_clear_concussion(b)
 	-- The mod keeps the player down while head or torso is at zero.
 	if (b.health.head or 0) <= 0 then b.health.head = 1 end
 	if (b.health.torso or 0) <= 0 then b.health.torso = 1 end
@@ -408,6 +420,7 @@ local function bhs_on_respawned()
 		b.health[k] = b.maxhp[k]
 		b.timedhp[k] = 0
 	end
+	bhs_clear_concussion(b)
 	bhs_save(b)
 	log("bhs", "respawned: every part back")
 end
@@ -416,6 +429,13 @@ local function install_bhs()
 	local b = C().mod("zzz_player_injuries")
 	if not bhs_tables(b) then return end
 	P().register("head_tbl", { prime = { "zzz_player_injuries" } })
+	local concussion = b.bhs_concussion
+	if type(concussion) == "function" then
+		b.bhs_concussion = function(...)
+			if not coop_npc_players.standing(0) then return end
+			return concussion(...)
+		end
+	end
 	C().listen("actor_revived", bhs_on_revived)
 	C().listen("actor_respawned", bhs_on_respawned)
 	installed[#installed + 1] = "bhs"
