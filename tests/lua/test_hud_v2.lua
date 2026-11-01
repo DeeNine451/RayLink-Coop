@@ -1590,5 +1590,26 @@ local allowed = { axr_companions = true, profile_timer = true, task_manager = tr
 local bad = {}
 for _, k in ipairs(unk) do if not allowed[k] then bad[#bad + 1] = k end end
 check(#bad == 0, "no reads of undefined globals (" .. table.concat(bad, ", ") .. ")")
+-- split levels: a player on another map says so, and has no marker here
+do
+	local H = machine(2)
+	H.players = {
+		{ id = 1, nick = "far", avatar_id = 501, is_self = false, level = 2, elsewhere = true },
+		{ id = 3, nick = "near", avatar_id = 503, is_self = false, level = 1, elsewhere = false },
+		{ id = 2, nick = "me", avatar_id = 0, is_self = true, level = 1 },
+	}
+	H.object(503, vec(1, 0, 0))
+	local E = H.env
+	E.coop_levels = { elsewhere_text = function(id) return id == 1 and "on another map: Garbage" or "" end }
+	local list = E.coop_core_hud.views(NOW)
+	local far, near
+	for _, v in ipairs(list) do
+		if v.peer == 1 then far = v end
+		if v.peer == 3 then near = v end
+	end
+	check(far and far.elsewhere == "on another map: Garbage" and far.pos == nil, "a player on another map says so, no position")
+	check(near and near.elsewhere == nil and near.pos ~= nil, "one who stands here as ever")
+end
+
 print(("== %d passed, %d failed"):format(PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

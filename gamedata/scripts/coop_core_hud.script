@@ -172,6 +172,14 @@ local function avatar_of(p)
 	return obj, obj and id or nil
 end
 
+-- Split levels: "on another map: <name>", nil for one who stands here.
+local function elsewhere_of(p)
+	if p.elsewhere ~= true then return nil end
+	local lv = rawget(_G, "coop_levels")
+	local text = lv and lv.elsewhere_text and lv.elsewhere_text(p.id)
+	return text and text ~= "" and text or nil
+end
+
 function views(tg)
 	tg = tg or time_global()
 	local A = allies()
@@ -192,6 +200,7 @@ function views(tg)
 				peer = p.id, slot = A.slot(p.id), nick = tostring(p.nick or "?"), host = p.id == 0,
 				state = state, bleed = bleed, hp = fresh and st.h or nil, avatar = id, icon = icon,
 				dist = (obj and actor) and obj:position():distance_to(actor:position()) or nil,
+				elsewhere = elsewhere_of(p),
 			}
 			if obj then
 				local okp, p = pcall(obj.position, obj)
@@ -537,7 +546,7 @@ function UICoopParty:Fill(r, v, tg)
 		put(r.host, x + 4 * kx, L.team_name_y + (L.team_name_h - L.team_star) / 2)
 		x = x + 4 * kx + L.team_star * kx
 	end
-	local dist = M.format_distance(v.dist) or ""
+	local dist = v.elsewhere or M.format_distance(v.dist) or ""
 	local dw = dist ~= "" and self:TextWidth(r, dist) or 0
 	if r._dist ~= dist then
 		r._dist = dist
