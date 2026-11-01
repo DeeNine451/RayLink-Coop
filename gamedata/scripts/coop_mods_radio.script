@@ -127,7 +127,7 @@ local function rf_tick()
 	local tg = time_global()
 	if tg < rf.next_tick then return end
 	rf.next_tick = tg + 2000
-	if C().is_host() then
+	if C().is_world_server() then
 		local ok, e = pcall(rf_host_diff)
 		if not ok then C().report("radio", "rf diff", e) end
 	elseif C().is_client() and next(rf.pending) then
@@ -260,7 +260,7 @@ local function install_fm()
 end
 
 local function fm_tick()
-	if not (fm.R and next(fm.names) and C().is_host()) then return end
+	if not (fm.R and next(fm.names) and C().is_world_server()) then return end
 	local tg = time_global()
 	if tg < fm.next_tick then return end
 	fm.next_tick = tg + 1000
@@ -371,7 +371,7 @@ local function install_packages()
 	local function client_only(name, ret)
 		C().wrap(tb, name, "tb_rf_receiver_packages." .. name, function(orig)
 			return function(...)
-				if C().is_client() then return ret end
+				if C().world_client() then return ret end
 				return orig(...)
 			end
 		end)
@@ -399,7 +399,7 @@ local function pkg_tick()
 	if tg < pkg.next_tick then return end
 	pkg.next_tick = tg + 2000
 	local ok, e
-	if C().is_host() then
+	if C().is_world_server() then
 		ok, e = pcall(pkg_host_check)
 	elseif C().is_client() then
 		ok, e = pcall(pkg_client_follow)

@@ -65,12 +65,13 @@ local function mirror_flush(m)
 	local tg = time_global()
 	if tg < m.next then return end
 	m.next = tg + 500
-	local host = C().is_host()
+	local host = C().is_world_server()
+	local leads = C().is_host() -- a map server reports what changes on its level, the world server tells everybody
 	local batch, size, n, included = {}, 0, 0, {}
 	for id in pairs(m.dirty) do
 		-- The host reports every change it knows of (a client's report included: the others need it once the
 		-- item leaves that player); a client reports what it carries, unless an item rider channel does.
-		if host or (own(id) and not m.client_elsewhere) then
+		if leads or (own(id) and not m.client_elsewhere) then
 			local ok, v = pcall(m.get, id)
 			local s = ok and (v == nil and "" or C().ser(v)) or nil
 			-- Raw sizes: coop_main.encode may triple them, the engine takes 16 KiB per event.
@@ -97,14 +98,14 @@ end
 
 local function mirror_receive(m, t, from)
 	local n = tonumber(t.n) or 0
-	local host = C().is_host()
+	local host = C().is_world_server()
 	for i = 1, math.min(n, 200) do
 		local id = C().lid(tonumber(t["i" .. i]))
 		local s = t["d" .. i]
 		if type(id) == "number" and id > 0 and id < 65535 and type(s) == "string" then
 			local accept
 			if host then
-				accept = C().holder_peer(id) == from -- only the carrier reports an item
+				accept = C().holder_peer(id) == from or C().is_bridge(from) -- only the carrier reports an item, or the authority of its level
 			else
 				-- from the host only (a client's broadcast is relayed with that client as sender, W5); never
 				-- over what this player carries

@@ -240,7 +240,7 @@ end
 -- { {obj, peer, self, id}, ... }: own actor first, then the other connected players' characters.
 function characters()
 	local out = {}
-	local ghost = api and api.is_dedicated and api.is_dedicated() -- the actor of a dedicated host is nobody's character
+	local ghost = api and ((api.is_dedicated and api.is_dedicated()) or is_map_server()) -- the actor of a dedicated host or a map server is nobody's
 	if db and db.actor and not ghost then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
 	if not active() then return out end
 	for _, p in ipairs(players()) do
@@ -268,6 +268,8 @@ function far_body_class:id() return self[4] end
 function far_body_class:position() return self[1] end
 function far_body_class:level_vertex_id() return self[2] end
 function far_body_class:game_vertex_id() return self[3] end
+function far_body_class:character_community() return alife_object(self[4]):community() end
+function far_body_class:character_rank() return alife_object(self[4]):rank() end
 function far_body_class:alive()
 	local se = alife_object(self[4])
 	if not se then return false end

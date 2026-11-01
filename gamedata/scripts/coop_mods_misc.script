@@ -237,7 +237,7 @@ local function host_party_max()
 end
 
 local function party_view()
-	if C().is_host() then return host_party_max() end
+	if C().is_world_server() then return host_party_max() end
 	return math.max(own_sleepiness(), sleep.party)
 end
 
@@ -255,7 +255,7 @@ local function sleep_tick()
 	local tg = time_global()
 	if tg < sleep.next_tick then return end
 	sleep.next_tick = tg + SLEEP_TICK_MS
-	if C().is_host() then
+	if C().is_world_server() then
 		local q = quant(host_party_max())
 		if q ~= sleep.pushed then
 			sleep.pushed = q
@@ -297,7 +297,7 @@ local function install_sleep()
 	C().on("sleepy", function(t, from)
 		local v = tonumber(t.v)
 		if v then sleep.peers[from] = math.max(0, math.min(10000, v)) end
-	end, "host")
+	end, "world")
 	C().on("sleepy_max", function(t)
 		local v = tonumber(t.v)
 		if v then sleep.party = math.max(0, math.min(10000, v)) end

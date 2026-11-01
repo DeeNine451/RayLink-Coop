@@ -214,7 +214,7 @@ end
 
 -- Records of characters that no longer exist (deleted players) are dropped when the host saves.
 local function host_save_state(m)
-	if not (C().is_host() and type(m) == "table" and type(m[STORE]) == "table") then return end
+	if not (C().is_world_server() and type(m) == "table" and type(m[STORE]) == "table") then return end
 	for k in pairs(m[STORE]) do
 		local id = tonumber(k)
 		local se = id and id < 65535 and alife_object(id)
@@ -234,7 +234,7 @@ local function install_load_hook()
 	return C().wrap(asm, "on_before_load_state", "alife_storage_manager.on_before_load_state", function(orig)
 		return function(...)
 			local r = orig(...)
-			if C().is_client() then
+			if C().world_client() then
 				local ok, e = pcall(apply_loaded, alife_storage_manager.get_state())
 				if not ok then C().report("pdata", "restore", e) end
 			end
@@ -258,7 +258,7 @@ end
 function on_game_start()
 	if not api then return end
 	start_step("install_load_hook", install_load_hook)
-	C().on_big("pd", host_store, "host")
+	C().on_big("pd", host_store, "world")
 	C().on("pd_ack", on_ack, "client")
 	C().set_limit("pd", 70, 8)
 	RegisterScriptCallback("actor_on_update", actor_on_update)

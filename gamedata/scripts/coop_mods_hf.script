@@ -141,9 +141,9 @@ local function host_publish_data(id)
 	local ok, d = pcall(get, id)
 	local s = ok and type(d) == "table" and C().ser(d) or nil
 	if s and #s < 4500 then -- encode may triple it
-		C().to_all("hf_data", { o = id, d = s })
+		C().publish("hf_data", { o = id, d = s })
 	elseif not (ok and d) then
-		C().to_all("hf_data", { o = id, x = true })
+		C().publish("hf_data", { o = id, x = true })
 	end
 	st.data_out = st.data_out + 1
 end
@@ -187,11 +187,18 @@ local function install_data_mirror()
 		data_orig.delete = orig
 		return function(id, ...)
 			local r = orig(id, ...)
-			if C().is_host() then C().to_all("hf_data", { o = id, x = true }) end
+			if C().is_host() then C().publish("hf_data", { o = id, x = true }) end
 			return r
 		end
 	end)
-	C().on("hf_data", client_data, "client")
+	C().on("hf_data", function(t, from)
+		if not C().is_world_server() then
+			if from == 0 then client_data(t) end
+		elseif C().is_bridge(from) then -- a map server changed it: the world's save keeps it, every machine hears it
+			client_data(t)
+			C().to_all("hf_data", t)
+		end
+	end)
 end
 
 -------------------------------------------------------------------------------
@@ -324,7 +331,7 @@ local function install_furniture()
 		C().wrap(pf, "create_object", "placeable_furniture.create_object", function(orig)
 			orig_create = orig
 			return function(section, loc, rot, lvid, gvid, ...)
-				if not C().is_client() then return orig(section, loc, rot, lvid, gvid, ...) end
+				if not C().world_client() then return orig(section, loc, rot, lvid, gvid, ...) end
 				local item = place_item
 				place_item = nil
 				-- Furniture the mod spawns from its own lists (map objects) is the host's.
@@ -598,7 +605,7 @@ local function apply_case(ws, case_id, map)
 end
 
 local function publish_case(ws, case_id)
-	if C().is_host() then C().to_all("hf_show_map", { c = case_id, m = encode_case(ws, case_id) }) end
+	if C().is_host() then C().publish("hf_show_map", { c = case_id, m = encode_case(ws, case_id) }) end
 end
 
 -- The harvester's start and stop are ActorMenu callbacks of the machine whose window it is, and its data is the host's: a client's
@@ -706,7 +713,7 @@ local function install_gadgets()
 	-- The host's displays are world objects: a client never re-creates them.
 	C().wrap(ws, "respawn_weapon_displays", "weapon_showcase.respawn_weapon_displays", function(orig)
 		return function(...)
-			if C().is_client() then return true end
+			if C().world_client() then return true end
 			return orig(...)
 		end
 	end)
@@ -733,10 +740,16 @@ local function install_gadgets()
 		end
 		publish_case(ws, case_id)
 	end, "host")
-	C().on("hf_show_map", function(t)
+	C().on("hf_show_map", function(t, from)
 		local case_id = C().lid(tonumber(t.c))
-		if case_id and type(t.m) == "string" then apply_case(ws, case_id, t.m) end
-	end, "client")
+		if not (case_id and type(t.m) == "string") then return end
+		if not C().is_world_server() then
+			if from == 0 then apply_case(ws, case_id, t.m) end
+		elseif C().is_bridge(from) then
+			apply_case(ws, case_id, t.m)
+			C().to_all("hf_show_map", t)
+		end
+	end)
 	C().set_limit("hf_show", 6, 2)
 end
 

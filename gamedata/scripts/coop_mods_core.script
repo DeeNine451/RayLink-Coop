@@ -4,20 +4,29 @@
 	Every coop_mods_*.script builds on this file. Nothing here changes the game by itself: it only offers
 	helpers, and every helper is inert outside a co-op session (single player behaves like stock).
 
-	Session:   active() is_host() is_client() live_client()
+	Session:   active() is_host() is_client() live_client() is_world_server() is_map_server() world_client() is_bridge(peer)
+	           is_host() is "this process leads a level for its players": the host's process and a map server (docs\SPLIT_LEVELS.md 7b);
+	           is_world_server() is the first alone. is_client() is a mirror: a player's machine. world_client() also a map server: what
+	           it has of the world is a copy, the mod's world spawns and timers are not its own.
 	Modules:   mod(name) -> module table or nil (a missing addon is not an error; the file is checked first)
 	           fn(tbl, key) -> function or nil
 	           wrap(tbl, key, label, make) -> true, orig   (tbl[key] = make(orig); listed in coop_status)
 	           upvalue(f, name) / find_local(module, name) -> value, holder, index (file locals of a script)
 	Players:   players() self_peer() avatar(peer) peer_of(id) is_player(id) is_remote_player(id)
 	           player_objects() -> { {peer=, obj=}, ... } (online characters on this machine)
+	           all_players() -> the same with a player on another level as coop_quests_core far_body
 	           nearest_player(pos) -> obj, dist_sqr      root_of(id) -> top parent id
 	           holder_peer(item_id) -> peer that carries the item (root parent is a player character)
 	Identity:  as_player(obj, f, ...) -> pcall results, db.actor = obj for one synchronous call (host only)
 	           identity_peer() -> peer of the swapped identity inside such a call, else nil
-	Network:   on(verb, f, side)     f(t, from): t = decoded flat table; side "host" / "client" / nil
+	Network:   on(verb, f, side)     f(t, from): t = decoded flat table; side:
+	                                 "host": what a player asks of the level he stands on: runs on its authority; the world server
+	                                 passes it to the map server of his level and f gets it there as if it came from him
+	                                 "world": a player's request to the world server's data, wherever he stands
+	                                 "client": from the world server, on a machine with a copy of the world; nil: anywhere, anyone
 	           on_big(verb, f, side) f(str, from): reassembled chunked string
 	           send(verb, t, target) to_host(verb, t) to_all(verb, t) send_big(verb, str, target)
+	           publish(verb, t): world data a map server changed goes through the world server (its verb takes it from a bridge)
 	           Event names on the wire: "mods.<verb>". Ids in payloads are in HOST numbering: hid() / lid().
 	Host:      give(peer, section, cond) -> true when an item was created in that player's character
 	           teleport(peer, pos)   fx_sound(path) fx_cam(anm, id, loop) fx_stop_cam(id)
@@ -70,12 +79,33 @@ function active()
 	return api ~= nil and api.is_active() == true
 end
 
-function is_host()
+function is_world_server()
 	return api ~= nil and api.is_active() == true and api.is_host() == true
 end
 
-function is_client()
+function is_map_server()
+	return api ~= nil and api.is_active() == true and api.is_map_server ~= nil and api.is_map_server() == true
+end
+
+function is_host()
+	return is_world_server() or is_map_server()
+end
+
+function world_client()
 	return api ~= nil and api.is_active() == true and api.is_client() == true
+end
+
+function is_client()
+	return world_client() and not is_map_server()
+end
+
+function is_bridge(peer)
+	local l = api and api.levels
+	if not (l and l.map_servers and is_world_server()) then return false end
+	for _, ms in ipairs(l.map_servers()) do
+		if ms.bridge == peer then return true end
+	end
+	return false
 end
 
 function live_client()
@@ -243,7 +273,7 @@ function nick_of(peer)
 end
 
 function is_player(id)
-	return id == 0 or (active() and peer_of(id) ~= nil)
+	return (id == 0 and not is_map_server()) or (active() and id ~= 0 and peer_of(id) ~= nil)
 end
 
 function is_remote_player(id)
@@ -254,12 +284,25 @@ end
 
 function player_objects()
 	local out = {}
-	if db.actor then out[1] = { peer = self_peer(), obj = db.actor } end
+	if db.actor and not is_map_server() then out[1] = { peer = self_peer(), obj = db.actor } end -- a map server's actor is its ghost
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and type(p.avatar_id) == "number" then
 			local obj = level.object_by_id(p.avatar_id)
 			if obj then out[#out + 1] = { peer = p.id, obj = obj } end
+		end
+	end
+	return out
+end
+
+function all_players()
+	local out = player_objects()
+	local qc = mod("coop_quests_core")
+	if not (qc and qc.far_body and active()) then return out end
+	for _, p in ipairs(players()) do
+		if not p.is_self and type(p.avatar_id) == "number" and not level.object_by_id(p.avatar_id) then
+			local far = qc.far_body(p.id, p.avatar_id)
+			if far then out[#out + 1] = { peer = p.id, obj = far } end
 		end
 	end
 	return out
@@ -353,25 +396,50 @@ end
 
 local function side_ok(side, from)
 	if side == "host" then return is_host() and type(from) == "number" and from ~= 0 end
-	if side == "client" then return is_client() and from == 0 end
+	if side == "world" then return is_world_server() and type(from) == "number" and from ~= 0 end
+	if side == "client" then return world_client() and from == 0 end
 	return true
+end
+
+-- The world server: the bridge of the map server this player stands under, nil on the host's level. Split levels off: nil.
+local function his_bridge(peer)
+	local l = api.levels
+	return l and l.split and l.split() == true and l.bridge_of_player and l.bridge_of_player(peer) or nil
 end
 
 function on(verb, f, side)
 	local cm = mod("coop_main")
 	if not (cm and cm.add_event_handler) then return false end
+	local to_his_level = side == "host"
 	return cm.add_event_handler(PREFIX .. verb, function(payload, from)
 		stats.received = stats.received + 1
-		if not side_ok(side, from) then
+		local t
+		if to_his_level and is_map_server() then
+			t = cm.decode(payload)
+			local peer = tonumber(t._peer)
+			if from ~= 0 or not peer then
+				stats.rejected = stats.rejected + 1
+				return
+			end
+			t._peer = nil
+			from = peer -- the world server is the door: the limit below was counted there
+		elseif not side_ok(side, from) then
 			stats.rejected = stats.rejected + 1
 			return
-		end
-		if not rate_ok(from, verb) then
+		elseif not rate_ok(from, verb) then
 			stats.limited = stats.limited + 1
 			return
 		end
-		local t = cm.decode(payload)
-		local ok, e = pcall(f, t, from)
+		if to_his_level and is_world_server() then
+			local bridge = his_bridge(from)
+			if bridge then
+				t = cm.decode(payload)
+				t._peer = from
+				pcall(api.send_event, PREFIX .. verb, cm.encode(t), bridge)
+				return
+			end
+		end
+		local ok, e = pcall(f, t or cm.decode(payload), from)
 		if not ok then report("net", verb, e) end
 	end)
 end
@@ -397,6 +465,7 @@ end
 function to_host(verb, t) return send(verb, t, 0) end
 function to_all(verb, t) return send(verb, t, -1) end
 function to_peer(peer, verb, t) return send(verb, t, peer) end
+function publish(verb, t) return is_map_server() and to_host(verb, t) or to_all(verb, t) end
 
 -- Chunked strings (> one event). Each piece: k = transfer key, i = index, n = count, d = data.
 local big_seq = 0
@@ -449,6 +518,12 @@ end
 function give(peer, section, cond)
 	if not (is_host() and type(section) == "string" and ini_sys:section_exist(section)) then return false end
 	local obj = avatar(peer)
+	if not obj then
+		-- a player on another level: into the record of his character, the authority of his level gets the item with it
+		local qc = mod("coop_quests_core")
+		local ok, id = pcall(api.avatar_of, peer)
+		obj = qc and qc.far_body and ok and qc.far_body(peer, id) or nil
+	end
 	if not obj then return false end
 	local t = type(cond) == "number" and { cond = math.max(0, math.min(1, cond)) } or nil
 	local ok, se = pcall(alife_create_item, section, obj, t)
@@ -497,15 +572,15 @@ end
 
 function fx_sound(path)
 	if not sound_path_ok(path) then return end
-	if is_host() then to_all("fx", { s = path }) end
+	if is_world_server() then to_all("fx", { s = path }) end
 end
 
 function fx_cam(anm, id, loop)
-	if is_host() and sound_path_ok(anm) then to_all("fx", { c = anm, i = tonumber(id) or 0, l = loop and true or false }) end
+	if is_world_server() and sound_path_ok(anm) then to_all("fx", { c = anm, i = tonumber(id) or 0, l = loop and true or false }) end
 end
 
 function fx_stop_cam(id)
-	if is_host() then to_all("fx", { x = tonumber(id) or 0 }) end
+	if is_world_server() then to_all("fx", { x = tonumber(id) or 0 }) end
 end
 
 -------------------------------------------------------------------------------
@@ -681,7 +756,7 @@ function on_container_opened(peer, container_id)
 end
 
 function on_new_character(peer)
-	if is_host() then fire("new_character", peer) end
+	if is_world_server() then fire("new_character", peer) end
 end
 
 function on_avatar_step(avatar_id, material, power, move_state)
