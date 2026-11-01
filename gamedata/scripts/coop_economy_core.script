@@ -11,6 +11,7 @@
 		                                          network input); tables, strings, numbers, booleans, CTime
 		coop_economy_core.players()              { {id, nick, avatar_id, is_self, obj, pos}, ... } on this machine
 		coop_economy_core.far_players(center, radius, except_peer) -> { nick, ... } not within radius
+		coop_economy_core.split_levels()         true when every player walks his own map (nothing is gathered then)
 	Events of the group are named "economy.<what>"; payloads are coop_main.encode tables.
 --]]
 
@@ -71,6 +72,14 @@ function is_map_server() return api ~= nil and api.is_active() and api.is_map_se
 -- Host, or a client that finished loading the host's world.
 function live() return api ~= nil and api.is_active() and api.is_live() end
 function self_id() return api and api.self_id() or -1 end
+-- Split levels (the game rule coop_split_levels): every player walks his own map, so nobody has to be gathered for a
+-- travel and the positions of two players are not comparable. False without the engine side (coop.levels).
+function split_levels()
+	local l = api and api.levels
+	if type(l) ~= "table" or type(l.split) ~= "function" then return false end
+	local ok, v = pcall(l.split)
+	return ok and v == true
+end
 
 -------------------------------------------------------------------------------
 -- Logging and messages

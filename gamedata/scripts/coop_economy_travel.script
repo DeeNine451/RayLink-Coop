@@ -165,11 +165,18 @@ end
 -------------------------------------------------------------------------------
 -- Stock patches
 -------------------------------------------------------------------------------
+-- The words Fair Fast Travel (game_fast_travel.parse_trip_tokens) puts in front of the destination of a row: fast
+-- travel, backpack travel and a hired guide. "\1" is no text of a language: an id without a string recognises nothing.
+local TRAVEL_ROWS = { "st_pda_fast_travel_to", "st_pda_backpack_travel_to", "st_fftd_mapspot_guideto" }
+
 local function is_travel_prop(prop)
 	if type(prop) ~= "string" or prop == "" then return false end
 	if prop == core.tr("bp_to", "\1") then return true end
-	local prefix = core.tr("st_pda_fast_travel_to", "\1") .. " "
-	return prop:sub(1, #prefix) == prefix
+	for _, id in ipairs(TRAVEL_ROWS) do
+		local prefix = core.tr(id, "\1") .. " "
+		if prop:sub(1, #prefix) == prefix then return true end
+	end
+	return false
 end
 
 -- The text of the row picked in the map's property menu (nil: none, or the menu is gone).
@@ -194,7 +201,7 @@ local function patch_pda()
 		if not (core.live() and db.actor) or core.others_count() == 0 or not is_travel_prop(selected_prop(property_ui)) then
 			return orig(property_ui, ...)
 		end
-		local party = group.party_fast_travel()
+		local party = group.travel_as_group()
 		if party and group.veto_if_ungathered() then
 			stats.vetoed = stats.vetoed + 1
 			return
@@ -216,7 +223,7 @@ local function patch_guides()
 			if type(orig) == "function" then
 				m[fname] = function(...)
 					if not (core.live() and db.actor) or core.others_count() == 0 then return orig(...) end
-					local party = group.party_fast_travel()
+					local party = group.travel_as_group()
 					if party and group.veto_if_ungathered() then
 						stats.vetoed = stats.vetoed + 1
 						return

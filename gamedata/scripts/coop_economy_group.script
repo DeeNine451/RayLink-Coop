@@ -20,7 +20,7 @@
 	Outside a session every wrapper calls the stock function unchanged.
 
 	For other scripts:
-		coop_economy_group.gather_radius() / party_fast_travel()
+		coop_economy_group.gather_radius() / party_fast_travel() / travel_as_group()
 		coop_economy_group.veto_if_ungathered(radius, msg_id, fallback) -> true = blocked, tip shown
 		coop_economy_group.request_skip(kind, minutes, cont) -> true = proposal sent, cont() runs on approval
 		coop_economy_group.with_arm(kind, fn, ...)   run fn; a level.change_game_time inside goes to the host
@@ -68,6 +68,9 @@ local stats = { proposals = 0, approved = 0, denied = 0, skips = 0, refused = 0,
 -------------------------------------------------------------------------------
 function gather_radius() return core.rule("gather_radius") or 20 end
 function party_fast_travel() return core.rule("party_fast_travel") ~= false end
+-- A travel moves the group (everybody gathered first, the others follow) when the rule is on and the levels are not
+-- split: with split levels a player goes alone, the others are on maps of their own.
+function travel_as_group() return party_fast_travel() and not core.split_levels() end
 
 local function my_pos()
 	return db.actor and core.position_of_id(0)
@@ -365,7 +368,7 @@ local function host_skip(from, t)
 	end
 	if kind == "travel" then
 		local last = st.last_travel[from]
-		if not (core.rule("travel_time") and party_fast_travel()) or minutes > TRAVEL_MAX_MIN
+		if not (core.rule("travel_time") and travel_as_group()) or minutes > TRAVEL_MAX_MIN
 			or (last and core.now() - last < TRAVEL_GAP_MS) then
 			stats.refused = stats.refused + 1
 			core.log("travel time of %s (%d min) not applied (solo travel or too often)", core.nick_of(from), minutes)
