@@ -37,4 +37,7 @@
 	<string id="st_coop_comp_refused_player">
 		<text>That player is not in the game now.</text>
 	</string>
+	<string id="st_coop_comp_refused_elsewhere">
+		<text>%s is on another level.</text>
+	</string>
 </string_table>

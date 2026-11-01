@@ -37,4 +37,7 @@
 	<string id="st_coop_comp_refused_player">
 		<text>Этого игрока сейчас нет в игре.</text>
 	</string>
+	<string id="st_coop_comp_refused_elsewhere">
+		<text>%s на другой карте</text>
+	</string>
 </string_table>

@@ -131,6 +131,7 @@ local PHRASE_GOODWILL = -10001 -- the engine sorts by this: after the stock line
 local paid_period = nil -- client: the seconds of the contract he just paid for
 local TAKE_WAIT_MS = 3000 -- a line of control just used stays away this long, the host's answer is on its way
 local asked_lead = {} -- NPC id -> time_global() of this machine's last request about its control
+local lead_peer = {} -- squad id -> its leader's peer, while this process knows him
 local refuse_dismiss -- host: its own dismiss of a companion somebody else leads (set below, it needs lead_for)
 
 local function resolve(full)
@@ -162,13 +163,27 @@ local function nick_of(peer)
 	return "?"
 end
 
--- The other players in the world, in the order of the choice of player.
+-- The other players in the world, in the order of the choice of player. One of another level stays in the list.
 local function other_players()
 	local list = {}
 	for _, p in ipairs(P.players()) do
-		if not p.is_self and type(p.avatar_id) == "number" then list[#list + 1] = p end
+		if not p.is_self and (type(p.avatar_id) == "number" or p.elsewhere == true) then list[#list + 1] = p end
 	end
 	return list
+end
+
+local function split_levels()
+	local api = rawget(_G, "coop")
+	local l = api and api.levels
+	return l and l.split and l.split() == true and l or nil
+end
+
+-- Do these two stand on different levels? The engine's table says, on the process that leads the level: no client decides this.
+local function on_other_level(a, b)
+	local l = split_levels()
+	if not l then return false end
+	local la, lb = l.level_of_player(a), l.level_of_player(b)
+	return la ~= nil and lb ~= nil and la ~= lb
 end
 
 local function idiots_lib(name)
@@ -258,7 +273,7 @@ local function show(key, name, nick)
 end
 
 local function client_on_msg(t)
-	if type(t.k) == "string" then show(t.k, t.n, t.w) end
+	if type(t.k) == "string" then show(t.k, type(t.a) == "number" and nick_of(t.a) or t.n, t.w) end
 end
 
 -- Client: the item list the host sent, and what he did since (ui_inventory's move reports it, a talk's take-all goes
@@ -451,11 +466,12 @@ local function talked_recently(from, npc, squad)
 	return false
 end
 
-local function tell(peer, key, name, nick)
-	if peer == P.self_peer() then
-		show(key, name, nick)
-	else
-		P.send(EV_MSG, { k = key, n = name, w = nick }, peer)
+-- about: a player the message names, whose nick the machine that reads it knows (a map server knows only the players of its level).
+local function tell(peer, key, name, nick, about)
+	if peer ~= P.self_peer() then
+		P.send(EV_MSG, { k = key, n = name, w = nick, a = about }, peer)
+	elseif not P.is_map_server() then -- its actor is a ghost, nobody reads it
+		show(key, about and nick_of(about) or name, nick)
 	end
 end
 
@@ -534,13 +550,21 @@ function is_group_companion(npc)
 	return is_companion_squad(squad_of(npc)) and true or false
 end
 
+-- The peer of this squad's leader if he stands on another level than player `peer`.
+local function leader_elsewhere(squad, peer)
+	local id = leaders[squad.id]
+	local lead = id and (P.peer_of(id) or lead_peer[squad.id])
+	if type(lead) == "number" and lead ~= peer and on_other_level(lead, peer) then return lead end
+	return nil
+end
+
 -- The host's decision on both commands, for a client's request and for its own dialog alike. act = "take": `from` takes control,
--- "give": `from` hands it to player `to`.
+-- "give": `from` hands it to player `to`. Control passes between players of one level (the owner's rule).
 local function host_lead(from, act, npc_id, to)
-	local function refuse(why)
+	local function refuse(why, about)
 		stats.lead_refused = stats.lead_refused + 1
 		log("%s of %s by player #%s refused: %s", tostring(act), tostring(npc_id), tostring(from), why)
-		tell(from, "st_coop_comp_refused_" .. why)
+		tell(from, "st_coop_comp_refused_" .. why, nil, nil, about)
 	end
 	local npc = level.object_by_id(npc_id)
 	local me = P.object_of_peer(from)
@@ -553,12 +577,16 @@ local function host_lead(from, act, npc_id, to)
 		if holder ~= from then return refuse("not_yours") end
 		target = to
 		if type(target) ~= "number" or target == from then return refuse("player") end
+		if on_other_level(from, target) then return refuse("elsewhere", target) end
 	elseif holder == from then
 		return -- the same request twice
+	else
+		local away = leader_elsewhere(squad, from)
+		if away then return refuse("elsewhere", away) end
 	end
-	local who = P.object_of_peer(target)
+	local who = P.avatar_of_peer(target)
 	if not who then return refuse("player") end
-	leaders[squad.id] = target ~= P.self_peer() and who:id() or nil
+	leaders[squad.id] = target ~= P.self_peer() and who or nil
 	stats.lead = stats.lead + 1
 	log("squad %s (%s): control %s -> player #%s", tostring(squad.id), npc:name(), tostring(holder), tostring(target))
 	push_squad(squad, target)
@@ -898,7 +926,6 @@ end
 -- A leader on another level (split levels, one player moves): his companions go after him. The authority of the level he left lets
 -- them go; the world server teleports them when none of them is online at a map server, and tells the authority of his level.
 -------------------------------------------------------------------------------
-local lead_peer = {} -- squad id -> its leader's peer, while this process knows him
 local followers = {} -- world server: squad id -> { p = peer, l = leader's character }
 
 local function adopt(squad_id, lead)
@@ -941,15 +968,22 @@ local function follow_home(l)
 	end
 end
 
+-- May this squad go after its leader? Stock's rule (Useful Idiots' over it): not one told to wait, not one that cannot teleport.
+local function may_follow(squad)
+	local ac = axr_companions
+	local f = orig.can_teleport or (ac and ac.companion_squad_can_teleport)
+	return type(f) ~= "function" or f(squad) == true
+end
+
 local function follow_tick()
-	local api = rawget(_G, "coop")
-	local l = api and api.levels
-	if not (l and l.split and l.split() == true) then return end
+	local l = split_levels()
+	if not l then return end
 	for squad_id, lead in pairs(leaders) do
 		local peer = P.peer_of(lead) or lead_peer[squad_id]
 		lead_peer[squad_id] = peer
 		local there = peer and l.level_name(l.level_of_player(peer))
-		if there and there ~= level.name() then
+		local squad = alife_object(squad_id)
+		if there and there ~= level.name() and (not squad or may_follow(squad)) then
 			leaders[squad_id], lead_peer[squad_id] = nil, nil
 			if P.is_map_server() then
 				axr_companions.companion_squads[squad_id] = nil
@@ -1029,9 +1063,17 @@ function dlg_can_hand(a, b) return answer(may_hand, a, b) end
 function dlg_can_take(a, b) return answer(may_take, a, b) end
 function dlg_slot(a, b, dialog_id, phrase_id, next_id, params) return answer(function() return slot_player(params) ~= nil end) end
 
+-- The line of a player: his nick, and where he stands if he is out of reach: the host would refuse.
+local function slot_text(params)
+	local p = slot_player(params)
+	if not p then return "" end
+	if p.elsewhere == true then return string.format(game.translate_string("st_coop_comp_refused_elsewhere"), tostring(p.nick)) end
+	return tostring(p.nick)
+end
+
 function dlg_slot_text(a, b, dialog_id, phrase_id, next_id, params)
-	local ok, p = pcall(slot_player, params)
-	return ok and p and tostring(p.nick) or ""
+	local ok, text = pcall(slot_text, params)
+	return ok and text or ""
 end
 
 function dlg_hand(a, b, dialog_id, phrase_id, next_id, params)
