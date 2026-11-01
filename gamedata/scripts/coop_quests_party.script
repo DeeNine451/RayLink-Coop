@@ -5,8 +5,9 @@
 	tasks_pump_station_defense.script replacements (wrapped here, the stock files stay as they are).
 	SPEC R-7.5 (quest items count from any player), R-7.6.
 
-	Only the host evaluates tasks (coop_tasks). While it checks a task (CGeneralTask:check_task) and other
-	players are connected:
+	Only the host evaluates tasks (coop_tasks). A player on a map server's level has no object on it: his records stand for him, the
+	inventory and the place (coop_quests_core far_body), and "the player nearest to the target" is looked for on the target's level.
+	While it checks a task (CGeneralTask:check_task) and other players are connected:
 	  - db.actor:object(section) also finds the item in another player's character, and
 	    utils_item.has_item_by_id(nil, id) is true when any player character holds that item: status and
 	    target functors that ask "does the actor have it" count the group (fetch, delivery, fate, measure,
@@ -62,10 +63,9 @@ function checking_task() return in_check end
 
 local function party_on() return qc.host_party() end
 
-local function smart_pos(name)
+local function smart_of(name)
 	local sb = rawget(_G, "SIMBOARD")
-	local sm = sb and sb.smarts_by_names and sb.smarts_by_names[name]
-	return sm and sm.position
+	return sb and sb.smarts_by_names and sb.smarts_by_names[name]
 end
 
 -- Server object of an id: its holder's id if it sits in an inventory, else its own.
@@ -89,8 +89,9 @@ end
 -------------------------------------------------------------------------------
 -- Host: task checks with the group's inventory and positions
 -------------------------------------------------------------------------------
-local function ref_position(tsk, ref)
-	if type(ref) == "string" then return smart_pos(ref) end
+-- What a position functor measures against: the server object of a smart or of the task's target (its holder when it is carried).
+local function ref_object(tsk, ref)
+	if type(ref) == "string" then return smart_of(ref) end
 	local tid = tsk.current_target
 	if type(tid) ~= "number" then
 		-- no target yet (first check): the task var's target, as the stock target functors use it
@@ -100,7 +101,7 @@ local function ref_position(tsk, ref)
 	local se = type(tid) == "number" and alife_object(tid)
 	if not se then return nil end
 	if se.parent_id and se.parent_id ~= 65535 then se = alife_object(se.parent_id) or se end
-	return se.position
+	return se
 end
 
 local function patch_check_task()
@@ -140,8 +141,7 @@ local function patch_check_task()
 		end
 		local ref = POSITION_FUNCTORS[self.status_functor]
 		if ref then
-			local pos = ref_position(self, ref)
-			local who = pos and qc.nearest_character(pos)
+			local who = qc.nearest_body(ref_object(self, ref))
 			if who and who:id() ~= a:id() then
 				stats.near_other = stats.near_other + 1
 				fields.position = function() return who:position() end
@@ -203,7 +203,7 @@ local function patch_conditions()
 			local need = tonumber(p[2])
 			if not need then return r end
 			local n = 0
-			for _, c in ipairs(qc.characters()) do
+			for _, c in ipairs(qc.bodies()) do
 				pcall(c.obj.iterate_inventory, c.obj, function(_, item)
 					if item:section() == p[1] then n = n + 1 end
 				end, nil)
@@ -217,8 +217,7 @@ local function patch_conditions()
 		xc.distance_to_barrier = function(a, b, c, ...)
 			if not party_on() then return barrier(a, b, c, ...) end
 			if not (type(c) == "table" and c[1] and tonumber(c[2])) then return barrier(a, b, c, ...) end
-			local pos = smart_pos(BARRIER_SMART)
-			local d = pos and qc.min_dist_sqr(pos, true)
+			local _, _, d = qc.nearest_body(smart_of(BARRIER_SMART), true)
 			if not d then return barrier(a, b, c, ...) end
 			local lim = tonumber(c[2]) ^ 2
 			if c[1] == "le" then return d <= lim end

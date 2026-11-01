@@ -362,7 +362,7 @@ end
 local function host_share_helmet(kind, except)
 	local sec = HELMETS[kind]
 	if not sec then return end
-	for _, c in ipairs(qc.characters()) do
+	for _, c in ipairs(qc.bodies()) do
 		if c.peer ~= except and not has_helmet(c.obj, sec) then
 			ct().give_to_peer(c.peer == qc.self_peer() and 0 or c.peer, 0, { sec })
 			stats.helmets = stats.helmets + 1

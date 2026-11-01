@@ -372,7 +372,13 @@ end
 -------------------------------------------------------------------------------
 -- Group inventories (R-7.5)
 -------------------------------------------------------------------------------
--- Characters of the group on this machine: own actor first, then the other connected players.
+-- A player on another level, as coop_quests_core answers for him. Not local: the chunk is at Lua's limit (test_engine_header).
+function far_of(peer, id)
+	local qc = rawget(_G, "coop_quests_core") or coop_quests_core
+	return qc and qc.far_body and qc.far_body(peer, id) or nil
+end
+
+-- Characters of the group on this machine: own actor first, then the other connected players, those on another level as far_body.
 local function party()
 	local out = {}
 	local ghost = api and api.is_dedicated and api.is_dedicated() -- the actor of a dedicated host is nobody's character
@@ -380,7 +386,7 @@ local function party()
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and p.avatar_id then
-			local o = level.object_by_id(p.avatar_id)
+			local o = level.object_by_id(p.avatar_id) or far_of(p.id, p.avatar_id)
 			if o then out[#out + 1] = { obj = o, peer = p.id } end
 		end
 	end
@@ -433,11 +439,17 @@ end
 function party_holds_id(item_id, section)
 	if type(item_id) ~= "number" then return false end
 	local o = level.object_by_id(item_id)
-	if not o then return false end
-	if section and o:section() ~= section then return false end
-	local ok, p = pcall(o.parent, o)
-	if not (ok and p) then return false end
-	local pid = p:id()
+	local pid
+	if o then
+		if section and o:section() ~= section then return false end
+		local ok, p = pcall(o.parent, o)
+		if not (ok and p) then return false end
+		pid = p:id()
+	else -- on another level: the record says who has it
+		local se = alife_object(item_id)
+		if not se or (section and se:section_name() ~= section) then return false end
+		pid = se.parent_id
+	end
 	for _, h in ipairs(party()) do
 		if h.obj:id() == pid then return true end
 	end
@@ -487,12 +499,12 @@ local function reward_mode()
 	return ok and tonumber(v) or 0
 end
 
--- Host: online character of a peer (0 = the host's actor).
+-- Host: character of a peer (0 = the host's actor), the far_body of one on another level; nil: he left the game.
 local function avatar_obj(peer)
 	if peer == nil then return nil end
 	if peer == 0 or peer == self_peer() then return db.actor end
 	local ok, id = pcall(api.avatar_of, peer)
-	return ok and id and level.object_by_id(id) or nil
+	return ok and id and (level.object_by_id(id) or far_of(peer, id)) or nil
 end
 
 function peer_in_session(peer) -- not local: the chunk is at Lua's limit of 200 with the engine's two (test_engine_header)
@@ -1006,7 +1018,7 @@ end
 local function online_peers()
 	local list = { 0 }
 	for _, p in ipairs(players()) do
-		if not p.is_self and p.avatar_id and level.object_by_id(p.avatar_id) then list[#list + 1] = p.id end
+		if not p.is_self and p.avatar_id and (level.object_by_id(p.avatar_id) or far_of(p.id, p.avatar_id)) then list[#list + 1] = p.id end
 	end
 	return list
 end
@@ -2656,7 +2668,8 @@ local function host_guides()
 	local fields = { is_active_task = function() return true end }
 	for peer, id in pairs(host.active) do
 		local rt = tm.task_info[id]
-		if not avatar_obj(peer) then
+		local body = avatar_obj(peer)
+		if not body or body.far then
 			-- left the game; on a map server's level he has no object here and is still in it
 			if not peer_in_session(peer) then host.active[peer] = nil end
 		elseif is_task(rt) and rt.check_level and rt.current_target ~= nil and target_elsewhere(rt.current_target) then

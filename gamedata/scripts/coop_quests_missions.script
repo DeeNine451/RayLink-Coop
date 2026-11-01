@@ -531,7 +531,7 @@ local function patch_status_kill()
 		local qp = qc.mod("coop_quests_party")
 		if npc == nil and qc.host_party() and qp and type(qp.checking_task) == "function" and qp.checking_task() then
 			local now = time_global()
-			for _, c in ipairs(qc.characters()) do
+			for _, c in ipairs(qc.bodies()) do
 				if not c.self and (not last_kill[c.peer] or now - last_kill[c.peer] >= KILL_GAP_MS) then
 					last_kill[c.peer] = now
 					if qc.send("kill", {}, c.peer) then stats.kills_out = stats.kills_out + 1 end
