@@ -233,6 +233,20 @@ function class:object(section)
 end
 function class:is_talking() return false end
 function class:is_stalker() return true end
+-- what the task scripts ask most, by a scan of tasks_*, task_functor and task_status_functor: a record has no answer to these, nil is the true one
+function class:active_item() return nil end
+function class:best_enemy() return nil end
+function class:best_weapon() return nil end
+function class:item_in_slot() return nil end
+function class:active_detector() return nil end
+function class:iterate_belt() end
+function class:condition() return 1 end
+function class:get_visual_name() return se_call(self, "get_visual_name") or se_call(self, "visual") end
+function class:see() return false end
+function class:transfer_item(item, to)
+	alife_release_id(item:id())
+	itms_manager.create_item(item:section(), to)
+end
 function class:direction() return vector():set(0, 0, 1) end
 function class:bone_position() return self[1] end
 function class:distance_to_sqr(o) return self[1]:distance_to_sqr(o) end
@@ -352,7 +366,7 @@ end
 local function open(lid, peer, what)
 	local gg_name = alife():level_name(lid)
 	local q = qc()
-	local s = { id = lid, name = gg_name, peer = peer, what = what, objects = {}, misses = {}, bodies = {}, prev = scope,
+	local s = { id = lid, name = gg_name, peer = peer, what = what, objects = {}, stores = {}, misses = {}, bodies = {}, prev = scope,
 		anomalies = db.anomaly_by_name, sim = _G.alife, view = nil }
 	s.avatar = peer and api.avatar_of and api.avatar_of(peer) or nil
 	for _, c in ipairs(q.bodies()) do
@@ -367,8 +381,12 @@ local function open(lid, peer, what)
 			return object_there(s, id)
 		end,
 		storage = function(id)
+			local st = s.stores[id]
+			if st then return st end
 			local o = object_there(s, id)
-			return o and { object = o, far = true } or nil
+			st = o and { object = o, far = true, pstor = {} } or nil -- what a functor keeps there lives as long as the scope
+			s.stores[id] = st
+			return st
 		end,
 		zone = function(name)
 			local names = names_of[s.id]
@@ -521,6 +539,10 @@ local DO = {
 		local st = db.storage[obj:id()]
 		if st then axr_companions.setup_companion_logic(obj, st, false, true) end
 	end,
+	release = function(obj, t)
+		local se = alife_object(obj:id())
+		if se then safe_release_manager.release(se) end
+	end,
 	hit = function(obj, t)
 		local h = hit()
 		h.power = t.a
@@ -534,6 +556,7 @@ local DO = {
 
 -- On the record alone: the object has no body anywhere now.
 local ON_RECORD = {
+	release = function(se) alife():release(se, true) end,
 	kill = function(se)
 		if se.alive and se:alive() then alife():kill_entity(se) end
 	end,
@@ -590,7 +613,13 @@ local function on_do(t, from)
 	if not q then return end
 	if done[q] then return qc().send("far_ack", { q = q, r = 1 }, 0) end
 	local obj = obj_of(tonumber(t.i))
-	if not obj then return qc().send("far_ack", { q = q, r = 0 }, 0) end
+	if not obj then
+		-- not online there: a squad and a held object of that level are still the map server's to release
+		local se = t.v == "release" and alife_object(tonumber(t.i))
+		if not se then return qc().send("far_ack", { q = q, r = 0 }, 0) end
+		safe_release_manager.release(se)
+		return qc().send("far_ack", { q = q, r = 1 }, 0)
+	end
 	local f = DO[t.v]
 	if f then
 		local ok, err = pcall(f, obj, t)
@@ -791,21 +820,61 @@ function _tick() next_tick = 0; tick() end
 function _stats() return stats end
 function _names_of() return names_of end
 
--- The logic of a companion is an NPC's on the level he stands on: tasks_agent_rescue makes the spy one from a status functor.
-local function patch_companions()
+-- A map server holds it: the world server's release of it would be refused (coop_requests held_by_a_client) and the task would keep it.
+local function held_there(se)
+	if not (se and se.online and se.id and split() and world_server()) then return false end
+	local lid = level_of_id(se.id)
+	return lid ~= nil and lid ~= my_level() and bridge_of_level(lid) ~= nil
+end
+
+local function patch_world_calls()
+	-- The logic of a companion is an NPC's on the level he stands on: tasks_agent_rescue makes the spy one from a status functor.
 	local ac = q_mod("axr_companions")
-	local f = ac and ac.setup_companion_logic
-	if type(f) ~= "function" then return end
-	ac.setup_companion_logic = function(npc, st, ...)
-		if npc and npc.far then return order(npc:id(), "companion") end
-		return f(npc, st, ...)
+	local setup = ac and ac.setup_companion_logic
+	if type(setup) == "function" then
+		ac.setup_companion_logic = function(npc, st, ...)
+			if npc and npc.far then return order(npc:id(), "companion") end
+			return setup(npc, st, ...)
+		end
+	end
+	local srm = q_mod("safe_release_manager")
+	local release = srm and srm.release
+	if type(release) == "function" then
+		srm.release = function(se, ...)
+			if held_there(se) then return order(se.id, "release") end
+			return release(se, ...)
+		end
+	end
+	local a_release, a_release_id = rawget(_G, "alife_release"), rawget(_G, "alife_release_id")
+	if type(a_release) == "function" then
+		_G.alife_release = function(se, ...)
+			if held_there(se) then return order(se.id, "release") end
+			return a_release(se, ...)
+		end
+	end
+	if type(a_release_id) == "function" then
+		_G.alife_release_id = function(id, ...)
+			if held_there(alife_object(id)) then return order(id, "release") end
+			return a_release_id(id, ...)
+		end
+	end
+	-- `smart.online` of the stock: the rest of this condition reads the actor's place, which a check keeps at the player's
+	local xc = q_mod("xr_conditions")
+	local near_smart = xc and xc.actor_near_smart
+	if type(near_smart) == "function" then
+		xc.actor_near_smart = function(actor, npc, p, ...)
+			if not scope then return near_smart(actor, npc, p, ...) end
+			local smart = p and p[1] and SIMBOARD.smarts_by_names[p[1]]
+			if not (smart and level_of_id(smart.id) == scope.id and db.actor) then return false end
+			return db.actor:position():distance_to(smart.position) < (tonumber(p[2]) or 50)
+		end
 	end
 end
 
 function on_game_start()
 	if not api then return end
 	local q = qc()
-	RegisterScriptCallback("actor_on_first_update", patch_companions)
+	RegisterScriptCallback("actor_on_first_update", patch_world_calls)
 	q.on("far_do", on_do, TAG)
 	q.on("far_ack", on_ack, TAG)
 	q.on("far_car", on_vehicle_death, TAG)

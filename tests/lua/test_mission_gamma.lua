@@ -449,6 +449,55 @@ do
 	check(tsk.stage == 1, "a client on his feet starts it, the host is down")
 end
 
+print("== a status pass for a player on another level: his level, his place")
+do
+	local H, E = host_world()
+	local LV = { [1] = "l03_agroprom", [2] = "l02_garbage" }
+	E.game_graph = function() return { vertex = function(_, v) return { level_id = function() return v end } end } end
+	local sim = {}
+	function sim:level_name(l) return LV[l] end
+	function sim:switch_distance() return 150 end
+	function sim:actor() return { id = 0 } end
+	E.alife = function() return sim end
+	E.db.anomaly_by_name = {}
+	E.vector = vector
+	H.objects[500] = nil
+	E.SE[500] = { id = 500, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 3, position = vec(30, 0, 0), online = true,
+		alive = function() return true end, community = function() return "actor_stalker" end }
+	E.coop.levels = {
+		split = function() return true end,
+		my_level = function() return 1 end,
+		level_of_player = function(peer) return peer == 1 and E.HIS_LEVEL or 1 end,
+		carried = function() return {} end,
+		map_servers = function() return { { bridge = 0x101, level = 2 } } end,
+	}
+	E.HIS_LEVEL = 2
+	E.level._coop_far_view = nil
+	E.coop_quests_core = load_script(H, "coop_quests_core") -- its far view stands over this level.name
+	E.coop_quests_far = load_script(H, "coop_quests_far")
+	local passes = {}
+	E.task_status_functor.hold_the_ground_task_status_functor = function(tsk)
+		passes[#passes + 1] = { E.level.name(), E.db.actor:id() }
+		if E.level.name() ~= "l02_garbage" then return "fail" end
+		if tsk.stage == 0 and E.db.actor:position():distance_to(vec(25, 0, 0)) < 10 then tsk.stage = 1 end
+	end
+	start_nta(H)
+	local fn = E.task_status_functor.hold_the_ground_task_status_functor
+	local tsk = { stage = 0 }
+	local r = fn(tsk, "t")
+	check(#passes == 2, "the host's pass and his")
+	check(passes[1][1] == "l03_agroprom" and passes[1][2] == 0, "the host on his own level")
+	check(passes[2][1] == "l02_garbage" and passes[2][2] == 500, "he on his")
+	check(tsk.stage == 1, "his pass moves the stage: a positional task starts on a map server's level")
+	check(r == nil, "and the host's fail does not end it")
+	check(E.level.name() == "l03_agroprom", "the far view is closed")
+	tsk.stage = 2
+	E.SE[500].m_game_vertex_id = 1
+	E.HIS_LEVEL = 1
+	r = fn(tsk, "t")
+	check(r == "fail", "nobody on that level: the stock's fail")
+end
+
 print("== Big Game: a giant that went offline is not a dead one")
 do
 	local H, E = host_world()

@@ -292,6 +292,68 @@ step()
 check(Ms.env.xr_bribe._local_M_DATA.stalker == nil, "a player's shot ends it there")
 check(Hm.env.xr_bribe._local_M_DATA.stalker == nil, "and in the save")
 
+print("== orders on the map server")
+local ms_far = Ms.env.coop_quests_far
+local killed = 0
+Ms.ObjMT.kill = function(self, who) killed = killed + 1 end
+local held = far.orders_held()
+far.order(700, "kill")
+check(far.orders_held() == held + 1, "held until the map server answers")
+pump()
+check(killed == 1, "the map server kills the NPC online there")
+check(far.orders_held() == held, "and the answer ends it")
+-- a resend after a lost answer changes nothing
+local q_last = Hm.env.coop_main.decode(Hm.sent[#Hm.sent].payload)
+Ms.handlers["quests.far_do"](Ms.env.coop_main.encode({ q = q_last.q, i = 700, v = "kill" }), 0)
+check(killed == 1, "a repeat of the same order runs once")
+far.order(701, "kill")
+Ms.objects[701] = nil
+pump()
+check(far.orders_held() == held, "an NPC that went home: the map server says so")
+
+print("== a release of what a map server holds")
+local released_ms = {}
+Ms.env.safe_release_manager = { release = function(se) released_ms[#released_ms + 1] = se.id end }
+Hm.env.safe_release_manager = { release = function(se) Hm.released_here = true end }
+Ms.env.alife_object = function(id) return records[id] or { id = id } end
+fire(Hm, "actor_on_first_update")
+Hm.env.safe_release_manager.release(records[700])
+pump()
+check(released_ms[1] == 700 and not Hm.released_here, "it goes to the map server: the world server's own would be refused")
+Hm.env.safe_release_manager.release({ id = 4000, online = false })
+check(Hm.released_here == true, "what is not held stays here")
+
+print("== hits only of what a task waits for")
+local hit_seen = {}
+Hm.env.coop_route = { domain_handlers = function(cb) return cb == "monster_on_before_hit" and { function(m, h, bone) hit_seen[#hit_seen + 1] = { m:id(), h.draftsman and h.draftsman:id(), bone } end } or {} end }
+Hm.ini.yan_stalker_sakharov_task_brain_game = {}
+Hm.tm:give_task("yan_stalker_sakharov_task_brain_game", 700)
+for _ = 1, 3 do
+	NOW = NOW + 6000
+	fire(Hm, "actor_on_update")
+	fire(Ms, "actor_on_update")
+	pump()
+end
+Ms.new_obj(720, "controller_dark", vec(0, 0, 0))
+Ms.new_obj(721, "dog_weak", vec(0, 0, 0))
+local shooter = Ms.objects[500]
+fire(Ms, "monster_on_before_hit", Ms.objects[721], { power = 1, type = 1, draftsman = shooter }, 31)
+pump()
+check(#hit_seen == 0, "a dog is nobody's task: nothing on the network")
+records[720] = { id = 720, parent_id = 65535, m_game_vertex_id = 2, position = vec(0, 0, 0), online = true,
+	section_name = function() return "controller_dark" end, clsid = function() return 55 end }
+fire(Ms, "monster_on_before_hit", Ms.objects[720], { power = 1, type = 1, draftsman = shooter }, 31)
+pump()
+check(hit_seen[1] and hit_seen[1][1] == 720 and hit_seen[1][2] == 500 and hit_seen[1][3] == 31, "a controller for Brain Game: the bone and who struck reach the task")
+Hm.tm.task_info.yan_stalker_sakharov_task_brain_game = nil
+
+print("== a vehicle")
+local cars = {}
+Hm.env.coop_route = { domain_handlers = function(cb) return cb == "vehicle_on_death_callback" and { function(o) cars[#cars + 1] = o:id() end } or {} end }
+fire(Ms, "vehicle_on_death_callback", Ms.npc)
+pump()
+check(cars[1] == 700, "its death reaches the task on the world server")
+
 print("== roles")
 check(Ms.env.coop_quests_core.host_party() == true, "a map server's logic pays players")
 local Q = Ms.env.coop_tasks

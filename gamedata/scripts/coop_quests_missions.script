@@ -626,7 +626,8 @@ local function host_guide_tick()
 	local g, c = qc.ser(offer), qc.ser(job)
 	local state, n = g .. "|" .. c, #qc.players()
 	if state == guide.sent and n <= guide.players then return end
-	local at, who = guide_offer_text(offer)
+	-- the guide may wait on a level a map server leads
+	local at, who = qc.with_target(offer.squad_id, nil, "the guide job", guide_offer_text, offer)
 	if qc.send("guide", { g = g, c = c, a = at, w = who }, -1) then
 		guide.sent, guide.players = state, n
 		stats.guide_sent = stats.guide_sent + 1
