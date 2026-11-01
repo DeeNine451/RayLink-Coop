@@ -447,7 +447,7 @@ check(Bm.tips[1] == "st_achievement_22_unlock" and Am.tips[1] == "player_b: st_a
 print("== a stash revealed by a PDA message: the line is the reader's, not the host's")
 clear(Hm, Am, Bm)
 Hm.new_obj(900, "inventory_box", vec(1, 0, 0))
-Bm.env.coop_quests_core.request_host_action("stash", { b = 900, s = "treasure", h = "hint" })
+Bm.env.coop_quests_core.request_host_action("stash_reveal", { b = 900, s = "treasure", h = "hint" })
 pump()
 check(Hm.stash_spots == 1 and #Hm.treasure == 0, "host: the stash is revealed, the line is not shown on its screen")
 check(#Bm.treasure == 1 and Bm.treasure[1] == 0 and #Am.treasure == 0, "player_b, who read the message, gets the line; A does not")

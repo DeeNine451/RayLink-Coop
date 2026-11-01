@@ -64,9 +64,9 @@ function nick_of(peer)
 	return "#" .. tostring(peer)
 end
 
--- Host with at least one other player connected.
+-- The process that leads a level, with at least one other player connected: a map server's logic pays and takes as the host's does.
 function host_party()
-	if not is_host() then return false end
+	if not (is_host() or is_map_server()) then return false end
 	for _, p in ipairs(players()) do
 		if not p.is_self then return true end
 	end
@@ -251,7 +251,8 @@ end
 function characters()
 	local out = {}
 	local ghost = api and ((api.is_dedicated and api.is_dedicated()) or is_map_server()) -- the actor of a dedicated host or a map server is nobody's
-	if db and db.actor and not ghost then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
+	-- in a far view the actor of this machine stands elsewhere: coordinates of two levels mean nothing to each other
+	if db and db.actor and not ghost and not far_seen() then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and p.avatar_id then
@@ -423,6 +424,15 @@ end
 -- Installed when this script loads: before tasks_* do, one of them keeps level.object_by_id in a local. Out of a scope they are the stock's.
 local far_view = nil
 function set_far_view(view) far_view = view end
+function far_seen() return far_view ~= nil end
+
+-- A player who stands on another level than this process.
+function is_far_peer(peer)
+	local l = api and api.levels
+	if not (l and l.split and l.split() == true and type(peer) == "number") then return false end
+	local mine, his = l.my_level(), l.level_of_player(peer)
+	return mine ~= nil and his ~= nil and mine ~= his
+end
 
 local function install_level_view()
 	local lv = rawget(_G, "level")
@@ -600,8 +610,9 @@ function request_host_action(name, t)
 	return ok
 end
 
--- What stands on the player's level: its authority runs these (split levels).
-local LEVEL_ACTIONS = { box = true }
+-- What touches a live NPC or a box of the player's level: its authority runs these (split levels). The rest stays here under the far view:
+-- their data is the save's (xr_bribe, the guide, the stash tables). trade: the stock of an ordinary stalker comes into the NPC there.
+local LEVEL_ACTIONS = { box = true, trade = true }
 
 local function host_on_action(t, from)
 	if is_map_server() and from == 0 then

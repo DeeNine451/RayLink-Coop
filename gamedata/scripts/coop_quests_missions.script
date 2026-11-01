@@ -234,6 +234,10 @@ end
 
 local function talked_recently(from, npc)
 	local api = qc.engine()
+	if qc.is_far_peer(from) then -- his talk lock is on the map server, which reports it with his place
+		local l = api.levels
+		return l.talking == nil or l.talking(from) == true
+	end
 	local recent = api and api.talk_recent
 	if type(recent) ~= "function" then return true end -- an engine without the talk locks: the reach check alone
 	return recent(from, npc:id(), TALK_MS) == true
@@ -319,8 +323,10 @@ local function patch_client_stash()
 	end
 end
 
--- Host: an NPC a player is at (the dialog that pays the stash), or nil. The stash call does not name him.
+-- Host: an NPC a player is at (the dialog that pays the stash), or nil. The stash call does not name him. A player on another level has no
+-- db.storage here: his talk lock stands for it.
 local function any_talk_partner(from)
+	if qc.is_far_peer(from) then return talked_recently(from, nil) end
 	local who = qc.avatar_obj(from)
 	if not who then return nil end
 	local pos = who:position()
@@ -353,6 +359,11 @@ local function host_stash(from, t)
 	local hint = type(t.h) == "string" and t.h:sub(1, STASH_HINT) or nil
 	stats.stash_run = stats.stash_run + 1
 	ct().with_recipient(from, make, t.ns == 1 or nil, hint, bonus, t.sl == 1 or nil, t.ib == 1 or nil)
+end
+
+-- What a player on another level asks of the world server: it runs here, on his level as the far view shows it.
+local function on_his_level(fn)
+	return function(from, t) return qc.with_level_of(from, fn, from, t) end
 end
 
 -------------------------------------------------------------------------------
@@ -434,8 +445,10 @@ local function player_id(obj)
 	return player_ids[id] and id or nil
 end
 
+local function leads_level() return qc.is_host() or qc.is_map_server() end
+
 local function on_enemy_eval(obj, enemy, flags)
-	if flags.override or not player_id(enemy) or not qc.is_host() then return end
+	if flags.override or not player_id(enemy) or not leads_level() then return end
 	local xb = qc.mod("xr_bribe")
 	if not (xb and type(xb.at_peace) == "function") then return end
 	local ok, peace = pcall(xb.at_peace, character_community(obj), character_community(enemy),
@@ -447,9 +460,36 @@ local function on_enemy_eval(obj, enemy, flags)
 end
 
 local function on_npc_hit(npc, amount, dir, who)
-	if not (who and player_id(who) and qc.is_host()) then return end
+	if not (who and player_id(who) and leads_level()) then return end
 	local xb = qc.mod("xr_bribe")
-	if xb and type(xb.npc_on_hit_callback) == "function" then pcall(xb.npc_on_hit_callback, character_community(npc)) end
+	if not (xb and type(xb.npc_on_hit_callback) == "function") then return end
+	local comm = character_community(npc)
+	pcall(xb.npc_on_hit_callback, comm)
+	if qc.is_map_server() then qc.send("bribe_hit", { c = comm }, 0) end -- the ceasefire is in the world server's save
+end
+
+-- The world server: a player broke a ceasefire on a map server's level.
+local function on_bribe_hit(t, from)
+	if not qc.is_host() or type(from) ~= "number" or from < 0x100 or type(t.c) ~= "string" then return end
+	local xb = qc.mod("xr_bribe")
+	if xb and type(xb.npc_on_hit_callback) == "function" then pcall(xb.npc_on_hit_callback, t.c) end
+end
+
+-- A ceasefire is bought on the world server (the relay) and holds on every level: a map server gets the table.
+local function share_ceasefires()
+	local share = rawget(_G, "coop_levels_share") or coop_levels_share
+	if not share then return end
+	local function data()
+		local m = qc.mod("xr_bribe")
+		local v = m and coop_mods_core.find_local(m, "M_DATA")
+		return type(v) == "table" and v or nil
+	end
+	share.down("bribe", data, function(v)
+		local mine = data()
+		if not mine then return end
+		for k in pairs(mine) do mine[k] = nil end
+		for k, x in pairs(v) do mine[k] = x end
+	end)
 end
 
 -------------------------------------------------------------------------------
@@ -557,6 +597,7 @@ end
 local TISSUE_NEED = "yan_ecolog_semenov_task_1_tissue_need"
 local TISSUE_COUNT = "yan_ecolog_semenov_task_1_tissue_count"
 
+-- The world server's: the counter is in its actor's pstor. A kill on a map server's level comes by the death relay (coop_quests_far).
 local function monster_on_death(victim, killer)
 	if not (qc.is_host() and victim and killer) then return end
 	local ok, kid = pcall(function() return killer:id() end)
@@ -700,15 +741,20 @@ end
 
 function on_game_start()
 	if not qc.engine() then return end
-	qc.register_host_action("rly", host_relay)
-	qc.register_host_action("stash", host_stash)
+	qc.register_host_action("rly", on_his_level(host_relay))
+	qc.register_host_action("stash", on_his_level(host_stash))
 	qc.register_host_action("trade", host_trade)
-	qc.register_host_action("delivery", host_delivery)
+	qc.register_host_action("delivery", on_his_level(host_delivery))
+	qc.on("bribe_hit", on_bribe_hit, TAG)
 	qc.on("kill", client_on_kill, TAG)
 	qc.on("guide", client_on_guide, TAG)
 	qc.on("trade", client_on_trade, TAG)
 	local ok, err = pcall(register_data_keys) -- before the world is loaded: a joining client's own values replace the host's
 	if not ok then qc.report(TAG, "data keys", err) end
+	ok, err = pcall(share_ceasefires)
+	if not ok then qc.report(TAG, "ceasefires", err) end
+	local far = rawget(_G, "coop_quests_far") or coop_quests_far
+	if far then far.add_death_listener("monster_on_death_callback", monster_on_death) end
 	RegisterScriptCallback("on_enemy_eval", on_enemy_eval)
 	RegisterScriptCallback("npc_on_hit_callback", on_npc_hit)
 	RegisterScriptCallback("monster_on_death_callback", monster_on_death)

@@ -700,7 +700,7 @@ local filled = {}
 Hm.env.treasure_manager = { caches = {}, set_random_stash = function(spot, hint, b, id) filled[id] = spot end,
 	try_spawn_treasure = function(box) filled.box = box:id() end }
 Hm.env.coop_quests_core.request_host_action = Hm.env.coop_quests_core.request_host_action
-Cm.env.coop_quests_core.request_host_action("stash", { b = 950, s = "treasure", h = "hint" })
+Cm.env.coop_quests_core.request_host_action("stash_reveal", { b = 950, s = "treasure", h = "hint" })
 Hm.new_obj(950, "inventory_box", vec(3, 0, 0), { _box = true })
 pump()
 check(filled[950] == "treasure", "stash revealed on a client is filled by the host")

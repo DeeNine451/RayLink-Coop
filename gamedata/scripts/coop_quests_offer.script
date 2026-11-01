@@ -222,8 +222,7 @@ end
 
 local last_req = {} -- "peer:npc" -> time
 
-local function host_on_offer_req(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
+local function offer_here(t, from)
 	stats.req_in = stats.req_in + 1
 	local npc_id, seq = tonumber(t.n), tonumber(t.q) or 0
 	local kind = t.k == "sim" and "sim" or "dyn"
@@ -464,6 +463,11 @@ end
 -------------------------------------------------------------------------------
 -- Client wrappers
 -------------------------------------------------------------------------------
+local function host_on_offer_req(t, from)
+	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
+	return qc.with_level_of(from, offer_here, t, from) -- the NPC stands on his level: its tasks are made here, from what the far view shows
+end
+
 local function patch_client()
 	local a = atm()
 	if a and type(a.generate_available_tasks) == "function" then

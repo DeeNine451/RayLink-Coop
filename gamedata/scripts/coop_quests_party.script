@@ -104,6 +104,15 @@ local function ref_object(tsk, ref)
 	return se
 end
 
+-- The id a task is about: its marker, the target of its var, its giver.
+local function target_of(tsk)
+	if type(tsk.current_target) == "number" then return tsk.current_target end
+	local var = load_var(db.actor, tsk.id)
+	local tid = type(var) == "table" and var.target_id or nil
+	if type(tid) == "number" then return tid end
+	return tsk.task_giver_id
+end
+
 local function patch_check_task()
 	local to = rawget(_G, "task_objects") or task_objects
 	local cls = to and to.CGeneralTask
@@ -151,10 +160,18 @@ local function patch_check_task()
 		end
 		in_check = self.id
 		local args = { ... }
-		local okc, err = pcall(ct().with_task_owner, self.id, function()
-			local okw, e = qc.with_actor(fields, orig, self, tm, unpack(args))
-			if not okw then error(e, 0) end
-		end)
+		local function checked()
+			ct().with_task_owner(self.id, function()
+				local okw, e = qc.with_actor(fields, orig, self, tm, unpack(args))
+				if not okw then error(e, 0) end
+			end)
+			if self.last_check_task == "fail" then
+				local far = qc.mod("coop_quests_far")
+				if far then far.note_fail(self.id) end
+			end
+		end
+		-- the level of what it is about, for whoever stands there: one target for everybody, a companion on another level can do it
+		local okc, err = pcall(qc.with_target, target_of(self), ct().taker(self.id), self.id, checked)
 		in_check = nil
 		if not okc then qc.report(TAG, "check " .. tostring(self.id), err) end
 	end
@@ -540,14 +557,15 @@ function give_to_npc(sec, npc, count)
 		qc.request_host_action("give_npc", { s = sec, n = qc.to_host_id(npc:id()), c = count })
 		return
 	end
-	local mine = math.min(count, count_own(sec))
+	-- a stand-in of an NPC of another level has no object to hand things to: what the group gives is made in his record
+	local mine = npc.far and 0 or math.min(count, count_own(sec))
 	if mine > 0 then itms_manager.relocate_item_from_actor(db.actor, npc, sec, mine) end
 	for _ = 1, count - mine do
 		if ct().party_take(sec, 1) > 0 then alife_create_item(sec, npc) end
 	end
 end
 
-local function host_give_npc(from, t)
+local function give_npc_here(from, t)
 	local npc = tonumber(t.n) and level.object_by_id(tonumber(t.n))
 	if not (npc and type(t.s) == "string" and ini_sys:section_exist(t.s)) then return end
 	local count = math.floor(tonumber(t.c) or 1)
@@ -556,6 +574,8 @@ local function host_give_npc(from, t)
 	if who and npc:position():distance_to_sqr(who:position()) > 900 then return end
 	ct().with_recipient(from, give_to_npc, t.s, npc, count) -- the "item given" news goes to that player
 end
+
+local function host_give_npc(from, t) return qc.with_level_of(from, give_npc_here, from, t) end
 
 -------------------------------------------------------------------------------
 -- Client: quest items the player lacks come from the group

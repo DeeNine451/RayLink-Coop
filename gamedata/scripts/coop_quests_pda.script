@@ -11,7 +11,7 @@
 	registered. Only the host generates them and sends them to every client (quests.pda); a client asks
 	for a PDA it has no messages for (quests.pda_req).
 	Stashes from PDA messages: the client's reveal is also done by the host (the host decides the
-	content, quests.act "stash"). Opening a stash box on a client asks the host to fill it
+	content, quests.act "stash_reveal"; "stash" is a reward's new stash, coop_quests_missions). Opening a stash box on a client asks the host to fill it
 	(treasure_manager.try_spawn_treasure, host-domain callback that does not run on a client).
 	Encyclopedia: an article or note one player unlocks is unlocked for everybody (articles without the stock news,
 	notes with the PDA note signal). Encyclopedia Messages Restored is kept quiet for those. An article another player
@@ -324,7 +324,7 @@ local function patch_npc_pda()
 				local hint = "%c[255,255,160,0]" .. game.translate_string(msg.topic_title or "")
 					.. "\\n%c[default]\\n%c[160,100,100,200]" .. game.translate_string("st_stash_of") .. " "
 					.. tostring(self.contact and self.contact.name or "")
-				qc.request_host_action("stash", { b = qc.to_host_id(msg.stash), s = spot, h = hint })
+				qc.request_host_action("stash_reveal", { b = qc.to_host_id(msg.stash), s = spot, h = hint })
 				stats.stash = stats.stash + 1
 			end
 			return r
@@ -771,7 +771,7 @@ function on_game_start()
 	qc.on("achv_got", on_achv_got, TAG)
 	qc.on("achv_ack", on_achv_ack, TAG)
 	qc.on("treasure", client_on_treasure, TAG)
-	qc.register_host_action("stash", host_stash)
+	qc.register_host_action("stash_reveal", host_stash)
 	qc.register_host_action("box", host_box)
 	RegisterScriptCallback("actor_on_update", retry_claims)
 	RegisterScriptCallback("actor_on_achievement_earned", on_earned)

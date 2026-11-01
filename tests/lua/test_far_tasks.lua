@@ -1,0 +1,303 @@
+-- Split levels: a player on a map server's level and the tasks of the world server: the far view at its entry points, the death relay, the
+-- actions that go to the map server, a map server is no player. Real scripts over the quests harness: the host (world server, level 1),
+-- a client on level 2, the map server of level 2. Run: tools\test_lua.cmd far_tasks
+dofile("tests/lua/support/harness_quests.lua")
+
+local SCRIPTS = { "coop_quests_core", "coop_levels_share", "coop_quests_far", "coop_tasks", "coop_quests_offer", "coop_quests_party",
+	"coop_quests_story", "coop_quests_missions", "coop_quests_pda" }
+local BRIDGE = 0x101
+local LEVEL_NAMES = { "l01_escape", "k00_marsh" }
+
+local function vector_of()
+	return { set = function(_, x, y, z) return vec(x, y, z) end }
+end
+
+local records = {} -- the world's records of what stands on level 2: id -> fields
+
+local function world(M)
+	local e = M.env
+	M.ObjMT.money = function(self) return self._money or 0 end
+	e.game_graph = function()
+		return { vertex = function(_, v) return { level_id = function() return v end } end }
+	end
+	local sim = {}
+	function sim:level_name(l) return LEVEL_NAMES[l] end
+	function sim:switch_distance() return 150 end
+	function sim:actor() return { id = 0, m_game_vertex_id = 1, position = vec(0, 0, 0) } end
+	function sim:has_info() return false end
+	e.alife = function() return sim end
+	e.vector = vector_of
+	e.db.anomaly_by_name = {}
+	e.db.zone_by_name = {}
+	local stock_object = e.alife_object
+	e.alife_object = function(id)
+		local r = records[id]
+		if r then return r end
+		local se = stock_object(id)
+		if se then se.m_game_vertex_id = 1 end
+		return se
+	end
+	e.IsStalker = function(o, cls)
+		if type(o) == "table" and o.far then return o:clsid() == 44 end
+		return type(o) == "table" and o._stalker == true
+	end
+	e.IsMonster = function(o, cls)
+		if cls then return cls == 55 end
+		return type(o) == "table" and o.clsid and o:clsid() == 55
+	end
+	e.coop.levels = {
+		split = function() return true end,
+		my_level = function() return M.my_level end,
+		level_of_player = function(peer) return peer == 1 and 2 or 1 end,
+		bridge_of_player = function(peer) return peer == 1 and BRIDGE or nil end,
+		map_servers = function() return { { bridge = BRIDGE, level = 2 } } end,
+		carried = function() return {} end,
+		talking = function(peer) return M.talking_players and M.talking_players[peer] == true end,
+	}
+	e.coop_mods_core = { find_local = function(m, name) return m["_local_" .. name] end }
+	e.axr_companions = { companion_squads = {} }
+	e.utils_data = { CTime_from_table = function(t) return t end }
+end
+
+local function boot(M)
+	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
+	for _, n in ipairs(SCRIPTS) do
+		if M.env[n].on_game_start then M.env[n].on_game_start() end
+	end
+	fire(M, "actor_on_first_update")
+end
+
+local Hm = machine("host", 0)
+local Cm = machine("client", 1)
+local Ms = machine("client", BRIDGE)
+Hm.my_level, Cm.my_level, Ms.my_level = 1, 2, 2
+world(Hm); world(Cm); world(Ms)
+Ms.env.coop.is_map_server = function() return true end
+
+records[500] = { id = 500, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 5, position = vec(10, 0, 10), online = true,
+	section_name = function() return "coop_player_avatar" end, clsid = function() return 44 end, name = function() return "player" end,
+	community = function() return "stalker" end }
+records[700] = { id = 700, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 6, position = vec(12, 0, 10), online = true, group_id = 65535,
+	section_name = function() return "stalker_trader" end, clsid = function() return 44 end, name = function() return "npc700" end,
+	community = function() return "stalker" end, rank = function() return 10 end, alive = function() return true end }
+records[701] = { id = 701, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 6, position = vec(300, 0, 300), online = true, group_id = 65535,
+	section_name = function() return "stalker_far" end, clsid = function() return 44 end, name = function() return "npc701" end,
+	alive = function() return true end }
+records[710] = { id = 710, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 6, position = vec(40, 0, 10), online = true,
+	section_name = function() return "bloodsucker_strong" end, clsid = function() return 55 end, name = function() return "bs" end,
+	alive = function() return false end }
+records[711] = { id = 711, parent_id = 65535, m_game_vertex_id = 2, position = vec(40, 0, 10), online = true,
+	section_name = function() return "dog" end, clsid = function() return 55 end, name = function() return "dog" end, alive = function() return false end }
+
+local PLAYERS_H = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, is_self = false, avatar_id = 500 } }
+Hm.players = PLAYERS_H
+Cm.players = { { id = 1, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 400 } }
+Ms.players = { { id = 1, is_self = false, avatar_id = 500 } }
+Ms.new_obj(500, "coop_player_avatar", vec(10, 0, 10), { _stalker = true })
+Ms.npc = Ms.new_obj(700, "stalker_trader", vec(12, 0, 10), { _stalker = true })
+Cm.npc = Cm.new_obj(700, "stalker_trader", vec(12, 0, 10), { _stalker = true })
+
+-- the stock functions the relay calls
+local RELAYED = {}
+Hm.env.dialogs_lostzone = { set_impending_doom_timer = function(a, b)
+	RELAYED[#RELAYED + 1] = { a = a:id(), b = b:id(), far = b.far, name = Hm.env.level.name(), peer = Hm.env.coop_tasks.reward_peer() }
+end }
+Cm.env.dialogs_lostzone = { set_impending_doom_timer = function() end }
+Ms.env.dialogs_lostzone = { set_impending_doom_timer = function() end }
+Hm.env.load_ctime = function() return nil end
+Cm.env.load_ctime = function() return nil end
+Ms.env.load_ctime = function() return nil end
+
+-- the stock of "wanna trade"
+local function death_manager(M)
+	local answers = {}
+	M.env.death_manager = {
+		get_items_by_npc = function(id) return answers[id] end,
+		set_items_by_npc = function(id, v) answers[id] = v end,
+		create_item_list = function(npc)
+			M.stocked = (M.stocked or 0) + 1
+			answers[npc:id()] = { "wpn" }
+		end,
+	}
+	M.env.character_community = function(o) return o:character_community() end
+	M.env.ranks = { get_obj_rank_name = function() return "novice" end }
+end
+death_manager(Hm); death_manager(Cm); death_manager(Ms)
+Cm.env.dialogs.is_trade_accept = function() return "stock" end
+Hm.env.dialogs.is_trade_accept = function() return "stock" end
+Ms.env.dialogs.is_trade_accept = function() return "stock" end
+
+-- the stock stash
+Hm.env.treasure_manager = { caches = {}, create_random_stash = function(no_spot, hint, bonus, spawn_local)
+	Hm.stash = { hint = hint, level = Hm.env.level.name(), actor_vertex = Hm.env.alife():actor().m_game_vertex_id }
+end, set_random_stash = function(spot, hint, _, b) Hm.reveal = { spot = spot, b = b } end }
+Cm.env.treasure_manager = { caches = {}, create_random_stash = function() end, set_random_stash = function() end }
+Ms.env.treasure_manager = { caches = {}, create_random_stash = function() end, set_random_stash = function() end }
+
+-- a ceasefire
+local function bribe(M)
+	M.env.xr_bribe = { _local_M_DATA = {}, at_peace = function(c) return M.env.xr_bribe._local_M_DATA[c] ~= nil end,
+		npc_on_hit_callback = function(c) M.env.xr_bribe._local_M_DATA[c] = nil end }
+	M.env.character_community = M.env.character_community or function(o) return o:character_community() end
+end
+bribe(Hm); bribe(Cm); bribe(Ms)
+
+boot(Hm); boot(Cm); boot(Ms)
+pump()
+
+local function step()
+	NOW = NOW + 1500
+	pump()
+end
+
+print("== two actions, two names: a reward's stash is not the reveal of a PDA message")
+Hm.talking_players = { [1] = true }
+Cm.env.treasure_manager.create_random_stash(nil, "the hint")
+step()
+check(Hm.stash and Hm.stash.hint == "the hint", "a reward's stash is made on the world server")
+check(Hm.stash and Hm.stash.level == "k00_marsh", "on the level of who earned it")
+check(Hm.stash and Hm.stash.actor_vertex == 2, "alife():actor() is he: box_in_same_map looks around him")
+check(Hm.reveal == nil, "and it is not taken for a reveal")
+Hm.env.alife_object_stock = nil
+records[950] = { id = 950, parent_id = 65535, m_game_vertex_id = 2, position = vec(1, 0, 1) }
+Cm.env.coop_quests_core.request_host_action("stash_reveal", { b = 950, s = "treasure", h = "hint" })
+step()
+check(Hm.reveal and Hm.reveal.b == 950, "the reveal of a PDA message has its own action")
+Hm.stash = nil
+Hm.talking_players = {}
+Cm.env.treasure_manager.create_random_stash(nil, "no talk")
+step()
+check(Hm.stash == nil, "no talk on his level: refused")
+
+print("== a dialog action of a player on a map server's level")
+Hm.talking_players = { [1] = true }
+Cm.env.dialogs_lostzone.set_impending_doom_timer(Cm.actor, Cm.npc)
+step()
+local c = RELAYED[1]
+check(c ~= nil, "it runs on the world server, the data is its save's")
+check(c and c.far == true and c.b == 700, "the NPC is a stand-in from the records")
+check(c and c.name == "k00_marsh", "level.name is his")
+check(c and c.peer == 1, "in his scope: rewards and tasks are his")
+Hm.talking_players = {}
+step()
+Cm.env.dialogs_lostzone.set_impending_doom_timer(Cm.actor, Cm.npc)
+step()
+check(#RELAYED == 1, "no talk lock on his level: refused")
+Hm.talking_players = { [1] = true }
+step()
+Cm.env.coop_quests_core.request_host_action("rly", { f = "dialogs_lostzone.set_impending_doom_timer", n = 701 })
+step()
+check(#RELAYED == 1, "an NPC out of reach of him: refused, measured on his level")
+check(Hm.env.level.name() == "l01_escape", "the far view is closed again")
+
+print("== what touches a live NPC goes to the map server")
+Cm.env.dialogs.who_is_npc = function() return Cm.npc end
+Ms.env.coop.talk_recent = function(from, id) return from == 1 and id == 700 end
+Hm.env.coop.talk_recent = function() error("the world server has no talk lock of his") end
+local yes = Cm.env.dialogs.is_trade_accept(Cm.actor, Cm.npc)
+step()
+if yes then
+	check(Ms.stocked == 1, "the stalker who agreed gets his stock on the map server")
+	check(Hm.stocked == nil, "not on the world server")
+end
+check(Ms.env.death_manager.get_items_by_npc(700) ~= nil, "the answer is kept where the NPC is")
+
+print("== give_npc: under the far view")
+Hm.created = nil
+Hm.env.coop_tasks.party_take = function() return 1 end
+Hm.env.ini_sys.section_exist = function() return true end
+Hm.env.alife_create_item = function(sec, place) Hm.created = { sec = sec, far = type(place) == "table" and place.far, id = place[4] } end
+Cm.env.coop_quests_core.request_host_action("give_npc", { s = "bread", n = 700, c = 1 })
+step()
+check(Hm.created and Hm.created.sec == "bread" and Hm.created.far == true and Hm.created.id == 700, "the group's item is made in his record")
+
+print("== a task's logic on a map server is no player")
+Hm.ini.logic_task = {}
+local T = Hm.env.coop_tasks
+Ms.env.coop.send_event("coop_tq", "", 0) -- nothing: a bad request must not break the handler
+step()
+check(T.player_of_request(BRIDGE, "logic_task") == 1, "the player of its level stands for it")
+check(T.player_of_request(1, "logic_task") == 1, "a player is himself")
+check(T.player_of_request(0x102, "logic_task") == 0, "a bridge with no level: the host")
+
+print("== a task check looks at the level of its target")
+Hm.ini.far_task = { status_functor = "far_sf" }
+local seen = {}
+Hm.env.task_status_functor.far_sf = function(tsk, id)
+	seen.level = Hm.env.level.name()
+	seen.npc = Hm.env.level.object_by_id(700)
+	seen.host_actor = false
+	for _, ch in ipairs(Hm.env.coop_quests_core.characters()) do seen.host_actor = seen.host_actor or ch.id == 0 end
+end
+Hm.tm:give_task("far_task", 700)
+local tsk = Hm.tm.task_info.far_task
+tsk.current_target = 700
+Hm.env.task_manager.get_task_manager():update()
+check(seen.level == "k00_marsh", "level.name is the level of the target")
+check(seen.npc and seen.npc.far == true, "level.object_by_id finds it")
+check(seen.host_actor == false, "the world server's actor is no character there")
+check(Hm.env.level.name() == "l01_escape", "and it is closed after the check")
+tsk.last_check_task = "fail"
+local before = #Hm.log
+Hm.env.task_manager.get_task_manager():update()
+local line = false
+for i = before + 1, #Hm.log do line = line or Hm.log[i]:find("task far_task failed on k00_marsh", 1, true) ~= nil end
+check(line, "a fail in a scope writes one line")
+tsk.last_check_task = nil
+Hm.tm.task_info.far_task = nil
+
+print("== the death relay")
+local far = Hm.env.coop_quests_far
+local counted, level_ran = 0, 0
+local function host_handler(victim, killer) counted = counted + 1 end
+Hm.env.coop_route = { domain_handlers = function(cb, d) return cb == "monster_on_death_callback" and d == "host" and { host_handler } or {} end }
+far.on_death(710, 500)
+check(counted == 1, "one death on a map server: the task's handler of the domain host hears it once")
+far.on_death(710, 500)
+check(counted == 1, "the same Died again: not twice")
+fire(Hm, "server_entity_on_unregister", { id = 710 })
+far.on_death(710, 500)
+check(counted == 2, "a new object under the same id is a new death")
+far.on_death(4242, 500)
+check(counted == 2, "an object that is no more: nothing")
+
+print("== Semenov's samples count a kill on a map server's level")
+local TISSUE = "yan_ecolog_semenov_task_1_tissue_count"
+Hm.env.save_var(Hm.actor, "yan_ecolog_semenov_task_1_tissue_need", 3)
+Hm.env.get_story_object = function(sid) return sid == "yan_ecolog_semenov" and {} or nil end
+Hm.env.coop_route = { domain_handlers = function() return {} end }
+far.on_death(711, 500)
+check(Hm.env.load_var(Hm.actor, TISSUE) == 1, "the counter is on the world server")
+far.on_death(711, 500)
+check(Hm.env.load_var(Hm.actor, TISSUE) == 1, "and counts once")
+check(Ms.env.load_var(Ms.actor, TISSUE) == nil, "the map server counts nothing")
+
+print("== a ceasefire holds on the map server and a hit there ends it")
+Hm.env.xr_bribe._local_M_DATA.stalker = { distance = 50 }
+for _ = 1, 3 do
+	fire(Hm, "actor_on_update")
+	step()
+end
+fire(Hm, "actor_on_update")
+pump()
+check(Ms.env.xr_bribe._local_M_DATA.stalker ~= nil, "the map server has it")
+local flags = {}
+Ms.env.coop_tasks = Ms.env.coop_tasks
+local npc = Ms.npc
+local player = Ms.objects[500]
+fire(Ms, "on_enemy_eval", npc, player, flags)
+check(flags.override == true and flags.result == false, "an NPC of that faction leaves a player alone there")
+fire(Ms, "npc_on_hit_callback", npc, 1, nil, player)
+step()
+check(Ms.env.xr_bribe._local_M_DATA.stalker == nil, "a player's shot ends it there")
+check(Hm.env.xr_bribe._local_M_DATA.stalker == nil, "and in the save")
+
+print("== roles")
+check(Ms.env.coop_quests_core.host_party() == true, "a map server's logic pays players")
+local Q = Ms.env.coop_tasks
+Ms.env.coop.money_grant = function(peer, n) Ms.granted = { peer, n } return true end
+Q.give_to_peer(1, 0, { "bread" })
+check(Ms.created == nil or Ms.created[1].owner == 500, "give_to_peer on a map server: into his avatar, not its ghost")
+
+print(string.format("%d passed, %d failed", PASSES, FAILS))
+if FAILS > 0 then os.exit(1) end

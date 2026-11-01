@@ -823,6 +823,22 @@ end
 -- Client request handlers (host). Return true when accepted; the state is then broadcast by the scan.
 local ops = {}
 
+-- The player a request of a map server's logic belongs to: who took the task, else a player of its level. It is no player itself.
+function player_of_request(from, id)
+	if type(from) ~= "number" or from < 0x100 then return from end
+	local l = api.levels
+	local lid = nil
+	for _, ms in ipairs(l and l.map_servers and l.map_servers() or {}) do
+		if ms.bridge == from then lid = ms.level end
+	end
+	local taker_is = host.taker[id]
+	if taker_is and taker_is ~= 0 and lid and l.level_of_player(taker_is) == lid then return taker_is end
+	for _, p in ipairs(players()) do
+		if lid and l.level_of_player(p.id) == lid then return p.id end
+	end
+	return 0
+end
+
 function ops.give(tm, id, t, from)
 	if tm.task_info[id] ~= nil and engine_task_running(id) then return false end
 	local got_vars = {}
@@ -902,8 +918,15 @@ local function host_on_request(payload, from)
 	end
 	local tm = tmgr()
 	if not tm then return end
-	host.exec_peer = from
-	local ok, res = pcall(fn, tm, id, t, from)
+	local who = player_of_request(from, id)
+	host.exec_peer = who
+	local qc = rawget(_G, "coop_quests_core")
+	local ok, res
+	if qc and qc.with_level_of then
+		ok, res = pcall(qc.with_level_of, who, fn, tm, id, t, who) -- his dialog, his NPC, his level
+	else
+		ok, res = pcall(fn, tm, id, t, who)
+	end
 	host.exec_peer = nil
 	if not ok then report("request " .. op .. " " .. id, res) end
 	if not ok or not res then
@@ -1594,7 +1617,7 @@ end
 -- Host: money and items for one player (0 = the host's own actor). Items are spawned by the host into
 -- that player's character; the player sees the news on its own machine.
 function give_to_peer(peer, money, sections)
-	if not is_host() then return end
+	if not is_host() and not (active() and api.is_map_server ~= nil and api.is_map_server() == true) then return end
 	peer = tonumber(peer) or 0
 	money = math_floor(tonumber(money) or 0)
 	local mine = peer == 0 or peer == self_peer()
