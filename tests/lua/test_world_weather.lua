@@ -93,6 +93,30 @@ do
 	check(H.sync_sets == sets, "the host writes the state only when it changed")
 end
 
+-- a map server: the cycle is the world server's, the sky of its level its own (docs\SPLIT_LEVELS.md 7b)
+print("== the weather of a map server")
+do
+	local H, C = world_pair()
+	C.env.coop.is_map_server = function() return true end
+	C.env.coop.is_mirror = function() return false end
+	local wh, wc = stock_weathers(H, 100), stock_weathers(C, 200)
+	local WH, WC = load_script(H, "coop_world_weather"), load_script(C, "coop_world_weather")
+	WH.on_game_start()
+	WC.on_game_start()
+	step(H, C)
+	H.hour, C.hour = 13, 13
+	wh:update()
+	wc:update()
+	check(C.periods == nil, "a map server rolls no period of its own")
+	step(H, C)
+	check(wc.cycle == wh.cycle and wc.preset == wh.preset, "the cycle is the world server's")
+	check(C.set_weather == wc.preset, "and the stock picks this level's weather from it")
+	local picks = C.selects
+	step(H, C)
+	check(C.selects == picks, "an unchanged cycle picks nothing")
+	check(wc.curr_weather ~= nil and C.sync_sets == nil, "a map server writes nothing into the world's state")
+end
+
 -- a client that has no state yet keeps the stock code
 do
 	local H, C = world_pair()

@@ -519,7 +519,7 @@ check(#feed(nil, board(M0, { me = me({ host = true, peer = 0 }), rows = { { peer
 
 -- the compass mark
 local marks = T.marks(away)
-check(#marks == 1 and marks[1].kind == "transition" and near(marks[1].pos[1], 10) and near(marks[1].pos[2], 2) and near(marks[1].pos[3], 30) and marks[1].label == "Guest"
+check(#marks == 1 and marks[1].kind == "transition" and near(marks[1].pos.x, 10) and near(marks[1].pos.y, 2) and near(marks[1].pos.z, 30) and marks[1].label == "Guest"
 	and marks[1].priority and marks[1].priority > 30 and marks[1].key == "exit" and marks[1].range == 0, "the exit as a compass mark: a transition at its place, labelled with the waiting player, above the allies")
 do
 	local r2, g2, b2 = M0.A.color(2)

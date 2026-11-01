@@ -345,6 +345,40 @@ TEST(manifest_leaves_out_textures_only)
 	CHECK(!manifest_visual_only("configs\\textures.ltx"));
 	CHECK(!manifest_visual_only("meshes\\textures\\a.ogf"));
 	CHECK(!manifest_visual_only("scripts\\grok_textures.script"));
+	// live 2026-11-01: an old install keeps sounds GAMMA has dropped: 166 of them differ from a fresh one, the simulation does not
+	CHECK(manifest_visual_only("sounds\\weapons\\_gunfire\\mono\\rem870\\close_3.ogg"));
+	CHECK(manifest_visual_only("Sounds/wct/rattle/raise/raise_7.ogg"));
+	CHECK(!manifest_visual_only("sounds"));
+	CHECK(!manifest_visual_only("soundsx\\a.ogg"));
+	CHECK(!manifest_visual_only("configs\\sounds.ltx"));
+	CHECK(!manifest_visual_only("scripts\\sounds\\a.script"));
+}
+
+// Live 2026-11-01: 4953 files of the same GAMMA differ only in CRLF: Git for Windows on one PC (core.autocrlf in its system
+// config) and no Git on the other. Sizes differ, the game reads the same, and the join was refused for "very many mods".
+TEST(manifest_counts_a_text_file_whatever_its_line_endings)
+{
+	CHECK(manifest_text_file("configs\\system.ltx"));
+	CHECK(manifest_text_file("Scripts/_g.SCRIPT"));
+	CHECK(manifest_text_file("configs\\text\\eng\\st_dialogs.xml"));
+	CHECK(manifest_text_file("particles\\hit_fx\\hit_flesh_02a.pg"));
+	CHECK(manifest_text_file("particles\\hit_fx\\effects\\a.pe"));
+	CHECK(manifest_text_file("shaders\\r3\\common.h"));
+	CHECK(manifest_text_file("shaders\\r3\\deffer_base_flat.ps"));
+	CHECK(!manifest_text_file("meshes\\a.ogf"));
+	CHECK(!manifest_text_file("anims\\a.omf"));
+	CHECK(!manifest_text_file("spawns\\all.spawn"));
+	CHECK(!manifest_text_file("scripts\\a.script.dll"));
+	CHECK(!manifest_text_file("noextension"));
+
+	const auto lf_size = [](const std::string& text) { return manifest_lf_size(reinterpret_cast<const uint8_t*>(text.data()), text.size()); };
+	CHECK_EQ(lf_size(""), 0u);
+	CHECK_EQ(lf_size("a\nb\n"), 4u);
+	CHECK_EQ(lf_size("a\r\nb\r\n"), 4u);
+	CHECK_EQ(lf_size("a\rb"), 3u); // a lone CR is text, the checkout does not touch it
+	CHECK_EQ(lf_size("\r"), 1u);
+	CHECK_EQ(lf_size("\r\r\n"), 2u);
+	CHECK_EQ(lf_size("a\r"), 2u); // the end of the file is no line ending
 }
 
 TEST(manifest_leaves_out_what_the_game_writes)

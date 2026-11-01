@@ -124,7 +124,7 @@ local function patch_class()
 	if not cls then return end
 	patch_method(cls, "change_period", function(orig)
 		return function(self, ...)
-			if P.is_client() then return end
+			if P.is_client() or P.is_map_server() then return end -- the cycle is the world server's
 			return orig(self, ...)
 		end
 	end)
@@ -201,9 +201,30 @@ end
 -------------------------------------------------------------------------------
 local next_tick = 0
 
+-- A map server: its level's sky is its own, on the world's cycle: a cellar stays a cellar. The world server's cycle and preset go into
+-- this manager and the stock picks this level's weather from them; the engine sends the sky to the players of this level.
+local cycle_seen = nil
+
+local function map_server_tick(wm)
+	local t = sync_get(KEY_STATE)
+	if type(t) ~= "table" then return end
+	local sig = table.concat({ tostring(t.c), tostring(t.p), tostring(t.lw) }, "|")
+	if sig == cycle_seen then return end
+	cycle_seen = sig
+	wm.cycle, wm.preset = t.c, t.p
+	local kind = tostring(t.lw)
+	wm.transition_period = kind:find("_transition", 1, true) ~= nil
+	wm.pre_blowout_period = kind:find("_pre_blowout", 1, true) ~= nil
+	wm:select_weather(false)
+	stats.applied = stats.applied + 1
+end
+
 local function tick()
 	local wm = manager()
-	if P.is_host() then
+	if P.is_map_server() then
+		patch_class()
+		if wm then map_server_tick(wm) end
+	elseif P.is_host() then
 		if wm then host_tick(wm) end
 		wet_host_tick()
 	elseif P.client_live() then

@@ -104,6 +104,14 @@ TEST(autosave_next_slot_oldest)
 	CHECK_EQ(next_slot(e, 10), uint32_t(1));
 }
 
+TEST(autosave_a_map_server_starts_after_a_fresh_save)
+{
+	CHECK(transfer_save_needed(0, 5000));
+	CHECK(!transfer_save_needed(5000, 5000 + kTransferSaveFreshMs - 1));
+	CHECK(transfer_save_needed(5000, 5000 + kTransferSaveFreshMs));
+	CHECK(transfer_save_needed(9000, 100)); // the clock went back: a loaded save
+}
+
 TEST(autosave_next_slot_count_shrunk)
 {
 	// Ten files on disk, the host now keeps five: the oldest among 1..5, whatever the others are.

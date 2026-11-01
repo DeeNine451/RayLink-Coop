@@ -405,7 +405,7 @@ function marks(t)
 	if #others == 0 then return {} end
 	local x, y, z = tonumber(t.pos.x), tonumber(t.pos.y), tonumber(t.pos.z)
 	if not (x and y and z) then return {} end
-	return { { key = "exit", kind = "transition", pos = { x, y, z }, color = peer_color(others[1]), label = nick_of(others[1]),
+	return { { key = "exit", kind = "transition", pos = { x = x, y = y, z = z }, color = peer_color(others[1]), label = nick_of(others[1]),
 		state = "waiting", priority = MARK_PRIORITY, range = 0 } }
 end
 

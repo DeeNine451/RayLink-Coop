@@ -679,7 +679,7 @@ TEST(transition_message_numbers_and_directions)
 	CHECK(msg_sender(Msg::TransitionVote) == MsgSender::ClientOnly);
 	CHECK(msg_sender(Msg::TransitionState) == MsgSender::HostOnly);
 	CHECK_EQ(std::string(msg_name(Msg::TransitionState)), std::string("TransitionState"));
-	CHECK_EQ(kProtocolVersion, 20u); // 16 attachment snapshots, 17 EntityVisual; older peers are refused by the handshake
+	CHECK_EQ(kProtocolVersion, 23u); // 16 attachment snapshots, 17 EntityVisual; older peers are refused by the handshake
 }
 
 // F3a, the host went alone and every player loads where he stands (plan §1.5): nobody waits for a level that is not his.
@@ -1133,6 +1133,20 @@ TEST(board_host_claim_via_link)
 	trip.dist = -1.f; // no exit, no distance
 	CHECK(apply_vote(b, 1, yes, trip, 7000) == Verdict::Claimed);
 	CHECK(b.claimed(1, &goal) && goal == kGuideGoal);
+}
+
+TEST(together_the_leading_exit_is_known_before_the_tick)
+{
+	transition::Board b;
+	uint32_t goal = 0;
+	CHECK(!b.leading(goal));
+	b.claim(2, transition::goal_of_exit(70), 2000);
+	b.claim(1, transition::goal_of_exit(90), 3000);
+	CHECK(b.leading(goal));
+	CHECK_EQ(goal, transition::goal_of_exit(70));
+	CHECK(b.release(2));
+	CHECK(b.leading(goal));
+	CHECK_EQ(goal, transition::goal_of_exit(90));
 }
 
 TEST(together_on_target_not_counted)
@@ -1760,10 +1774,11 @@ TEST(load_saves_handed_counts_the_movers_data_only)
 // world is not taken for the transition's.
 TEST(load_reload_watchdog)
 {
-	CHECK(!reload_overdue(false, 1000, 1000 + kReloadWatchMs * 10)); // nothing pending
-	CHECK(!reload_overdue(true, 0, 999999)); // the pump has not ended
-	CHECK(!reload_overdue(true, 1000, 1000 + kReloadWatchMs - 1));
-	CHECK(reload_overdue(true, 1000, 1000 + kReloadWatchMs));
+	CHECK(!reload_overdue(false, 1000, 1000 + kReloadWatchMs * 10, true)); // nothing pending
+	CHECK(!reload_overdue(true, 0, 999999, true)); // the pump has not ended
+	CHECK(!reload_overdue(true, 1000, 1000 + kReloadWatchMs - 1, true));
+	CHECK(reload_overdue(true, 1000, 1000 + kReloadWatchMs, true));
+	CHECK(!reload_overdue(true, 1000, 1000 + kReloadWatchMs * 100, false)); // live 2026-11-01: a slow load is a load
 	CHECK(kReloadWatchMs >= 5000 && kReloadWatchMs <= 30000);
 }
 
@@ -1825,6 +1840,7 @@ TEST(load_reload_watchdog_in_the_source)
 	const std::string watch = body_of(join, "void host_load_watch(");
 	REQUIRE(!watch.empty());
 	CHECK(watch.find("reload_overdue(") != std::string::npos);
+	CHECK(watch.find("world_up()") != std::string::npos);
 	CHECK(watch.find("host_load_void(") != std::string::npos);
 	CHECK(watch.find("sync::host_begin_join(") != std::string::npos);
 	CHECK(watch.find("g.reset_pending = true") != std::string::npos);
