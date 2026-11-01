@@ -28,6 +28,9 @@
 	<string id="st_coop_transition_row_agreed">
 		<text>agreed</text>
 	</string>
+	<string id="st_coop_transition_row_map">
+		<text>on %s</text>
+	</string>
 	<string id="st_coop_transition_row_dist">
 		<text>%d m</text>
 	</string>
@@ -51,6 +54,12 @@
 	</string>
 	<string id="st_coop_transition_hint_consent">
 		<text>hold [$$ACTION_USE$$] — go with the group</text>
+	</string>
+	<string id="st_coop_transition_hint_blocked">
+		<text>no yes yet: %s is on %s</text>
+	</string>
+	<string id="st_coop_transition_remind_map">
+		<text>waits for everybody on %s to go on to %s</text>
 	</string>
 	<string id="st_coop_transition_hint_confirm">
 		<text>hold [$$ACTION_USE$$] — agree</text>

@@ -28,6 +28,9 @@
 	<string id="st_coop_transition_row_agreed">
 		<text>согласен</text>
 	</string>
+	<string id="st_coop_transition_row_map">
+		<text>на карте %s</text>
+	</string>
 	<string id="st_coop_transition_row_dist">
 		<text>%d м</text>
 	</string>
@@ -51,6 +54,12 @@
 	</string>
 	<string id="st_coop_transition_hint_consent">
 		<text>удерживай [$$ACTION_USE$$] Ч идти с группой</text>
+	</string>
+	<string id="st_coop_transition_hint_blocked">
+		<text>подтвердить нельз€: %s на карте %s</text>
+	</string>
+	<string id="st_coop_transition_remind_map">
+		<text>ждЄт всех на карте %s, чтобы идти на %s</text>
 	</string>
 	<string id="st_coop_transition_hint_confirm">
 		<text>удерживай [$$ACTION_USE$$] Ч согласитьс€</text>

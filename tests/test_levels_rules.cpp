@@ -169,6 +169,23 @@ TEST(observes_other_level_false)
 
 // ---------------------------------------------------------------- gates
 
+TEST(table_all_on_a_level)
+{
+	Table t(0);
+	t.set(seat(0, 2));
+	t.set(seat(1, 2));
+	t.set(seat(2, 3));
+	CHECK(!t.all_on(2, 0));
+	CHECK(t.all_on(3, 3) == false);
+	CHECK(t.all_on(2, 2)); // everybody but him: he is the one who comes
+	Seat ghost = seat(9, 5);
+	ghost.plays = false;
+	t.set(ghost);
+	CHECK(t.all_on(2, 2)); // a seat that plays nobody waits for nobody
+	Table lone(0);
+	CHECK(lone.all_on(4, 0));
+}
+
 TEST(gate_fold)
 {
 	// Split levels on: the gate stands; with "story maps together" off, Together is only a suggestion.

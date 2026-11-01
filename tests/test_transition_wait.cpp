@@ -1180,33 +1180,202 @@ TEST(together_on_target_not_counted)
 	CHECK_EQ(s.total, 3u);
 }
 
-TEST(together_remote_confirm)
+TEST(together_no_yes_from_another_map)
 {
-	// A player on another map says yes with the exit's id: no distance is asked of him (he is not near it), the board does
-	// not drop his claim for being far, his row has no metres.
+	// Owner 2026-11-02: a yes counts only when everybody stands on one map. Who is on another map cannot say it, whatever he sends.
 	Board b;
-	auto m = party({0, 1, 2}); // 2 is missing: the board waits
-	m[1].other_map = true;
 	VoteFacts there;
 	there.in_world = true;
 	there.exit_known = true;
-	there.other_map = true; // dist unknown
-	CHECK(apply_vote(b, 1, vote_ready(kA), there, 0) == Verdict::Claimed);
-	VoteFacts far_there = there;
-	far_there.dist = 900.f;
-	CHECK(apply_vote(b, 1, vote_ready(kA), far_there, 10) == Verdict::Refreshed);
-	b.claim(0, kA, 5);
-	const DistFn far = [](uint32_t id, uint32_t) { return id == 1 ? 900.f : 1.f; };
-	const Status s = b.tick(m, far, 20);
-	CHECK(b.claimed(1));
-	CHECK_EQ(int(row_of(s, 1).mark), int(Mark::Ready));
-	CHECK_EQ(row_of(s, 1).dist_m, kUnknownDist);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	CHECK_EQ(s.ready, 2u);
+	there.other_map = true;
+	CHECK(apply_vote(b, 1, vote_ready(kA), there, 0) == Verdict::OtherMap);
+	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), there, 0) == Verdict::OtherMap);
+	CHECK(apply_vote(b, 1, vote_of(VoteRoute, kA, 40), there, 0) == Verdict::OtherMap);
+	CHECK(!b.claimed(1));
 	// on the exit's own map the same vote needs the distance
 	VoteFacts here = there;
 	here.other_map = false;
 	CHECK(apply_vote(b, 1, vote_ready(kA), here, 30) == Verdict::TooFar);
+	// a client on a map server's level: the host has only his record, it comes once a second: near the exit is enough
+	here.far_place = true;
+	CHECK(apply_vote(b, 1, vote_ready(kA), here, 40) == Verdict::Claimed);
+}
+
+TEST(together_one_on_another_map_holds_the_group_without_a_limit)
+{
+	// Nothing lets the group go without him: not the clock, not the chat's /go.
+	Board b;
+	auto m = party({0, 1, 2});
+	m[2].other_map = true;
+	b.claim(0, kA, 0);
+	b.claim(1, kA, 0);
+	uint64_t now = 10;
+	Status s = b.tick(m, kNear, now);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	CHECK_EQ(s.ready, 2u);
+	CHECK_EQ(s.total, 3u);
+	CHECK_EQ(int(row_of(s, 2).mark), int(Mark::Away));
+	CHECK(row_of(s, 2).other_map);
+	for (; now < 3600000u; now += 4000)
+	{
+		b.claim(1, kA, now); // his refresh
+		s = b.tick(m, kNear, now);
+		CHECK(!s.go);
+	}
+	b.force(kA);
+	s = b.tick(m, kNear, now);
+	CHECK(!s.go);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	// he came to the exit's map: a loading player of that map is no reason to stop, he runs up or says yes
+	m[2].other_map = false;
+	s = b.tick(m, kNear, now + 1);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	b.consent(2, kA, now + 2);
+	s = b.tick(m, kNear, now + 3);
+	CHECK(s.go);
+}
+
+TEST(together_a_loader_on_another_map_has_no_minute)
+{
+	Board b;
+	auto m = party({0, 1});
+	m[1].other_map = true;
+	m[1].in_world = false;
+	b.claim(0, kA, 0);
+	CHECK(!b.tick(m, kNear, 0).go);
+	const Status s = b.tick(m, kNear, kLoadWaitMs + 1000);
+	CHECK(!s.go);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	CHECK_EQ(s.load_ms, 0u);
+	// the same player on the exit's map still has his minute
+	Board c;
+	auto n = party({0, 1});
+	n[1].in_world = false;
+	c.claim(0, kA, 0);
+	CHECK(!c.tick(n, kNear, 0).go);
+	CHECK(c.tick(n, kNear, kLoadWaitMs + 1000).go);
+}
+
+TEST(together_a_yes_from_afar_needs_everybody_on_one_map)
+{
+	Board b;
+	b.claim(0, kA, 0);
+	VoteFacts far_off;
+	far_off.in_world = true;
+	far_off.exit_known = true;
+	far_off.dist = 300.f;
+	far_off.others_away = true;
+	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), far_off, 10) == Verdict::OtherMap);
+	CHECK(!b.claimed(1));
+	// running up to the exit is always open
+	VoteFacts at = far_off;
+	at.dist = 1.f;
+	CHECK(apply_vote(b, 1, vote_ready(kA), at, 20) == Verdict::Claimed);
+	CHECK(b.release(1));
+	far_off.others_away = false;
+	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), far_off, 30) == Verdict::Claimed);
+	// a yes given stays when somebody walks off: his refresh is no new yes
+	far_off.others_away = true;
+	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), far_off, 40) == Verdict::Refreshed);
+	// the yes to a trip is the same
+	Board g;
+	g.start_guide(0, 0, Trip::Waits);
+	VoteFacts yes;
+	yes.in_world = true;
+	yes.guide_running = true;
+	yes.others_away = true;
+	CHECK(apply_vote(g, 1, vote_ready(kNoChanger), yes, 10) == Verdict::OtherMap);
+	yes.others_away = false;
+	yes.other_map = true;
+	CHECK(apply_vote(g, 1, vote_ready(kNoChanger), yes, 10) == Verdict::OtherMap);
+	yes.other_map = false;
+	CHECK(apply_vote(g, 1, vote_ready(kNoChanger), yes, 10) == Verdict::Claimed);
+}
+
+TEST(transition_a_trip_that_waits_has_no_limit)
+{
+	Board b;
+	auto m = party({0, 1});
+	m[1].other_map = true;
+	b.start_guide(0, 0, Trip::Waits);
+	const Status s = b.tick(m, kNear, 3600000u);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	CHECK(!s.expired);
+	CHECK(!s.go);
+	CHECK(b.claimed(0));
+}
+
+TEST(transition_the_one_who_asked_calls_the_trip_off)
+{
+	// the cancel of the one who asked ends it for everybody
+	Board b;
+	const auto m = party({0, 1, 2});
+	b.start_guide(1, 0, Trip::Waits);
+	b.claim(0, kGuideGoal, 10);
+	CHECK(b.guide_on());
+	CHECK(b.release(1));
+	Status s = b.tick(m, kNear, 20);
+	CHECK_EQ(int(s.state), int(State::Idle));
+	CHECK(s.called_off);
+	CHECK(!b.claimed(0));
+	CHECK(!b.guide_on());
+	// a yes of somebody else is his own to take back
+	Board c;
+	c.start_guide(0, 0, Trip::Waits);
+	c.claim(1, kGuideGoal, 10);
+	CHECK(c.release(1));
+	s = c.tick(m, kNear, 20);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	CHECK(c.claimed(0));
+}
+
+TEST(transition_the_one_who_asked_walks_away_from_the_trip)
+{
+	Board b;
+	const auto m = party({0, 1});
+	b.start_guide(0, 0, Trip::Waits);
+	float metres = 1.f;
+	const DistFn dist = [&metres](uint32_t, uint32_t where) { return where == kTripPlace ? metres : 500.f; };
+	Status s = b.tick(m, dist, 10);
+	CHECK_EQ(int(s.state), int(State::Waiting));
+	b.claim(0, kGuideGoal, 20); // his own "still yes" keeps the place he is measured against
+	metres = kLeaveM + 1.f;
+	s = b.tick(m, dist, 30);
+	CHECK_EQ(int(s.state), int(State::Idle));
+	CHECK(s.called_off);
+}
+
+TEST(transition_movers_of_a_group)
+{
+	// who goes with the group
+	MoverFacts f;
+	f.joined = true;
+	f.known = true;
+	f.proxy = true;
+	f.on_host_level = true;
+	CHECK(goes_with_the_group(f, false));
+	f.on_host_level = false;
+	CHECK(!goes_with_the_group(f, false)); // a level change of the host's level alone
+	CHECK(goes_with_the_group(f, true)); // split levels: wherever he stands
+	f.loading = true;
+	CHECK(!goes_with_the_group(f, true));
+	f.loading = false;
+	f.joining = true;
+	CHECK(!goes_with_the_group(f, true));
+	f.joining = false;
+	f.choosing = true;
+	CHECK(!goes_with_the_group(f, true));
+	f.choosing = false;
+	f.proxy = false;
+	CHECK(!goes_with_the_group(f, true));
+	// live 39.10: "the group moves", and the client came up where he stood. A mover is put on the new level unless he stands on it already.
+	constexpr uint16_t kOld = 1, kArrival = 2, kNoSeat = 0xffff;
+	CHECK(mover_is_placed(true, kOld, kArrival));
+	CHECK(!mover_is_placed(true, kArrival, kArrival));
+	CHECK(mover_is_placed(false, kOld, kArrival));
+	CHECK(mover_is_placed(false, kArrival, kArrival)); // no split levels: one level for everybody, the group moves
+	CHECK(mover_is_placed(true, kNoSeat, kArrival)); // a seat nobody knows is no reason to leave him behind
+	CHECK(mover_is_placed(true, kNoSeat, kNoSeat));
 }
 
 TEST(together_row_flags)
@@ -1262,10 +1431,13 @@ TEST(transition_rows_say_who_comes_along)
 	const Status s = b.tick(m, kNear, 10);
 	CHECK(!row_of(s, 0).consent);
 	CHECK(row_of(s, 1).consent);
-	CHECK(row_of(s, 2).consent && row_of(s, 2).other_map);
+	CHECK(!row_of(s, 2).consent && row_of(s, 2).other_map); // no yes counts from another map
+	CHECK(!b.claimed(2));
 	CHECK(!row_of(s, 3).consent);
 	CHECK_EQ(int(row_of(s, 1).mark), int(Mark::Ready));
-	const StateMsg msg = state_message(s, "l01_escape");
+	StateMsg msg = state_message(s, "l01_escape");
+	msg.rows[2].consent = true; // both bits on one row: the wire has room for them
+	msg.rows[2].mark = Mark::Ready;
 	Writer w;
 	msg.write(w);
 	CHECK_EQ(w.size(), size_t(28 + 4 * 7)); // the head with "l01_escape" (as sample_state's 42 = 28 + 2 x 7), 7 a row

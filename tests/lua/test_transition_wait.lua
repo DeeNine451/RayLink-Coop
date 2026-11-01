@@ -221,6 +221,7 @@ local function machine(self_peer, opts)
 		}
 	end
 	env.coop_core_chat = { system = function(text) M.feed[#M.feed + 1] = text end }
+	env.coop_levels = { map_of = function(peer) return M.maps and M.maps[peer] or nil end }
 	env.coop_hud_markers = {
 		add_source = function(name, fn, every) M.sources[name] = { fn = fn, every = every } return true end,
 	}
@@ -647,6 +648,45 @@ check(not win(M).g_board.visible and not win(M).g_remind.visible, "an open inven
 M.hud_shown = true
 run(M, 400)
 check(win(M).g_board.visible, "and it is back when it closes")
+
+-- ================================================================ somebody on another map (owner 2026-11-02)
+print("== on another map")
+do
+	local Ma = machine(1)
+	local Ta = Ma.T
+	Ma.maps = { [2] = "Swamps", [0] = "Cordon" }
+	local rows = { { peer = 0, mark = "ready", dist = 2 }, { peer = 1, mark = "away", dist = 40 }, { peer = 2, mark = "away", other = true } }
+	local list = Ta.row_texts(board(Ma, { rows = rows }))
+	check(list[3].text == string.format(STR_ENG.st_coop_transition_row_map, "Swamps") and list[3].tone == "dim" and not list[3].ready,
+		"his row says where he is")
+	Ma.maps = {}
+	check(Ta.row_texts(board(Ma, { rows = rows }))[3].text == "on another map", "a map nobody can name: on another map")
+	Ma.maps = { [2] = "Swamps", [0] = "Cordon" }
+	local away_me = { peer = 1, host = false, in_zone = false, ready = false, confirm = false }
+	local t = board(Ma, { rows = rows, me = away_me })
+	check(Ta.hint_kind(t) == "blocked", "no yes from afar while somebody is on another map")
+	check(Ta.hold_ms("blocked") == nil, "and there is nothing to hold")
+	check(Ta.hint_text("blocked", t) == string.format(STR_ENG.st_coop_transition_hint_blocked, "Guest", "Swamps"), "the window says who and where")
+	local trip = board(Ma, { kind = "guide", rows = rows, me = { peer = 1, in_zone = false, ready = false, confirm = true } })
+	check(Ta.hint_kind(trip) == "blocked", "the same for a trip")
+	local asked = board(Ma, { kind = "guide", rows = rows, me = { peer = 0, host = true, in_zone = false, ready = true } })
+	check(Ta.hint_kind(asked) == "cancel", "the one who asked can always take it back")
+	local gone = { { peer = 0, mark = "ready" }, { peer = 1, mark = "away" }, { peer = 2, mark = "down", other = true } }
+	check(Ta.hint_kind(board(Ma, { rows = gone, me = away_me })) == "consent", "a dead player on another map is no reason")
+	Ma.t = t
+	run(Ma, 400)
+	fire(Ma, "on_key_press", DIK_F)
+	run(Ma, 1500)
+	check(#Ma.console == 0 and Ma.T.hold_state() == nil, "the key does nothing")
+	check(win(Ma).g_remind.visible, "the reminder stays")
+	-- the one who is away himself
+	local Mz = machine(2)
+	Mz.maps = { [0] = "Cordon", [2] = "Swamps" }
+	local there = board(Mz, { rows = rows, level = "l13u_warlab", me = { peer = 2, in_zone = false, ready = false, confirm = false } })
+	local rem = Mz.T.reminder(there)
+	check(rem and rem.text == string.format(STR_ENG.st_coop_transition_remind_map, "Cordon", Mz.T.level_title("l13u_warlab")),
+		"who is away himself is told where the group meets")
+end
 
 -- ================================================================ 5. a guide trip
 print("== guide")

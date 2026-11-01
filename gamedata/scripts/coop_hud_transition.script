@@ -38,6 +38,9 @@
 		coop_hud_transition.current() -> the last coop.transition() table, nil when nobody waits
 		coop_hud_transition.get_window() -> the overlay while it is on the HUD
 		coop_hud_transition.layout() -> the sizes in force
+
+	Owner 2026-11-02: with somebody on another map his row says the map, nobody can say yes from afar (the hint says who and where, the
+	key does nothing), the group waits for him as long as it takes; the host's board is what decides, this only shows it.
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -255,13 +258,36 @@ local function dist_text(d)
 	return string_format(tr("st_coop_transition_row_dist", "%d m"), math_floor(d + 0.5))
 end
 
+local function levels_module()
+	local m = rawget(_G, "coop_levels")
+	if type(m) == "table" then return m end
+	local ok, v = pcall(function() return coop_levels end) -- loads the script
+	return ok and type(v) == "table" and v or nil
+end
+
+-- The name of the map player `peer` stands on; nil if unknown.
+local function map_of(peer)
+	local L = levels_module()
+	if not (L and L.map_of) then return nil end
+	local ok, name = pcall(L.map_of, peer)
+	return ok and name or nil
+end
+
+-- The row of somebody who stands on another map and is waited for, nil if nobody does: a dead one is not waited for.
+local function away_row(t)
+	for _, r in ipairs(t and t.rows or {}) do
+		if type(r) == "table" and r.other == true and r.mark ~= "down" then return r end
+	end
+	return nil
+end
+
 -- What a row says on the right and how it is toned.
 local function row_state(r, t)
 	local mark = r.mark
 	local guide = t and t.kind == "guide"
-	-- F3a: a player on another map (the together entry of split levels) answers from there: no metres to show
-	if r.other == true and (mark == "ready" or mark == "away") then
-		if mark == "ready" then return tr("st_coop_transition_row_agreed", "agreed"), "ready" end
+	if r.other == true and mark ~= "down" then
+		local where = map_of(r.peer)
+		if where then return string_format(tr("st_coop_transition_row_map", "on %s"), where), "dim" end
 		return tr("st_coop_together_row_other", "on another map"), "dim"
 	end
 	if mark == "ready" then
@@ -322,18 +348,19 @@ end
 
 -- The use key held (owner 2026-10-24: only by those who are NOT at the exit): "consent" (away from the exit somebody waits
 -- at: go with the group), "cancel" (coming along, or agreed to a guide trip: not any more), "confirm" (a guide trip I have not
--- answered), nil (at the exit: he steps out to withdraw; the go; nobody waits).
+-- answered), "blocked" (the same two while somebody is on another map: nothing to hold, the hint says who and where), nil (at the
+-- exit: he steps out to withdraw; the go; nobody waits).
 function hint_kind(t)
 	local me = type(t) == "table" and t.me or nil
 	if type(me) ~= "table" or t.state == "going" then return nil end
 	if t.kind == "guide" then
 		if me.ready then return "cancel" end
-		if me.confirm then return "confirm" end
+		if me.confirm then return away_row(t) and "blocked" or "confirm" end
 		return nil
 	end
 	if me.in_zone then return nil end
 	if me.ready or me.consent then return "cancel" end
-	if #waiting_others(t) > 0 then return "consent" end
+	if #waiting_others(t) > 0 then return away_row(t) and "blocked" or "consent" end
 	return nil
 end
 
@@ -341,7 +368,12 @@ function hold_ms(kind)
 	return HOLD_MS[kind]
 end
 
-function hint_text(kind)
+function hint_text(kind, t)
+	if kind == "blocked" then
+		local r = away_row(t)
+		local where = r and map_of(r.peer) or tr("st_coop_together_row_other", "on another map")
+		return string_format(tr("st_coop_transition_hint_blocked", "cannot agree yet: %s is on %s"), r and nick_of(r.peer) or "?", where)
+	end
 	if kind == "consent" then return tr("st_coop_transition_hint_consent", "hold [F] - go with the group") end
 	if kind == "cancel" then return tr("st_coop_transition_hint_cancel", "hold [F] - cancel") end
 	if kind == "confirm" then return tr("st_coop_transition_hint_confirm", "hold [F] - agree") end
@@ -358,7 +390,14 @@ function reminder(t)
 	local level = level_title(t.level)
 	local d = tonumber(t.me and t.me.dist)
 	local text
-	if d and d == d and d >= 0 then
+	local mine = type(t.me) == "table" and tonumber(t.me.peer) or nil
+	local i_am_away = false
+	for _, r in ipairs(t.rows or {}) do
+		if type(r) == "table" and r.other == true and tonumber(r.peer) == mine then i_am_away = true end
+	end
+	if i_am_away then
+		text = string_format(tr("st_coop_transition_remind_map", "waits for everybody on %s to go on to %s"), map_of(others[1]) or "?", level)
+	elseif d and d == d and d >= 0 then
 		text = string_format(tr("st_coop_transition_remind", "waits for you at the exit to %s . %d m"), level, math_floor(d + 0.5))
 	else
 		text = string_format(tr("st_coop_transition_remind_far", "waits for you at the exit to %s"), level)
@@ -639,7 +678,7 @@ function UICoopTransition:FrameBoard(tg, dt, t, m, L)
 			show(self.bar_fill, false)
 		end
 		text_place(self.t_hint, x0, hint_y, Wd, L.hint_h, m)
-		text_set(self.t_hint, hint_text(kind), 217 * a, C_DIM)
+		text_set(self.t_hint, hint_text(kind, bv), 217 * a, C_DIM)
 		text_show(self.t_hint, true)
 	else
 		show(self.bar_track, false)
@@ -695,7 +734,7 @@ function UICoopTransition:FrameRemind(tg, dt, rem, m, L)
 			show(self.r_bar_fill, false)
 		end
 		text_place(self.t_rhint, CX - w / 2, hint_y, w, L.hint_h, m)
-		text_set(self.t_rhint, hint_text(kind), 217 * a, C_DIM)
+		text_set(self.t_rhint, hint_text(kind, rv.t), 217 * a, C_DIM)
 		text_show(self.t_rhint, true)
 	else
 		show(self.r_bar_track, false)
@@ -756,9 +795,12 @@ end
 
 -- The go: the screen darkens once (every moving player, the host player too: the board's Going state reaches all of them);
 -- the engine's level change follows transition::kGoFadeMs later. The stock effector of the route teleport and ChangeLevel.
-local function fade_for_the_go()
+local function fade_for_the_go(trip)
 	local lv = rawget(_G, "level")
 	if not (lv and lv.add_pp_effector) then return end
+	-- a trip left the stock callback out with its fade (coop_transition_route): the world server's scripts hear it now
+	local send = rawget(_G, "SendScriptCallback")
+	if trip and send and api and api.is_host and api.is_host() then pcall(send, "on_before_level_changing") end
 	local ok, err = pcall(lv.add_pp_effector, FADE_PPE, FADE_ID, false)
 	if ok then
 		stats.fades = stats.fades + 1
@@ -783,7 +825,7 @@ function UICoopTransition:Frame(tg)
 	if raw and raw.state == "going" then
 		if not faded then
 			faded = true
-			fade_for_the_go()
+			fade_for_the_go(raw.kind == "guide")
 		end
 	else
 		faded = false
@@ -792,7 +834,7 @@ function UICoopTransition:Frame(tg)
 	if t and not hud_visible() then t = nil end -- the inventory, the PDA, a scope: no overlay on top
 	local board = t and shows_board(t) and t or nil
 	local rem = t and reminder(t) or nil
-	if rem then rem.kind = hint_kind(t) end
+	if rem then rem.kind, rem.t = hint_kind(t), t end
 	if board then stats.shown = stats.shown + 1 end
 	step_hold(tg, raw)
 	self:FrameBoard(tg, dt, board, m, L)
@@ -864,7 +906,7 @@ local function start_hold(tg, how)
 	if hold or key.latched or not WIN or not last_t or not hud_visible() then return end
 	if not (shows_board(last_t) or reminder(last_t)) then return end -- a key only with a placard that names it
 	local kind = hint_kind(last_t)
-	if not kind then return end
+	if not (kind and hold_ms(kind)) then return end
 	hold = { kind = kind, since = tg, fired = false }
 	log("transition: the use key held (%s, from its %s)", kind, how)
 end

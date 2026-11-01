@@ -25,6 +25,7 @@
 		coop_levels.elsewhere(who)        is player `who` (a number: a player id) or the level `who` (a string: a level
 		                                  name) another level than the local player's? false without split levels
 		coop_levels.elsewhere_text(who)   "On another map: <name>" for the HUD, "" when not elsewhere
+		coop_levels.map_of(who)           the name of the map a player stands on, nil if unknown
 		coop_levels.evaluate([force])     world server: evaluate the table, hand over the gates that changed (all with
 		                                  force); returns how many; 0 where it is not the world server or there is no engine
 		coop_levels.evaluate_level(level) the word the table gives for `level` right now (a pure read); "free" without
@@ -280,6 +281,12 @@ function elsewhere(who)
 	if not levels_api() then return false end
 	local theirs, mine = level_of(who), my_level()
 	return theirs ~= nil and mine ~= "" and theirs ~= mine
+end
+
+-- The name of the map player `who` stands on, nil if unknown.
+function map_of(who)
+	local lvl = level_of(who)
+	return lvl and name(lvl) or nil
 end
 
 function elsewhere_text(who)

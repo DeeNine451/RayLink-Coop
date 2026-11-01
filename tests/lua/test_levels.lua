@@ -573,6 +573,8 @@ check(mod.name("") == "" and mod.name(5) == "", "name: not a level")
 
 PLAYER_LEVEL[2] = "l02_garbage"
 PLAYER_LEVEL[3] = "l01_escape"
+check(mod.map_of(2) == mod.name("l02_garbage"), "map_of: the name of the map a player stands on")
+check(mod.map_of(77) == nil, "map_of: nil for a player nobody knows")
 check(mod.elsewhere(2) == true, "player 2 is on another level")
 check(mod.elsewhere(3) == false, "player 3 is on my level")
 check(mod.elsewhere(4) == false, "a player the engine does not know is not elsewhere")
