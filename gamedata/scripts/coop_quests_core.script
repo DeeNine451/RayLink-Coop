@@ -37,7 +37,9 @@ function active()
 	return ok and v == true
 end
 function is_host() return active() and api.is_host() == true end
-function is_client() return active() and api.is_client() == true end
+-- F3a: a map server is no player: its logic is its level's (the stock effects run there), it asks nobody for them
+function is_map_server() return active() and api.is_map_server ~= nil and api.is_map_server() == true end
+function is_client() return active() and api.is_client() == true and not is_map_server() end
 function client_live() return is_client() and api.is_live() == true end
 
 function self_peer()
@@ -403,8 +405,25 @@ function request_host_action(name, t)
 	return ok
 end
 
+-- What stands on the player's level: its authority runs these (split levels).
+local LEVEL_ACTIONS = { box = true }
+
 local function host_on_action(t, from)
-	if not is_host() or type(from) ~= "number" or from == 0 then return end
+	if is_map_server() and from == 0 then
+		from = tonumber(t._peer)
+		t._peer = nil
+	elseif not is_host() or type(from) ~= "number" or from == 0 then
+		return
+	elseif LEVEL_ACTIONS[t.a] then
+		local l = api.levels
+		local bridge = l and l.split and l.split() == true and l.bridge_of_player and l.bridge_of_player(from)
+		if bridge then
+			t._peer = from
+			send("act", t, bridge)
+			return
+		end
+	end
+	if not from then return end
 	local fn = type(t.a) == "string" and actions[t.a]
 	if not fn then
 		action_stats.refused = action_stats.refused + 1

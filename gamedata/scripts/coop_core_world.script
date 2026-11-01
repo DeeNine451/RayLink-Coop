@@ -92,6 +92,15 @@ local function is_host()
 	return in_session() and api.is_host()
 end
 
+local function map_server()
+	return in_session() and api.is_map_server ~= nil and api.is_map_server() == true
+end
+
+-- This process leads a level: what a player asks of it, what happens on it.
+local function leads_level()
+	return is_host() or map_server()
+end
+
 local function live_client()
 	return in_session() and api.is_client() and api.is_live()
 end
@@ -240,8 +249,9 @@ end
 
 -- Host: pass a news on to every client, or to the one player it belongs to.
 local function share(kind, t, peer)
-	if news_applying or not is_host() or not others_online() then return false end
-	local to = peer or -1
+	local ms = map_server()
+	if news_applying or not (ms or (is_host() and others_online())) then return false end
+	local to = peer or (ms and 0) or -1 -- a map server's news is everybody's: the world server passes it on
 	if said_just_now(t.m or t.id or t.s or t.t, to) then
 		stats.news_repeat = stats.news_repeat + 1
 		return false
@@ -433,7 +443,7 @@ end
 -- is his alone: not shown here. Outside a session, and on a client, the stock function just runs.
 local function sender_wrapper(kind, orig, fields)
 	return function(...)
-		if not is_host() then return orig(...) end
+		if not leads_level() then return orig(...) end
 		if in_sender then
 			local r = orig(...)
 			if not sender_seen then sender_seen, sender_result = true, r end
@@ -484,7 +494,7 @@ end
 -- takes an object.
 local function direct_wrapper(orig)
 	return function(self, ...)
-		if in_sender or not is_host() then return orig(self, ...) end
+		if in_sender or not leads_level() then return orig(self, ...) end
 		local caption, text, icon, delay, show, ty = ...
 		local t = { k = "ggn", c = plain(caption), t = plain(text), ic = plain(icon), d = plain(delay), sh = plain(show), ty = plain(ty) }
 		if scope ~= "world" then
@@ -740,7 +750,13 @@ local function show_news(t)
 end
 
 local function on_news(payload, from)
-	if from ~= 0 or not live_client() or not db.actor then return end
+	local of_a_map_server = is_host() and type(from) == "number" and from >= 0x100
+	if of_a_map_server then
+		api.send_event(EV_NEWS, payload, -1)
+	elseif from ~= 0 or not live_client() or map_server() then
+		return
+	end
+	if not db.actor then return end
 	local t = codec().decode(payload)
 	local kind = t.k
 	if not NEWS_LIMIT_IN[kind] then
@@ -824,7 +840,7 @@ local function host_grant(to, id, obj)
 end
 
 local function on_mloot_open(payload, from)
-	if not is_host() then return end
+	if not leads_level() then return end
 	stats.mloot_req = stats.mloot_req + 1
 	local id = tonumber(codec().decode(payload).id)
 	local obj = id and level.object_by_id(id)
@@ -878,7 +894,7 @@ local function host_release(id, more, loot)
 end
 
 local function on_mloot_close(payload, from)
-	if not is_host() then return end
+	if not leads_level() then return end
 	local t = codec().decode(payload)
 	local id = tonumber(t.id)
 	local lock = id and locks[id]
@@ -1044,7 +1060,7 @@ local function on_box_take(box, item)
 end
 
 local function host_on_box_take(payload, from)
-	if not is_host() then return end
+	if not leads_level() then return end
 	local id = tonumber(codec().decode(payload).id)
 	local tm = rawget(_G, "treasure_manager") or treasure_manager
 	if not (id and tm and type(tm.caches) == "table" and tm.caches[id] == true) then return end
@@ -1108,7 +1124,7 @@ local function on_menu_mode(mode)
 end
 
 local function host_on_trader_req(payload, from)
-	if not is_host() then return end
+	if not leads_level() then return end
 	local id = tonumber(codec().decode(payload).id)
 	local npc = id and level.object_by_id(id)
 	local tm = rawget(_G, "trade_manager") or trade_manager
@@ -1189,13 +1205,13 @@ function on_game_start()
 		return
 	end
 	cm.add_event_handler(EV_NEWS, on_news)
-	cm.add_event_handler(EV_MLOOT_OPEN, on_mloot_open)
+	cm.add_level_handler(EV_MLOOT_OPEN, on_mloot_open)
 	cm.add_event_handler(EV_MLOOT_STATE, on_mloot_state)
-	cm.add_event_handler(EV_MLOOT_CLOSE, on_mloot_close)
+	cm.add_level_handler(EV_MLOOT_CLOSE, on_mloot_close)
 	cm.add_event_handler(EV_MLOOT_EDGE, on_mloot_edge)
-	cm.add_event_handler(EV_BOX_TAKE, host_on_box_take)
+	cm.add_level_handler(EV_BOX_TAKE, host_on_box_take)
 	cm.add_event_handler(EV_STASH_FOUND, on_stash_found)
-	cm.add_event_handler(EV_TRADER_REQ, host_on_trader_req)
+	cm.add_level_handler(EV_TRADER_REQ, host_on_trader_req)
 	cm.add_event_handler(EV_TRADER_CFG, on_trader_cfg)
 end
 

@@ -170,7 +170,7 @@ TEST(protocol_f3a_version_is_11)
 {
 	// 11: the F3a messages, Hello carries a role and a token, PlayerState carries the vertices, TransitionState a flags
 	// byte, WeatherSync a weather set; a protocol 10 peer is refused at the handshake.
-	CHECK_EQ(kProtocolVersion, 22u); // 17: EntityVisual, a host creature's new visual; 20: map servers (LevelMap rows, Tunnel lanes); 21: bodies
+	CHECK_EQ(kProtocolVersion, 23u); // 17: EntityVisual, a host creature's new visual; 20: map servers (LevelMap rows, Tunnel lanes); 21: bodies
 }
 
 TEST(protocol_f3a_a_trip_round_trip)
@@ -197,6 +197,7 @@ TEST(protocol_f3a_body_facts_round_trip)
 {
 	levels::wire::LevelBodyFacts a;
 	a.fight = 1;
+	a.talking = 1;
 	a.place = 3;
 	a.source = 777;
 	Writer w;
@@ -205,6 +206,7 @@ TEST(protocol_f3a_body_facts_round_trip)
 	levels::wire::LevelBodyFacts b;
 	CHECK(b.read(r));
 	CHECK_EQ(b.fight, uint8_t(1));
+	CHECK_EQ(b.talking, uint8_t(1));
 	CHECK_EQ(b.place, uint8_t(3));
 	CHECK_EQ(b.source, uint16_t(777));
 	Reader none(w.data().data(), 1);

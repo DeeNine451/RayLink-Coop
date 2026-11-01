@@ -191,6 +191,31 @@ function add_event_handler(name, func)
 	return true
 end
 
+-- Split levels: a player's request to the logic of his level (a body to cut up, a trader, a cache). The world server passes it to the
+-- authority of his level with his peer; func gets it as if it came from him. A client knows no other process.
+function add_level_handler(name, func)
+	return add_event_handler(name, function(payload, from)
+		if not api then return end
+		if api.is_map_server ~= nil and api.is_map_server() == true then
+			local t = decode(payload)
+			local peer = tonumber(t._peer)
+			if from ~= 0 or not peer then return end
+			t._peer = nil
+			return func(encode(t), peer)
+		end
+		local l = api.levels
+		local bridge = api.is_host() and type(from) == "number" and from ~= 0 and l ~= nil and l.split ~= nil and l.split() == true and
+			l.bridge_of_player and l.bridge_of_player(from)
+		if bridge then
+			local t = decode(payload)
+			t._peer = from
+			api.send_event(name, encode(t), bridge)
+			return
+		end
+		return func(payload, from)
+	end)
+end
+
 function remove_event_handler(name, func)
 	if handlers[name] then handlers[name][func] = nil end
 end
