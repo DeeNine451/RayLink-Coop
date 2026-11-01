@@ -309,7 +309,13 @@ check(killed == 1, "a repeat of the same order runs once")
 far.order(701, "kill")
 Ms.objects[701] = nil
 pump()
-check(far.orders_held() == held, "an NPC that went home: the map server says so")
+check(far.orders_held() == held + 1, "an NPC not online there yet: the order waits for it")
+Ms.new_obj(701, "stalker_far", vec(300, 0, 300), { _stalker = true })
+killed = 0
+NOW = NOW + 4000
+Hm.env.coop_quests_far._tick()
+pump()
+check(killed == 1 and far.orders_held() == held, "it came online: the next try finds it")
 
 print("== a release of what a map server holds")
 local released_ms = {}
@@ -346,6 +352,26 @@ fire(Ms, "monster_on_before_hit", Ms.objects[720], { power = 1, type = 1, drafts
 pump()
 check(hit_seen[1] and hit_seen[1][1] == 720 and hit_seen[1][2] == 500 and hit_seen[1][3] == 31, "a controller for Brain Game: the bone and who struck reach the task")
 Hm.tm.task_info.yan_stalker_sakharov_task_brain_game = nil
+
+print("== the hand of who struck: an axe for Vengence Amplified")
+Hm.ini.simulation_task_vengence_amplified = {}
+Hm.tm:give_task("simulation_task_vengence_amplified", 700)
+for _ = 1, 3 do
+	NOW = NOW + 6000
+	fire(Hm, "actor_on_update")
+	fire(Ms, "actor_on_update")
+	pump()
+end
+Ms.new_obj(722, "chimera_weak", vec(0, 0, 0))
+records[722] = { id = 722, parent_id = 65535, m_game_vertex_id = 2, position = vec(0, 0, 0), online = true,
+	section_name = function() return "chimera_weak" end, clsid = function() return 55 end }
+shooter.active_item = function() return { section = function() return "wpn_axe" end } end
+Hm.env.coop_route = { domain_handlers = function(cb) return {} end }
+fire(Ms, "monster_on_before_hit", Ms.objects[722], { power = 1, type = 1, draftsman = shooter }, 1)
+pump()
+local player_far = Hm.env.coop_quests_far.object(500)
+check(player_far:active_item() and player_far:active_item():section() == "wpn_axe", "nta_utils.is_axe reads it from the stand-in")
+Hm.tm.task_info.simulation_task_vengence_amplified = nil
 
 print("== a vehicle")
 local cars = {}

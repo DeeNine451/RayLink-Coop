@@ -184,9 +184,9 @@ local function des_at(s, i, depth)
 	return nil
 end
 
--- String -> value, nil if malformed (network input).
-function des(s)
-	if type(s) ~= "string" or s == "" or #s > 65536 then return nil end
+-- String -> value, nil if malformed (network input). limit: the longest it takes.
+function des(s, limit)
+	if type(s) ~= "string" or s == "" or #s > (limit or 65536) then return nil end
 	local ok, v, j = pcall(des_at, s, 1, 0)
 	if not ok or v == nil or j ~= #s + 1 then return nil end
 	return v
@@ -503,6 +503,13 @@ function at_home(fn, ...)
 	local far = far_mod()
 	if not far then return fn(...) end
 	return far.at_home(fn, ...)
+end
+
+-- A squad a map server holds: with split levels off nothing is.
+function held_there(se)
+	local l = api and api.levels
+	if not (se and se.online and se.m_game_vertex_id and l and l.split and l.split() == true) then return false end
+	return game_graph():vertex(se.m_game_vertex_id):level_id() ~= l.my_level()
 end
 
 -- The smart's field, seen from where the far view stands (a rewrite of the task scripts' `smart.online`).

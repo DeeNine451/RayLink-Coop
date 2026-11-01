@@ -1132,7 +1132,7 @@ local function host_on_trader_req(payload, from)
 	if not (npc and tm and npc:alive()) then return end
 	-- the stock restock check, now: the client trades the current stock. The supply level reads "the actor" (goodwill, heavy pockets):
 	-- the player at the trader, not this machine's actor (a map server's is a ghost).
-	local P = module_of("coop_npc_players")
+	local P = map_server() and module_of("coop_npc_players")
 	local who = P and P.object_of_peer(from)
 	if who then
 		pcall(P.with_identity, who, tm.update, npc, false)

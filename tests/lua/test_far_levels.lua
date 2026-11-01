@@ -144,6 +144,22 @@ Ms.env.guards_spawner.guarded_smarts = {}
 frames(1)
 check(Ms.env.guards_spawner.guarded_smarts.zat_b5 ~= nil, "a new process on that bridge gets it again, though nothing changed")
 
+print("== a new process on the same bridge says hello and gets everything")
+Ms.env.guards_spawner.guarded_smarts = {}
+Hm.handlers["coop_share"](Hm.env.coop_main.encode({ k = "__hello" }), BRIDGE)
+frames(1)
+check(Ms.env.guards_spawner.guarded_smarts.zat_b5 ~= nil, "nothing changed, the bridge stayed: it still arrives")
+
+print("== a table longer than one codec's limit for a network string")
+local huge = {}
+for i = 1, 3000 do huge[20000 + i] = { resupply_time = { Y = 2012 }, cfg_ltx = string.rep("x", 40) } end
+for id, row in pairs(huge) do
+	tm_m[id] = row
+	Ms.new_obj(id, "trader", vec(0, 0, 0))
+end
+frames(2)
+check(tm_h[20001] ~= nil and tm_h[23000] ~= nil, "it reads on the other side")
+
 print("== only a bridge writes to the world server, only the world server to a map server")
 local before = #Ms.sent
 Hm.handlers["coop_share"](Hm.env.coop_main.encode({ k = "trade", s = 99, i = 1, n = 1, d = "{}" }), 1)
@@ -153,9 +169,16 @@ print("== a level's anomalies")
 da_h.updated_anomaly_levels.l01_escape = { time = 1, anomalies = { 1 } }
 da_h.updated_anomaly_levels.k00_marsh = { time = 1, anomalies = { 2 } }
 da_h.updated_anomaly_levels.zaton = { time = 1, anomalies = { 3 } }
-da_m.updated_anomaly_levels.k00_marsh = { time = 5, anomalies = { 9, 10 } }
+da_m.updated_anomaly_levels.k00_marsh = { time = 5, anomalies = { 9, 10 }, anomalies_properties = { [9] = { time_active = 7, update_time = 1, active = true } } }
 frames(2)
 check(da_h.updated_anomaly_levels.k00_marsh.time == 5, "a map server's row replaces the world server's")
+local props = da_h.updated_anomaly_levels.k00_marsh.anomalies_properties
+check(props[9].time_active == 7 and props[9].update_time == nil and props[9].active == nil, "without what changes every few seconds")
+local sent_share = count_sent(Ms, "coop_share")
+da_m.updated_anomaly_levels.k00_marsh.anomalies_properties[9].update_time = 2
+da_m.updated_anomaly_levels.k00_marsh.anomalies_properties[9].active = false
+frames(2)
+check(count_sent(Ms, "coop_share") == sent_share, "such a change sends nothing")
 Hm.emission_global = true
 da_h.calls = {}
 Hm.env.drx_da_main.actor_on_interaction("anomalies", nil, "emission_end")

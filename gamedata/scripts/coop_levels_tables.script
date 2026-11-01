@@ -98,6 +98,10 @@ local function patch_dao()
 	if type(clean) ~= "function" then return end
 	dao.orig = clean
 	da.clean_dynamic_anomalies_global = function(...)
+		if map_server() then -- what another level has is not this process's to clean
+			local here = level.name()
+			return with_levels(da, function(name) return name == here end, clean, ...)
+		end
 		if not (world_server() and split()) then return clean(...) end
 		local led = led_levels()
 		local r = with_levels(da, function(name) return not led[name] end, clean, ...)
@@ -144,10 +148,24 @@ local function on_dao(payload, from)
 	da.build_anomalies_pos_tree()
 end
 
+-- The row of its level, without what the behaviours of the anomalies change every few seconds: they set these again when a level loads.
 local function dao_row()
 	local da = rawget(_G, "drx_da_main")
 	if type(da) ~= "table" or type(da.updated_anomaly_levels) ~= "table" then return nil end
-	return da.updated_anomaly_levels[level.name()]
+	local row = da.updated_anomaly_levels[level.name()]
+	if type(row) ~= "table" then return nil end
+	local out = {}
+	for k, v in pairs(row) do out[k] = v end
+	local props = {}
+	for id, p in pairs(row.anomalies_properties or {}) do
+		local c = {}
+		for k, v in pairs(p) do
+			if k ~= "update_time" and k ~= "active" then c[k] = v end
+		end
+		props[id] = c
+	end
+	out.anomalies_properties = props
+	return out
 end
 
 local function dao_merge(row, lid)

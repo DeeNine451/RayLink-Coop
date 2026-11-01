@@ -18,6 +18,8 @@ local EV = "coop_share"
 local PART = 6000
 local EVERY_MS = 3000
 local MAX_PARTS = 64
+local HELLO = "__hello"
+local said_hello = false
 
 local ups, downs = {}, {}
 local parts = {} -- "from:name" -> { seq, n, got, list }
@@ -119,6 +121,10 @@ local function on_part(payload, from)
 		if from ~= 0 then return end
 		e = downs[name]
 	end
+	if world and name == HELLO then
+		for _, d in pairs(downs) do d.sent[from] = nil end -- a new process on this bridge: it knows nothing
+		return
+	end
 	if not e then return end
 	local key = tostring(from) .. ":" .. tostring(name)
 	local p = parts[key]
@@ -134,8 +140,11 @@ local function on_part(payload, from)
 	end
 	if p.got < p.n then return end
 	parts[key] = nil
-	local v = q.des(table.concat(p.list))
-	if v == nil then return end
+	local v = q.des(table.concat(p.list), MAX_PARTS * PART)
+	if v == nil then
+		printf("! [coop] share: %s from %s does not read", tostring(name), tostring(from))
+		return
+	end
 	local ok, err
 	if world then ok, err = pcall(e.set, v, level_of_bridge(from)) else ok, err = pcall(e.set, v) end
 	if not ok then q.report("share", tostring(name), err) end
@@ -146,6 +155,10 @@ local function on_update()
 	local now = time_global()
 	local q = qc()
 	if q.is_map_server() then
+		if not said_hello then
+			said_hello = true
+			api.send_event(EV, cm().encode({ k = HELLO }), 0)
+		end
 		tick_up(now)
 	elseif q.is_host() then
 		tick_down(now)

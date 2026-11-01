@@ -160,6 +160,29 @@ qc.with_level_of(1, function()
 end)
 stock_again("after nesting")
 
+print("== from inside a scope, a player of the world server's own level")
+qc.with_level_of(1, function()
+	local seen
+	qc.with_level_of(0, function() seen = level.name() end)
+	check(seen == "l01_escape", "his level, not the scope's")
+	check(level.name() == "k00_marsh", "and the scope stands again")
+end)
+stock_again("after leaving and coming back")
+
+print("== a timer started in a scope looks at the same level")
+local TIMERS = {}
+CreateTimeEvent = function(ev, act, t, f, ...) TIMERS[#TIMERS + 1] = { f = f, p = { ... } } end
+local STOCK_CTE = CreateTimeEvent
+local fired
+qc.with_level_of(1, function()
+	CreateTimeEvent("x", "y", 3, function(a) fired = { a, level.name(), db.storage[600] ~= nil } end, 5)
+end)
+check(CreateTimeEvent == STOCK_CTE, "CreateTimeEvent is the stock's again")
+check(level.name() == "l01_escape", "the timer is not running yet")
+TIMERS[1].f(unpack(TIMERS[1].p))
+check(fired and fired[1] == 5 and fired[2] == "k00_marsh" and fired[3] == true, "it fires on that level")
+stock_again("after a timer")
+
 print("== by the target: who stands there")
 local names = {}
 qc.with_target(600, 0, "task", function() names[1] = level.name() names[2] = far.in_scope().peer end)
@@ -205,7 +228,7 @@ check(logged[1] and logged[1]:find("700: another level", 1, true) and logged[1]:
 
 print("== orders")
 local SENT = {}
-coop.send_event = function(name, payload, target) SENT[#SENT + 1] = { name = name, target = target } return true end
+coop.send_event = function(name, payload, target) SENT[#SENT + 1] = { name = name, payload = payload, target = target } return true end
 local CLOCK = 1000
 time_global = function() return CLOCK end
 local before = #SENT
@@ -221,6 +244,14 @@ for _ = 1, 5 do
 end
 check(far.orders_held() == 0, "after the last try it is carried out here")
 check(SIM.killed == 600, "on the record")
+
+print("== \"the actor\" of an order is the player of the scope: on a map server id 0 is a ghost")
+local real_send, sent_order = qc.send, nil
+qc.send = function(name, t) sent_order = t return true end
+qc.with_level_of(1, function() o:set_relation(3, ACTOR) end)
+qc.send = real_send
+check(sent_order and sent_order.v == "relation" and sent_order.b == 500, "the player's avatar, not the ghost")
+far._orders_clear()
 
 print("== an order for an object that is no more")
 o:give_info_portion("x")

@@ -145,12 +145,12 @@ local function guard(f, d, script, what, skip_ret, err_ret)
 			return skip_ret
 		end
 		note(d, "ran")
+		local rotate = (d == "host" or d == "level") and what == "actor_on_update" and ROTATE[script]
 		if client then
+			if rotate then return finish(d, script, what, err_ret, pcall(as_player_in_turn, script, f, ...)) end
 			return finish(d, script, what, err_ret, pcall(f, ...))
 		end
-		if (d == "host" or d == "level") and what == "actor_on_update" and ROTATE[script] then
-			return as_player_in_turn(script, f, ...)
-		end
+		if rotate then return as_player_in_turn(script, f, ...) end
 		return f(...)
 	end
 	wrappers[w] = true

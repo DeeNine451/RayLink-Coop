@@ -66,6 +66,8 @@ local function map_server() return api ~= nil and qc().is_map_server() end
 
 local stats = { scopes = 0, orders = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
 
+local scope = nil -- the far view that is open
+
 -------------------------------------------------------------------------------
 -- Levels
 -------------------------------------------------------------------------------
@@ -233,8 +235,14 @@ function class:object(section)
 end
 function class:is_talking() return false end
 function class:is_stalker() return true end
+-- What a player last struck with: a hit a task waits for says it (nta_utils.is_axe). A record knows no hand.
+local hands = {}
+function class:active_item()
+	local sec = hands[self[4]]
+	if not sec then return nil end
+	return setmetatable({ item_id = 0, item_section = sec, item_condition = 1, item_owner = self }, item_class)
+end
 -- what the task scripts ask most, by a scan of tasks_*, task_functor and task_status_functor: a record has no answer to these, nil is the true one
-function class:active_item() return nil end
 function class:best_enemy() return nil end
 function class:best_weapon() return nil end
 function class:item_in_slot() return nil end
@@ -289,7 +297,6 @@ end
 -------------------------------------------------------------------------------
 -- The far view
 -------------------------------------------------------------------------------
-local scope = nil
 local names_of = {} -- level -> { a = { anomaly name -> id }, z = { zone name -> id } }, from its map server
 
 function in_scope() return scope end
@@ -400,6 +407,17 @@ local function open(lid, peer, what)
 	db.anomaly_by_name = names_table(s, "a")
 	_G.alife = function() return s.sim_view end
 	s.sim_view = sim_view(s, s.sim)
+	-- a task's timer started here looks at the same level when it fires: tasks_fate kills its dead squad three seconds later
+	s.cte = _G.CreateTimeEvent
+	if type(s.cte) == "function" then
+		_G.CreateTimeEvent = function(ev, act, timer, f, ...)
+			if type(f) == "function" then
+				local g = f
+				f = function(...) return reopen(lid, peer, what, g, ...) end
+			end
+			return s.cte(ev, act, timer, f, ...)
+		end
+	end
 	scope = s
 	q.set_far_view(s.view)
 	stats.scopes = stats.scopes + 1
@@ -410,6 +428,7 @@ local function close(s)
 	scope = s.prev
 	db.anomaly_by_name = s.anomalies
 	_G.alife = s.sim
+	_G.CreateTimeEvent = s.cte
 	qc().set_far_view(scope and scope.view or nil)
 end
 
@@ -423,11 +442,20 @@ local function usable(lid)
 	return lid ~= nil and split() and world_server() and lid ~= my_level()
 end
 
--- fn on the level of player `peer`. The world server's own level, or split levels off: fn as it is.
+-- A timer of a scope, when it fires.
+function reopen(lid, peer, what, fn, ...)
+	if not usable(lid) then return fn(...) end
+	return finish(open(lid, peer, what), pcall(fn, ...))
+end
+
+-- fn on the level of player `peer`. The world server's own level, or split levels off: fn as it is; from inside a scope it leaves it.
 function with_level_of(peer, fn, ...)
 	local l = levels()
 	local lid = split() and type(peer) == "number" and l.level_of_player(peer) or nil
-	if not usable(lid) then return fn(...) end
+	if not usable(lid) then
+		if scope and lid ~= nil and lid == my_level() then return at_home(fn, ...) end
+		return fn(...)
+	end
 	return finish(open(lid, peer, "player " .. tostring(peer)), pcall(fn, ...))
 end
 
@@ -444,12 +472,12 @@ function with_target(id, peer, what, fn, ...)
 		end
 	end
 	if who == nil or lid == my_level() then
-		if who ~= nil then return fn(...) end
+		if who ~= nil then return at_home(fn, ...) end
 		local l = levels()
 		lid = type(peer) == "number" and l.level_of_player(peer) or nil
 		who = peer
 	end
-	if not usable(lid) then return fn(...) end
+	if not usable(lid) then return at_home(fn, ...) end
 	return finish(open(lid, who, what), pcall(fn, ...))
 end
 
@@ -457,15 +485,17 @@ end
 function at_home(fn, ...)
 	local s = scope
 	if not s then return fn(...) end
-	local anomalies, sim = db.anomaly_by_name, _G.alife
+	local anomalies, sim, cte = db.anomaly_by_name, _G.alife, _G.CreateTimeEvent
 	scope = nil
 	db.anomaly_by_name = s.anomalies
 	_G.alife = s.sim
+	_G.CreateTimeEvent = s.cte
 	qc().set_far_view(nil)
 	local function back(ok, ...)
 		scope = s
 		db.anomaly_by_name = anomalies
 		_G.alife = sim
+		_G.CreateTimeEvent = cte
 		qc().set_far_view(s.view)
 		if not ok then error((...), 0) end
 		return ...
@@ -593,6 +623,8 @@ local function orders_tick(now)
 	for q, o in pairs(orders) do
 		if not alife_object(o.id) then
 			carry_out(q, o, "gone")
+		elseif obj_of(o.id) then
+			carry_out(q, o, "it came home")
 		else
 			local bridge = bridge_of_level(level_of_id(o.id))
 			if not bridge or (o.bridge and bridge ~= o.bridge) then
@@ -637,7 +669,8 @@ local function on_ack(t, from)
 	local o = q and orders[q]
 	if not o then return end
 	stats.acks = stats.acks + 1
-	if t.r == 1 then orders[q] = nil else carry_out(q, o, "it went home") end
+	-- not online there yet: the tick asks again, a player near it brings it online; when it never comes the record takes the order
+	if t.r == 1 then orders[q] = nil end
 end
 
 function orders_held()
@@ -733,6 +766,7 @@ end
 local HIT_RULES = {
 	brain_game = { section = "controller" },
 	gambling_with_life = { section = "bloodsucker" },
+	vengence_amplified = { section = "chimera" }, -- the axe in the hand of who strikes
 	the_living_fire = { story = "the_living_fire_prometheus" },
 }
 
@@ -774,8 +808,9 @@ local function pass_hit(callback, obj, h, bone)
 	hit_at[id] = now
 	local who = h.draftsman
 	stats.hits_out = stats.hits_out + 1
+	local okh, item = pcall(function() return who and who:active_item() end)
 	qc().send("far_hit", { c = callback, i = id, k = who and who:id() or nil, b = bone, p = tonumber(h.power) or 0, t = tonumber(h.type) or 0,
-		w = tonumber(h.weapon_id) }, 0)
+		w = tonumber(h.weapon_id), s = okh and item and item:section() or nil }, 0)
 end
 
 local function monster_on_before_hit(obj, h, bone) pass_hit("monster_on_before_hit", obj, h, bone) end
@@ -788,6 +823,7 @@ local function on_hit(t, from)
 	if not victim then return end
 	if t.c ~= "monster_on_before_hit" and t.c ~= "npc_on_before_hit" then return end
 	stats.hits_in = stats.hits_in + 1
+	if tonumber(t.k) and type(t.s) == "string" then hands[tonumber(t.k)] = t.s end
 	local h = { power = t.p, type = t.t, impulse = 0, weapon_id = t.w, direction = function() return vector():set(0, 0, 1) end,
 		draftsman = tonumber(t.k) and object(tonumber(t.k)) or nil }
 	with_target(id, nil, "a hit", relay, t.c, victim, h, t.b, { ret_value = true })
@@ -817,6 +853,7 @@ function print_status()
 end
 
 function _tick() next_tick = 0; tick() end
+function _orders_clear() orders = {} end
 function _stats() return stats end
 function _names_of() return names_of end
 

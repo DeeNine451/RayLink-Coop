@@ -88,7 +88,7 @@ local REWRITES = {
 		{ 'if who:section() == "actor" then', "if coop_npc_is_player_id(who:id()) then" },
 	},
 	-- split levels: a smart of a level a map server leads is not online here, and the far view cannot reach a field of a C++ class. A squad
-	-- it holds did its first update there (coop_levels_brain): online here means it is loaded, or the task waits for it for ever.
+	-- it holds did its first update there (coop_levels_brain): held there means it is loaded, or the task waits for it for ever.
 	tasks_fate = {
 		{ "smrt and smrt.online then", "smrt and coop_quests_core.online_of(smrt) then" },
 	},
@@ -97,10 +97,10 @@ local REWRITES = {
 	},
 	tasks_assault = {
 		{ "local is_online = v.online", "local is_online = coop_quests_core.online_of(v)" },
-		{ "if not ( squad.first_update ) then", "if not ( squad.first_update or squad.online ) then", all = true },
+		{ "if not ( squad.first_update ) then", "if not ( squad.first_update or coop_quests_core.held_there(squad) ) then", all = true },
 	},
 	tasks_dominance = {
-		{ "if not ( squad.first_update ) then", "if not ( squad.first_update or squad.online ) then", all = true },
+		{ "if not ( squad.first_update ) then", "if not ( squad.first_update or coop_quests_core.held_there(squad) ) then", all = true },
 	},
 	-- enemy audit F6 (2026-10-31): the psy drain under a controller asks the controller for an enemy; a client's copy of a
 	-- monster is a puppet without AI and has none. On a client the distance (10 m) decides.

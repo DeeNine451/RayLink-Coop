@@ -55,6 +55,12 @@ check(runs_on_map_server("actor_on_update", "grok_sniper_remover"), "GAMMA's sni
 check(runs_on_map_server("monster_on_update", "xcv_phantoms"), "phantoms")
 check(runs_on_map_server("time_event", "xcv_phantoms_fix"), "phantoms: the release of offline squads")
 
+print("== a wrapper of a world handler keeps its domain")
+check(coop_native.route("actor_on_interaction", "coop_levels_tables") == "host", "drx_da_main's handler in a wrapper: world server only, one roll")
+check(domain_on_map_server("actor_on_interaction", "coop_levels_tables") == "host", "and not on a map server")
+check(domain_on_map_server("time_event", "coop_npc_adapters") == "level", "trader_autoinject.timed_update in its wrapper")
+check(not coop_native.runs_here("level", false), "which a client does not run")
+
 print("== with one level for everybody level is host")
 check(coop_native.runs_here("level", true) and coop_native.runs_here("host", true), "the host runs both")
 check(not coop_native.runs_here("level", false) and not coop_native.runs_here("host", false), "a client neither")
