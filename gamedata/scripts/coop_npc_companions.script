@@ -74,7 +74,7 @@ local function report(what, err) P.report(TAG, what, err) end
 local EV_CMD, EV_INFO = "npc.comp", "npc.comp_info"
 local EV_LEAD, EV_MSG, EV_REQ, EV_GO = "npc.comp_lead", "npc.comp_msg", "npc.comp_req", "npc.comp_go"
 local EV_ITEM, EV_ITEMS = "npc.comp_item", "npc.comp_items"
-local EV_FOLLOW, EV_ADOPT = "npc.comp_follow", "npc.comp_adopt"
+local EV_FOLLOW, EV_ADOPT, EV_TALK = "npc.comp_follow", "npc.comp_adopt", "npc.comp_talk"
 
 -- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order.
 local ACTIONS = {
@@ -590,6 +590,19 @@ function leader_of(npc)
 	return nil
 end
 
+-- Whom this NPC takes for "the actor" on this process: its leader; on a map server, whose actor is a ghost, a companion with no leader
+-- here goes to the nearest player of the level. nil: nobody, it runs as it is.
+function follows(npc)
+	if next(leaders) ~= nil then
+		local lead = leader_of(npc)
+		if lead then return lead end
+	end
+	if not P.is_map_server() then return nil end
+	local cs = axr_companions and axr_companions.companion_squads
+	if type(cs) ~= "table" or next(cs) == nil or not is_companion_squad(squad_of(npc)) then return nil end
+	return (P.nearest(npc))
+end
+
 -- Ruling F2-32b, the owner's change of 2026-11-01: a companion's inventory is the group's. Asked by the engine for an item move.
 function is_group_companion(npc)
 	return is_companion_squad(squad_of(npc)) and true or false
@@ -710,7 +723,7 @@ local function hunted_player(self)
 	if not (self.st and self.st.target == "actor") then return nil end
 	local squad = squad_of(self.object)
 	local cs = axr_companions and axr_companions.companion_squads
-	if squad and type(cs) == "table" and cs[squad.id] then return nil end
+	if squad and type(cs) == "table" and cs[squad.id] ~= nil then return nil end -- false: loaded, no update yet
 	local pos = self.object:position()
 	local best, best_d
 	for _, o in ipairs(P.everyone()) do
@@ -729,7 +742,9 @@ local function patch_beh()
 	orig.beh = ex
 	ab.execute = function(self, ...)
 		if host_on and not P.in_identity() then
-			local lead = next(leaders) ~= nil and leader_of(self.object) or hunted_player(self)
+			-- this target reads a var of the actor, which a proxy has not (axr_beh set_desired_target)
+			local anomaly = self.st and self.st.target == "task_target_anomaly"
+			local lead = not anomaly and (follows(self.object) or hunted_player(self))
 			if lead then
 				stats.follow = stats.follow + 1
 				return P.with_identity(lead, ex, self, ...)
@@ -741,7 +756,7 @@ end
 
 -- The leader of this companion for stock code outside axr_beh; nil: run it as it is.
 local function lead_for(npc)
-	if host_on and next(leaders) ~= nil and not P.in_identity() then return leader_of(npc) end
+	if host_on and not P.in_identity() then return follows(npc) end
 	return nil
 end
 
@@ -782,7 +797,7 @@ end
 
 -- Is this companion led by the player the code runs for: the one under with_identity, else the host?
 local function led_here(npc)
-	local lead = leader_of(npc)
+	local lead = follows(npc)
 	if P.in_identity() then return lead ~= nil and lead:id() == db.actor:id() end
 	return lead == nil
 end
@@ -880,6 +895,29 @@ local function patch_leader_paths()
 	local NPC = idiots_lib("illish.lib.npc")
 	if NPC then patch_idiots(NPC) end
 	patch_enemy_rule()
+end
+
+-- A companion's logic starts a talk with "the actor" (beh_companion.ltx: the ecologists' talk at the destination): his leader's machine
+-- opens it. The stock runs it on this process's actor, a host who may not be near, a ghost on a map server.
+local function patch_force_talk()
+	local fx = _G["xr_effects"]
+	local f = fx and fx.force_talk
+	if type(f) ~= "function" or orig.force_talk then return end
+	orig.force_talk = f
+	fx.force_talk = function(actor, npc, p)
+		local lead = host_on and npc and follows(npc)
+		local peer = lead and P.peer_of(lead)
+		if type(peer) == "number" then
+			P.send(EV_TALK, { i = npc:id(), b = p and p[1] == "true" or false }, peer)
+			return
+		end
+		if not P.is_map_server() then return f(actor, npc, p) end
+	end
+end
+
+local function client_on_talk(t)
+	local npc = type(t.i) == "number" and level.object_by_id(P.to_local(t.i))
+	if npc and db.actor then db.actor:run_talk_dialog(npc, t.b == true) end
 end
 
 -- Companions a task gives (on_init of the escort, raid and hostage tasks, Mystery of the Swamps, the speaker of
@@ -1389,7 +1427,7 @@ function on_game_start()
 	if not rawget(_G, "coop") then return end
 	if not installed then
 		for _, s in ipairs({ { "client actions", patch_client_actions }, { "beh", patch_beh },
-			{ "task squads", wrap_task_squads }, { "leader paths", patch_leader_paths }, { "dialog", patch_dialog },
+			{ "task squads", wrap_task_squads }, { "leader paths", patch_leader_paths }, { "force talk", patch_force_talk }, { "dialog", patch_dialog },
 			{ "items", patch_items } }) do
 			local ok, err = pcall(s[2])
 			if not ok then report("install " .. s[1], err) end
@@ -1404,6 +1442,7 @@ function on_game_start()
 	P.on(EV_ITEM, host_on_item, "host", TAG)
 	P.on(EV_MSG, client_on_msg, "client", TAG)
 	P.on(EV_ITEMS, client_on_items, "client", TAG)
+	P.on(EV_TALK, client_on_talk, "client", TAG)
 	P.on(EV_FOLLOW, on_follow, nil, TAG)
 	P.on(EV_ADOPT, on_adopt, nil, TAG)
 	local share = rawget(_G, "coop_levels_share") or coop_levels_share

@@ -106,6 +106,7 @@ local STYPE_RESTRICTOR = 4
 local installed = false
 local host_on = false -- host with at least one client (refreshed every 250 ms)
 local applying = false -- client: applying a host section
+local leading = false -- host: a companion's logic is switching under its leader's identity
 local replaying = false -- client: running a relayed effect
 local ctx = {} -- host: stack of replicated restrictors whose condlist is being evaluated
 
@@ -530,9 +531,27 @@ local function team_try_switch(npc, st, actor, l)
 	return switched
 end
 
+-- Whom this NPC takes for "the actor": a companion's leader (coop_npc_companions.follows).
+local function followed(npc)
+	local c = rawget(_G, "coop_npc_companions")
+	return c and c.follows and c.follows(npc) or nil
+end
+
+-- A companion's logic runs for its leader: distances, sight and the functors of its condlists read him. The infos of those condlists stay
+-- the world's (pick_section), and [meet] stays with the nearest player: it does not pass here.
+local function switch_for_leader(lead, npc, st)
+	leading = true
+	local ok, r = pcall(P.with_identity, lead, orig.try_switch, npc, st, lead)
+	leading = false
+	if not ok then error(r, 0) end
+	return r
+end
+
 local function try_switch(npc, st, actor)
 	if installed and npc and P.active() then
 		if host_on then
+			local lead = actor and followed(npc)
+			if lead then return switch_for_leader(lead, npc, st) end
 			local l = st and st.logic
 			if actor and l and has_actor_conds(st, l) and not is_local_restrictor(npc) then
 				return team_try_switch(npc, st, actor, l)
@@ -776,14 +795,21 @@ local function patch_conditions()
 	end
 	wrap("dist_to_actor_le", function(f) return function(actor, npc, p)
 		if team_actor(actor, npc) and p and p[1] ~= nil and npc then
+			if P.in_identity() then return f(db.actor, npc, p) end -- to the leader of a companion
 			return P.nearest_dist_sqr(npc:position()) <= tonumber(p[1]) ^ 2
 		end
 		return f(actor, npc, p)
 	end end)
 	wrap("dist_to_actor_ge", function(f) return function(actor, npc, p)
 		if team_actor(actor, npc) and p and p[1] ~= nil and npc then
+			if P.in_identity() then return f(db.actor, npc, p) end
 			return P.nearest_dist_sqr(npc:position()) >= tonumber(p[1]) ^ 2
 		end
+		return f(actor, npc, p)
+	end end)
+	-- reads a var of the actor, which a proxy has not
+	wrap("dist_to_task_target_anomaly_le", function(f) return function(actor, npc, p)
+		if P.in_identity() then return P.with_identity(P.own_actor(), f, actor, npc, p) end
 		return f(actor, npc, p)
 	end end)
 	-- A proxy has no vision of its own (a puppet): "the player sees it" = it sees the player.
@@ -841,7 +867,44 @@ end
 -------------------------------------------------------------------------------
 -- Host: condlist context of replicated restrictors
 -------------------------------------------------------------------------------
+-- A condlist under a leader's identity: the stock reads and gives "the actor's" infos on db.actor, and a proxy holds none of the world's
+-- (the engine's story knows the actor alone). They are read and given here, on this process's own actor; the rest goes to the stock line by
+-- line: cond = { section, { checks }, { effects } }, kind 1 + 2 -, [3] set for an NPC's own flag (xr_logic.extract_conditions).
+local function pick_for_leader(obj, npc, condlist)
+	local actor = P.own_actor()
+	for i = 1, #condlist do
+		local cond = condlist[i]
+		local met, checks = true, {}
+		for _, c in ipairs(cond[2] or {}) do
+			if (c[2] == 1 or c[2] == 2) and not c[3] then
+				if actor:has_info(c[1]) ~= (c[2] == 1) then
+					met = false
+					break
+				end
+			else
+				checks[#checks + 1] = c
+			end
+		end
+		if met then
+			local sets, infos = {}, {}
+			for _, s in ipairs(cond[3] or {}) do
+				if (s[2] == 1 or s[2] == 2) and not s[3] then infos[#infos + 1] = s else sets[#sets + 1] = s end
+			end
+			local section = orig.pick(obj, npc, { { cond[1], checks, sets } })
+			if section ~= nil then
+				for _, s in ipairs(infos) do
+					local has = actor:has_info(s[1])
+					if s[2] == 1 and not has then actor:give_info_portion(s[1]) elseif s[2] == 2 and has then actor:disable_info_portion(s[1]) end
+				end
+				return section
+			end
+		end
+	end
+	return nil
+end
+
 local function pick_section(obj, npc, condlist)
+	if leading and condlist and P.in_identity() then return pick_for_leader(obj, npc, condlist) end
 	if not host_on or npc == nil then return orig.pick(obj, npc, condlist) end
 	local ok_id, id = pcall(id_of, npc) -- npc can be a game object, a server object or a squad
 	local st = ok_id and type(id) == "number" and db.storage[id]

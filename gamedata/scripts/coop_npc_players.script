@@ -301,6 +301,11 @@ function in_identity()
 	return depth > 0
 end
 
+-- This process's own actor, also inside an identity scope: with_identity(own_actor(), f, ...) runs f as stock inside one.
+function own_actor()
+	return real_actor()
+end
+
 -------------------------------------------------------------------------------
 -- Events
 -------------------------------------------------------------------------------

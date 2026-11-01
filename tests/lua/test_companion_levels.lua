@@ -212,6 +212,62 @@ local function stand(opts)
 	return W
 end
 
+-- The stock's xr_logic, as far as a condlist goes: { section, { checks }, { effects } }, kinds 1 + 2 - 3 = functor, [3] of an info: an NPC's.
+local function logic_env(M)
+	local E = M.env
+	E.modules = { stype_restrictor = 4 }
+	E.utils_obj = { npc_in_zone = function() return false end }
+	local xl = {}
+	E.xr_logic = xl
+	function xl.pick_section_from_condlist(obj, npc, condlist)
+		local actor = E.db.actor
+		M.picked_as = obj and obj:id()
+		for _, cond in ipairs(condlist or {}) do
+			local met = true
+			for _, c in ipairs(cond[2] or {}) do
+				local who = c[3] and npc or actor
+				if c[2] == 1 then met = who:has_info(c[1])
+				elseif c[2] == 2 then met = not who:has_info(c[1])
+				elseif c[2] == 3 then met = E.xr_conditions[c[1]](obj, npc, c[3])
+				end
+				if not met then break end
+			end
+			if met then
+				for _, s in ipairs(cond[3] or {}) do
+					local who = s[3] and npc or actor
+					if s[2] == 1 then who:give_info_portion(s[1])
+					elseif s[2] == 2 then who:disable_info_portion(s[1])
+					else E.xr_effects[s[1]](obj, npc, s[3])
+					end
+				end
+				return cond[1] or ""
+			end
+		end
+		return nil
+	end
+	function xl.switch_to_section(npc, ini, section)
+		if section == "" or section == nil then return false end
+		M.section = section
+		return true
+	end
+	function xl.try_switch_to_another_section(npc, st, actor)
+		M.switch_as, M.stock_try = E.db.actor:id(), (M.stock_try or 0) + 1
+		for _, c in ipairs(st.logic or {}) do
+			if xl.switch_to_section(npc, st.ini, xl.pick_section_from_condlist(actor, npc, c.condlist)) then return true end
+		end
+		return false
+	end
+	function xl.determine_section_to_activate() return "nil" end
+	function xl.initialize_obj() end
+	function xl.save_obj() end
+	E.xr_conditions = {
+		dist_to_actor_le = function(actor, npc, p) return npc:position():distance_to_sqr(actor:position()) <= p[1] ^ 2 end,
+		dist_to_actor_ge = function(actor, npc, p) return npc:position():distance_to_sqr(actor:position()) >= p[1] ^ 2 end,
+		dist_to_task_target_anomaly_le = function(actor, npc, p) return E.load_var(E.db.actor, "task_target_anomaly") ~= nil end,
+	}
+	E.xr_effects = { force_talk = function(actor, npc, p) M.stock_talk = E.db.actor:id() end }
+end
+
 local function last(M) return M.msgs and M.msgs[#M.msgs] or "" end
 local function ask(M, t)
 	M.env.coop_npc_players.send("npc.comp_lead", t, 0)
@@ -561,6 +617,138 @@ do
 	local m = {}
 	H.fire("save_state", m)
 	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
+end
+
+print("== a map server's companion with no living leader goes to the nearest player, not to the ghost")
+do
+	local W = stand({ mk_knows_all = true })
+	local Mk = W.Mk
+	W.refresh()
+	Mk.env.axr_beh.action_beh.execute({ object = W.comp2 })
+	check(Mk.beh_actor == 501, "no leader at all: the player of the level")
+	W.CM._leaders()[400] = 500 -- a leader who is not here, a squad that may not go
+	Mk.se[301] = { companion_cannot_teleport = true }
+	W.refresh()
+	Mk.beh_actor = nil
+	Mk.env.axr_beh.action_beh.execute({ object = W.comp2 })
+	check(Mk.beh_actor == 501, "a leader on another level: the same")
+	check(W.CM.follows(W.comp2):id() == 501, "follows answers that player")
+	local alone = Mk.add(make_obj(302, 7, 0, 0, { _name = "stranger" }))
+	check(W.CM.follows(alone) == nil, "an NPC of no squad of the group: nobody")
+	Mk.env.axr_beh.action_beh.execute({ object = alone })
+	check(Mk.beh_actor == 0, "stock for it")
+	W.proxy_b._alive = false
+	Mk.env.coop_npc_players.invalidate()
+	Mk.beh_actor = nil
+	Mk.env.axr_beh.action_beh.execute({ object = W.comp2 })
+	check(Mk.beh_actor == 0, "nobody alive on the level: nothing to go to, stock")
+end
+
+print("== the world server: a companion of the host stays the host's, a loaded one is no scripted enemy")
+do
+	local W = stand()
+	local H = W.H
+	W.refresh()
+	check(W.CH.follows(W.comp) == nil, "the host's own: nobody to follow but him")
+	H.env.db.actor._pos = vec(1000, 0, 0)
+	H.env.coop_npc_players.invalidate()
+	H.env.axr_companions.companion_squads[300] = false -- a loaded squad until its first update
+	H.beh_actor = nil
+	H.env.axr_beh.action_beh.execute({ object = W.comp, st = { target = "actor" } })
+	check(H.beh_actor == 0, "its target 'actor' is not the nearest player")
+end
+
+print("== task_target_anomaly reads the var of the actor: it runs without the leader's identity")
+do
+	local W = stand()
+	local H = W.H
+	W.CH._leaders()[300] = 500
+	W.refresh()
+	H.env.axr_beh.action_beh.execute({ object = W.comp, st = { target = "task_target_anomaly" } })
+	check(H.beh_actor == 0, "the target that reads the actor's var: no identity")
+	H.env.axr_beh.action_beh.execute({ object = W.comp, st = { target = "actor" } })
+	check(H.beh_actor == 500, "any other: its leader")
+end
+
+print("== the logic of a companion: 'the actor' is its leader, the infos of a condlist the world's")
+do
+	local W = stand({ env = logic_env })
+	local H, Mk, A, B = W.H, W.Mk, W.A, W.B
+	W.LH = load_script(H, "coop_npc_logic")
+	W.LM = load_script(Mk, "coop_npc_logic")
+	W.LH.on_game_start()
+	W.LM.on_game_start()
+	W.CH._leaders()[300] = 500
+	W.refresh()
+	local xl, xc = H.env.xr_logic, H.env.xr_conditions
+	local seen
+	xc.who = function(actor, npc) seen = { param = actor:id(), db = H.env.db.actor:id() }; return true end
+	local function logic(condlist) return { ini = {}, logic = { { name = "on_info", condlist = condlist } } } end
+	check(xl.try_switch_to_another_section(W.comp, logic({ { "beh@x", { { "who", 3 } } } }), H.env.db.actor) == true, "the stock switch runs")
+	check(seen.param == 500 and seen.db == 500, "its functors get the leader, as parameter and as db.actor")
+	check(H.switch_as == 500, "under his identity")
+	check(H.env.db.actor:id() == 0, "the identity ends with it")
+	local plain = H.add(make_obj(290, 7, 0, 0))
+	seen = nil
+	xl.try_switch_to_another_section(plain, logic({ { "x", { { "who", 3 } } } }), H.env.db.actor)
+	check(seen.param == 0 and seen.db == 0, "an NPC of nobody: stock")
+
+	H.env.db.actor:give_info_portion("world_flag")
+	H.section = nil
+	xl.try_switch_to_another_section(W.comp, logic({ { "beh@flag", { { "world_flag", 1 } } } }), H.env.db.actor)
+	check(H.section == "beh@flag", "an info of the condlist is the world's: a proxy has none of them")
+	H.section = nil
+	xl.try_switch_to_another_section(W.comp, logic({ { "beh@no", { { "world_flag", 2 } } }, { "beh@second" } }), H.env.db.actor)
+	check(H.section == "beh@second", "and its absence: the first line fails, the next one stands")
+	W.comp:give_info_portion("npcx_x")
+	H.section = nil
+	xl.try_switch_to_another_section(W.comp, logic({ { "beh@own", { { "npcx_x", 1, 1 } } } }), H.env.db.actor)
+	check(H.section == "beh@own", "an NPC's own flag stays his")
+
+	-- beh_companion.ltx: on_info2 = {-force_started =dist_to_actor_le(3)} %+force_started =force_talk(true)%
+	local talk = logic({ { "", { { "force_started", 2 }, { "dist_to_actor_le", 3, { 3 } } }, { { "force_started", 1 }, { "force_talk", 3, { "true" } } } } })
+	W.proxy_a._pos = vec(100, 0, 0) -- far from it, the host next to it
+	H.env.db.actor._pos = vec(6, 0, 0)
+	H.env.coop_npc_players.invalidate()
+	local talks = {}
+	A.env.db.actor.run_talk_dialog = function(self, npc, brk) talks[#talks + 1] = { npc = npc:id(), brk = brk } end
+	xl.try_switch_to_another_section(W.comp, talk, H.env.db.actor)
+	pump()
+	check(#talks == 0 and not H.env.db.actor:has_info("force_started"), "dist_to_actor is the leader's: the host next to it counts for nothing")
+	check(xc.dist_to_actor_le(H.env.db.actor, W.comp, { 3 }) == true, "[meet] and the rest, outside the scope: the nearest player")
+	check(H.env.coop_npc_players.with_identity(W.proxy_a, xc.dist_to_actor_le, H.env.db.actor, W.comp, { 3 }) == false,
+		"asked about the host's actor under the identity: the leader")
+	check(H.env.coop_npc_players.with_identity(W.proxy_a, xc.dist_to_actor_ge, H.env.db.actor, W.comp, { 3 }) == true, "the same for ge")
+	W.proxy_a._pos = vec(5, 0, 0)
+	H.env.coop_npc_players.invalidate()
+	xl.try_switch_to_another_section(W.comp, talk, H.env.db.actor)
+	pump()
+	check(#talks == 1 and talks[1].npc == 201 and talks[1].brk == true, "force_talk: the leader's machine opens the talk")
+	check(H.stock_talk == nil, "not the host's")
+	check(H.env.db.actor:has_info("force_started") and not W.proxy_a:has_info("force_started"), "the latch is the world's info, the proxy has none")
+	xl.try_switch_to_another_section(W.comp, talk, H.env.db.actor)
+	pump()
+	check(#talks == 1, "it latches: once")
+
+	H.env.save_var(H.env.db.actor, "task_target_anomaly", "anomaly_1")
+	check(H.env.coop_npc_players.with_identity(W.proxy_a, xc.dist_to_task_target_anomaly_le, W.proxy_a, W.comp, { 15 }) == true,
+		"dist_to_task_target_anomaly reads the actor's var under the identity too: the switch to beh@task_target_anomaly stands")
+
+	-- a map server: the same, the nearest player for a companion with no leader
+	local xm = Mk.env.xr_logic
+	local mtalk = logic({ { "", { { "dist_to_actor_le", 3, { 3 } } }, { { "force_talk", 3, { "false" } } } } })
+	B.env.db.actor.run_talk_dialog = function(self, npc, brk) talks[#talks + 1] = { npc = npc:id(), brk = brk } end
+	xm.try_switch_to_another_section(W.comp2, mtalk, Mk.env.db.actor)
+	pump()
+	check(#talks == 2 and talks[2].npc == 301 and talks[2].brk == false, "on a map server force_talk goes to the player it takes for its leader")
+	check(Mk.stock_talk == nil, "the ghost talks to nobody")
+
+	-- the host's own companion: stock
+	W.CH._leaders()[300] = nil
+	W.refresh()
+	H.stock_talk = nil
+	H.env.xr_effects.force_talk(H.env.db.actor, W.comp, { "true" })
+	check(H.stock_talk == 0, "a companion of the host: stock")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
