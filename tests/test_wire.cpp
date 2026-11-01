@@ -360,6 +360,7 @@ TEST(manifest_counts_a_text_file_whatever_its_line_endings)
 {
 	CHECK(manifest_text_file("configs\\system.ltx"));
 	CHECK(manifest_text_file("Scripts/_g.SCRIPT"));
+	CHECK(manifest_text_file("scripts/illish/patches/xr_danger.lua")); // live 2026-11-01: two of these in the list of a laptop
 	CHECK(manifest_text_file("configs\\text\\eng\\st_dialogs.xml"));
 	CHECK(manifest_text_file("particles\\hit_fx\\hit_flesh_02a.pg"));
 	CHECK(manifest_text_file("particles\\hit_fx\\effects\\a.pe"));
