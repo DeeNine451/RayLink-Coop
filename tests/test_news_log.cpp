@@ -2,7 +2,7 @@
 // Live 2026-11-01: a client read the host's "You are hosting a co-op session" in the log of his PDA.
 #include "test_util.h"
 
-#include "xrCoop/coop_news_log.h"
+#include "coop_news_log.h"
 
 #include <string>
 #include <vector>
