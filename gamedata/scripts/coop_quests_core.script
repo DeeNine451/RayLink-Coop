@@ -381,7 +381,13 @@ local function install_condlist_tracker()
 			holding_infos = false
 			pcall(api.story_hold_infos, false)
 		end
-		if not ok then error(r, 0) end
+		if not ok then
+			-- live 2026-11-01: the task list opened on a client, a mod's condition asked for the host's simulation. What a client
+			-- reads here decides nothing: it is no reason to end his game.
+			if not is_client() then error(r, 0) end
+			report("core", "a condlist on a client", r)
+			return nil
+		end
 		return r
 	end
 end

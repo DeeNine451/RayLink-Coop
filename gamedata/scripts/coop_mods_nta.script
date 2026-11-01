@@ -119,6 +119,14 @@ local function install_helpers(nu)
 			return orig(...)
 		end
 	end)
+	-- A precondition picks its target among the simulation's stalkers (tasks_intercept_artifact); a client has no simulation,
+	-- and his task list reads preconditions. Live 2026-11-01: sim_stalkers nil, fatal.
+	C().wrap(nu, "find_random_stalker", "nta_utils.find_random_stalker", function(orig)
+		return function(...)
+			if C().is_client() then return nil end
+			return orig(...)
+		end
+	end)
 	-- is_axe() asks db.actor's hand. The kill tasks (brain game, gambling with life, vengence amplified; coop_npc_compat
 	-- rewrites their handlers) pass the killer: his hand decides, not the host's.
 	C().wrap(nu, "is_axe", "nta_utils.is_axe", function(orig)

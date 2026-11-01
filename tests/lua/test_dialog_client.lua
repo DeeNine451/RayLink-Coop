@@ -215,6 +215,14 @@ do
 	Cm.env.xr_effects.make_stash = function() Cm.env.treasure_manager.create_random_stash(nil, nil, nil, true) end
 	Cm.env.xr_logic.pick_section_from_condlist(Cm.actor, Cm.npc, { src = "%=make_stash%" })
 	check(count_sent(Cm, "quests.act") == sent, "inside a condlist the client sends nothing")
+
+	-- live 2026-11-01: the task list opened on a client, a mod's condition needs the host's simulation: fatal
+	local function host_only() local nothing = nil; return nothing.here end
+	Cm.env.xr_effects.host_only = host_only
+	Hm.env.xr_effects.host_only = host_only
+	local okc, picked = pcall(Cm.env.xr_logic.pick_section_from_condlist, Cm.actor, Cm.npc, { src = "%=host_only%" })
+	check(okc and picked == nil, "a condition that needs the host's world does not end a client's game")
+	check(not pcall(Hm.env.xr_logic.pick_section_from_condlist, Hm.actor, Hm.npc, { src = "%=host_only%" }), "on the host an error stays the stock's")
 end
 
 -- ---------------------------------------------------------------- trade

@@ -115,7 +115,11 @@ do
 	check(inside == true and not qc.in_condlist(), "in_condlist true only inside a condlist")
 	Cm.env.xr_effects.boom = function() error("boom") end
 	local ok = pcall(Cm.env.xr_logic.pick_section_from_condlist, nil, nil, { src = "%=boom%" })
-	check(not ok and not qc.in_condlist(), "an error inside a condlist propagates and resets the depth")
+	check(ok and not qc.in_condlist(), "an error inside a condlist on a client ends there and resets the depth")
+	Hm.env.xr_effects.boom = Cm.env.xr_effects.boom
+	local qh = Hm.env.coop_quests_core
+	ok = pcall(Hm.env.xr_logic.pick_section_from_condlist, nil, nil, { src = "%=boom%" })
+	check(not ok and not qh.in_condlist(), "on the host it propagates and resets the depth")
 end
 
 do
