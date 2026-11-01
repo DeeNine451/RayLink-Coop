@@ -74,7 +74,7 @@ local function report(what, err) P.report(TAG, what, err) end
 local EV_CMD, EV_INFO = "npc.comp", "npc.comp_info"
 local EV_LEAD, EV_MSG, EV_REQ, EV_GO = "npc.comp_lead", "npc.comp_msg", "npc.comp_req", "npc.comp_go"
 local EV_ITEM, EV_ITEMS = "npc.comp_item", "npc.comp_items"
-local EV_FOLLOW, EV_ADOPT, EV_TALK = "npc.comp_follow", "npc.comp_adopt", "npc.comp_talk"
+local EV_FOLLOW, EV_ADOPT, EV_TALK, EV_DROP = "npc.comp_follow", "npc.comp_adopt", "npc.comp_talk", "npc.comp_drop"
 
 -- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order.
 local ACTIONS = {
@@ -1236,6 +1236,28 @@ local function on_adopt(t, from)
 	if not adopt(t.s, t.l, t) then adopting[t.s] = { t = t, at = time_global() } end
 end
 
+-- A task of the world server lets a squad go that a map server holds (Hidden Threat, the player left the station): the NPC is there.
+local function on_drop(t, from)
+	if not (P.is_map_server() and from == 0 and type(t.s) == "number") then return end
+	leaders[t.s], adopting[t.s], lead_peer[t.s] = nil, nil, nil
+	local squad = alife_object(t.s)
+	if squad and is_companion_squad(squad) then axr_companions.dismiss_special_squad(squad) end
+end
+
+local function patch_dismiss()
+	local ac = axr_companions
+	local f = ac and ac.dismiss_special_squad
+	if type(f) ~= "function" or orig.dismiss then return end
+	orig.dismiss = f
+	ac.dismiss_special_squad = function(squad)
+		local bridge = squad and far_leader(squad.id) and map_server_of(squad)
+		f(squad)
+		if not squad then return end
+		note_far(nil, squad.id)
+		if bridge then P.send(EV_DROP, { s = squad.id }, bridge) end
+	end
+end
+
 -- Who leads what, between the processes (coop_levels_share): the squads of a map server's level are its own, the save is the world
 -- server's. Up: what this map server leads. Down: all of it, a new map server takes the squads of its level, once: what it changed
 -- after that is newer than what the world server has heard.
@@ -1493,7 +1515,7 @@ function on_game_start()
 	if not installed then
 		for _, s in ipairs({ { "client actions", patch_client_actions }, { "beh", patch_beh },
 			{ "task squads", wrap_task_squads }, { "leader paths", patch_leader_paths }, { "force talk", patch_force_talk }, { "dialog", patch_dialog },
-			{ "items", patch_items } }) do
+			{ "items", patch_items }, { "dismiss", patch_dismiss } }) do
 			local ok, err = pcall(s[2])
 			if not ok then report("install " .. s[1], err) end
 		end
@@ -1510,6 +1532,7 @@ function on_game_start()
 	P.on(EV_TALK, client_on_talk, "client", TAG)
 	P.on(EV_FOLLOW, on_follow, nil, TAG)
 	P.on(EV_ADOPT, on_adopt, nil, TAG)
+	P.on(EV_DROP, on_drop, nil, TAG)
 	local share = rawget(_G, "coop_levels_share") or coop_levels_share
 	if share then
 		share.up("comp_leaders", leaders_here, leaders_heard)

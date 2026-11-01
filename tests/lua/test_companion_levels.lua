@@ -69,6 +69,11 @@ local function stock(M, W)
 		return not E.se_load_var(squad:commander_id(), nil, "companion_cannot_teleport")
 	end
 	function ac.get_inventory_table() return {} end
+	function ac.dismiss_special_squad(squad)
+		if ac.companion_squads[squad.id] == nil then return end
+		ac.companion_squads[squad.id] = nil
+		M.dismissed = squad.id
+	end
 	function ac.list_actor_squad_by_id()
 		local t = {}
 		for id in pairs(ac.companion_squads) do t[#t + 1] = id end
@@ -543,6 +548,32 @@ do
 	check(#sent_named(H, "npc.comp_adopt") == sent + 1, "once")
 	pump()
 	check(W.CM._leaders()[400] == 501, "the map server leads it")
+end
+
+print("== a task lets go of a squad on a map server's level (Hidden Threat: the player left the station)")
+do
+	local W = stand()
+	local H, Mk = W.H, W.Mk
+	local ac = H.env.axr_companions
+	local before = W.CH.squads_now()
+	Mk.env.axr_companions.companion_squads[400] = nil
+	ac.companion_squads[400] = W.squads[400]
+	W.CH.claim_since(before, 2)
+	pump()
+	check(W.CM._leaders()[400] == 501 and Mk.env.axr_companions.companion_squads[400] ~= nil, "(the map server leads it)")
+	ac.dismiss_special_squad(W.squads[400])
+	pump()
+	check(H.dismissed == 400, "the stock runs on the world server")
+	check(Mk.dismissed == 400 and Mk.env.axr_companions.companion_squads[400] == nil, "and on the map server, where the NPC is")
+	check(W.CM._leaders()[400] == nil, "it has no leader there")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders == nil, "nor in the save")
+	ac.companion_squads[300] = W.squads[300]
+	H.dismissed, Mk.dismissed = nil, nil
+	local sent = #sent_named(H, "npc.comp_drop")
+	ac.dismiss_special_squad(W.squads[300])
+	check(H.dismissed == 300 and #sent_named(H, "npc.comp_drop") == sent, "a squad of the host's level: stock alone")
 end
 
 print("== a member online when the map server takes the squad, a companion of it already")
