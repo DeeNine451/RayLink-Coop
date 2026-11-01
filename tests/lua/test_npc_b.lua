@@ -181,7 +181,7 @@ H.env.axr_beh.action_beh.execute({ object = comp })
 check(H.beh_actor == 500, "companion thinks with 'actor' = its leader's proxy")
 H.env.db.actor._pos = vec(12, 0, 1)
 H.env.actor_menu = { set_msg = function(_, m) H.refused_msg = m end }
-H.env.dialogs_axr_companion.remove_companions_from_squad(H.env.db.actor, comp)
+H.env.dialogs_axr_companion.remove_companions_from_squad(H.env.db.actor, comp, "dm_companion_leave", "2")
 check(CH._leaders()[300] == 500 and H.refused_msg ~= nil, "only who holds control dismisses it: the host hears why")
 C.env.dialogs_axr_companion.remove_companions_from_squad(C.env.db.actor, comp_c)
 pump()

@@ -21,12 +21,15 @@
 	  nta_utils.spawn_companion_squad) join the player the task was taken by (coop_tasks.reward_peer): the squads such
 	  a call adds are led by his proxy. add_speaker_companion takes the giver of the request for the speaker (the host
 	  is not talking while a client takes the task).
-	Control (owner's request 2026-11-01): a companion squad follows one leader, a player. Only he dismisses it (a line of the
-	  list of commands that any other player gets refused, with the reason), the other orders are everybody's. The leader
-	  hands it to another player
-	  (a line of the companion's list of commands, then a line per player), any other player takes it (the dialog
-	  dm_coop_companion_take, modxml_coop_companions). The host decides (host_lead, its own dialog takes the same path): the
-	  asker must be a player of the session, the NPC a living companion within 15 m, and only the leader hands over.
+	Control (owner's request 2026-11-01): a companion squad follows one leader, a player. Only he dismisses it (dm_companion_leave,
+	  any other player gets refused, with the reason; the same action in a story's dialog, the Fanatic's training, is anybody's, and the
+	  story's next recruit gives the companion back to who led it), the other orders are everybody's. The leader hands it to another
+	  player (a line of the companion's list of commands, then a line per player; a character with no such list, the Fanatic, has the
+	  dialog dm_coop_companion_hand), any other player takes it (the dialog dm_coop_companion_take, modxml_coop_companions). The host
+	  decides (host_lead, its own dialog takes the same path): the asker must be a player of the session, the NPC a living companion
+	  within 15 m, and only the leader hands over. Control passes between players of one level (owner 2026-11-02): a player of another
+	  level stays in the list, says so, and the process that leads the level refuses by the engine's table (coop.levels.level_of_player);
+	  a story's NPC of a task the same.
 	  Both players get a short message. leaders[] holds the character (a proxy id, which a character keeps in the save); a
 	  squad with no entry is the host's. A line of npc.comp_info says who leads it. The answer takes a round trip and the
 	  talk window reads the conditions at once, so a line just used stays away for TAKE_WAIT_MS.
@@ -40,18 +43,29 @@
 	  "the actor" (target 0, the stock's scripted_target) goes to the leader instead, and Useful Idiots' offline rule stays;
 	  the keys, the wheel, the panel and the squad list of the host cover the squads he leads (filtered companion_squads,
 	  own_squads_only); a client's orders reach his companions at any distance; a client's go-to key: npc.comp_go.
-	  Level change: nothing to do. The stock on_level_changing puts the squads at the group's arrival, and the engine puts
-	  every mover's character there too (host_place_movers), a late one next to the host (bring_proxy_to_level).
+	  A group's level change: nothing to do. The stock on_level_changing puts the squads at the group's arrival, and the engine
+	  puts every mover's character there too (host_place_movers), a late one next to the host (bring_proxy_to_level).
 	  Inventory: one backpack for the group. The host's stock table is the truth, a client's moves go there (npc.comp_item), the
 	  list goes to every player (npc.comp_items), so what one gave another can take; F2-32b reads is_group_companion.
+	Split levels (docs\SPLIT_LEVELS.md 7a): leaders[] and the stock's table are the business of the process that leads the squad's level.
+	  A map server's actor is a ghost: a companion with no leader here goes to the nearest player (follows). Its leaders go up into the
+	  world server's save and down onto a new map server (coop_levels_share). A squad claimed by a task on a map server's level goes there
+	  (npc.comp_adopt, with the stock's marks and the logic of a companion). The host's level change takes only his own squads
+	  (companion_squad_can_teleport). A leader who goes to another level: the authority lets the squad go, the world server teleports it
+	  to his body when nothing of it is online at a map server, the level of arrival adopts it; a squad the stock forbids to teleport
+	  (told to wait, the Fanatic) stays and keeps its leader's entry.
 	Not covered: the Useful Idiots panel on a client (axr_companions.companion_squads is empty there), unstuck()'s distance to
-	  the host, the overweight gate on a client, split levels (F3a: one level for the group today).
+	  the host, the overweight gate on a client.
 
 	Events (ids in host numbering):
-	  npc.comp       client -> host  { f = "module.function", i = npc }
+	  npc.comp       client -> host  { f = "module.function", i = npc, d = dialog id }
 	  npc.comp_info  host -> client  { i = npc, s = "flag1,flag2,...", l = peer who holds control, nil: nobody's companion }
 	  npc.comp_lead  client -> host  { a = "take" | "give", i = npc, to = peer }
-	  npc.comp_msg   host -> client  { k = string id, n = NPC's name, w = player's nick }
+	  npc.comp_msg   host -> client  { k = string id, n = NPC's name, w = player's nick, a = peer whose nick n is, on the reader's machine }
+	  npc.comp_talk  host -> client  { i = npc, b = allow break }: force_talk of a companion's logic, on its leader's machine
+	  npc.comp_follow map server -> world server  { s = squad, p = leader's peer, l = his character }: his squad is let go
+	  npc.comp_adopt world server -> map server   { s = squad, l = character, p = peer, d, c = the stock's marks: no dismiss, no teleport }
+	  npc.comp_drop  world server -> map server   { s = squad }: a task let it go
 	  npc.comp_req   client -> host  {}: his Lua state is new, send everything
 	  npc.comp_go    client -> host  { x, y, z }: his companions go there
 	  npc.comp_item  client -> host  { i = npc, o = item, g = true: gave, false: took }
@@ -59,7 +73,8 @@
 	Stock functions wrapped: dialogs_axr_companion.<the actions below>, is_not_actor_companion,
 	dm_init_is_actor_companion, dialogs_lostzone and dialogs_agr_u companion setters (if present),
 	axr_beh.action_beh.execute, sim_squad_scripted:get_current_task, axr_companions.cycle_state, move_to_point,
-	list_actor_squad_by_id, get_nearby_companion, is_assigned_item, is_assigned_companion, transfer_item; of Useful Idiots
+	list_actor_squad_by_id, get_nearby_companion, is_assigned_item, is_assigned_companion, transfer_item, companion_squad_can_teleport,
+dismiss_special_squad; xr_effects.force_talk; of Useful Idiots
 	NPC.getCompanions, getTargetCompanion, the surge patch's companion helpers, onEvalEnemy, its combat actions.
 --]]
 

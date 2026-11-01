@@ -20,6 +20,8 @@
 	    within [coop_npc] scene_radius of them. The host runs the effect only if its own player is in the
 	    audience; the others get it as npc.fx and run it on their own actor. enable_ui/enable_imput/
 	    stop_tutorial always run on the host too (an unlock never hurts, sr_cutscene locks outside condlists).
+	  - A companion with a leader (coop_npc_companions.follows) switches for him: try_switch runs under his identity, the infos of its
+	    condlists stay the world's (pick_for_leader), dist_to_actor_* under an identity reads that player.
 	  - A physics object (ph_idle, ph_button: lifts, valves, switches) remembers who used it (generic_physics_binder
 	    use_callback): its actor effects, the delayed sections of on_timer / on_game_timer included, go to that player, and
 	    a logic that teleports takes the players within scene_radius of him along. Nobody used it: stock, the host's.
@@ -49,7 +51,7 @@
 	Stock functions wrapped: xr_logic.try_switch_to_another_section, determine_section_to_activate,
 	initialize_obj, switch_to_section, pick_section_from_condlist, save_obj; sr_timer.action_timer.update;
 	sr_crow_spawner.crowkiller.update; sr_monster.fake_monster.update; xr_conditions.dist_to_actor_le,
-	dist_to_actor_ge, actor_see_npc, actor_near_smart, actor_in_zone, actor_out_zone, actor_inside_zone,
+	dist_to_actor_ge, dist_to_task_target_anomaly_le, actor_see_npc, actor_near_smart, actor_in_zone, actor_out_zone, actor_inside_zone,
 	has_active_tutorial; xr_effects.<actor effects>; bind_physic_object.generic_physics_binder.use_callback;
 	ph_code.codepad.use_callback.
 --]]
