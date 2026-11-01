@@ -23,7 +23,7 @@
 		<text>Camp updated: arrival point.</text>
 	</string>
 	<string id="st_coop_cp_updated_story">
-		<text>Camp updated: story checkpoint.</text>
+		<text>Camp updated: checkpoint.</text>
 	</string>
 	<string id="st_coop_cp_updated_mod">
 		<text>Camp updated: a place marked by a mod.</text>
