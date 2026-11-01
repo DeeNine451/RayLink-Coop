@@ -346,7 +346,9 @@ TEST(levels_wire_move_refused)
 	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(1, 0xFFFF, 0, 0, 0)), std::string("refused")); // an exit is an object
 	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 9, 5, 1.f, 0.f)), std::string("read"));
 	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 0xFFFF, 5, 1.f, 0.f)), std::string("refused")); // a graph vertex
-	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 9, 0xFFFFFFFFu, 1.f, 0.f)), std::string("refused")); // a level vertex
+	// Live 2026-11-01: a stock ChangeLevel asks level.vertex_id of a point on another level and gets none. Refused here, the host
+	// said nothing back and the client stayed in the dark of the route's fade.
+	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 9, 0xFFFFFFFFu, 1.f, 0.f)), std::string("read"));
 	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 9, 5, std::nanf(""), 0.f)), std::string("refused"));
 	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 9, 5, std::numeric_limits<float>::infinity(), 0.f)), std::string("refused"));
 	CHECK_EQ(refused<LevelMoveMsg>(move_bytes(2, 9, 5, 2.0e6f, 0.f)), std::string("refused")); // beyond any level
