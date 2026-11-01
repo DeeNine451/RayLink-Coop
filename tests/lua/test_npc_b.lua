@@ -562,7 +562,7 @@ SQ.check_online_status = function(self)
 	if self.position:distance_to(H.env.db.actor:position()) <= 75 then self.forced_online_status = false else self.forced_online_status = nil end
 end
 local SM = {}
-SM.try_respawn = function(self) self.respawned = true end
+SM.try_respawn = function(self) self.respawned = true; self.saw = self.is_on_actor_level end
 H.env.sim_squad_scripted = { sim_squad_scripted = SQ }
 H.env.smart_terrain = { se_smart_terrain = SM }
 local KS = load_script(H, "coop_npc_compat")
@@ -575,12 +575,57 @@ check(squad.forced_online_status == false, "a squad 20 m from a client's charact
 local far_squad = { online = false, position = vector():set(proxy:position().x + 900, 0, proxy:position().z + 900) }
 SQ.check_online_status(far_squad)
 check(far_squad.forced_online_status == nil, "far from every player: no rule")
-local smart = { position = vector():set(proxy:position().x + 30, 0, proxy:position().z), respawn_radius = 150 }
+local LEVEL_OF = { [1] = 1, [2] = 2 } -- game vertex -> level
+H.env.game_graph = function() return { vertex = function(_, v) return { level_id = function() return LEVEL_OF[v] end } end } end
+local RECORD = { m_game_vertex_id = 1, position = proxy:position() } -- the world server's record of the client's body
+H.env.alife_object = function(id) return id == 500 and RECORD or nil end
+local smart = { position = vector():set(proxy:position().x + 30, 0, proxy:position().z), respawn_radius = 150, m_game_vertex_id = 1 }
 SM.try_respawn(smart)
 check(smart.respawned == nil, "no respawn 30 m from a client")
-local far_smart = { position = vector():set(proxy:position().x + 900, 0, proxy:position().z + 900), respawn_radius = 150 }
+local far_smart = { position = vector():set(proxy:position().x + 900, 0, proxy:position().z + 900), respawn_radius = 150, m_game_vertex_id = 2 }
 SM.try_respawn(far_smart)
 check(far_smart.respawned == true, "far from every player: respawns")
+
+print("== coop_npc_compat: a player on a map server's level is a record on the world server, and he counts")
+H.objects[500] = nil -- he stands on a map server's level: no game object here
+H.env.coop_npc_players.invalidate()
+RECORD.m_game_vertex_id = 2
+RECORD.position = vector():set(7000, 0, 7000)
+local his_smart = { position = vector():set(7030, 0, 7000), respawn_radius = 150, m_game_vertex_id = 2 }
+SM.try_respawn(his_smart)
+check(his_smart.respawned == nil, "no respawn 30 m from the record of his body")
+local on_his_level = { position = vector():set(9000, 0, 7000), respawn_radius = 150, m_game_vertex_id = 2 }
+SM.try_respawn(on_his_level)
+check(on_his_level.respawned == true and on_his_level.saw == true, "far from him: it respawns, with his level as the actor's (respawn_only_level)")
+check(on_his_level.is_on_actor_level == nil, "and the smart stays as it was")
+RECORD.m_game_vertex_id = 1
+local another_level = { position = vector():set(7030, 0, 7000), respawn_radius = 150, m_game_vertex_id = 2 }
+SM.try_respawn(another_level)
+check(another_level.respawned == true, "the same coordinates on another level are nobody's")
+
+print("== coop_npc_compat: on a map server its ghost is nobody")
+H, C, proxy, hav = pair()
+SQ = {}
+SQ.check_online_status = function(self)
+	if self.position:distance_to(H.env.db.actor:position()) <= 75 then self.forced_online_status = false else self.forced_online_status = nil end
+end
+H.env.sim_squad_scripted = { sim_squad_scripted = SQ }
+H.env.smart_terrain = { se_smart_terrain = {} }
+KS = load_script(H, "coop_npc_compat")
+KS.on_game_start()
+KS._set_host_on(true)
+H.env.coop.is_map_server = function() return true end
+H.env.coop.is_host = function() return false end
+H.env.db.actor._pos = vector():set(5000, 0, 5000) -- where the ghost stands
+H.env.coop_npc_players.invalidate()
+local at_ghost = { online = false, position = vector():set(5010, 0, 5000) }
+SQ.check_online_status(at_ghost)
+check(at_ghost.forced_online_status == nil, "a squad next to the ghost is near nobody")
+local at_player = { online = false, position = vector():set(proxy:position().x + 20, 0, proxy:position().z) }
+SQ.check_online_status(at_player)
+check(at_player.forced_online_status == false, "a squad 20 m from a player of its level stays offline")
+check(H.env.coop_npc_players.any_within(vector():set(5001, 0, 5000), 50) == false, "nothing is near the ghost")
+check(H.env.coop_npc_players.any_within(proxy:position(), 50) == true, "the player of the level is")
 H.env.sim_squad_scripted, H.env.smart_terrain = nil, nil
 
 print("== coop_npc_compat: helicopters hunt every player as the actor (audit B7)")

@@ -5,12 +5,16 @@
 	targets of a few of them with the stock board (their ALife records are the world's) and tells that map server; there
 	the stock squad update asks the board and gets that answer. A squad nobody decided for yet stays at its smart.
 
-	The logic of an NPC (m_data.game_object[id], what xr_logic reads when it comes online) travels with the object: the
-	engine asks logic_of when it hands an object over and logic_in when it takes one (coop_levels_alife.cpp).
+	The logic of an NPC (m_data.game_object[id], what xr_logic reads when it comes online) travels with the object, and so does
+	what a squad's stock update keeps in Lua: its smart, its target, how long it stays. The engine asks logic_of when it hands an
+	object over and logic_in when it takes one (coop_levels_alife.cpp): both sides of a transfer know where the squad was going,
+	whichever side ran it last. Who updates a squad: the world server while it is offline at home, on a map server the binder of
+	its commander while it is online, the engine (coop_levels_xfer.cpp xfer_scheduled) while it is held and offline.
 
 	API:
 		coop_levels_brain.logic_of(id)   the engine: coop.levels.logic_put(bytes of this object's logic)
 		coop_levels_brain.logic_in(id)   the engine: coop.levels.logic_bytes() is the logic of this object
+		coop_levels_brain.left(id)       the engine on a map server: this object went home
 --]]
 
 local api = rawget(_G, "coop")
@@ -89,15 +93,53 @@ local function patch_board()
 	end
 end
 
+local function squad_at(id)
+	local se = alife_object(id)
+	return se and se.clsid and se:clsid() == clsid.online_offline_group_s and se or nil
+end
+
+-- What sim_squad_scripted keeps between updates and no packet carries while it lives.
+local function mind_of(se)
+	return {
+		smart = se.smart_id, target = se.assigned_target_id, current = se.current_target_id, action = se.current_action,
+		task = se.task_target_id, script = se.scripted_target, idle = se.idle_time, lock = se.__lock or nil,
+		rush = se.rush_to_target, spawn = se.respawn_point_id, prop = se.respawn_point_prop_section,
+		stay = se.stay_time and utils_data.CTime_to_table(se.stay_time) or nil,
+	}
+end
+
+local function mind_in(se, t)
+	if se.smart_id ~= t.smart then SIMBOARD:assign_squad_to_smart(se, t.smart) end
+	se.assigned_target_id, se.current_target_id, se.current_action = t.target, t.current, t.action
+	se.task_target_id, se.scripted_target, se.idle_time = t.task, t.script, t.idle or se.idle_time
+	se.__lock, se.rush_to_target = t.lock, t.rush
+	se.respawn_point_id, se.respawn_point_prop_section = t.spawn, t.prop
+	se.stay_time = t.stay and utils_data.CTime_from_table(t.stay) or nil
+	se.first_update = true -- the side it came from did what is done once: the items of item_on_all exist
+end
+
 function logic_of(id)
-	local t = alife_storage_manager.get_state().game_object[id]
+	local squad = squad_at(id)
+	local t = squad and mind_of(squad) or alife_storage_manager.get_state().game_object[id]
 	local ok, bytes = pcall(marshal.encode, t)
 	levels().logic_put(t and ok and bytes or "")
 end
 
 function logic_in(id)
 	local ok, t = pcall(marshal.decode, levels().logic_bytes())
-	if ok and type(t) == "table" then alife_storage_manager.get_state().game_object[id] = t end
+	if not (ok and type(t) == "table") then return end
+	local squad = squad_at(id)
+	if squad then
+		mind_in(squad, t)
+	else
+		alife_storage_manager.get_state().game_object[id] = t
+	end
+end
+
+-- Map server: a squad went home. It keeps no job on this level's smarts; if it comes back, its mind comes with it.
+function left(id)
+	local squad = squad_at(id)
+	if squad and squad.smart_id and SIMBOARD then SIMBOARD:assign_squad_to_smart(squad, nil) end
 end
 
 function _targets() return targets end

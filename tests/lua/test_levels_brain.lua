@@ -6,17 +6,38 @@ dofile("tests/lua/support/stubs.lua")
 
 local BODIES = { [300] = { id = 300, smart_id = 40 }, [310] = { id = 310, smart_id = 41 }, [40] = { id = 40 }, [50] = { id = 50 }, [41] = { id = 41 } }
 alife_object = function(id) return BODIES[id] end
+clsid = { online_offline_group_s = 7 }
+utils_data = {
+	CTime_to_table = function(t) return { at = t.at } end,
+	CTime_from_table = function(t) return { at = t.at } end,
+}
 local asked = {}
 sim_board = { simulation_board = {} }
 function sim_board.simulation_board:get_squad_target(squad)
 	asked[#asked + 1] = squad.id
 	return BODIES[50]
 end
+local ASSIGNED = {}
+function sim_board.simulation_board:assign_squad_to_smart(squad, smart)
+	ASSIGNED[#ASSIGNED + 1] = { squad = squad.id, smart = smart }
+	squad.smart_id = smart
+end
 SIMBOARD = setmetatable({}, { __index = sim_board.simulation_board })
 
 local LOGIC = { game_object = {} }
 alife_storage_manager = { get_state = function() return LOGIC end }
-marshal = { encode = function(t) return "<" .. tostring(t.active) .. ">" end, decode = function(s) return { active = s:match("<(.*)>") } end }
+local MINDS = {} -- a table of a squad cannot be read back from a stub string
+marshal = {
+	encode = function(t)
+		if t.active then return "<" .. tostring(t.active) .. ">" end
+		MINDS[#MINDS + 1] = t
+		return "#" .. #MINDS
+	end,
+	decode = function(s)
+		local n = tonumber(s:match("#(%d+)"))
+		return n and MINDS[n] or { active = s:match("<(.*)>") }
+	end,
+}
 
 local KEPT = nil
 local SQUADS = { 300, 310 }
@@ -71,5 +92,40 @@ check(KEPT == "", "an object without logic: nothing")
 KEPT = "<camper@1>"
 coop_levels_brain.logic_in(203)
 check(LOGIC.game_object[203] and LOGIC.game_object[203].active == "camper@1", "what came is what xr_logic reads when it comes online")
+
+print("== a squad's mind goes with it, both ways")
+local function group(id, t)
+	t.id = id
+	t.clsid = function() return clsid.online_offline_group_s end
+	BODIES[id] = t
+	return t
+end
+local here = group(400, {
+	smart_id = 41, assigned_target_id = 50, current_target_id = 41, current_action = 1, task_target_id = 9, scripted_target = "esc_smart",
+	idle_time = 7200, rush_to_target = true, respawn_point_id = 40, respawn_point_prop_section = "sect", stay_time = { at = 123 },
+})
+coop_levels_brain.logic_of(400)
+local bytes = KEPT
+check(type(bytes) == "string" and bytes ~= "", "a squad's mind goes to the engine as bytes")
+local there = group(401, { smart_id = 40, assigned_target_id = 40, current_action = 0, idle_time = 100 })
+KEPT = bytes
+ASSIGNED = {}
+coop_levels_brain.logic_in(401)
+check(#ASSIGNED == 1 and ASSIGNED[1].smart == 41 and there.smart_id == 41, "it is assigned to the smart it was at, on the board of this side")
+check(there.assigned_target_id == 50 and there.current_target_id == 41 and there.current_action == 1, "it goes where it was going")
+check(there.task_target_id == 9 and there.scripted_target == "esc_smart" and there.idle_time == 7200, "a task's target and its stay come with it")
+check(there.respawn_point_id == 40 and there.respawn_point_prop_section == "sect", "the smart that spawned it counts it when it dies")
+check(there.stay_time and there.stay_time.at == 123 and there.rush_to_target == true, "the stay is not started over")
+check(there.first_update == true, "what is done once is not done again on this side")
+ASSIGNED = {}
+KEPT = bytes
+coop_levels_brain.logic_in(401)
+check(#ASSIGNED == 0, "the same smart: nothing changes on the board")
+check(LOGIC.game_object[401] == nil, "a squad's mind is not an NPC's logic")
+coop_levels_brain.left(401)
+check(ASSIGNED[1] and ASSIGNED[1].smart == nil and there.smart_id == nil, "a squad that went home keeps no job on this level")
+ASSIGNED = {}
+coop_levels_brain.left(300)
+check(#ASSIGNED == 0, "an object that is no squad: nothing")
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

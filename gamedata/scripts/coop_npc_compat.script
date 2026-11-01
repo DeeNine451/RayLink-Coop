@@ -255,7 +255,7 @@ end
 
 -- Audit B3 (2026-10-24): a squad may not come online within excl_dist (75 m) of the player - the HOST's player, so
 -- squads popped into view next to a far client. The stock rule runs again as each other player (with_identity); any
--- "no" stands.
+-- "no" stands. On a map server db.actor is its ghost, nobody: the players of its level are all that counts.
 local function wrap_squads()
 	local m = mod("sim_squad_scripted")
 	local cls = m and m.sim_squad_scripted
@@ -263,7 +263,12 @@ local function wrap_squads()
 	if type(f) ~= "function" or orig.squad_online then return end
 	orig.squad_online = f
 	cls.check_online_status = function(self, ...)
-		f(self, ...)
+		local first = host_on and P.is_map_server() and P.others()[1] or nil
+		if first then
+			P.with_identity(first, f, self, ...)
+		else
+			f(self, ...)
+		end
 		if self.forced_online_status ~= nil or self.online or not host_on then return end
 		for _, p in ipairs(P.others()) do
 			local ok, err = pcall(P.with_identity, p, f, self, ...)
@@ -277,7 +282,23 @@ local function wrap_squads()
 	applied[#applied + 1] = "squad_exclusion"
 end
 
--- Audit B4: a smart terrain does not respawn within its respawn_radius of the HOST's player only; any player counts.
+-- Audit B4: a smart terrain does not respawn within its respawn_radius of the HOST's player only; any player counts. The world
+-- server alone respawns (a map server's try_respawn returns, coop_main): for a player on a map server's level it has no object, only
+-- the record of his body, and "the actor is on this level" holds for him too (respawn_only_level).
+local function player_near_record(self, r)
+	local gg = game_graph()
+	local lid = gg:vertex(self.m_game_vertex_id):level_id()
+	local on_level = false
+	for _, p in ipairs(P.players()) do
+		local se = not p.is_self and type(p.avatar_id) == "number" and alife_object(p.avatar_id) or nil
+		if se and gg:vertex(se.m_game_vertex_id):level_id() == lid then
+			on_level = true
+			if se.position:distance_to_sqr(self.position) <= r * r then return true, true end
+		end
+	end
+	return false, on_level
+end
+
 local function wrap_smart_respawn()
 	local m = mod("smart_terrain")
 	local cls = m and m.se_smart_terrain
@@ -285,10 +306,16 @@ local function wrap_smart_respawn()
 	if type(f) ~= "function" or orig.smart_respawn then return end
 	orig.smart_respawn = f
 	cls.try_respawn = function(self, ...)
-		if host_on and self.position and P.any_within(self.position, tonumber(self.respawn_radius) or 150) then
-			return -- a player is near: nothing spawns in his view
-		end
-		return f(self, ...)
+		if not (host_on and self.position) then return f(self, ...) end
+		local r = tonumber(self.respawn_radius) or 150
+		if P.any_within(self.position, r) then return end -- a player is near: nothing spawns in his view
+		local near_one, on_level = player_near_record(self, r)
+		if near_one then return end
+		if self.is_on_actor_level or not on_level then return f(self, ...) end
+		self.is_on_actor_level = true
+		local ok, err = pcall(f, self, ...)
+		self.is_on_actor_level = nil
+		if not ok then error(err, 0) end
 	end
 	applied[#applied + 1] = "smart_respawn"
 end

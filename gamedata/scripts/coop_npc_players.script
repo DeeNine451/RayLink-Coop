@@ -242,7 +242,7 @@ function nearest(pos)
 	local best, best_d = nil, math.huge
 	if not pos then return nil, best_d end
 	local a = real_actor()
-	if a and a:alive() then
+	if a and a:alive() and not is_map_server() then -- a map server's actor is its ghost, nobody
 		best, best_d = a, a:position():distance_to_sqr(pos)
 	end
 	for _, o in ipairs(others()) do
