@@ -130,12 +130,14 @@ Writer map_bytes(uint8_t flags, const std::vector<std::vector<uint8_t>>& players
 	return w;
 }
 
-std::vector<uint8_t> player_row(uint32_t peer, uint16_t level, uint8_t role)
+std::vector<uint8_t> player_row(uint32_t peer, uint16_t level, uint8_t in_world, uint16_t proxy = 500)
 {
 	Writer w;
 	w.u32(peer);
 	w.u16(level);
-	w.u8(role);
+	w.u8(in_world);
+	w.u16(proxy);
+	w.u32(1000);
 	return w.data();
 }
 
@@ -162,23 +164,23 @@ std::string gate_row(uint16_t level, uint8_t gate, const std::string& reason)
 
 TEST(levels_wire_map_roundtrip)
 {
-	// flags + n + 3 x (u32 + u16 + u8) + m + 2 x (u16 + u8 + u8) + g + (u16 + u8 + str "") + (u16 + u8 + str 18)
-	check_roundtrip("LevelMap", sample_map(), 1 + 1 + 3 * 7 + 1 + 2 * 4 + 1 + (2 + 1 + 1) + (2 + 1 + (1 + 18)));
+	// flags + n + 3 x (u32 + u16 + u8 + u16 + u32) + m + 2 x (u16 + u8 + u8) + g + (u16 + u8 + str "") + (u16 + u8 + str 18)
+	check_roundtrip("LevelMap", sample_map(), 1 + 1 + 3 * 13 + 1 + 2 * 4 + 1 + (2 + 1 + 1) + (2 + 1 + (1 + 18)));
 
 	LevelMapMsg empty; // nobody, no server, no gate: the shortest map
 	check_roundtrip("empty LevelMap", empty, 4);
 
 	// A player on no level yet (still loading) is a row too
 	LevelMapMsg loading;
-	loading.players = {{2, kNoLevel, kHelloRolePlayer}};
-	check_roundtrip("loading player", loading, 4 + 7);
+	loading.players = {{2, kNoLevel, 0, kNoObject, 0}};
+	check_roundtrip("loading player", loading, 4 + 13);
 }
 
 TEST(levels_wire_map_limits)
 {
 	std::vector<std::vector<uint8_t>> eight, nine;
 	for (uint32_t p = 0; p < 9; ++p)
-		(p < 8 ? eight : nine).push_back(player_row(p, 1, kHelloRolePlayer));
+		(p < 8 ? eight : nine).push_back(player_row(p, 1, 0));
 	nine.insert(nine.begin(), eight.begin(), eight.end());
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, eight, {})), std::string("read")); // kMaxPlayers rows
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, nine, {})), std::string("refused"));
@@ -208,7 +210,7 @@ TEST(levels_wire_map_limits)
 	// reads as a whole map (a player missing from it would be taken for gone).
 	LevelMapMsg at_limit;
 	for (uint32_t p = 0; p < 8; ++p)
-		at_limit.players.push_back({p, 1, kHelloRolePlayer});
+		at_limit.players.push_back({p, 1, 1, 500, 1000});
 	for (uint16_t l = 0; l < 8; ++l)
 		at_limit.servers.push_back({l, l == 0 ? uint8_t(LevelMapMsg::HostProcess) : uint8_t(LevelMapMsg::MapServerProcess), 1});
 	for (uint16_t l = 0; l < 128; ++l)
@@ -216,7 +218,7 @@ TEST(levels_wire_map_limits)
 	check_write_at_limit("LevelMap with 8 players, 8 servers, 128 gates", at_limit);
 
 	LevelMapMsg nine_players = at_limit;
-	nine_players.players.push_back({0, 1, kHelloRolePlayer});
+	nine_players.players.push_back({0, 1, 1, 500, 1000});
 	check_write_refused("LevelMap with 9 players", nine_players);
 	LevelMapMsg nine_servers = at_limit;
 	nine_servers.servers.push_back({8, LevelMapMsg::MapServerProcess, 1});
@@ -226,24 +228,25 @@ TEST(levels_wire_map_limits)
 	check_write_refused("LevelMap with 129 gates", many_gates);
 	LevelMapMsg twelve;
 	for (uint32_t p = 0; p < 12; ++p)
-		twelve.players.push_back({p % 8, 1, kHelloRolePlayer});
+		twelve.players.push_back({p % 8, 1, 1, 500, 1000});
 	check_write_refused("LevelMap with 12 players", twelve);
 }
 
 TEST(levels_wire_map_bad_rows)
 {
-	const auto ok_player = player_row(1, 4, kHelloRolePlayer);
+	const auto ok_player = player_row(1, 4, 0);
 	// flags: only the two known bits
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(3, {}, {})), std::string("read"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(4, {}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0x80, {}, {})), std::string("refused"));
 
-	// players: a peer is a slot (< kMaxPlayers), listed once; the role is a Hello role
+	// players: a peer is a slot (< kMaxPlayers), listed once; in the world or not
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {ok_player}, {})), std::string("read"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(8, 4, 0)}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {ok_player, ok_player}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 2)}, {})), std::string("refused"));
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, kHelloRoleMapServer)}, {})), std::string("read"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 1)}, {})), std::string("read"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 1, kNoObject)}, {})), std::string("read")); // no character yet
 
 	// servers: a real level, listed once; 0 host process (one), 1 map server; the state is one of four
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 0, 3)})), std::string("read"));
@@ -388,7 +391,7 @@ TEST(levels_wire_move_result_roundtrip)
 			w.u8(verdict_byte);
 			w.u8(reason);
 			w.u16(3);
-			const bool want = verdict_byte <= LevelMoveResultMsg::Refused && reason <= LevelMoveResultMsg::Led &&
+			const bool want = verdict_byte <= LevelMoveResultMsg::Refused && reason <= LevelMoveResultMsg::Invalid &&
 			    ((verdict_byte == LevelMoveResultMsg::Refused) == (reason != LevelMoveResultMsg::None));
 			CHECK_EQ("verdict " + std::to_string(verdict_byte) + " reason " + std::to_string(reason) + " " +
 			        refused<LevelMoveResultMsg>(w),
@@ -449,7 +452,7 @@ TEST(levels_wire_snapshot_and_entity_headers_leave_the_body)
 		we.u8(op);
 		LevelEntityHead e;
 		Reader re(we.ptr(), we.size());
-		const bool want = op <= LevelEntityHead::Report;
+		const bool want = op <= LevelEntityHead::Money;
 		CHECK_EQ(std::string("op ") + std::to_string(op) + (e.read(re) ? " read" : " refused"),
 		    std::string("op ") + std::to_string(op) + (want ? " read" : " refused"));
 	}
@@ -831,7 +834,11 @@ TEST(levels_wire_tunnel_roundtrip_and_refusals)
 		return w;
 	};
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4)), std::string("read"));
-	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(2, uint16_t(Msg::PlayerState), 4)), std::string("refused")); // unknown flag
+	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(8, uint16_t(Msg::PlayerState), 4)), std::string("refused")); // unknown flag
+	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(TunnelMsg::LaneUnreliable, uint16_t(Msg::PlayerState), 4)), std::string("read"));
+	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(TunnelMsg::LaneBulk, uint16_t(Msg::PlayerState), 4)), std::string("read"));
+	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(TunnelMsg::LaneUnreliable | TunnelMsg::LaneBulk, uint16_t(Msg::PlayerState), 4)),
+	    std::string("refused")); // one lane
 	// the peer is a session slot; for everybody on the map it is not looked at
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 7)), std::string("read"));
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 8)), std::string("refused"));

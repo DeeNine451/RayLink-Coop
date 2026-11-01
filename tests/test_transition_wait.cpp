@@ -679,7 +679,27 @@ TEST(transition_message_numbers_and_directions)
 	CHECK(msg_sender(Msg::TransitionVote) == MsgSender::ClientOnly);
 	CHECK(msg_sender(Msg::TransitionState) == MsgSender::HostOnly);
 	CHECK_EQ(std::string(msg_name(Msg::TransitionState)), std::string("TransitionState"));
-	CHECK_EQ(kProtocolVersion, 19u); // 16 attachment snapshots, 17 EntityVisual; older peers are refused by the handshake
+	CHECK_EQ(kProtocolVersion, 20u); // 16 attachment snapshots, 17 EntityVisual; older peers are refused by the handshake
+}
+
+// F3a, the host went alone and every player loads where he stands (plan §1.5): nobody waits for a level that is not his.
+TEST(prepared_load_by_map_enters_level_by_level)
+{
+	using Peers = std::vector<uint32_t>;
+	transition::PreparedLoad l;
+	l.start(5, {0, 1, 2}, 1000);
+	bool garbage_up = false;
+	const auto map_ready = [&garbage_up](uint32_t peer) { return peer != 2 || garbage_up; };
+	CHECK(l.take_entering_by_map(map_ready).empty()); // the server's world is not up: nobody enters a world that is not there
+	l.ready(1, 5);
+	l.ready(2, 5);
+	l.world_up(2000);
+	CHECK(l.take_entering_by_map(map_ready) == (Peers{0, 1})); // 2's map server is not up: the others do not wait for it
+	CHECK(l.take_entering_by_map(map_ready).empty());
+	CHECK(!l.finished());
+	garbage_up = true;
+	CHECK(l.take_entering_by_map(map_ready) == (Peers{2}));
+	CHECK(l.finished());
 }
 
 TEST(transition_vote_round_trip)

@@ -1,7 +1,7 @@
-// Anomaly Coop unit tests: multilevel v1, a player's own process leads his map (docs/SPLIT_LEVELS.md §2). Who leads a level,
+// Anomaly Coop unit tests: split levels, every map is computed on the host's PC (docs/SPLIT_LEVELS.md §7a). Who computes a level,
 // the verdict on a move, the roles of a process, which messages reach a player on another level, the vote of the switch
-// manager on the level a client leads, and the world server's book of objects held by a client (coop_levels_keeper.h) against
-// the real Holder of the transfer core.
+// manager on a map server, and the world server's book of objects held by a map server (coop_levels_keeper.h) against the
+// real Holder of the transfer core.
 #include "test_util.h"
 
 #include "coop_levels_keeper.h"
@@ -33,12 +33,12 @@ Seat seat(uint32_t peer, uint16_t level, bool in_world = true, bool plays = true
 
 xfer::Bytes state_of(uint8_t v) { return xfer::Bytes{v, uint8_t(v + 1)}; }
 
-// One client on one level against the keeper, packets delivered by hand.
+// One map server on one level against the keeper, packets delivered by hand.
 struct Rig
 {
 	Keeper keeper;
-	xfer::Holder holder{7}; // what the client's Holder calls itself; the wire carries no peer
-	uint32_t peer = 2; // his session slot
+	xfer::Holder holder{7}; // what the map server's Holder calls itself; the wire carries no peer
+	uint32_t peer = 0x101; // its bridge
 	uint64_t now = kT0;
 	std::vector<Keeper::Change> changes;
 
@@ -80,83 +80,65 @@ struct Rig
 };
 } // namespace
 
-// ---------------------------------------------------------------- who leads
+// ---------------------------------------------------------------- who computes a level
 
-TEST(lead_host_on_the_level_leads_even_when_a_client_came_first)
+// The owner's decision (2026-10-24, again 2026-11-01): the maps are computed on the host's PC, a client never is an authority.
+TEST(server_the_host_on_a_level_is_its_server_even_when_a_client_came_first)
 {
 	Table t;
 	t.set(seat(1, kGarbage));
 	t.set(seat(0, kGarbage));
-	CHECK_EQ(t.leader_of(kGarbage), 0u);
+	CHECK(t.server_of(kGarbage) == Server::HostProcess);
 }
 
-TEST(lead_the_first_to_come_leads)
+TEST(server_a_level_of_clients_alone_has_a_map_server_however_many_there_are)
 {
 	Table t;
 	t.set(seat(0, kCordon));
 	t.set(seat(2, kGarbage));
-	t.set(seat(1, kGarbage)); // seat 1 comes later: arrival counts, not the slot
-	CHECK_EQ(t.leader_of(kGarbage), 2u);
-	CHECK_EQ(t.leader_of(kCordon), 0u);
-	CHECK_EQ(t.leader_of(kAgroprom), kNoLeader);
-	CHECK_EQ(t.leader_of(kNoLevel), kNoLeader);
-}
-
-TEST(lead_goes_to_the_next_when_the_first_leaves)
-{
-	Table t;
 	t.set(seat(1, kGarbage));
-	t.set(seat(2, kGarbage));
-	t.set(seat(3, kGarbage));
-	t.set(seat(1, kAgroprom));
-	CHECK_EQ(t.leader_of(kGarbage), 2u);
+	CHECK(t.server_of(kGarbage) == Server::MapServer);
+	CHECK(t.server_of(kCordon) == Server::HostProcess);
+	CHECK(t.server_of(kAgroprom) == Server::None);
+	CHECK(t.server_of(kNoLevel) == Server::None);
 	t.remove(2);
-	CHECK_EQ(t.leader_of(kGarbage), 3u);
+	CHECK(t.server_of(kGarbage) == Server::MapServer);
+	t.remove(1);
+	CHECK(t.server_of(kGarbage) == Server::None);
 }
 
-// Coming back is a new arrival; staying on the level, whatever else changes in his seat, is not.
-TEST(lead_comes_anew_only_with_a_new_level)
-{
-	Table t;
-	t.set(seat(1, kGarbage, false));
-	t.set(seat(2, kGarbage));
-	t.set(seat(1, kGarbage, true)); // he finished loading: still the first
-	CHECK_EQ(t.leader_of(kGarbage), 1u);
-	t.set(seat(1, kAgroprom));
-	t.set(seat(1, kGarbage));
-	CHECK_EQ(t.leader_of(kGarbage), 2u);
-}
-
-TEST(lead_a_seat_that_does_not_play_leads_nothing)
+TEST(server_a_seat_that_does_not_play_keeps_no_level_served)
 {
 	Table t;
 	t.set(seat(1, kGarbage, true, false));
-	CHECK_EQ(t.leader_of(kGarbage), kNoLeader);
+	CHECK(t.server_of(kGarbage) == Server::None);
 }
 
 // ---------------------------------------------------------------- the verdict
 
-TEST(move_a_free_level_goes_and_the_mover_leads_it)
+TEST(move_a_free_level_goes_and_a_new_map_server_starts_for_it)
 {
-	CHECK(decide_player_move(Gate::Free, kNoLeader, 0, 1) == MoveVerdict::Go);
-	CHECK(decide_player_move(Gate::BetterTogether, kNoLeader, 0, 1) == MoveVerdict::Go);
+	CHECK(decide_move(Gate::Free, true, 0, 3) == MoveVerdict::Go);
+	CHECK(decide_move(Gate::BetterTogether, true, 2, 3) == MoveVerdict::Go);
 }
 
-TEST(move_to_the_hosts_level_goes_a_client_mirrors_the_host)
+TEST(move_to_a_level_somebody_computes_goes_whatever_the_cap)
 {
-	CHECK(decide_player_move(Gate::Free, 0, 0, 1) == MoveVerdict::Go);
+	CHECK(decide_move(Gate::Free, false, 3, 3) == MoveVerdict::Go); // the host's level, or a running map server's
+	CHECK(decide_move(Gate::Free, false, 0, 0) == MoveVerdict::Go);
 }
 
-TEST(move_to_a_level_another_client_leads_is_refused_until_mirrors_there_exist)
+TEST(move_over_the_cap_of_map_servers_is_refused)
 {
-	CHECK(decide_player_move(Gate::Free, 2, 0, 1) == MoveVerdict::RefuseLed);
-	CHECK(decide_player_move(Gate::Free, 1, 0, 1) == MoveVerdict::Go); // he himself: a seat that repeats its move
+	CHECK(decide_move(Gate::Free, true, 3, 3) == MoveVerdict::RefuseCap);
+	CHECK(decide_move(Gate::BetterTogether, true, 3, 3) == MoveVerdict::RefuseCap);
+	CHECK(decide_move(Gate::Free, true, 0, 0) == MoveVerdict::RefuseCap); // coop_max_map_servers 0: nobody leaves the host's map
 }
 
 TEST(move_together_waits_at_the_board_and_a_bad_gate_is_refused)
 {
-	CHECK(decide_player_move(Gate::Together, kNoLeader, 0, 1) == MoveVerdict::Board);
-	CHECK(decide_player_move(Gate(9), kNoLeader, 0, 1) == MoveVerdict::RefuseInvalid);
+	CHECK(decide_move(Gate::Together, true, 3, 3) == MoveVerdict::Board);
+	CHECK(decide_move(Gate(9), true, 0, 3) == MoveVerdict::RefuseInvalid);
 }
 
 // ---------------------------------------------------------------- the roles
@@ -164,18 +146,27 @@ TEST(move_together_waits_at_the_board_and_a_bad_gate_is_refused)
 TEST(roles_of_the_host_and_of_a_client_as_before_split_levels)
 {
 	CHECK_EQ(int(host_roles()), int(uint8_t(ProcessRole::WorldServer) | uint8_t(ProcessRole::MapAuthority) | uint8_t(ProcessRole::Player)));
-	CHECK(has(client_roles(false), ProcessRole::Mirror));
-	CHECK(has(client_roles(false), ProcessRole::WorldClient));
-	CHECK(has(client_roles(false), ProcessRole::Player));
-	CHECK(!has(client_roles(false), ProcessRole::MapAuthority));
+	CHECK(has(client_roles(), ProcessRole::Mirror));
+	CHECK(has(client_roles(), ProcessRole::WorldClient));
+	CHECK(has(client_roles(), ProcessRole::Player));
 }
 
-TEST(roles_a_leading_client_stays_a_client_of_the_world)
+// A client mirrors, always and on every level: this test is the owner's decision in code. It has to fail the day a client may
+// compute a map.
+TEST(roles_a_client_never_is_a_map_authority)
 {
-	const uint8_t r = client_roles(true);
-	CHECK(has(r, ProcessRole::WorldClient)); // time, story, money still ask the host
-	CHECK(has(r, ProcessRole::Player));
-	CHECK(has(r, ProcessRole::MapAuthority)); // the objects of his level are his
+	CHECK(!has(client_roles(), ProcessRole::MapAuthority));
+	CHECK(!has(client_roles(), ProcessRole::MapServer));
+	CHECK(!has(client_roles(), ProcessRole::WorldServer));
+}
+
+TEST(roles_of_a_map_server)
+{
+	const uint8_t r = map_server_roles();
+	CHECK_EQ(int(r), int(uint8_t(ProcessRole::MapAuthority) | uint8_t(ProcessRole::MapServer) | uint8_t(ProcessRole::WorldClient)));
+	CHECK(has(r, ProcessRole::MapAuthority)); // the objects of its level are its own
+	CHECK(has(r, ProcessRole::WorldClient)); // time, story, money: it asks the world server
+	CHECK(!has(r, ProcessRole::Player)); // its actor is a ghost, nobody plays it
 	CHECK(!has(r, ProcessRole::Mirror));
 	CHECK(!has(r, ProcessRole::WorldServer));
 }
@@ -250,7 +241,7 @@ TEST(takes_a_player_on_another_level_is_heard_for_the_world_and_his_own_data)
 	CHECK(level_takes(Msg::JoinRequest, true, false));
 	CHECK(level_takes(Msg::LevelMove, true, false));
 	CHECK(level_takes(Msg::CheckpointClaim, true, false));
-	// what he leads
+	// the trunk: scope Trunk is the session's business (a player who sends it is kicked before this question)
 	CHECK(level_takes(Msg::LevelXferUp, true, false));
 	CHECK(level_takes(Msg::LevelEntity, true, false));
 	// his own data, for the save
@@ -300,9 +291,9 @@ TEST(vote_a_creature_on_its_way_back_stays_offline)
 
 // ---------------------------------------------------------------- ids
 
-TEST(ids_each_player_has_his_slice_and_nobody_shares_it)
+TEST(ids_each_map_server_has_its_slice_and_nobody_shares_it)
 {
-	CHECK_EQ(int(leader_ids_of(0)), 0); // the host keeps them out of his generator, he makes none of them
+	CHECK_EQ(int(leader_ids_of(0)), 0); // the world server keeps them out of its generator, it makes none of them
 	CHECK_EQ(int(leader_ids_of(8)), 0);
 	uint32_t next = kLeaderIdFirst;
 	for (uint32_t peer = 1; peer <= kLeaderSlots; ++peer)
@@ -406,7 +397,7 @@ TEST(keeper_a_message_of_nobody_is_not_heard)
 	Rig r;
 	xfer::Packet up{xfer::Op::TakeReq, xfer::Key{100, 0}, 7, xfer::kWorld, {}};
 	const xfer::Bytes fresh = state_of(1);
-	CHECK(r.keeper.on_up(5, up, &fresh, r.now).empty()); // peer 5 never connected as a leader
+	CHECK(r.keeper.on_up(5, up, &fresh, r.now).empty()); // peer 5 never connected as a map server
 	CHECK(!r.keeper.away(100));
 }
 

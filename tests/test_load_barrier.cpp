@@ -106,6 +106,21 @@ TEST(barrier_timeout_leaves_laggard)
 }
 
 // LoadReady of an older (or a later) transition is not an answer to this one.
+// A lone player held for his map server (coop_join.cpp host_held_step): the barrier may open while his own world still loads, and an
+// Enter to that screen would be lost.
+TEST(barrier_one_player_enters_only_when_he_is_ready)
+{
+	LoadBarrier b;
+	b.start(7, {3}, true, 1000);
+	b.server_ready(7);
+	CHECK(!b.enters(3, 1000 + kLoadWaitMs - 1));
+	CHECK(b.enter(1000 + kLoadWaitMs)); // the minute is over, the server is up ...
+	CHECK(!b.enters(3, 1000 + kLoadWaitMs)); // ... and he is still loading
+	b.ready(3, 7);
+	CHECK(b.enters(3, 1000 + kLoadWaitMs + 1));
+	CHECK(!b.enters(4, 1000 + kLoadWaitMs + 1)); // nobody of this barrier
+}
+
 TEST(barrier_stale_epoch_ignored)
 {
 	LoadBarrier b;

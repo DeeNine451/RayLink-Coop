@@ -1322,52 +1322,11 @@ TEST(game_messages_the_wrong_way_are_refused)
 	CHECK(b.s.is_active() && !b.disconnected);
 }
 
-// F3a multilevel: a client who leads his level sends what a map server sends, and only he. It stays his to the end of the
-// connection: a leader who moved on has some under way, and that is no reason to kick him.
-TEST(trunk_only_messages_pass_from_a_client_who_leads_and_only_from_him)
-{
-	Node host("Boss", 37141), leader("Lead", 37141), other("Other", 37141);
-	std::vector<uint16_t> at_host;
-	host.s.on(Msg::LevelXferUp, [&at_host](PeerId from, Reader&) { at_host.push_back(from); });
-	std::string err;
-	REQUIRE(host.host(&err));
-	auto pump = [&](uint32_t timeout_ms, const std::function<bool()>& done) {
-		const uint64_t start = t::now_ms();
-		for (;;)
-		{
-			const uint64_t now = t::now_ms();
-			host.s.update(now);
-			leader.s.update(now);
-			other.s.update(now);
-			if (done())
-				return true;
-			if (now - start > timeout_ms)
-				return false;
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
-	};
-	REQUIRE(leader.connect(37141, &err));
-	REQUIRE(pump(5000, [&] { return leader.s.is_active() && host.s.peers().size() == 1; }));
-	REQUIRE(other.connect(37141, &err));
-	REQUIRE(pump(5000, [&] { return other.s.is_active() && host.s.peers().size() == 2; }));
-
-	host.s.allow_trunk(leader.s.self());
-	leader.s.send(kHostPeer, Lane::Reliable, Msg::LevelXferUp, Writer());
-	CHECK(pump(5000, [&] { return !at_host.empty(); }));
-	CHECK_EQ(at_host.size(), size_t(1));
-	CHECK(!leader.disconnected);
-
-	other.s.send(kHostPeer, Lane::Reliable, Msg::LevelXferUp, Writer());
-	CHECK(pump(5000, [&] { return other.disconnected; }));
-	CHECK(kicked(other, "unexpected LevelXferUp"));
-	CHECK_EQ(at_host.size(), size_t(1));
-}
-
 TEST(trunk_only_messages_are_refused_from_everybody_else)
 {
-	// Protocol 11 (F3a): MsgSender::TrunkOnly is what the process that leads a level sends to the host's process. A client
-	// the host did not allow it (Session::allow_trunk) is kicked before any handler, as for HostOnly, and the host
-	// that sends one to a client is ignored (logged), as for ClientOnly. It must not pass like Either.
+	// Protocol 11 (F3a): MsgSender::TrunkOnly is what a map server sends to the host's process, over its bridge alone
+	// (test_trunk.cpp). A client is kicked before any handler, as for HostOnly, and the host that sends one to a client is
+	// ignored (logged), as for ClientOnly. It must not pass like Either.
 	const Msg trunk[] = {Msg::LevelSnapshot, Msg::LevelEntity, Msg::LevelXferUp, Msg::LevelHash, Msg::MapServerState};
 	constexpr size_t kSenders = sizeof(trunk) / sizeof(trunk[0]);
 	Node host("Boss", 37137), b("Bo", 37137);

@@ -3,7 +3,7 @@
 // Every coop module registers its game message handlers in two tables (engine/src/xrGame/coop/*.cpp):
 // install_server(Session&) for the world server, on the hosting session, and install_client(Endpoint&) for a client, on a
 // remote client's session or on the host player's LocalLink. A hosting session takes only ClientOnly and Either messages, and
-// TrunkOnly from a client who led a level (Session::allow_trunk), a client's session only HostOnly and Either ones (Session
+// TrunkOnly from the bridge of a map server, a client's session only HostOnly and Either ones (Session
 // game_message refuses the rest before any handler). So:
 //   - the server tables hold ClientOnly, Either and TrunkOnly types only, the client tables HostOnly and Either types only;
 //   - an Either type is in both: in one only, the other side drops it (no handler) where it used to run;

@@ -154,16 +154,12 @@ TEST(protocol_f3a_client_rate_rows)
 		CHECK_EQ(rule->burst, 4u);
 		CHECK_EQ(rule->refill_ms, 1000u);
 	}
-	// F3a multilevel: a client who leads his level sends these (Session::allow_trunk): he is a client of the same limits
-	for (Msg m : {Msg::LevelXferUp, Msg::LevelEntity, Msg::LevelHash})
-		CHECK(limits::client_rule(m) != nullptr);
-	// nothing else of the sixteen has a row: the rest is sent by the host (a row for a message that a client never sends would be
-	// dead, and the session would kick the sender first)
+	// nothing else of the sixteen has a row: the rest is sent by the host or by a map server's bridge, which has no limits (a row
+	// for a message that a client never sends would be dead, and the session would kick the sender first)
 	for (const F3aMsg& m : kF3a)
 	{
 		const bool has = limits::client_rule(m.type) != nullptr;
-		const bool want = m.type == Msg::LevelMove || m.type == Msg::LoadReady || m.type == Msg::LevelXferUp ||
-		    m.type == Msg::LevelEntity || m.type == Msg::LevelHash;
+		const bool want = m.type == Msg::LevelMove || m.type == Msg::LoadReady;
 		CHECK_EQ(row(m, has ? "has a rate row" : "has none"), row(m, want ? "has a rate row" : "has none"));
 	}
 }
@@ -172,7 +168,7 @@ TEST(protocol_f3a_version_is_11)
 {
 	// 11: the F3a messages, Hello carries a role and a token, PlayerState carries the vertices, TransitionState a flags
 	// byte, WeatherSync a weather set; a protocol 10 peer is refused at the handshake.
-	CHECK_EQ(kProtocolVersion, 19u); // 17: EntityVisual, a host creature's new visual
+	CHECK_EQ(kProtocolVersion, 20u); // 17: EntityVisual, a host creature's new visual; 20: map servers (LevelMap rows, Tunnel lanes)
 }
 
 TEST(protocol_f3a_hello_carries_a_role_and_a_token)

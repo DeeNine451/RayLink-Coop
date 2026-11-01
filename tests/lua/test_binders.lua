@@ -218,7 +218,7 @@ do
 	W.calls = {}
 	W.new(W.faction):update(100)
 	check(W.calls["faction.update"] == 1 and not W.calls.base_update, "faction update is the stock one in Lua (the engine decides whether to call it)")
-	-- the engine suspends it for a puppet; a client who leads his level (F3a) runs it, and a Lua error there stays a log line
+	-- the engine suspends it for a puppet; a map server (F3a) runs it, and a Lua error there stays a log line
 	check(W.motivator.update ~= mu0, "creature binder: update guarded (a puppet's is suspended by the engine)")
 
 	-- F2-35: the update of the binders that keep running is guarded here
@@ -236,12 +236,12 @@ do
 		local rv = inst:update(1)
 		check(W.calls[mod .. ".update"] == 1 and inst.updates == 1 and rv == nil, "guard: a healthy " .. mod .. " update runs the stock code once (no return value through the guard)")
 	end
-	-- F3a multilevel: on a level he leads a client is no mirror: what "a client does not do" runs again, the guards stay
+	-- F3a: a map server is a client of the world and no mirror: what "a client does not do" runs again, the guards stay
 	W.api.is_mirror = function() return false end
 	W.calls = {}
 	local lead_zone = W.new(W.zone)
-	check(lead_zone:spawn_artefact_randomly() == "spawned" and W.calls["zone.spawn"] == 1, "a client who leads runs what a mirror skips")
-	check(pcall(function() W.new(W.guard.bind_stalker):update(1) end), "a client who leads keeps the guard")
+	check(lead_zone:spawn_artefact_randomly() == "spawned" and W.calls["zone.spawn"] == 1, "a map server runs what a mirror skips")
+	check(pcall(function() W.new(W.guard.bind_stalker):update(1) end), "a map server keeps the guard")
 	W.api.is_mirror = nil
 	-- the binder stays: one failed update does not stop the next ones, the instance keeps its state
 	local it = W.new(W.guard.bind_item)
