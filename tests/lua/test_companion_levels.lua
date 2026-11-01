@@ -751,5 +751,105 @@ do
 	check(H.stock_talk == 0, "a companion of the host: stock")
 end
 
+print("== letting go: the menu's line is the leader's, a story's line anybody's, the story's next recruit gives him back")
+do
+	local W = stand()
+	local H, A, B = W.H, W.A, W.B
+	H.env.coop.talk_recent = function() return true end
+	W.move(2, 1)
+	W.proxy_b._pos = vec(6, 0, 0)
+	W.comp_b = B.add(make_obj(201, 7, 0, 0, { _name = "comp" }))
+	local L, cs = W.CH._leaders, H.env.axr_companions.companion_squads
+	L()[300] = 500
+	W.refresh()
+	local da, db_ = A.env.dialogs_axr_companion, B.env.dialogs_axr_companion
+	B.msgs = nil
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b, "dm_companion_leave", "2")
+	pump()
+	check(L()[300] == 500 and cs[300] ~= nil, "dm_companion_leave of another player: refused")
+	check(last(B):find("st_coop_comp_refused_not_yours", 1, true) ~= nil, "he hears why")
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b, "fanat_training_anomaly_reached", "1")
+	pump()
+	check(L()[300] == nil and cs[300] == nil, "the story lets him go by any player's line")
+	db_.become_actor_companion(B.env.db.actor, W.comp_b, "fanat_training_back_to_village", "1")
+	pump()
+	check(L()[300] == 500, "the next recruit gives him back to who took him, whoever said the line")
+
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b, "fanat_training_stash_found", "1")
+	pump()
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_last_leaders and m.coop_npc_last_leaders[300] == 500, "the save remembers who it was")
+	H.fire("load_state", m)
+	db_.become_actor_companion(B.env.db.actor, W.comp_b, "x", "1")
+	pump()
+	check(L()[300] == 500, "and a load does not forget")
+
+	da.remove_companions_from_squad(A.env.db.actor, W.comp_a, "dm_companion_leave", "2")
+	pump()
+	check(L()[300] == nil and cs[300] == nil, "the leader's own dm_companion_leave goes through")
+	db_.become_actor_companion(B.env.db.actor, W.comp_b, "dm_recruit", "1")
+	pump()
+	check(L()[300] == 501, "he let him go himself: whoever hires him next leads him")
+
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b, "fanat_training_anomaly_reached", "1")
+	pump()
+	W.move(2, 2)
+	W.refresh()
+	da.become_actor_companion(A.env.db.actor, W.comp_a, "x", "1")
+	pump()
+	check(L()[300] == 500, "who took him stands on another level: the one who recruits leads, the rule of one level")
+
+	print("-- the host's own talk")
+	local dh = H.env.dialogs_axr_companion
+	W.move(2, 1)
+	W.refresh()
+	H.msgs = nil
+	dh.remove_companions_from_squad(H.env.db.actor, W.comp, "dm_companion_leave", "2")
+	check(L()[300] == 500 and cs[300] ~= nil, "his dm_companion_leave of a client's companion: refused")
+	check(last(H):find("st_coop_comp_refused_not_yours", 1, true) ~= nil, "he hears why")
+	dh.remove_companions_from_squad(H.env.db.actor, W.comp, "fanat_training_anomaly_reached", "1")
+	check(cs[300] == nil, "a story's line goes through")
+	W.refresh()
+	check(L()[300] == nil, "(the refresh drops the entry)")
+	dh.become_actor_companion(H.env.db.actor, W.comp, "x", "1")
+	check(L()[300] == 500, "his recruit in the story gives him back too")
+	dh.remove_companions_from_squad(H.env.db.actor, W.comp, "fanat_x", "1")
+	W.refresh()
+	check(next(L()) == nil, "(gone)")
+	da.become_actor_companion(A.env.db.actor, W.comp_a, "x", "1")
+	pump()
+	W.CH._leaders()[300] = nil -- the host took him, the stock way
+	W.refresh()
+	da.remove_companions_from_squad(A.env.db.actor, W.comp_a, "fanat_x", "1")
+	pump()
+	check(cs[300] == nil, "a client's line lets the host's companion go")
+	da.become_actor_companion(A.env.db.actor, W.comp_a, "x", "1")
+	pump()
+	check(L()[300] == nil and cs[300] ~= nil, "and he comes back to the host: who took him")
+end
+
+print("== last leaders of a map server's level reach the save")
+do
+	local function share_env(M)
+		M.share = { up = {}, down = {} }
+		M.env.coop_levels_share = {
+			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
+			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
+		}
+	end
+	local W = stand({ env = share_env })
+	local H, Mk, B = W.H, W.Mk, W.B
+	W.CM._leaders()[400] = 501
+	W.refresh()
+	B.env.dialogs_axr_companion.remove_companions_from_squad(B.env.db.actor, W.comp2_b, "story_line", "1")
+	pump()
+	check(W.CM._leaders()[400] == nil, "the map server lets him go")
+	H.share.up.comp_leaders.set(Mk.share.up.comp_leaders.get(), 2)
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_last_leaders and m.coop_npc_last_leaders[400] == 501, "the save has who it was")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

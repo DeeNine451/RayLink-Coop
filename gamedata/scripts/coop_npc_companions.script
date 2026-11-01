@@ -89,6 +89,7 @@ local ACTIONS = {
 	["txr_paid_companions.register_paid_companion"] = true,
 }
 local PAID = "txr_paid_companions.register_paid_companion"
+local LEAVE_DIALOG = "dm_companion_leave" -- the stock menu's "leave me": the leader's. The same action in a story's dialog is anybody's.
 local PAID_SECONDS = { take_guard_money_1 = 86400, take_guard_money_2 = 172800 } -- the stock's guard_period, a file local
 for _, n in ipairs({
 	"set_companion_to_stealth_substate", "set_companion_to_default_substate", "set_companion_to_wait_state",
@@ -117,6 +118,8 @@ local host_on = false
 local orig = {}
 local leaders = {} -- host: squad id -> proxy id (host numbering) of the client that leads it
 local far = {} -- world server: level id -> { squad id -> proxy id }: what the map servers lead, for the save (coop_levels_share)
+local last_leader = {} -- host: squad id -> who led it when a story's line let it go (0: the world server's player): he gets it back
+local far_last = {} -- world server: level id -> last_leader of that map server, for the save
 local down_heard = false -- map server: it took the leaders of its level from the world server
 local view = {} -- client: NPC id -> peer who holds control of it (npc.comp_info)
 local waiting_flags = {} -- client: NPC id -> flags that came while the NPC was not here
@@ -136,6 +139,7 @@ local asked_lead = {} -- NPC id -> time_global() of this machine's last request 
 local lead_peer = {} -- squad id -> its leader's peer, while this process knows him
 local refuse_dismiss -- host: its own dismiss of a companion somebody else leads (set below, it needs lead_for)
 local claimed_far -- world server: a squad just claimed on a map server's level goes there (set below, it needs adopt)
+local note_let_go, give_back -- a story's dismissal and its next recruit (set below, they need control_peer, squad_ids)
 local teleport_rule -- axr_companions.companion_squad_can_teleport as this script wrapped it
 
 local function resolve(full)
@@ -229,13 +233,20 @@ local function patch_client_actions()
 		local f = m and m[fn]
 		if type(f) == "function" and not orig[full] then
 			orig[full] = f
-			m[fn] = function(a, b, ...)
+			m[fn] = function(a, b, dialog_id, ...)
 				local npc = (a and a:id() == 0) and b or a
 				if not P.client_live() then
-					if ACTIONS[full] == "remove" and refuse_dismiss(npc) then return end
-					return f(a, b, ...)
+					local kind = ACTIONS[full]
+					if kind == "remove" then
+						if refuse_dismiss(npc, dialog_id) then return end
+						note_let_go(squad_of(npc), dialog_id)
+					end
+					local before = kind == "add" and squads_now()
+					f(a, b, dialog_id, ...)
+					if before then give_back(before) end
+					return
 				end
-				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()), p = paid_period }, 0) then
+				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()), p = paid_period, d = dialog_id }, 0) then
 					stats.cmd_out = stats.cmd_out + 1
 				end
 			end
@@ -498,6 +509,33 @@ function claim_since(before, peer)
 	return claim_new_squads(known, peer)
 end
 
+-- A story lets a companion go and takes it back later, by a line anybody may say (the Fanatic's training): it goes back to who led it. His
+-- own "leave me" ends that.
+note_let_go = function(squad, dialog_id)
+	if not (squad and is_companion_squad(squad)) then return end
+	if dialog_id == LEAVE_DIALOG then
+		last_leader[squad.id] = nil
+	elseif leaders[squad.id] ~= nil then
+		last_leader[squad.id] = leaders[squad.id]
+	elseif P.is_world_server() then
+		last_leader[squad.id] = 0
+	end
+end
+
+-- The squads added since `before`: he who led one when a story let it go leads it again, if he stands on its level.
+give_back = function(before)
+	for id in pairs(squad_ids()) do
+		local lead = not before[id] and last_leader[id]
+		if lead == 0 then
+			last_leader[id] = nil
+			leaders[id] = nil
+		elseif lead then
+			last_leader[id] = nil
+			if level.object_by_id(lead) and P.peer_of(lead) then leaders[id] = lead end
+		end
+	end
+end
+
 -- Ruling F2-34: did player `from` talk to the NPC, or to a member of its squad, now or in the last RECRUIT_TALK_MS
 -- (the host's talk locks, coop.talk_recent)? False without the engine function.
 local function talked_recently(from, npc, squad)
@@ -543,7 +581,7 @@ local function host_on_cmd(t, from)
 			stats.refused = stats.refused + 1
 			return
 		end
-		if kind == "remove" and control_peer(squad) ~= from then
+		if kind == "remove" and t.d == LEAVE_DIALOG and control_peer(squad) ~= from then
 			stats.refused = stats.refused + 1
 			tell(from, "st_coop_comp_refused_not_yours")
 			return
@@ -557,6 +595,7 @@ local function host_on_cmd(t, from)
 		return
 	end
 	stats.cmd_in = stats.cmd_in + 1
+	if kind == "remove" then note_let_go(squad, t.d) end
 	local before = kind == "add" and squad_ids()
 	-- (host actor, npc) makes dialogs.who_is_npc pick the NPC. Orders placed at "the actor's" position run
 	-- with the client's proxy as db.actor; the rest as stock (they only touch the NPC and its squad).
@@ -572,6 +611,7 @@ local function host_on_cmd(t, from)
 	end
 	if kind == "add" then
 		claim_new_squads(before, from)
+		give_back(before)
 	elseif kind == "remove" and squad then
 		leaders[squad.id] = nil
 	end
@@ -760,8 +800,8 @@ local function lead_for(npc)
 	return nil
 end
 
-refuse_dismiss = function(npc)
-	if not lead_for(npc) then return false end
+refuse_dismiss = function(npc, dialog_id)
+	if dialog_id ~= LEAVE_DIALOG or not lead_for(npc) then return false end
 	stats.refused = stats.refused + 1
 	tell(P.self_peer(), "st_coop_comp_refused_not_yours")
 	return true
@@ -1017,6 +1057,9 @@ local function host_refresh()
 			if not alife_object(squad_id) then row[squad_id] = nil end
 		end
 	end
+	for squad_id in pairs(last_leader) do
+		if not alife_object(squad_id) then last_leader[squad_id] = nil end
+	end
 	-- the last word about whom this was: a contract's end, a dismissal by the host, a death
 	for id, told in pairs(sent_info) do
 		if not live[id] then
@@ -1205,13 +1248,14 @@ local function leaders_here()
 		if not at or at == level.name() then t[id] = lead end
 	end
 	for id, a in pairs(adopting) do t[id] = a.t.l end
-	return { l = t }
+	return { l = t, b = last_leader }
 end
 
 local function leaders_heard(v, level_id)
 	if type(v) ~= "table" or type(v.l) ~= "table" or level_id == nil then return end
 	for id in pairs(v.l) do note_far(nil, id) end
 	far[level_id] = v.l
+	far_last[level_id] = type(v.b) == "table" and v.b or nil
 end
 
 local function all_leaders()
@@ -1402,11 +1446,24 @@ end
 local function save_state(m_data)
 	local t = all_leaders().l
 	m_data.coop_npc_leaders = next(t) ~= nil and t or nil
+	local gone = {}
+	for id, lead in pairs(last_leader) do gone[id] = lead end
+	for _, row in pairs(far_last) do
+		for id, lead in pairs(row) do gone[id] = lead end
+	end
+	m_data.coop_npc_last_leaders = next(gone) ~= nil and gone or nil
 end
 
 local function load_state(m_data)
 	leaders = {}
 	far = {}
+	last_leader = {}
+	far_last = {}
+	if type(m_data.coop_npc_last_leaders) == "table" then
+		for k, v in pairs(m_data.coop_npc_last_leaders) do
+			if type(k) == "number" and type(v) == "number" then last_leader[k] = v end
+		end
+	end
 	if type(m_data.coop_npc_leaders) == "table" then
 		for k, v in pairs(m_data.coop_npc_leaders) do
 			if type(k) == "number" and type(v) == "number" then leaders[k] = v end
