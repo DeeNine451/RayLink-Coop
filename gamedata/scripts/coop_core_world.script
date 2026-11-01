@@ -1059,8 +1059,9 @@ local function on_box_take(box, item)
 	api.send_event(EV_BOX_TAKE, codec().encode({ id = host_id(id) }), 0)
 end
 
+-- The world server's whichever level the box stands on: its marks, its radio, its table (a map server tells it a box was filled).
 local function host_on_box_take(payload, from)
-	if not leads_level() then return end
+	if not is_host() then return end
 	local id = tonumber(codec().decode(payload).id)
 	local tm = rawget(_G, "treasure_manager") or treasure_manager
 	if not (id and tm and type(tm.caches) == "table" and tm.caches[id] == true) then return end
@@ -1209,7 +1210,7 @@ function on_game_start()
 	cm.add_event_handler(EV_MLOOT_STATE, on_mloot_state)
 	cm.add_level_handler(EV_MLOOT_CLOSE, on_mloot_close)
 	cm.add_event_handler(EV_MLOOT_EDGE, on_mloot_edge)
-	cm.add_level_handler(EV_BOX_TAKE, host_on_box_take)
+	cm.add_event_handler(EV_BOX_TAKE, host_on_box_take)
 	cm.add_event_handler(EV_STASH_FOUND, on_stash_found)
 	cm.add_level_handler(EV_TRADER_REQ, host_on_trader_req)
 	cm.add_event_handler(EV_TRADER_CFG, on_trader_cfg)

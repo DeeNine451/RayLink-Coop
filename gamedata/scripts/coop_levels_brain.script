@@ -11,22 +11,34 @@
 	whichever side ran it last. Who updates a squad: the world server while it is offline at home, on a map server the binder of
 	its commander while it is online, the engine (coop_levels_xfer.cpp xfer_scheduled) while it is held and offline.
 
+	treasure_manager.caches says which box holds a stash, and each process has a copy from its save. A box is opened on the authority of its
+	level, the marks and the save are the world server's: every few seconds each side tells the other what changed, the world server
+	each map server what concerns its level (all of it the first time: that save may be older).
+
 	API:
 		coop_levels_brain.logic_of(id)   the engine: coop.levels.logic_put(bytes of this object's logic)
 		coop_levels_brain.logic_in(id)   the engine: coop.levels.logic_bytes() is the logic of this object
 		coop_levels_brain.left(id)       the engine on a map server: this object went home
+		coop_levels_brain.caches_now()   the caches are looked at on the next update: a box was just filled
 --]]
 
 local api = rawget(_G, "coop")
 
 local EV_TARGETS = "coop_brain"
+local EV_CACHES = "coop_caches"
 local TICK_MS = 1000
+local CACHES_MS = 3000 -- treasure_manager.caches are compared this often
+local CACHE_BYTES = 12000 -- in one event
 local AGAIN_MS = 30000 -- a squad's target is looked at this often
 local ROWS_A_TICK = 8 -- get_squad_target walks the whole board
 
 local targets = {} -- map server: squad id -> the target the world gave it
 local decided = {} -- world server: squad id -> when its target is due again
 local next_tick = 0
+local cache_next = 0
+local known_up = nil -- map server: stash box -> what the world server has of it
+local told = {} -- world server: bridge -> stash box -> what that map server has of it
+local box_level = {} -- world server: stash box -> its level, false: no such object
 
 local function levels()
 	return api and api.levels
@@ -63,8 +75,119 @@ local function tell(ms, now)
 	if #rows > 0 then api.send_event(EV_TARGETS, table.concat(rows, ","), ms.bridge) end
 end
 
+local function the_caches()
+	local tm = rawget(_G, "treasure_manager") or treasure_manager
+	return tm and type(tm.caches) == "table" and tm.caches or nil
+end
+
+local function cache_row(id, v)
+	if v == nil then return id .. "|n|" end
+	if v == true then return id .. "|t|" end
+	if v == false then return id .. "|f|" end
+	return id .. "|s|" .. tostring(v)
+end
+
+-- What differs from `known` goes into a batch and into `known`. -> the batch, true when more is left for the next one.
+local function cache_diff(c, known, wanted)
+	local rows, bytes = {}, 0
+	local function add(id, v)
+		local r = cache_row(id, v)
+		rows[#rows + 1] = r
+		bytes = bytes + #r + 1
+		known[id] = v
+		return bytes >= CACHE_BYTES
+	end
+	for id, v in pairs(c) do
+		if known[id] ~= v and (wanted == nil or wanted(id)) and add(id, v) then return rows, true end
+	end
+	for id in pairs(known) do
+		if c[id] == nil and add(id, nil) then return rows, true end
+	end
+	return rows, false
+end
+
+local function on_level(id, lid)
+	local l = box_level[id]
+	if l == nil then
+		local se = alife_object(id)
+		l = se and game_graph():vertex(se.m_game_vertex_id):level_id() or false
+		box_level[id] = l
+	end
+	return l == lid
+end
+
+local function caches_of_world(c)
+	local live, more = {}, false
+	for _, ms in ipairs(levels().map_servers()) do
+		live[ms.bridge] = true
+		told[ms.bridge] = told[ms.bridge] or {}
+		local rows, left = cache_diff(c, told[ms.bridge], function(id) return on_level(id, ms.level) end)
+		if #rows > 0 then api.send_event(EV_CACHES, table.concat(rows, ";"), ms.bridge) end
+		more = more or left
+	end
+	for bridge in pairs(told) do
+		if not live[bridge] then told[bridge] = nil end -- the next process on that bridge starts from a newer save
+	end
+	return more
+end
+
+local function baseline(c)
+	if known_up then return end
+	known_up = {}
+	for id, v in pairs(c) do known_up[id] = v end
+end
+
+local function caches_of_map(c)
+	if not known_up then return baseline(c) end
+	local rows, left = cache_diff(c, known_up)
+	if #rows > 0 then api.send_event(EV_CACHES, table.concat(rows, ";"), 0) end
+	return left
+end
+
+local function caches_tick(now)
+	cache_next = now + CACHES_MS
+	local c = the_caches()
+	local go = world_server() and caches_of_world or map_server() and caches_of_map or nil
+	if not (c and go and split()) then return end
+	local ok, more = pcall(go, c)
+	if not ok then
+		printf("[coop-brain] ! caches: %s", tostring(more))
+	elseif more then
+		cache_next = 0
+	end
+end
+
+local function on_caches(payload, from)
+	local c = the_caches()
+	if not c then return end
+	local known
+	if map_server() then
+		if from ~= 0 then return end
+		baseline(c)
+		known = known_up
+	elseif world_server() and split() then
+		for _, ms in ipairs(levels().map_servers()) do
+			if ms.bridge == from then
+				told[from] = told[from] or {}
+				known = told[from]
+			end
+		end
+	end
+	if not known then return end
+	for id, kind, text in payload:gmatch("(%d+)|(%a)|([^;]*)") do
+		local v = nil
+		if kind == "t" then v = true elseif kind == "f" then v = false elseif kind == "s" then v = text end
+		id = tonumber(id)
+		c[id] = v
+		known[id] = v
+	end
+end
+
+function caches_now() cache_next = 0 end
+
 local function on_update()
 	local now = time_global()
+	if now >= cache_next then caches_tick(now) end
 	if now < next_tick then return end
 	next_tick = now + TICK_MS
 	if not (world_server() and split() and SIMBOARD) then return end
@@ -149,5 +272,6 @@ function on_game_start()
 	if not api then return end
 	patch_board()
 	coop_main.add_event_handler(EV_TARGETS, on_targets)
+	coop_main.add_event_handler(EV_CACHES, on_caches)
 	RegisterScriptCallback("actor_on_update", on_update)
 end

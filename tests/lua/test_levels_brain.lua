@@ -128,4 +128,72 @@ ASSIGNED = {}
 coop_levels_brain.left(300)
 check(#ASSIGNED == 0, "an object that is no squad: nothing")
 
+print("== treasure_manager.caches: one table of the world")
+treasure_manager = { caches = { [600] = "wpn_pm,bandage", [601] = true, [602] = false, [700] = "medkit" } }
+LEVELS = { [1] = 1, [2] = 2 }
+game_graph = function() return { vertex = function(_, v) return { level_id = function() return LEVELS[v] end } end } end
+BODIES[600] = { id = 600, m_game_vertex_id = 2 }
+BODIES[601] = { id = 601, m_game_vertex_id = 2 }
+BODIES[602] = { id = 602, m_game_vertex_id = 2 }
+BODIES[603] = { id = 603, m_game_vertex_id = 2 }
+BODIES[700] = { id = 700, m_game_vertex_id = 1 }
+MODE = "host"
+MAP_SERVER = false
+coop.is_host = function() return true end
+local function caches_sent()
+	for i = #SENT, 1, -1 do
+		if SENT[i].name == "coop_caches" then return SENT[i] end
+	end
+end
+SENT = {}
+NOW = NOW + 5000
+coop_levels_brain._tick()
+local first = caches_sent()
+check(first and first.to == 0x101, "the world server tells a map server the stashes of its level")
+check(first and first.payload:find("600|s|wpn_pm,bandage", 1, true) and first.payload:find("601|t|", 1, true) and first.payload:find("602|f|", 1, true), "all of them the first time")
+check(first and not first.payload:find("700|", 1, true), "not those of other levels")
+SENT = {}
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+check(caches_sent() == nil, "nothing changed: nothing goes")
+treasure_manager.caches[603] = "ammo_9x18"
+treasure_manager.caches[600] = nil
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+local change = caches_sent()
+check(change and change.payload:find("603|s|ammo_9x18", 1, true) and change.payload:find("600|n|", 1, true), "a new stash and one that is gone go")
+SENT = {}
+treasure_manager.caches[603] = true
+coop_main.on_event("coop_caches", "603|t|;602|s|bread", 0x101)
+check(treasure_manager.caches[602] == "bread", "what a map server filled comes to the world server's table")
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+check(caches_sent() == nil, "and is not told back to it")
+coop_main.on_event("coop_caches", "602|f|", 5)
+check(treasure_manager.caches[602] == "bread", "a player is no map server")
+
+MODE = "client"
+MAP_SERVER = true
+coop.is_host = function() return false end
+treasure_manager.caches = { [800] = "wpn_pm", [801] = true }
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+SENT = {}
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+check(caches_sent() == nil, "a map server starts from its save: nothing to say")
+treasure_manager.caches[800] = true
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+local up = caches_sent()
+check(up and up.to == 0 and up.payload == "800|t|", "a box it filled goes up")
+SENT = {}
+coop_main.on_event("coop_caches", "801|f|;802|s|bread", 0)
+check(treasure_manager.caches[801] == false and treasure_manager.caches[802] == "bread", "the world's word goes into its copy")
+coop_levels_brain.caches_now()
+coop_levels_brain._tick()
+check(caches_sent() == nil, "and is not told back")
+coop_main.on_event("coop_caches", "801|t|", 7)
+check(treasure_manager.caches[801] == false, "only the world server says")
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))

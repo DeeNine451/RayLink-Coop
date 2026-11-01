@@ -402,6 +402,8 @@ local function host_box(from, t)
 	local who = qc.avatar_obj(from)
 	if who and box:position():distance_to_sqr(who:position()) > 100 then return end
 	tm.try_spawn_treasure(box)
+	local brain = qc.mod("coop_levels_brain")
+	if brain and brain.caches_now then brain.caches_now() end -- the world server hears before the player takes anything
 end
 
 -------------------------------------------------------------------------------

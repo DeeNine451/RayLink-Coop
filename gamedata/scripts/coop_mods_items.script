@@ -496,6 +496,7 @@ local function install_corpse_loot()
 		end
 		local ok, e = C().as_player(who, death_manager.create_release_item, npc)
 		if not ok then C().report("items", "corpse loot", e) end
+		if C().is_map_server() then C().to_host("corpse_dropped", { n = id, s = npc:name() }) end -- a body rolls once, in the world's save too
 		for _, name in ipairs(USE_HANDLERS) do
 			local handler = C().fn(C().mod(name), "npc_on_use")
 			if handler then
@@ -505,6 +506,10 @@ local function install_corpse_loot()
 		end
 	end, "host")
 	C().set_limit("corpse_loot", 6, 2)
+	C().on("corpse_dropped", function(t, from)
+		local id = tonumber(t.n)
+		if id and type(t.s) == "string" and C().is_bridge(from) then se_save_var(id, t.s, "death_dropped", true) end
+	end, "world")
 end
 
 -------------------------------------------------------------------------------
