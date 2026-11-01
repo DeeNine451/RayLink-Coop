@@ -1774,10 +1774,11 @@ TEST(load_saves_handed_counts_the_movers_data_only)
 // world is not taken for the transition's.
 TEST(load_reload_watchdog)
 {
-	CHECK(!reload_overdue(false, 1000, 1000 + kReloadWatchMs * 10)); // nothing pending
-	CHECK(!reload_overdue(true, 0, 999999)); // the pump has not ended
-	CHECK(!reload_overdue(true, 1000, 1000 + kReloadWatchMs - 1));
-	CHECK(reload_overdue(true, 1000, 1000 + kReloadWatchMs));
+	CHECK(!reload_overdue(false, 1000, 1000 + kReloadWatchMs * 10, true)); // nothing pending
+	CHECK(!reload_overdue(true, 0, 999999, true)); // the pump has not ended
+	CHECK(!reload_overdue(true, 1000, 1000 + kReloadWatchMs - 1, true));
+	CHECK(reload_overdue(true, 1000, 1000 + kReloadWatchMs, true));
+	CHECK(!reload_overdue(true, 1000, 1000 + kReloadWatchMs * 100, false)); // live 2026-11-01: a slow load is a load
 	CHECK(kReloadWatchMs >= 5000 && kReloadWatchMs <= 30000);
 }
 
@@ -1839,6 +1840,7 @@ TEST(load_reload_watchdog_in_the_source)
 	const std::string watch = body_of(join, "void host_load_watch(");
 	REQUIRE(!watch.empty());
 	CHECK(watch.find("reload_overdue(") != std::string::npos);
+	CHECK(watch.find("world_up()") != std::string::npos);
 	CHECK(watch.find("host_load_void(") != std::string::npos);
 	CHECK(watch.find("sync::host_begin_join(") != std::string::npos);
 	CHECK(watch.find("g.reset_pending = true") != std::string::npos);
