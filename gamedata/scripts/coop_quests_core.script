@@ -272,8 +272,14 @@ function far_item_class:section() return self.item_section end
 function far_item_class:condition() return self.item_condition end
 function far_item_class:get_remaining_uses() return tonumber(ini_sys:r_float_ex(self.item_section, "max_uses")) or 1 end -- no record has them
 
+-- What a record has no answer to goes where a stand-in of an NPC goes: coop_quests_far, a method nobody needed yet is logged once.
 local far_body_class = {}
-far_body_class.__index = far_body_class
+far_body_class.__index = function(_, k)
+	local m = rawget(far_body_class, k)
+	if m ~= nil then return m end
+	local far = rawget(_G, "coop_quests_far") or coop_quests_far
+	return far and far.fallback and far.fallback(k) or nil
+end
 function far_body_class:id() return self[4] end
 function far_body_class:position() return self[1] end
 function far_body_class:level_vertex_id() return self[2] end
@@ -409,6 +415,85 @@ function avatar_obj(peer)
 	if not api then return nil end
 	local ok, id = pcall(api.avatar_of, peer)
 	return ok and id and level.object_by_id(id) or nil
+end
+
+-------------------------------------------------------------------------------
+-- The far view (coop_quests_far): what the stock reads of the level it stands on, for one call
+-------------------------------------------------------------------------------
+-- Installed when this script loads: before tasks_* do, one of them keeps level.object_by_id in a local. Out of a scope they are the stock's.
+local far_view = nil
+function set_far_view(view) far_view = view end
+
+local function install_level_view()
+	local lv = rawget(_G, "level")
+	if type(lv) ~= "table" or rawget(lv, "_coop_far_view") then return end
+	rawset(lv, "_coop_far_view", true)
+	local object_by_id, name = lv.object_by_id, lv.name
+	if type(object_by_id) == "function" then
+		lv.object_by_id = function(id)
+			if far_view then return far_view.object_by_id(id, object_by_id) end
+			return object_by_id(id)
+		end
+	end
+	if type(name) == "function" then
+		lv.name = function()
+			if far_view then return far_view.name end
+			return name()
+		end
+	end
+	local d = rawget(_G, "db")
+	if d == nil then
+		local ok, m = pcall(function() return _G.db end)
+		d = ok and m or nil
+	end
+	if type(d) ~= "table" then return end
+	if type(d.storage) == "table" and getmetatable(d.storage) == nil then
+		setmetatable(d.storage, { __index = function(_, id)
+			if far_view then return far_view.storage(id) end
+			return nil
+		end })
+	end
+	if type(d.zone_by_name) == "table" and getmetatable(d.zone_by_name) == nil then
+		setmetatable(d.zone_by_name, { __index = function(_, zone)
+			if far_view then return far_view.zone(zone) end
+			return nil
+		end })
+	end
+end
+
+-- simulation_objects loads late: this one from on_game_start.
+local function install_sim_view()
+	local so = rawget(_G, "simulation_objects") or simulation_objects
+	if type(so) ~= "table" or type(so.is_on_the_actor_level) ~= "function" or so._coop_far_view then return end
+	so._coop_far_view = true
+	local on_level = so.is_on_the_actor_level
+	so.is_on_the_actor_level = function(se, ...)
+		if far_view then return far_view.on_actor_level(se) end
+		return on_level(se, ...)
+	end
+end
+
+local function far_mod() return rawget(_G, "coop_quests_far") or coop_quests_far end
+
+-- fn on the level of a player (coop_quests_far.with_level_of); the world server's own level, or no split levels: fn as it is.
+function with_level_of(peer, fn, ...)
+	local far = far_mod()
+	if not far then return fn(...) end
+	return far.with_level_of(peer, fn, ...)
+end
+
+-- fn on the level of a target, for a player who stands there; nobody there: on the level of peer.
+function with_target(id, peer, what, fn, ...)
+	local far = far_mod()
+	if not far then return fn(...) end
+	return far.with_target(id, peer, what, fn, ...)
+end
+
+-- The smart's field, seen from where the far view stands (a rewrite of the task scripts' `smart.online`).
+function online_of(se)
+	if not se then return false end
+	if far_view then return far_view.online(se) end
+	return se.online
 end
 
 -------------------------------------------------------------------------------
@@ -576,9 +661,15 @@ local function start_step(what, f)
 	if not ok then printf("! [coop_quests_core] %s failed: %s", what, tostring(err)) end
 end
 
+if api then
+	local ok, err = pcall(install_level_view)
+	if not ok then printf("! [coop_quests_core] the far view: %s", tostring(err)) end
+end
+
 function on_game_start()
 	if not api or started then return end
 	started = true
 	start_step("install_condlist_tracker", install_condlist_tracker)
+	start_step("install_sim_view", install_sim_view)
 	on("act", host_on_action, "core")
 end

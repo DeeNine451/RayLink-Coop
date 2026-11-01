@@ -388,6 +388,33 @@ function handlers_of(callback, script)
 	return out
 end
 
+-- What runs for a callback in that domain, as plain functions: a handler object is called as axr_main calls it. The death relay
+-- (coop_quests_far) tells these by hand: on the world server they did not hear the death of a map server's level.
+function domain_handlers(callback, domain)
+	local out = {}
+	local t = intercepts()
+	local list = t and t[callback]
+	if type(list) ~= "table" then return out end
+	local found = {}
+	for k, v in pairs(list) do
+		local o = origin[k]
+		if o and o.domain == domain then found[#found + 1] = { fn = o.fn, v = tonumber(v) or 0 } end
+	end
+	table.sort(found, function(a, b) return a.v < b.v end)
+	for i, e in ipairs(found) do
+		local fu = e.fn
+		if type(fu) == "function" then
+			out[i] = fu
+		else
+			out[i] = function(...)
+				local m = fu[callback]
+				if m then return m(fu, ...) end
+			end
+		end
+	end
+	return out
+end
+
 function wrapper_of(callback, fn)
 	local m = wrapped[callback]
 	return m and fn ~= nil and m[fn] or nil

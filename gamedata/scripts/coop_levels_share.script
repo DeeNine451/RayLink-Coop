@@ -1,0 +1,161 @@
+--[[
+	Anomaly Coop - split levels: tables of the stock and of the mods that the world server and a map server must see alike
+	(docs\SPLIT_LEVELS.md 7a). A process holds its Lua state alone and only the world server saves, so a table a map server writes never
+	reached the save, and a table the world server writes never reached a map server started before.
+
+		share.up(name, get, set[, every_ms])     get() on a map server, set(value, level) on the world server
+		share.down(name, get, set[, every_ms])   get() on the world server, set(value) on a map server
+
+	get answers a table of strings, numbers and booleans (coop_quests_core.ser), or nil for nothing to tell yet. It is compared as a string
+	and goes when it changed, in parts: one event carries at most PART characters. A map server that starts gets every down table.
+--]]
+
+local api = rawget(_G, "coop")
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+
+local EV = "coop_share"
+local PART = 6000
+local EVERY_MS = 3000
+local MAX_PARTS = 64
+
+local ups, downs = {}, {}
+local parts = {} -- "from:name" -> { seq, n, got, list }
+
+local function qc() return coop_quests_core end
+local function levels() return api and api.levels end
+local function split()
+	local l = levels()
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+local function cm() return rawget(_G, "coop_main") or coop_main end
+
+function up(name, get, set, every)
+	ups[name] = { get = get, set = set, every = every or EVERY_MS, next = 0, sent = nil, seq = 0 }
+end
+
+function down(name, get, set, every)
+	downs[name] = { get = get, set = set, every = every or EVERY_MS, next = 0, sent = {}, seq = 0 }
+end
+
+local function send(name, seq, blob, target)
+	local n = math.max(1, math.ceil(#blob / PART))
+	if n > MAX_PARTS then
+		printf("! [coop] share: %s is too long to send (%d)", name, #blob)
+		return false
+	end
+	for i = 1, n do
+		api.send_event(EV, cm().encode({ k = name, s = seq, i = i, n = n, d = blob:sub((i - 1) * PART + 1, i * PART) }), target)
+	end
+	return true
+end
+
+local function blob_of(e, name)
+	local ok, v = pcall(e.get)
+	if not ok then
+		qc().report("share", name, v)
+		return nil
+	end
+	if v == nil then return nil end
+	return qc().ser(v)
+end
+
+local function tick_up(now)
+	for name, e in pairs(ups) do
+		if now >= e.next then
+			e.next = now + e.every
+			local blob = blob_of(e, name)
+			if blob and blob ~= e.sent then
+				e.seq = e.seq + 1
+				if send(name, e.seq, blob, 0) then e.sent = blob end
+			end
+		end
+	end
+end
+
+local function tick_down(now)
+	local list = levels().map_servers()
+	for name, e in pairs(downs) do
+		local live = {}
+		for _, ms in ipairs(list) do live[ms.bridge] = true end
+		for bridge in pairs(e.sent) do
+			if not live[bridge] then e.sent[bridge] = nil end -- the next process on that bridge knows nothing
+		end
+		local fresh = false
+		for _, ms in ipairs(list) do fresh = fresh or e.sent[ms.bridge] == nil end
+		if now >= e.next or fresh then
+			e.next = now + e.every
+			local blob = blob_of(e, name)
+			if blob then
+				for _, ms in ipairs(list) do
+					if e.sent[ms.bridge] ~= blob then
+						e.seq = e.seq + 1
+						if send(name, e.seq, blob, ms.bridge) then e.sent[ms.bridge] = blob end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function level_of_bridge(from)
+	for _, ms in ipairs(levels().map_servers()) do
+		if ms.bridge == from then return ms.level end
+	end
+	return nil
+end
+
+local function on_part(payload, from)
+	if type(from) ~= "number" or not split() then return end
+	local q = qc()
+	local world = q.is_host()
+	local e
+	local t = cm().decode(payload)
+	local name = t.k
+	if world then
+		if from < 0x100 then return end
+		e = ups[name]
+	elseif q.is_map_server() then
+		if from ~= 0 then return end
+		e = downs[name]
+	end
+	if not e then return end
+	local key = tostring(from) .. ":" .. tostring(name)
+	local p = parts[key]
+	local seq, n, i = tonumber(t.s), tonumber(t.n), tonumber(t.i)
+	if not (seq and n and i and n <= MAX_PARTS) then return end
+	if not p or p.seq ~= seq then
+		p = { seq = seq, n = n, got = 0, list = {} }
+		parts[key] = p
+	end
+	if p.list[i] == nil then
+		p.list[i] = tostring(t.d or "")
+		p.got = p.got + 1
+	end
+	if p.got < p.n then return end
+	parts[key] = nil
+	local v = q.des(table.concat(p.list))
+	if v == nil then return end
+	local ok, err
+	if world then ok, err = pcall(e.set, v, level_of_bridge(from)) else ok, err = pcall(e.set, v) end
+	if not ok then q.report("share", tostring(name), err) end
+end
+
+local function on_update()
+	if not (api and split()) then return end
+	local now = time_global()
+	local q = qc()
+	if q.is_map_server() then
+		tick_up(now)
+	elseif q.is_host() then
+		tick_down(now)
+	end
+end
+
+function _tick() on_update() end
+
+function on_game_start()
+	if not api then return end
+	cm().add_event_handler(EV, on_part)
+	RegisterScriptCallback("actor_on_update", on_update)
+end

@@ -1,0 +1,789 @@
+--[[
+	Anomaly Coop - split levels: the world server looks at a level a map server leads (docs\SPLIT_LEVELS.md 7a "Дальний вид").
+	The world, the save, the task manager and the modules of the tasks live on the world server; what a task asks about stands on another
+	process. Status functors stay here, their state is here. Two ways of one idea:
+
+	The far view, for one call. with_level_of(peer, fn, ...) and with_target(id, peer, what, fn, ...) run fn as if the world server stood on
+	that level: level.name, level.object_by_id, db.storage, db.anomaly_by_name, db.zone_by_name, simulation_objects.is_on_the_actor_level,
+	alife():actor(). Only inside: outside nil still means "offline", and the stock and big_game_offline stand on that. What comes back from
+	level.object_by_id is a stand-in: a table with the methods of a game object, reading ALife records (alife_object, coop.levels.carried). A
+	method nobody needed yet answers nil and is logged once (`[coop] far: <method> asked by <script>`). A change (kill, hit, relation, info)
+	is an order to the map server of that level.
+
+	An order is held here until the map server answers. When that server is gone, or the object went home, the world server carries it out
+	on its own record; for an object that is no more it is dropped with a line in the log.
+
+	The death relay. A death on a map server's level reaches the world through LevelEntity Died, which runs only the server's on_death. The
+	engine calls on_death here (coop_levels_alife.cpp host_apply_death) and this calls the handlers of the domain host of
+	npc_on_death_callback and monster_on_death_callback with stand-ins. A handler of the domain level ran on the map server and is not called
+	here: a death is heard on exactly one side. The same id twice is heard once.
+	vehicle_on_death_callback comes as an event of the map server (bind_car on the object). Hits are sent only for what active tasks wait for
+	(hit_list, the world server tells each map server), so the network does not carry every bullet.
+
+	API (world server):
+		with_level_of(peer, fn, ...)            fn on the level of that player
+		with_target(id, peer, what, fn, ...)    fn on the level of object id, for a player who stands there; else on peer's level
+		in_scope()                              the open scope, nil outside
+		object(id)                              a stand-in of id
+		note_fail(task_id)                      what a task that failed in a scope looked for and what it got
+		order(id, verb, a, b, c)                a change to a far object
+		add_death_listener(callback, f)         a coop script's handler for the relay (coop_* are view: they do not pass by domain)
+		on_death(victim, killer)                the engine
+		host_handlers(callback)                 the handlers the relay calls (tests, coop_status)
+--]]
+
+local api = rawget(_G, "coop")
+
+local tostring, tonumber, type, pairs, ipairs, pcall, select, setmetatable, rawget =
+	tostring, tonumber, type, pairs, ipairs, pcall, select, setmetatable, rawget
+local unpack = unpack
+
+local TAG = "far"
+local TICK_MS = 1000
+local RESEND_MS = 3000
+local MAX_SENDS = 5
+local HIT_GAP_MS = 100 -- of one target
+local HITS_MS = 5000 -- the list of what the tasks wait for is compared this often
+local DONE_KEPT = 256
+local MISSES_KEPT = 3
+
+local function qc() return coop_quests_core end
+local function levels() return api and api.levels end
+
+local function log(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("[coop] far: %s", ok and line or tostring(fmt))
+end
+
+local function split()
+	local l = levels()
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+
+local function world_server() return api ~= nil and qc().is_host() end
+local function map_server() return api ~= nil and qc().is_map_server() end
+
+local stats = { scopes = 0, orders = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
+
+-------------------------------------------------------------------------------
+-- Levels
+-------------------------------------------------------------------------------
+local function vertex_level(gv)
+	return game_graph():vertex(gv):level_id()
+end
+
+local function root_of(se)
+	for _ = 1, 8 do
+		local pid = se and se.parent_id
+		if not pid or pid == 65535 then break end
+		local up = alife_object(pid)
+		if not up then break end
+		se = up
+	end
+	return se
+end
+
+-- The level object id stands on; nil when it is no more.
+function level_of_id(id)
+	local se = type(id) == "number" and alife_object(id)
+	if not se then return nil end
+	local root = root_of(se)
+	return root.m_game_vertex_id and vertex_level(root.m_game_vertex_id) or nil
+end
+
+local function my_level()
+	local l = levels()
+	return l and l.my_level and l.my_level() or nil
+end
+
+local function players_on(lid)
+	local l = levels()
+	local out = {}
+	for _, p in ipairs(qc().players()) do
+		if l.level_of_player(p.id) == lid then out[#out + 1] = p end
+	end
+	return out
+end
+
+local function bridge_of_level(lid)
+	local l = levels()
+	if not (l and l.map_servers) then return nil end
+	for _, ms in ipairs(l.map_servers()) do
+		if ms.level == lid then return ms.bridge end
+	end
+	return nil
+end
+
+-------------------------------------------------------------------------------
+-- What a stand-in answers
+-------------------------------------------------------------------------------
+local function se_of(self) return alife_object(self[4]) end
+
+local function se_call(self, name, ...)
+	local se = se_of(self)
+	local f = se and se[name]
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, se, ...)
+	if ok then return v end
+	return nil
+end
+
+local asked = {}
+local unknown_fns = {}
+
+local function caller()
+	local info = debug.getinfo(3, "S")
+	local src = info and info.short_src or "?"
+	return src:match("([^\\/]+)%.script") or src
+end
+
+local function unknown(name)
+	local f = unknown_fns[name]
+	if f then return f end
+	f = function()
+		if not asked[name] then
+			asked[name] = true
+			printf("[coop] far: %s asked by %s", name, caller())
+		end
+		return nil
+	end
+	unknown_fns[name] = f
+	return f
+end
+
+local item_class = {}
+item_class.__index = function(t, k) return rawget(item_class, k) or unknown(k) end
+function item_class:id() return self.item_id end
+function item_class:section() return self.item_section end
+function item_class:name() return self.item_section end
+function item_class:condition() return self.item_condition end
+function item_class:clsid() return se_call({ [4] = self.item_id }, "clsid") end
+function item_class:parent() return self.item_owner end
+function item_class:position() return self.item_owner and self.item_owner:position() end
+function item_class:get_remaining_uses() return tonumber(ini_sys:r_float_ex(self.item_section, "max_uses")) or 1 end
+
+local NUMBERS = { radiation = 0, psy_health = 1, power = 1, morale = 1, bleeding = 0, satiety = 1, alcohol = 0, rank = 0 }
+
+local class = {}
+
+class.__index = function(t, k)
+	local m = rawget(class, k)
+	if m ~= nil then return m end
+	if k == "health" then
+		local se = se_of(t)
+		local ok, v = pcall(function() return se.health end)
+		return ok and type(v) == "number" and v or (t:alive() and 1 or 0)
+	end
+	local n = NUMBERS[k]
+	if n ~= nil then return n end
+	return unknown(k)
+end
+
+function class:id() return self[4] end
+function class:position() return self[1] end
+function class:level_vertex_id() return self[2] end
+function class:game_vertex_id() return self[3] end
+function class:section() return se_call(self, "section_name") end
+function class:section_name() return se_call(self, "section_name") end
+function class:name() return se_call(self, "name") end
+function class:clsid() return se_call(self, "clsid") end
+function class:community() return se_call(self, "community") end
+function class:character_community() return se_call(self, "community") end
+function class:character_name() return se_call(self, "character_name") end
+function class:character_icon() return se_call(self, "character_icon") end
+function class:character_rank() return se_call(self, "rank") end
+function class:character_reputation() return se_call(self, "reputation") end
+function class:commander_id() return se_call(self, "commander_id") end
+function class:squad_members() return se_call(self, "squad_members") end
+function class:parent()
+	local se = se_of(self)
+	local pid = se and se.parent_id
+	return pid and pid ~= 65535 and object(pid) or nil
+end
+function class:alive()
+	local se = se_of(self)
+	if not se then return false end
+	local f = se.alive
+	if type(f) ~= "function" then return true end
+	local ok, v = pcall(f, se)
+	return not ok or v ~= false
+end
+function class:has_info(name)
+	local ok, v = pcall(function() return alife():has_info(self[4], name) end)
+	return ok and v == true
+end
+function class:dont_has_info(name) return not self:has_info(name) end
+function class:iterate_inventory(f, x)
+	local l = levels()
+	for _, it in ipairs(l and l.carried and l.carried(self[4]) or {}) do
+		local item = setmetatable({ item_id = it.id, item_section = it.section, item_condition = it.condition, item_owner = self }, item_class)
+		if f(x, item) == true then return end
+	end
+end
+function class:object(section)
+	local found
+	self:iterate_inventory(function(_, item)
+		if item:section() == section then
+			found = item
+			return true
+		end
+	end, nil)
+	return found
+end
+function class:is_talking() return false end
+function class:is_stalker() return true end
+function class:direction() return vector():set(0, 0, 1) end
+function class:bone_position() return self[1] end
+function class:distance_to_sqr(o) return self[1]:distance_to_sqr(o) end
+function class:relation(who) return game_object and game_object.neutral or 1 end
+function class:money() return se_call(self, "money") or 0 end
+
+-- The changes: orders to the map server (below).
+function class:kill(who) order(self[4], "kill", who and who:id()) end
+function class:give_info_portion(name) order(self[4], "info", name) return true end
+function class:disable_info_portion(name) order(self[4], "uninfo", name) end
+function class:set_relation(rel, who) order(self[4], "relation", rel, who and who:id()) end
+function class:force_set_goodwill(v, who) order(self[4], "goodwill", v, type(who) == "number" and who or (who and who:id())) end
+function class:set_community_goodwill(comm, v) order(self[4], "comm_goodwill", comm, v) end
+function class:set_character_community(comm, rank, rep) order(self[4], "community", comm, rank, rep) end
+function class:set_health_ex(v) order(self[4], "health", v) end
+function class:give_money(n) order(self[4], "money", n) end
+function class:set_npc_position(pos) order(self[4], "place", pos.x, pos.y, pos.z) end
+function class:force_set_position(pos) order(self[4], "place", pos.x, pos.y, pos.z) end
+function class:hit(h)
+	local who = h and h.draftsman
+	order(self[4], "hit", tonumber(h and h.power) or 0, tonumber(h and h.type) or 0, who and who:id())
+end
+
+function make(id, se)
+	return setmetatable({ se.position, se.m_level_vertex_id, se.m_game_vertex_id, id, far = true }, class)
+end
+
+-- What a stand-in answers, for another class of the same shape (coop_quests_core far_body).
+function fallback(name)
+	return rawget(class, name) or unknown(name)
+end
+
+-------------------------------------------------------------------------------
+-- The far view
+-------------------------------------------------------------------------------
+local scope = nil
+local names_of = {} -- level -> { a = { anomaly name -> id }, z = { zone name -> id } }, from its map server
+
+function in_scope() return scope end
+
+local function miss(s, id, what)
+	if #s.misses < MISSES_KEPT then s.misses[#s.misses + 1] = tostring(id) .. ": " .. what end
+end
+
+-- A stand-in of id when it stands on the level of the scope and is online there; nil for the offline, as the stock takes it.
+local function object_there(s, id)
+	local cached = s.objects[id]
+	if cached ~= nil then return cached or nil end
+	local se = type(id) == "number" and alife_object(id)
+	if not se then
+		miss(s, id, "nil")
+		s.objects[id] = false
+		return nil
+	end
+	if level_of_id(id) ~= s.id then
+		miss(s, id, "another level")
+		s.objects[id] = false
+		return nil
+	end
+	local root = root_of(se)
+	local on = root.online == true
+	if not on then
+		local reach = alife():switch_distance()
+		for _, p in ipairs(s.bodies) do
+			if p:position():distance_to_sqr(root.position) <= reach * reach then
+				on = true
+				break
+			end
+		end
+	end
+	if not on then
+		miss(s, id, "nil (offline)")
+		s.objects[id] = false
+		return nil
+	end
+	local o = make(id, se)
+	miss(s, id, "a stand-in")
+	s.objects[id] = o
+	return o
+end
+
+local function names_table(s, kind)
+	local out = {}
+	local names = names_of[s.id]
+	for name, id in pairs(names and names[kind] or {}) do
+		local se = alife_object(id)
+		if se then out[name] = { object = make(id, se), far = true } end
+	end
+	return out
+end
+
+local function sim_view(s, real_alife)
+	local sim = real_alife()
+	local bound = {}
+	return setmetatable({}, { __index = function(_, k)
+		local b = bound[k]
+		if b then return b end
+		if k == "actor" then
+			b = function() return s.avatar and alife_object(s.avatar) or sim:actor() end
+		else
+			local v = sim[k]
+			if type(v) ~= "function" then return v end
+			b = function(_, ...) return v(sim, ...) end
+		end
+		bound[k] = b
+		return b
+	end })
+end
+
+local function open(lid, peer, what)
+	local gg_name = alife():level_name(lid)
+	local q = qc()
+	local s = { id = lid, name = gg_name, peer = peer, what = what, objects = {}, misses = {}, bodies = {}, prev = scope,
+		anomalies = db.anomaly_by_name, sim = _G.alife, view = nil }
+	s.avatar = peer and api.avatar_of and api.avatar_of(peer) or nil
+	for _, c in ipairs(q.bodies()) do
+		local ok, v = pcall(function() return vertex_level(c.obj:game_vertex_id()) end)
+		if ok and v == lid then s.bodies[#s.bodies + 1] = c.obj end
+	end
+	s.view = {
+		name = gg_name,
+		object_by_id = function(id, real)
+			local o = real(id)
+			if o then return o end
+			return object_there(s, id)
+		end,
+		storage = function(id)
+			local o = object_there(s, id)
+			return o and { object = o, far = true } or nil
+		end,
+		zone = function(name)
+			local names = names_of[s.id]
+			local id = names and names.z and names.z[name]
+			local se = id and alife_object(id)
+			return se and make(id, se) or nil
+		end,
+		on_actor_level = function(se) return se ~= nil and vertex_level(se.m_game_vertex_id) == s.id end,
+		online = function(se)
+			if level_of_id(se.id) ~= s.id then return false end
+			return object_there(s, se.id) ~= nil
+		end,
+	}
+	db.anomaly_by_name = names_table(s, "a")
+	_G.alife = function() return s.sim_view end
+	s.sim_view = sim_view(s, s.sim)
+	scope = s
+	q.set_far_view(s.view)
+	stats.scopes = stats.scopes + 1
+	return s
+end
+
+local function close(s)
+	scope = s.prev
+	db.anomaly_by_name = s.anomalies
+	_G.alife = s.sim
+	qc().set_far_view(scope and scope.view or nil)
+end
+
+local function finish(s, ok, ...)
+	close(s)
+	if not ok then error((...), 0) end
+	return ...
+end
+
+local function usable(lid)
+	return lid ~= nil and split() and world_server() and lid ~= my_level()
+end
+
+-- fn on the level of player `peer`. The world server's own level, or split levels off: fn as it is.
+function with_level_of(peer, fn, ...)
+	local l = levels()
+	local lid = split() and type(peer) == "number" and l.level_of_player(peer) or nil
+	if not usable(lid) then return fn(...) end
+	return finish(open(lid, peer, "player " .. tostring(peer)), pcall(fn, ...))
+end
+
+-- fn on the level of the target: a player who stands there does the task, whoever took it. Nobody there: on the level of `peer`, as when
+-- the task's target is offline for him.
+function with_target(id, peer, what, fn, ...)
+	if not split() or not world_server() then return fn(...) end
+	local lid = level_of_id(id)
+	local who = nil
+	if lid ~= nil then
+		for _, p in ipairs(players_on(lid)) do
+			if p.id == peer then who = p.id end
+			who = who or p.id
+		end
+	end
+	if who == nil or lid == my_level() then
+		if who ~= nil then return fn(...) end
+		local l = levels()
+		lid = type(peer) == "number" and l.level_of_player(peer) or nil
+		who = peer
+	end
+	if not usable(lid) then return fn(...) end
+	return finish(open(lid, who, what), pcall(fn, ...))
+end
+
+-- The one line of a task that failed in a scope: what it looked for and what it got.
+function note_fail(task_id)
+	local s = scope
+	if not s then return end
+	printf("[coop] far: task %s failed on %s (%s): %s", tostring(task_id), tostring(s.name), tostring(s.what),
+		#s.misses > 0 and table.concat(s.misses, ", ") or "it asked for no object")
+end
+
+-- A stand-in of id, wherever it stands; nil when it is no more.
+function object(id)
+	local se = type(id) == "number" and alife_object(id)
+	return se and make(id, se) or nil
+end
+
+-------------------------------------------------------------------------------
+-- Orders
+-------------------------------------------------------------------------------
+local orders = {} -- world server: number -> { id, verb, a, b, c, bridge, sent, sends }
+local next_order = 0
+local done = {} -- map server: number -> true, the last ones
+local done_list = {}
+
+local function send_order(q, o)
+	o.sent = time_global()
+	o.sends = o.sends + 1
+	qc().send("far_do", { q = q, i = o.id, v = o.verb, a = o.a, b = o.b, c = o.c }, o.bridge)
+end
+
+function order(id, verb, a, b, c)
+	if not world_server() then return false end
+	next_order = next_order + 1
+	local o = { id = id, verb = verb, a = a, b = b, c = c, sends = 0 }
+	stats.orders = stats.orders + 1
+	o.bridge = bridge_of_level(level_of_id(id))
+	orders[next_order] = o
+	if o.bridge then send_order(next_order, o) end
+	return true
+end
+
+local function obj_of(id) return type(id) == "number" and level.object_by_id(id) or nil end
+
+-- On a game object, on the map server, or here when the object came home.
+local DO = {
+	kill = function(obj, t)
+		local who = obj_of(t.a) or obj
+		obj:kill(who)
+	end,
+	info = function(obj, t) obj:give_info_portion(t.a) end,
+	uninfo = function(obj, t) obj:disable_info_portion(t.a) end,
+	relation = function(obj, t)
+		local who = obj_of(t.b)
+		if who then obj:set_relation(t.a, who) end
+	end,
+	goodwill = function(obj, t)
+		local who = obj_of(t.b)
+		if who then obj:force_set_goodwill(t.a, who) end
+	end,
+	comm_goodwill = function(obj, t) obj:set_community_goodwill(t.a, t.b) end,
+	community = function(obj, t) obj:set_character_community(t.a, t.b or 0, t.c or 0) end,
+	health = function(obj, t) obj:set_health_ex(t.a) end,
+	money = function(obj, t) obj:give_money(t.a) end,
+	place = function(obj, t) obj:set_npc_position(vector():set(t.a, t.b, t.c)) end,
+	hit = function(obj, t)
+		local h = hit()
+		h.power = t.a
+		h.type = t.b
+		h.impulse = 0
+		h.direction = vector():set(0, 0, 1)
+		h.draftsman = obj_of(t.c) or obj
+		obj:hit(h)
+	end,
+}
+
+-- On the record alone: the object has no body anywhere now.
+local ON_RECORD = {
+	kill = function(se)
+		if se.alive and se:alive() then alife():kill_entity(se) end
+	end,
+	info = function(se, o) alife():give_info(se.id, o.a) end,
+	uninfo = function(se, o) alife():disable_info(se.id, o.a) end,
+	goodwill = function(se, o)
+		if se.force_set_goodwill and o.b then se:force_set_goodwill(o.a, o.b) end
+	end,
+}
+
+local function carry_out(q, o, why)
+	orders[q] = nil
+	local se = alife_object(o.id)
+	if not se then
+		stats.dropped = stats.dropped + 1
+		printf("[coop] far: order %s on %s dropped: the object is no more", o.verb, tostring(o.id))
+		return
+	end
+	local real = obj_of(o.id)
+	local f = real and DO[o.verb] or ON_RECORD[o.verb]
+	if not f then
+		stats.dropped = stats.dropped + 1
+		printf("[coop] far: order %s on %s dropped (%s): nothing to change on a record", o.verb, tostring(o.id), why)
+		return
+	end
+	stats.on_record = stats.on_record + 1
+	local ok, err
+	if real then ok, err = pcall(f, real, o) else ok, err = pcall(f, se, o) end
+	if not ok then qc().report(TAG, "order " .. o.verb, err) end
+	printf("[coop] far: order %s on %s carried out here (%s)", o.verb, tostring(o.id), why)
+end
+
+local function orders_tick(now)
+	for q, o in pairs(orders) do
+		if not alife_object(o.id) then
+			carry_out(q, o, "gone")
+		else
+			local bridge = bridge_of_level(level_of_id(o.id))
+			if not bridge or (o.bridge and bridge ~= o.bridge) then
+				carry_out(q, o, "its map server is gone")
+			elseif not o.bridge then
+				o.bridge = bridge
+				send_order(q, o)
+			elseif now - o.sent >= RESEND_MS then
+				if o.sends >= MAX_SENDS then carry_out(q, o, "no answer") else send_order(q, o) end
+			end
+		end
+	end
+end
+
+local function on_do(t, from)
+	if from ~= 0 or not map_server() then return end
+	local q = tonumber(t.q)
+	if not q then return end
+	if done[q] then return qc().send("far_ack", { q = q, r = 1 }, 0) end
+	local obj = obj_of(tonumber(t.i))
+	if not obj then return qc().send("far_ack", { q = q, r = 0 }, 0) end
+	local f = DO[t.v]
+	if f then
+		local ok, err = pcall(f, obj, t)
+		if not ok then qc().report(TAG, "order " .. tostring(t.v), err) end
+	end
+	done[q] = true
+	done_list[#done_list + 1] = q
+	if #done_list > DONE_KEPT then done[table.remove(done_list, 1)] = nil end
+	qc().send("far_ack", { q = q, r = 1 }, 0)
+end
+
+local function on_ack(t, from)
+	if not world_server() or type(from) ~= "number" or from < 0x100 then return end
+	local q = tonumber(t.q)
+	local o = q and orders[q]
+	if not o then return end
+	stats.acks = stats.acks + 1
+	if t.r == 1 then orders[q] = nil else carry_out(q, o, "it went home") end
+end
+
+function orders_held()
+	local n = 0
+	for _ in pairs(orders) do n = n + 1 end
+	return n
+end
+
+-------------------------------------------------------------------------------
+-- Names of the anomalies and zones of a level
+-------------------------------------------------------------------------------
+local names_sent = nil
+
+local function names_tick()
+	local t = { a = {}, z = {} }
+	for name, b in pairs(db.anomaly_by_name or {}) do
+		local o = b and b.object
+		if o then t.a[name] = o:id() end
+	end
+	for name, o in pairs(db.zone_by_name or {}) do
+		local ok, id = pcall(function() return o:id() end)
+		if ok then t.z[name] = id end
+	end
+	return t
+end
+
+-------------------------------------------------------------------------------
+-- The death relay
+-------------------------------------------------------------------------------
+local listeners = {} -- callback -> list of coop handlers
+local heard = {} -- world server: id -> true: its death was told here
+
+function add_death_listener(callback, f)
+	local list = listeners[callback] or {}
+	listeners[callback] = list
+	list[#list + 1] = f
+end
+
+function host_handlers(callback)
+	local r = rawget(_G, "coop_route")
+	local out = r and r.domain_handlers and r.domain_handlers(callback, "host") or {}
+	for _, f in ipairs(listeners[callback] or {}) do out[#out + 1] = f end
+	return out
+end
+
+local function relay(callback, ...)
+	for _, f in ipairs(host_handlers(callback)) do
+		local ok, err = pcall(f, ...)
+		if not ok then qc().report(TAG, callback, err) end
+	end
+end
+
+local function is_monster(se)
+	local cls = se:clsid()
+	return IsMonster ~= nil and IsMonster(nil, cls) == true
+end
+
+-- The engine, on the world server, once it took a death from a map server. killer: 65535 when there is none.
+function on_death(victim, killer)
+	if not world_server() or heard[victim] then return end
+	local se = alife_object(victim)
+	if not se then return end
+	heard[victim] = true
+	stats.deaths = stats.deaths + 1
+	local dead = make(victim, se)
+	local who = killer ~= 65535 and object(killer) or nil
+	local callback = is_monster(se) and "monster_on_death_callback" or "npc_on_death_callback"
+	local lid = level_of_id(victim)
+	local peer = players_on(lid)[1]
+	with_level_of(peer and peer.id, relay, callback, dead, who)
+end
+
+local function on_unregister(se)
+	if se and se.id then heard[se.id] = nil end
+end
+
+local function on_vehicle_death(t, from)
+	if not world_server() or type(from) ~= "number" or from < 0x100 then return end
+	local id = tonumber(t.i)
+	local o = id and object(id)
+	if not o then return end
+	with_target(id, nil, "a vehicle", relay, "vehicle_on_death_callback", o, tonumber(t.k) and object(tonumber(t.k)) or nil)
+end
+
+local function vehicle_died(obj)
+	if map_server() and obj then qc().send("far_car", { i = obj:id() }, 0) end
+end
+
+-------------------------------------------------------------------------------
+-- Hits of what a task waits for
+-------------------------------------------------------------------------------
+-- Status functor of a task -> what of its target a hit says: a bone, who struck. Rules by the section of the victim.
+local HIT_RULES = {
+	brain_game = { section = "controller" },
+	gambling_with_life = { section = "bloodsucker" },
+	the_living_fire = { story = "the_living_fire_prometheus" },
+}
+
+local wanted = { ids = {}, sections = {} } -- map server: what to pass on
+local hit_at = {}
+
+local function hit_list()
+	local ids, sections = {}, {}
+	local tm = task_manager.get_task_manager()
+	for tid, tsk in pairs(tm.task_info) do
+		if type(tsk.current_target) == "number" then ids[tsk.current_target] = true end
+		for key, rule in pairs(HIT_RULES) do
+			if tostring(tid):find(key, 1, true) then
+				if rule.section then sections[rule.section] = true end
+				if rule.story then
+					local sid = get_story_object_id and get_story_object_id(rule.story)
+					if sid then ids[sid] = true end
+				end
+			end
+		end
+	end
+	return { ids = ids, sections = sections }
+end
+
+function hit_wanted(obj)
+	if wanted.ids[obj:id()] then return true end
+	local sec = obj:section()
+	for key in pairs(wanted.sections) do
+		if sec:find(key, 1, true) then return true end
+	end
+	return false
+end
+
+local function pass_hit(callback, obj, h, bone)
+	if not (map_server() and obj and h and hit_wanted(obj)) then return end
+	local id = obj:id()
+	local now = time_global()
+	if hit_at[id] and now - hit_at[id] < HIT_GAP_MS then return end
+	hit_at[id] = now
+	local who = h.draftsman
+	stats.hits_out = stats.hits_out + 1
+	qc().send("far_hit", { c = callback, i = id, k = who and who:id() or nil, b = bone, p = tonumber(h.power) or 0, t = tonumber(h.type) or 0,
+		w = tonumber(h.weapon_id) }, 0)
+end
+
+local function monster_on_before_hit(obj, h, bone) pass_hit("monster_on_before_hit", obj, h, bone) end
+local function npc_on_before_hit(obj, h, bone) pass_hit("npc_on_before_hit", obj, h, bone) end
+
+local function on_hit(t, from)
+	if not world_server() or type(from) ~= "number" or from < 0x100 then return end
+	local id = tonumber(t.i)
+	local victim = id and object(id)
+	if not victim then return end
+	if t.c ~= "monster_on_before_hit" and t.c ~= "npc_on_before_hit" then return end
+	stats.hits_in = stats.hits_in + 1
+	local h = { power = t.p, type = t.t, impulse = 0, weapon_id = t.w, direction = function() return vector():set(0, 0, 1) end,
+		draftsman = tonumber(t.k) and object(tonumber(t.k)) or nil }
+	with_target(id, nil, "a hit", relay, t.c, victim, h, t.b, { ret_value = true })
+end
+
+-------------------------------------------------------------------------------
+-- Frames
+-------------------------------------------------------------------------------
+local next_tick = 0
+
+local function tick()
+	if scope then
+		-- pcall closes every scope; only a coroutine left inside one could leave it open
+		stats.leaks = stats.leaks + 1
+		printf("! [coop] far: scope leaked by %s", tostring(scope.what))
+		while scope do close(scope) end
+	end
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	if world_server() and split() then orders_tick(now) end
+end
+
+function print_status()
+	qc().log(TAG, "scopes %d | orders %d, answered %d, on records %d, dropped %d, held now %d | deaths relayed %d | hits out %d, in %d | leaks %d",
+		stats.scopes, stats.orders, stats.acks, stats.on_record, stats.dropped, orders_held(), stats.deaths, stats.hits_out, stats.hits_in, stats.leaks)
+end
+
+function _tick() next_tick = 0; tick() end
+function _stats() return stats end
+function _names_of() return names_of end
+
+function on_game_start()
+	if not api then return end
+	local q = qc()
+	q.on("far_do", on_do, TAG)
+	q.on("far_ack", on_ack, TAG)
+	q.on("far_car", on_vehicle_death, TAG)
+	q.on("far_hit", on_hit, TAG)
+	RegisterScriptCallback("actor_on_update", tick)
+	RegisterScriptCallback("server_entity_on_unregister", on_unregister)
+	RegisterScriptCallback("monster_on_before_hit", monster_on_before_hit)
+	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
+	RegisterScriptCallback("vehicle_on_death_callback", vehicle_died)
+	local share = rawget(_G, "coop_levels_share") or coop_levels_share
+	if share then
+		-- a map server's anomalies and zones: what a task looks for by name on the world server
+		share.up("names", names_tick, function(t, lid)
+			if type(t) == "table" then names_of[lid] = t end
+		end)
+		share.down("hit_list", hit_list, function(t)
+			if type(t) == "table" then
+				wanted.ids, wanted.sections = t.ids or {}, t.sections or {}
+			end
+		end, HITS_MS)
+	end
+end
