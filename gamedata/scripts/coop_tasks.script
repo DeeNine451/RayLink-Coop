@@ -57,7 +57,7 @@
 	  coop_tasks.active_of(peer) -> the task that player has as his active one (host only, nil: none reported)
 	  coop_tasks.run_as(peer, fn, ...) -> runs fn as a request of that player (host: gives / turn-ins
 	    inside belong to that player)
-	  coop_tasks.with_task_owner(task_id, fn, ...) -> runs fn with the effects keyed to the actor going
+	  coop_tasks.with_task_owner(task_id, fn, ...) -> runs fn with the companions it adds and the effects keyed to the actor going
 	    to the player who took the task (host: items a status functor hands out, news)
 	  coop_tasks.with_recipient(peer, fn, ...) -> the same for a given player (host)
 	  coop_tasks.in_reward_scope() -> true while such effects belong to one player (host)
@@ -1237,8 +1237,12 @@ function with_task_owner(id, fn, ...)
 	local t = host.taker[id]
 	if not t or t == 0 or not avatar_obj(t) then return fn(...) end
 	ctx = { task = id, rcpt = t, share = false, status = true }
+	-- a functor can make a companion by writing the stock table itself (tasks_agent_rescue): what it added is the taker's
+	local comp = rawget(_G, "coop_npc_companions")
+	local before = comp and comp.squads_now and comp.squads_now()
 	local res = { pcall(fn, ...) }
 	ctx = nil
+	if before then comp.claim_since(before, t) end
 	if not res[1] then error(res[2], 0) end
 	return unpack(res, 2)
 end

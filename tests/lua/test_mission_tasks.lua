@@ -303,5 +303,24 @@ sent_before = count_sent(Cm, "quests.act")
 Cm.env.itms_manager.relocate_item_from_actor(Cm.actor, nil, "bread", 5)
 check(count_sent(Cm, "quests.act") == sent_before, "no NPC to hand to: stock")
 
+-- ---------------------------------------------------------------- a companion made in a status functor
+print("== a task's status functor makes a companion (tasks_agent_rescue writes the stock table): the taker leads it")
+do
+	local ct = Hm.env.coop_tasks
+	local asked, claimed = 0, {}
+	Hm.env.coop_npc_companions = {
+		squads_now = function() asked = asked + 1; return { [77] = true } end,
+		claim_since = function(before, peer) claimed[#claimed + 1] = { before = before, peer = peer } end,
+	}
+	check(ct.with_task_owner("cf_task", function() return "done" end) == "done", "the functor's answer passes through")
+	check(#claimed == 1 and claimed[1].peer == 1 and claimed[1].before[77] == true, "what it added goes to the task's taker")
+	check(pcall(ct.with_task_owner, "cf_task", function() error("boom", 0) end) == false and #claimed == 2,
+		"a functor that fails: what it added before is claimed all the same, the error stands")
+	asked = 0
+	check(ct.with_task_owner("no_such_task", function() return 1 end) == 1 and asked == 0, "no taker known: nothing to compare")
+	Hm.env.coop_npc_companions = nil
+	check(ct.with_task_owner("cf_task", function() return 2 end) == 2, "without the module: as before")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

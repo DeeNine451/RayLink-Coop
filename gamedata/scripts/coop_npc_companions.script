@@ -483,6 +483,21 @@ local function claim_new_squads(before, peer)
 	return n
 end
 
+function squads_now()
+	return squad_ids()
+end
+
+-- For code that writes the stock table itself (coop_tasks.with_task_owner): the squads added since `before`, that no wrapper claimed, are
+-- led by player `peer`. Returns how many.
+function claim_since(before, peer)
+	local known = {}
+	for id in pairs(before) do known[id] = true end
+	for id in pairs(squad_ids()) do
+		if leaders[id] ~= nil or far_leader(id) ~= nil then known[id] = true end
+	end
+	return claim_new_squads(known, peer)
+end
+
 -- Ruling F2-34: did player `from` talk to the NPC, or to a member of its squad, now or in the last RECRUIT_TALK_MS
 -- (the host's talk locks, coop.talk_recent)? False without the engine function.
 local function talked_recently(from, npc, squad)

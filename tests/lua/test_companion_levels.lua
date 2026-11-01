@@ -465,6 +465,30 @@ do
 	check(H.teleported == nil and W.CM._leaders()[400] == 501, "with its leader on its level it stays")
 end
 
+print("== a companion a status functor writes into the stock table (tasks_agent_rescue): the taker leads it")
+do
+	local W = stand()
+	local H, Mk = W.H, W.Mk
+	local ac = H.env.axr_companions
+	local before = W.CH.squads_now()
+	ac.companion_squads[310] = W.squad(310, 10, 211)
+	check(W.CH.claim_since(before, 1) == 1 and W.CH._leaders()[310] == 500, "a squad of this level: its taker is its leader")
+	ac.companion_squads[311] = W.squad(311, 10, 212)
+	W.CH._leaders()[311] = 501
+	check(W.CH.claim_since(before, 1) == 0 and W.CH._leaders()[311] == 501, "a wrapper of the stock claimed it already: it stays")
+	before = W.CH.squads_now()
+	W.bodies[301] = { name = function() return "comp2" end }
+	Mk.env.axr_companions.companion_squads[400] = nil
+	ac.companion_squads[400] = W.squads[400]
+	local sent = #sent_named(H, "npc.comp_adopt")
+	W.CH.claim_since(before, 2)
+	check(#sent_named(H, "npc.comp_adopt") == sent + 1, "a squad on a map server's level goes there")
+	W.CH.claim_since(before, 2)
+	check(#sent_named(H, "npc.comp_adopt") == sent + 1, "once")
+	pump()
+	check(W.CM._leaders()[400] == 501, "the map server leads it")
+end
+
 print("== a member online when the map server takes the squad, a companion of it already")
 do
 	local W = stand()
