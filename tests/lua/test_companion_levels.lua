@@ -41,7 +41,10 @@ local function stock(M, W)
 	E.dik_to_bind = function(d) return d end
 	E.dialogs = { who_is_npc = function(a, b) return a:id() == 0 and b or a end }
 	E.CALifeSmartTerrainTask = function(gv, lv) return { gv = gv, lv = lv } end
-	E.alife_object = function(id) return W.bodies[id] or W.squads[id] or (M.objects[id] and M.objects[id]) end
+	E.alife_object = function(id)
+		if M == W.Mk and W.not_yet[id] then return nil end
+		return W.bodies[id] or W.squads[id] or M.objects[id]
+	end
 	E.get_object_squad = function(o)
 		for _, sq in pairs(W.squads) do
 			for k in sq:squad_members() do if k.id == o:id() then return sq end end
@@ -66,6 +69,12 @@ local function stock(M, W)
 		return not E.se_load_var(squad:commander_id(), nil, "companion_cannot_teleport")
 	end
 	function ac.get_inventory_table() return {} end
+	function ac.list_actor_squad_by_id()
+		local t = {}
+		for id in pairs(ac.companion_squads) do t[#t + 1] = id end
+		table.sort(t)
+		return t
+	end
 	E.dialogs_axr_companion = {
 		is_actor_companion = function(actor, npc) return npc:has_info("npcx_is_companion") end,
 		is_not_actor_companion = function(actor, npc) return npc:has_info("npcx_is_companion") ~= true end,
@@ -93,7 +102,8 @@ end
 local function stand(opts)
 	opts = opts or {}
 	reset_world()
-	local W = { bodies = {}, squads = {}, tables = {}, level_of = { [0] = 1, [1] = 1, [2] = 2 }, split = opts.split ~= false, online = {} }
+	local W = { bodies = {}, squads = {}, tables = {}, level_of = { [0] = 1, [1] = 1, [2] = 2 }, split = opts.split ~= false, online = {},
+		not_yet = {} }
 	local H = machine("host", 0, { [0] = 0, [1] = 500, [2] = 501 })
 	local Mk = machine("client", BRIDGE, opts.mk_knows_all and { [1] = 500, [2] = 501 } or { [2] = 501 })
 	local A = machine("client", 1, { [0] = 500, [1] = 0, [2] = 501 })
@@ -107,7 +117,7 @@ local function stand(opts)
 	-- what a map server says to a player of its level comes down the tunnel: the client hears the world server
 	local send = Mk.env.coop.send_event
 	Mk.env.coop.send_event = function(name, payload, target)
-		if type(target) == "number" and target < 0x100 then
+		if type(target) == "number" and target > 0 and target < 0x100 then
 			Mk.sent[#Mk.sent + 1] = { name = name, payload = payload, target = target }
 			QUEUE[#QUEUE + 1] = { from = 0, name = name, payload = payload, target = target }
 			return true
@@ -335,6 +345,198 @@ do
 	W.CA.dlg_hand(A.env.db.actor, W.comp_a, "d", "p", "", { "2" })
 	pump()
 	check(L()[300] == 501, "the hand-over goes through")
+end
+
+print("== the host's level change: a squad somebody else leads stays")
+do
+	local W = stand()
+	local H = W.H
+	local ac = H.env.axr_companions
+	W.CH._leaders()[300] = 500
+	W.squad(310, 10, 211)
+	ac.companion_squads[310] = W.squads[310]
+	W.refresh()
+	check(ac.companion_squad_can_teleport(W.squads[300]) == false, "a squad a client leads does not go with the host")
+	check(ac.companion_squad_can_teleport(W.squads[310]) == true, "his own does")
+	H.se[211] = { companion_cannot_teleport = true }
+	check(ac.companion_squad_can_teleport(W.squads[310]) == false, "the stock's rule stands for his own")
+	H.se[211] = nil
+	local asked = 0
+	ac.companion_squad_can_teleport = function(squad) asked = asked + 1; return squad.id ~= 310 end -- Useful Idiots, loaded after us
+	W.refresh()
+	check(ac.companion_squad_can_teleport(W.squads[300]) == false, "over a patch that came later too")
+	check(ac.companion_squad_can_teleport(W.squads[310]) == false and asked == 1, "the patch still decides for the host's own")
+	W.split = false
+	check(ac.companion_squad_can_teleport(W.squads[300]) == true and asked == 2, "split levels off: as before")
+end
+
+print("== a client leaves the host's level: his squad goes after him, the map server of his level takes it")
+do
+	local W = stand()
+	local H, Mk = W.H, W.Mk
+	local L = W.CH._leaders
+	L()[300] = 500
+	W.refresh()
+	Mk.add(make_obj(201, 1, 0, 0, { _name = "comp" }))
+	H.objects[201] = nil
+	W.move(1, 2)
+	W.refresh()
+	check(H.teleported and H.teleported.id == 300 and H.teleported.gvid == 20, "the world server teleports it to his body")
+	check(L()[300] == nil and H.env.axr_companions.companion_squads[300] == nil, "it is no companion of this level any more")
+	check(W.CM._leaders()[300] == 500 and Mk.env.axr_companions.companion_squads[300] == W.squads[300], "the map server takes it")
+	check(Mk.env.axr_companions.logic[201] ~= nil, "with the logic of a companion")
+end
+
+print("== a squad that may not follow stays where it is, and keeps its leader")
+do
+	local W = stand()
+	local H = W.H
+	local L = W.CH._leaders
+	L()[300] = 500
+	W.refresh()
+	H.se[201] = { companion_cannot_teleport = true } -- the Fanatic (dialogs_escape), a task's squad
+	W.move(1, 2)
+	W.refresh()
+	W.refresh()
+	check(H.teleported == nil, "not teleported")
+	check(L()[300] == 500 and H.env.axr_companions.companion_squads[300] ~= nil, "his entry stays, it is his when he comes back")
+	check(W.CH.leader_of(W.comp) == nil, "meanwhile it acts for the host: no leader here")
+	H.se[201] = nil
+	W.refresh()
+	check(H.teleported and H.teleported.id == 300, "the mark gone, it goes after him")
+end
+
+print("== a client leaves a map server's level: it lets the squad go, the world server takes it")
+do
+	local W = stand()
+	local H, Mk = W.H, W.Mk
+	local LM = W.CM._leaders
+	LM()[400] = 501
+	W.refresh()
+	W.online[301] = true
+	W.proxy_b._alive = true
+	W.move(2, 1)
+	W.refresh()
+	check(LM()[400] == nil and Mk.env.axr_companions.companion_squads[400] == nil, "the map server lets it go")
+	check(H.teleported == nil, "the world server waits: a member is online at the map server")
+	W.online[301] = nil
+	W.refresh()
+	check(H.teleported and H.teleported.id == 400 and H.teleported.gvid == 10, "then teleports it to his body")
+	check(W.CH._leaders()[400] == 501 and H.env.axr_companions.companion_squads[400] == W.squads[400], "the host's level takes it")
+end
+
+print("== a task's squad on a map server's level: the map server takes it, with the logic and the stock's marks")
+do
+	local TAKER
+	local W = stand({ env = function(M)
+		M.env.coop_tasks = { reward_peer = function() return TAKER end, giving_npc = function() return nil end }
+		M.env.xr_effects = { add_task_companion = function(actor, npc, p)
+			local ac = M.env.axr_companions
+			ac.companion_squads[p[1]] = W_squads[p[1]]
+			M.se[301] = { companion = true, companion_cannot_dismiss = true, companion_cannot_teleport = true }
+		end }
+	end })
+	W_squads = W.squads
+	local H, Mk = W.H, W.Mk
+	local ac = Mk.env.axr_companions
+	ac.companion_squads[400] = nil
+	W.comp2:disable_info_portion("npcx_is_companion")
+	W.not_yet[400] = true
+	W.bodies[301] = { name = function() return "comp2" end }
+	TAKER = 2
+	H.env.xr_effects.add_task_companion(H.env.db.actor, nil, { 400 })
+	TAKER = nil
+	pump()
+	check(ac.companion_squads[400] == nil, "the squad is not on the map server yet: nothing to take")
+	W.not_yet[400] = nil
+	W.refresh()
+	check(W.CM._leaders()[400] == 501 and ac.companion_squads[400] == W.squads[400], "it comes: the map server takes it, its leader the taker")
+	check(ac.logic[301] ~= nil and ac.logic[301].cannot_dismiss == true, "the logic of a companion: he does not go back to his own walker")
+	check(Mk.se[301] and Mk.se[301].companion == true and Mk.se[301].companion_cannot_dismiss == true
+		and Mk.se[301].companion_cannot_teleport == true, "the stock's marks: the binder reads them when he comes online")
+	check(W.CH._leaders()[400] == nil, "the world server does not lead it")
+	check(H.env.axr_companions.companion_squads[400] ~= nil, "its table keeps the squad: task scripts ask it")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders and m.coop_npc_leaders[400] == 501, "the save has the leader at once")
+	check(H.env.axr_companions.companion_squad_can_teleport(W.squads[400]) == false, "it does not go with the host")
+	check(#H.env.axr_companions.list_actor_squad_by_id() == 1, "the host's squad list and keys are not for it")
+	W.refresh()
+	check(H.teleported == nil and W.CM._leaders()[400] == 501, "with its leader on its level it stays")
+end
+
+print("== a member online when the map server takes the squad, a companion of it already")
+do
+	local W = stand()
+	local Mk = W.Mk
+	W.CH._leaders()[300] = 500
+	W.refresh()
+	Mk.add(make_obj(201, 1, 0, 0, { _name = "comp", _info = { npcx_is_companion = true } }))
+	W.H.objects[201] = nil
+	W.move(1, 2)
+	W.refresh()
+	check(Mk.env.axr_companions.logic[201] == nil, "no second setup: it would reset his orders")
+end
+
+print("== the leaders of a map server's level: into the save, onto a new map server")
+do
+	local function share_env(M)
+		M.share = { up = {}, down = {} }
+		M.env.coop_levels_share = {
+			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
+			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
+		}
+	end
+	local W = stand({ env = share_env })
+	local H, Mk = W.H, W.Mk
+	local up, down = "comp_leaders", "comp_leaders"
+	check(Mk.share.up[up] ~= nil and H.share.down[down] ~= nil, "both tables are declared")
+	local LM = W.CM._leaders
+	LM()[400] = 501
+	H.share.up[up].set(Mk.share.up[up].get(), 2)
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders and m.coop_npc_leaders[400] == 501, "a leader on the map server reaches the save")
+	check(H.env.axr_companions.companion_squad_can_teleport(W.squads[400]) == false, "the world server knows it for somebody's")
+	LM()[300] = 500 -- the save's entry of a squad of another level
+	W.refresh()
+	check(LM()[300] == nil, "a map server keeps only the squads of its level")
+	local row = Mk.share.up[up].get()
+	check(row.l[400] == 501 and row.l[300] == nil, "and reports those")
+	LM()[400] = nil
+	H.share.up[up].set(Mk.share.up[up].get(), 2)
+	m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders == nil, "dismissed there: gone from the save")
+
+	LM()[400] = 501
+	H.share.up[up].set(Mk.share.up[up].get(), 2)
+	LM()[400] = nil
+	Mk.env.axr_companions.companion_squads[400] = nil
+	W.comp2:disable_info_portion("npcx_is_companion")
+	local given = H.share.down[down].get()
+	Mk.share.down[down].set(given)
+	check(LM()[400] == 501 and Mk.env.axr_companions.companion_squads[400] ~= nil, "a new map server gets the leaders of its level")
+	check(Mk.env.axr_companions.logic[301] ~= nil, "and sets the logic up")
+	LM()[400] = 500
+	Mk.share.down[down].set(given)
+	check(LM()[400] == 500, "the word counts once: what the map server changed since is newer")
+end
+
+print("== a save with leaders of every level: each process keeps its own")
+do
+	local W = stand()
+	local H, Mk = W.H, W.Mk
+	local saved = { coop_npc_leaders = { [300] = 500, [400] = 501 } }
+	H.fire("load_state", saved)
+	Mk.fire("load_state", saved)
+	W.refresh()
+	check(W.CH._leaders()[300] == 500 and W.CH._leaders()[400] == nil, "the world server leads the squads of its level")
+	check(W.CM._leaders()[400] == 501 and W.CM._leaders()[300] == nil, "the map server those of its own")
+	check(H.teleported == nil, "nobody takes a squad on another level for one left behind")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
