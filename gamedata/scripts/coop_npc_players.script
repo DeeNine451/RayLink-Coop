@@ -78,6 +78,11 @@ function client_live()
 	return is_client() and api.is_live() == true
 end
 
+-- F3a: this process is a map server: the authority of its level, a client of the world.
+function is_map_server()
+	return active() and api.is_map_server ~= nil and api.is_map_server() == true
+end
+
 function self_peer()
 	if not api then return 0 end
 	local ok, v = pcall(api.self_id)

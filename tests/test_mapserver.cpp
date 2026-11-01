@@ -281,7 +281,8 @@ TEST(bridge_takes_the_world_and_the_registry_not_the_stream_of_the_hosts_level)
 		CHECK(bridge_takes(m));
 	for (const Msg m : {Msg::EntitySpawn, Msg::EntityDestroy, Msg::EntityParent, Msg::EntitySquad})
 		CHECK(bridge_takes(m));
-	for (const Msg m : {Msg::EntitySnapshot, Msg::PlayerState, Msg::EntitySwitch, Msg::ZoneState, Msg::Chat, Msg::PeerList})
+	for (const Msg m : {Msg::EntitySnapshot, Msg::PlayerState, Msg::EntitySwitch, Msg::ZoneState, Msg::Chat, Msg::PeerList,
+	         Msg::WeatherSync, Msg::Thunderbolt})
 		CHECK(!bridge_takes(m));
 }
 

@@ -330,6 +330,50 @@ local function players()
 	return ok and list or {}
 end
 
+-------------------------------------------------------------------------------
+-- The emission on every level (docs\SPLIT_LEVELS.md 7b). One schedule, the world server's; the phase goes to every map server and
+-- every client. A map server is the authority of its level: there the stock runs for real, with the kills on, and the verdict on
+-- the players of that level is its own. A level the stock emission does not reach plays nothing.
+-------------------------------------------------------------------------------
+local function split_on()
+	local l = api and api.levels
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+
+local function map_server()
+	return api ~= nil and api.is_map_server ~= nil and api.is_map_server() == true
+end
+
+-- The stock's two levels no emission reaches on top of its valid_levels (surge_manager.script start): its source, and a level with
+-- nowhere to hide.
+local NO_EMISSION = { l13_generators = true, l11_hospital = true }
+local function level_open(name)
+	local lw = rawget(_G, "level_weathers") or level_weathers
+	return name ~= nil and lw ~= nil and lw.valid_levels ~= nil and lw.valid_levels[name] == true and not NO_EMISSION[name]
+end
+
+-- The world server: an open level somebody stands on, the host's own first.
+local function open_level_of_a_player()
+	local here = level.name()
+	if level_open(here) then return here end
+	local l = api.levels
+	for _, p in ipairs(players()) do
+		local name = not p.is_self and l.level_of_player and l.level_name and l.level_name(l.level_of_player(p.id))
+		if name and level_open(name) then return name end
+	end
+	return nil
+end
+
+-- The world server: this event of player `peer` goes to the authority of his level. -> it went
+local function to_his_map_server(name, t, peer)
+	local l = api.levels
+	local bridge = split_on() and l.bridge_of_player and l.bridge_of_player(peer)
+	if not bridge then return false end
+	t.peer = peer
+	api.send_event(name, encode(t), bridge)
+	return true
+end
+
 -- Host: the stock surge decided to kill unsheltered people now (2nd wave or the end). Same verdict for
 -- every remote player's character, once per emission. The wave position is not used for proxies.
 -- A remote player sleeping through the emission on an anabiotic (coop_npc_effects keeps it per player, W5).
@@ -342,7 +386,7 @@ local function anabiotic(peer)
 end
 
 local function host_surge_kill_check(m)
-	if not (api and api.is_host()) then return end
+	if not (api and (api.is_host() or map_server())) then return end
 	-- audit E3: the host's story immunity (surge_immuned) is his own; a client's is checked on his machine (coop_env_kill)
 	for _, p in ipairs(players()) do
 		if not p.is_self and env_host.kill_sent[p.id] ~= env_host.serial and anabiotic(p.id) then
@@ -359,6 +403,41 @@ local function host_surge_kill_check(m)
 	end
 end
 
+-- The stock's level checks read level.name() of this process. With split levels the emission is the world's: fn sees `name`.
+local function with_level_name(name, fn, ...)
+	local own = level.name
+	level.name = function() return name end
+	local res = { pcall(fn, ...) }
+	level.name = own
+	if not res[1] then report_error("coop_main", "emission schedule", res[2]) end
+	return unpack(res, 2)
+end
+
+-- The world server, with split levels: a host under ground does not stop the world's emission, and he plays nothing of it there.
+-- `field`: the manager's length; `finish`: how the stock ends it.
+local function schedule_around(cls, field, finish)
+	local start, update = cls.start, cls.update
+	cls.start = function(self, ...)
+		if not split_on() then return start(self, ...) end
+		local name = open_level_of_a_player()
+		if not name or name == level.name() then return start(self, ...) end
+		log("emission schedule: the host is on a closed level, %s is open", name)
+		return with_level_name(name, start, self, ...)
+	end
+	cls.update = function(self, ...)
+		if not (split_on() and self.started == true and not level_open(level.name())) then return update(self, ...) end
+		local ok, sec = pcall(function() return game.get_game_time():diffSec(self.inited_time) / level.get_time_factor() end)
+		if ok and sec >= (self[field] or 0) then self[finish](self) end
+	end
+end
+
+function install_env_schedule()
+	local sm_mod = rawget(_G, "surge_manager") or surge_manager
+	local pm_mod = rawget(_G, "psi_storm_manager") or psi_storm_manager
+	if sm_mod and sm_mod.CSurgeManager then schedule_around(sm_mod.CSurgeManager, "surge_time", "end_surge") end
+	if pm_mod and pm_mod.CPsiStormManager then schedule_around(pm_mod.CPsiStormManager, "psi_storm_duration", "finish") end
+end
+
 local function install_host_hooks()
 	host_hooks = true
 	local mod = rawget(_G, "surge_manager") or surge_manager
@@ -371,6 +450,8 @@ local function install_host_hooks()
 		local ok, orig = pcall(function() return cls[fname] end)
 		if ok and type(orig) == "function" then
 			cls[fname] = function(self, ...)
+				-- the end of an emission that runs elsewhere reaches nobody on a level it does not reach
+				if split_on() and not level_open(level.name()) then return end
 				local r = orig(self, ...)
 				local okc, err = pcall(host_surge_kill_check, self)
 				if not okc then report_error("coop_main", "surge kill check", err) end
@@ -378,6 +459,7 @@ local function install_host_hooks()
 			end
 		end
 	end
+	if api.is_host() then install_env_schedule() end
 end
 
 local function host_env_tick()
@@ -396,14 +478,22 @@ local function host_env_tick()
 	local active = s_on or p_on
 	env_host.next_send = tg + (active and 1000 or 10000)
 	local tf = level.get_time_factor()
+	local split = split_on()
 	for _, p in ipairs(players()) do
 		if not p.is_self then
+			-- with split levels a player elsewhere has no object here: his machine judges his shelter, the authority of his level his fate
+			local own = split and api.levels.on_host_level ~= nil and not api.levels.on_host_level(p.id)
 			local cover = true
-			if active then
+			if active and not own then
 				local obj = p.avatar_id and level.object_by_id(p.avatar_id)
 				cover = (obj == nil) or player_in_cover(p.id, obj)
 			end
-			api.send_event("coop_env", encode({ s = s_on, sg = s_gs, p = p_on, pg = p_gs, tf = tf, c = cover }), p.id)
+			api.send_event("coop_env", encode({ s = s_on, sg = s_gs, p = p_on, pg = p_gs, tf = tf, c = cover, own = own or nil }), p.id)
+		end
+	end
+	if split and api.levels.map_servers then
+		for _, ms in ipairs(api.levels.map_servers()) do
+			api.send_event("coop_env", encode({ s = s_on, sg = s_gs, p = p_on, pg = p_gs, tf = tf, c = true }), ms.bridge)
 		end
 	end
 end
@@ -473,6 +563,14 @@ local function patch_env_classes_for_client()
 	end
 	local sm_mod = rawget(_G, "surge_manager") or surge_manager
 	local pm_mod = rawget(_G, "psi_storm_manager") or psi_storm_manager
+	if map_server() then
+		-- the authority of its level: every consequence runs here, what nobody plays does not
+		local n = neutralize(sm_mod and sm_mod.CSurgeManager, { "give_surge_hide_task", "displayIndicators" })
+		n = n + neutralize(pm_mod and pm_mod.CPsiStormManager, { "give_psi_storm_hide_task", "displayIndicators" })
+		install_host_hooks()
+		log("emission/psi-storm: the phases are the world server's, the consequences this map server's (%d hud method(s) off)", n)
+		return
+	end
 	-- R5 I2: launch_rockets (signal lights) is the host's too: the psi storm calls it unconditionally
 	local n = neutralize(sm_mod and sm_mod.CSurgeManager, { "kill_crows_at_pos",
 		"turn_to_zombie", "explode", "kill_actor_at_pos", "kill_all_unhided", "launch_rockets" })
@@ -533,6 +631,7 @@ local function mirror_start_surge(m)
 	m.effector_set, m.second_message_given, m.ui_disabled = false, false, false
 	m.task_given = false -- audit E2: the stock update gives this player's personal hide task at its moment
 	m.blowout_sound, m.wave_sound = false, false
+	env_host.serial = env_host.serial + 1 -- a map server: a new emission, everybody on its level can be caught again
 	pcall(SendScriptCallback, "actor_on_interaction", "anomalies", nil, "emission_start")
 	log("emission started by the host")
 end
@@ -607,7 +706,13 @@ local function client_env_tick()
 	if tg < env_cl.next_tick then return end
 	env_cl.next_tick = tg + 1000
 	if tg - env_cl.at > 15000 then return end -- the host is silent: hold the current phase
+	if split_on() and not level_open(level.name()) then return end -- under ground the emission of the world is not felt
 	local dt = (tg - env_cl.at) / 1000 * (env_cl.tf or level.get_time_factor())
+	if env_cl.own then
+		local ok, c = pcall(env_own_cover)
+		env_cl.cover = ok and c == true
+	end
+	local ghost = map_server()
 
 	local sm = surge_mgr()
 	if sm then
@@ -617,7 +722,7 @@ local function client_env_tick()
 				skip_stages_over(sm, SURGE_STAGES_OVER, env_cl.sg + dt)
 			end
 			mirror_update(sm, env_cl.sg + dt, "emission mirror", "surge_time")
-			quake_step((env_cl.sg + dt) / (env_cl.tf or level.get_time_factor()))
+			if not ghost then quake_step((env_cl.sg + dt) / (env_cl.tf or level.get_time_factor())) end
 		elseif sm.started then
 			quake_stop()
 			with_cover(true, function() sm:end_surge() end, "emission end")
@@ -656,6 +761,7 @@ add_event_handler("coop_env", function(payload, from)
 	env_cl.p, env_cl.pg = p, tonumber(t.pg) or 0
 	env_cl.tf = tonumber(t.tf)
 	env_cl.cover = t.c ~= false
+	env_cl.own = t.own == true -- split levels: he stands where the world server has no object of him
 	env_cl.at = time_global()
 	env_cl.have = true
 end)
@@ -706,12 +812,19 @@ local function option(name, def)
 end
 
 add_event_handler("coop_env_npc_kill", function(payload, from)
-	if not (api and api.is_host()) or type(from) ~= "number" or from == 0 then return end
+	local ms = map_server()
+	if not (api and (api.is_host() or ms)) or type(from) ~= "number" then return end
+	local t = decode(payload)
+	if ms then
+		from = tonumber(t.peer) -- the world server passes on what a player of this level reported
+		if not from then return end
+	elseif from == 0 or to_his_map_server("coop_env_npc_kill", t, from) then
+		return
+	end
 	local tg = time_global()
 	if tg - (env_host.npc_kill_at[from] or -NPC_KILL_MIN_MS) < NPC_KILL_MIN_MS then return end
 	local obj = avatar_of(from)
 	if not obj then return end
-	local t = decode(payload)
 	local apos = obj:position()
 	if t.k == "p" then
 		local pm = psi_mgr()
@@ -738,8 +851,15 @@ add_event_handler("coop_env_npc_kill", function(payload, from)
 end)
 
 add_event_handler("coop_env_cover", function(payload, from)
-	if not (api and api.is_host()) or type(from) ~= "number" or from == 0 then return end
+	local ms = map_server()
+	if not (api and (api.is_host() or ms)) or type(from) ~= "number" then return end
 	local t = decode(payload)
+	if ms then
+		from = tonumber(t.peer)
+		if not from then return end
+	elseif from == 0 or to_his_map_server("coop_env_cover", t, from) then
+		return
+	end
 	env_host.cover_rep[from] = { c = t.c == true, at = time_global() }
 end)
 
@@ -754,6 +874,7 @@ local function own_cover()
 	if sm.init_surge_covers then sm:init_surge_covers() end
 	return sm:pos_in_cover(actor:position()) == true
 end
+env_own_cover = own_cover
 
 add_event_handler("coop_env_kill", function(payload, from)
 	if from ~= 0 or not (api and api.is_client()) then return end
@@ -918,7 +1039,7 @@ local function actor_on_update()
 			api.send_event("coop_env_req", "", 0)
 		end
 		client_env_tick()
-		if (env_cl.s or env_cl.p) and tg >= env_cl.cover_at then
+		if not map_server() and (env_cl.s or env_cl.p) and tg >= env_cl.cover_at then
 			env_cl.cover_at = tg + 1000
 			local ok, c = pcall(own_cover)
 			api.send_event("coop_env_cover", encode({ c = ok and c == true }), 0)

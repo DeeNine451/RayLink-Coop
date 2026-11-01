@@ -215,8 +215,9 @@ TEST(passes_another_level_gets_the_world_and_the_registry_not_the_stream)
 	CHECK(level_passes(Msg::EntityDestroy, true, false));
 	CHECK(level_passes(Msg::EntityParent, true, false));
 	CHECK(level_passes(Msg::EntitySquad, true, false));
-	// until weather is per level (plan T15) the sky stays the host's
-	CHECK(level_passes(Msg::WeatherSync, true, false));
+	// the sky is the authority's of each level: one cycle, but a cellar has no sun
+	CHECK(!level_passes(Msg::WeatherSync, true, false));
+	CHECK(!level_passes(Msg::Thunderbolt, true, false));
 }
 
 TEST(takes_split_off_every_message_as_before)
