@@ -22,6 +22,11 @@
 		coop_economy_travel.group_teleport(dest, heading, origin, radius, kind)  this player moved from origin
 		    to dest; the players around origin follow (dest/origin: vectors or {x,y,z}; heading nil = keep)
 
+	Visited places (a client): smart_terrain.script tells actor_on_interaction("smarts", smart, name) while the actor is
+	within 50 m of an online smart; game_statistics (the places visited) and Fair Fast Travel (state 1: only the points
+	visited) listen. A client's ALife is frozen, its smarts never update, so he visited nothing and had no points. The
+	client counts it here: once a second, the fast travel points of his map (game_fast_travel.tsmarts) within 50 m.
+
 	Events:
 		economy.tp     mover -> host -> others   { x, y, z, h (optional), ox, oy, oz, r, l = level, k = kind, n = nick }
 		economy.route  any -> host -> others     { a, b }  (txr_routes short level names)
@@ -356,9 +361,91 @@ local function register_events()
 end
 
 -------------------------------------------------------------------------------
+-- Visited smarts (a client)
+-------------------------------------------------------------------------------
+local VISIT_RADIUS = 50 -- m, smart_terrain.script
+local VISIT_EVERY_MS = 1000
+local VISIT_RESCAN_MS = 30000 -- a map with no point found is looked at again after this
+local visits = { next_at = 0, level = nil, tsmarts = nil, list = nil, scan_at = 0, errors = 0, tried = false }
+
+-- The smart is on the map the actor is on (a client's ALife copy holds the smarts of every map).
+local function on_this_map(se, here)
+	local ok, name = pcall(function()
+		return alife():level_name(game_graph():vertex(se.m_game_vertex_id):level_id())
+	end)
+	return ok and name == here
+end
+
+-- { { name, id }, ... }: the points of `tsmarts` on map `here`. The simulation board first (the smarts register
+-- there when their server object does), else the ALife copy: the objects of the current level of the smart clsid, else all.
+local function find_smarts(tsmarts, here)
+	local found = {}
+	local board = rawget(_G, "SIMBOARD")
+	local by_name = type(board) == "table" and type(board.smarts_by_names) == "table" and board.smarts_by_names or nil
+	if by_name then
+		for name in pairs(tsmarts) do
+			local se = by_name[name]
+			if se and on_this_map(se, here) then found[#found + 1] = { name = name, id = se.id } end
+		end
+		if #found > 0 then return found end
+	end
+	local sim = alife()
+	local cls = rawget(_G, "clsid") and clsid.smart_terrain
+	if not (sim and cls) then return found end
+	local function take(se)
+		local name = se:name()
+		if tsmarts[name] and on_this_map(se, here) then found[#found + 1] = { name = name, id = se.id } end
+		return false
+	end
+	pcall(function() sim:iterate_level_objects_of_clsid(cls, take) end)
+	if #found == 0 then
+		sim:iterate_objects(function(se)
+			if se:clsid() == cls then take(se) end
+			return false
+		end)
+	end
+	return found
+end
+
+local function visit_tick()
+	if not (core.is_client() and core.live() and db.actor) then return end
+	local now = core.now()
+	if now < visits.next_at then return end
+	visits.next_at = now + VISIT_EVERY_MS
+	local fft = rawget(_G, "game_fast_travel")
+	if fft == nil and not visits.tried then
+		visits.tried = true
+		fft = core.mod("game_fast_travel")
+	end
+	local tsmarts = fft and fft.tsmarts
+	if type(tsmarts) ~= "table" then return end
+	local here = level_name()
+	if visits.list == nil or visits.level ~= here or visits.tsmarts ~= tsmarts
+		or (#visits.list == 0 and now >= visits.scan_at) then
+		visits.level, visits.tsmarts, visits.scan_at = here, tsmarts, now + VISIT_RESCAN_MS
+		visits.list = find_smarts(tsmarts, here)
+	end
+	if #visits.list == 0 then return end
+	local sim = alife()
+	local me = db.actor:position()
+	if not (sim and me) then return end
+	for _, v in ipairs(visits.list) do
+		local se = sim:object(v.id)
+		if se and se.position and me:distance_to(se.position) <= VISIT_RADIUS then
+			SendScriptCallback("actor_on_interaction", "smarts", se, v.name)
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Update, status, start
 -------------------------------------------------------------------------------
 local function actor_on_update()
+	local ok, err = pcall(visit_tick)
+	if not ok and visits.errors < 3 then
+		visits.errors = visits.errors + 1
+		core.log("! smart visits: %s", tostring(err))
+	end
 	local w = watch
 	if not w then return end
 	if moved_check(w, WATCH_JUMP) or core.now() > w.until_ms then watch = nil end
