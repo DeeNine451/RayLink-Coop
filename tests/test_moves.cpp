@@ -90,3 +90,16 @@ TEST(moves_plain_sides)
 	CHECK(std::string(verdict_text(Verdict::Locked)).find("lock") != std::string::npos);
 	CHECK(std::string(verdict_text(Verdict::Ok)) == "ok");
 }
+
+// Live 2026-11-01: a multitool on an item in a stash. The item must go, under the rules of taking it out.
+TEST(moves_an_item_is_used_up_where_a_player_may_take_it)
+{
+	CHECK_EQ(destroy_check(side(Side::Box)), Verdict::Ok);
+	CHECK_EQ(destroy_check(side(Side::Corpse)), Verdict::Ok);
+	CHECK_EQ(destroy_check(npc(false, true)), Verdict::Ok); // a companion of the group
+	CHECK_EQ(destroy_check(npc(true, false)), Verdict::Ok); // a talk
+	CHECK_EQ(destroy_check(npc(false, false)), Verdict::NotOwner);
+	CHECK_EQ(destroy_check(side(Side::Box, true)), Verdict::Locked);
+	CHECK_EQ(destroy_check(side(Side::Player)), Verdict::NotOwner);
+	CHECK_EQ(destroy_check(side(Side::World)), Verdict::NotOwner);
+}
