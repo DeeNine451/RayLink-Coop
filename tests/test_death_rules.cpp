@@ -1472,3 +1472,12 @@ TEST(death_no_hit_counts_while_gone_or_right_after_a_respawn)
 	CHECK(!hit_counts(false, shield - 1, shield));
 	CHECK(hit_counts(false, shield, shield));
 }
+
+TEST(death_the_spectators_volume_comes_in_softly)
+{
+	CHECK(spectate_volume(0) == kSpectateFadeFrom);
+	CHECK(spectate_volume(kSpectateFadeMs / 2) > kSpectateFadeFrom);
+	CHECK(spectate_volume(kSpectateFadeMs / 2) < 1.f);
+	CHECK(spectate_volume(kSpectateFadeMs) == 1.f);
+	CHECK(spectate_volume(kSpectateFadeMs * 10ull) == 1.f);
+}

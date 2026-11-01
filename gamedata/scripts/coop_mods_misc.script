@@ -25,6 +25,8 @@
 	                                           heals the limbs (the mod's own heal never runs on a revive);
 	                                           head_tbl is per player. Its concussion waits until the player stands:
 	                                           hits on a body turned the volume down and up again and again.
+	AGDD Voiced Actor                          a player who is down or dead says nothing: grunts over the teammate he
+	                                           watches (live 2026-11-01).
 	Oleh's Extended MovementSFX                footsteps of other players' characters (when the engine reports
 	                                           avatar steps through coop_mods_core.on_avatar_step).
 --]]
@@ -442,6 +444,20 @@ local function install_bhs()
 end
 
 -------------------------------------------------------------------------------
+-- AGDD Voiced Actor: every line of the player's voice goes through actor_speak_base
+-------------------------------------------------------------------------------
+local function install_voiced()
+	local v = C().mod("agdd_voiced_actor")
+	local speak = v and v.actor_speak_base
+	if type(speak) ~= "function" then return end
+	v.actor_speak_base = function(...)
+		if not coop_npc_players.standing(0) then return false end
+		return speak(...)
+	end
+	installed[#installed + 1] = "voiced_actor"
+end
+
+-------------------------------------------------------------------------------
 -- Oleh's Extended MovementSFX: other players' footsteps
 -------------------------------------------------------------------------------
 local STEP_DIR = "footstep\\n_"
@@ -503,6 +519,7 @@ function on_game_start()
 	start_step("install_zcp", install_zcp)
 	start_step("install_paw", install_paw)
 	start_step("install_bhs", install_bhs)
+	start_step("install_voiced", install_voiced)
 	start_step("install_oleh", install_oleh)
 	if C().mod("haru_quick_action_wheel_mcm") then RegisterScriptCallback("actor_on_first_update", actor_on_first_update) end
 	C().status_line("misc", function()
