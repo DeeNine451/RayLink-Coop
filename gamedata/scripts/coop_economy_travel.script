@@ -7,7 +7,9 @@
 	    on (core rule party_fast_travel) everybody must be within gather_radius of the traveller, else the
 	    travel is refused with a tip. The traveller moves as in single player; the players who stood within
 	    gather_radius of the start are moved to the destination too ("economy.tp"). The time cost of the
-	    travel is applied once, by the host (coop_economy_group).
+	    travel is applied once, by the host (coop_economy_group). Fair Fast Travel's rows count as well: fast
+	    travel, backpack travel and a hired guide. With split levels (coop.levels.split) every player walks his
+	    own map: nobody is gathered and nobody follows, and a solo travel moves no shared clock.
 	  - Travel to another level (fast travel to an offline point, guides of ka_travel): the engine turns a
 	    client's level change into a request to the host, the host moves the whole group (coop_join), so only
 	    the time cost is handled here.
