@@ -158,6 +158,35 @@ TEST(soft_relay_a_map_message_of_a_player_goes_to_the_map_server_of_his_level)
 	CHECK(m.packet == p);
 }
 
+// The road does what the main thread would have done, message by message: one table of routes, two readers of it.
+TEST(soft_relay_takes_the_same_route_as_the_main_thread)
+{
+	const Relay r = rig();
+	uint32_t seen = 0;
+	for (uint32_t t = uint16_t(Msg::GameBase); t < 0x0400; ++t)
+	{
+		const Msg msg = static_cast<Msg>(t);
+		Scope scope;
+		if (!scope_row(msg, scope))
+			continue;
+		++seen;
+		std::vector<Relay::Out> out;
+		const std::vector<uint8_t> p = packet_of(msg);
+		const softmove::Take take = r.on_packet(&g_a, 11, uint8_t(Lane::Reliable), p.data(), p.size(), out);
+		const MsgSender sender = msg_sender(msg);
+		if (sender == MsgSender::HostOnly || sender == MsgSender::TrunkOnly || msg == Msg::Tunnel)
+		{
+			CHECK(take == softmove::Take::Keep);
+			continue;
+		}
+		const mapserver::Incoming go = mapserver::route_incoming(msg, true, false, true);
+		CHECK_EQ(out.size(), size_t(go.tunnel ? 1 : 0));
+		CHECK((take == softmove::Take::Keep || take == softmove::Take::SentAndKept) == go.here);
+		CHECK((take == softmove::Take::Sent || take == softmove::Take::SentAndKept) == go.tunnel);
+	}
+	CHECK(seen > 50u);
+}
+
 TEST(soft_relay_keeps_what_the_world_keeps_and_says_it_went_on)
 {
 	const Relay r = rig();

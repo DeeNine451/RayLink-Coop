@@ -367,6 +367,22 @@ Hm.env.coop_quests_far._tick()
 pump()
 check(killed == 1 and far.orders_held() == held, "it came online: the next try finds it")
 
+print("== the host's move: the world server's numbers are new, the map server's memory of them goes")
+do
+	local killed_again = 0
+	Ms.ObjMT.kill = function(self, who) killed_again = killed_again + 1 end
+	far.order(700, "kill")
+	pump()
+	check(killed_again == 1, "an order")
+	local q = Hm.env.coop_main.decode(Hm.sent[#Hm.sent].payload).q
+	Ms.handlers["quests.far_do"](Ms.env.coop_main.encode({ q = q, i = 700, v = "kill" }), 0)
+	check(killed_again == 1, "its repeat runs once")
+	fire(Ms, "coop_world_back")
+	Ms.handlers["quests.far_do"](Ms.env.coop_main.encode({ q = q, i = 700, v = "kill" }), 0)
+	check(killed_again == 2, "the same number from the new Lua is a new order: it is not answered without being done")
+	pump()
+end
+
 print("== a release of what a map server holds")
 local released_ms = {}
 Ms.env.safe_release_manager = { release = function(se) released_ms[#released_ms + 1] = se.id end }

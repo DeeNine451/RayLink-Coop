@@ -150,6 +150,12 @@ local function on_part(payload, from)
 	if not ok then q.report("share", tostring(name), err) end
 end
 
+-- The host's move: this process stayed, the world server's Lua is new. What it was told is gone, a down table it sends by itself.
+local function on_world_back()
+	said_hello = false
+	for _, e in pairs(ups) do e.sent, e.next = nil, 0 end
+end
+
 local function on_update()
 	if not (api and split()) then return end
 	local now = time_global()
@@ -171,4 +177,5 @@ function on_game_start()
 	if not api then return end
 	cm().add_event_handler(EV, on_part)
 	RegisterScriptCallback("actor_on_update", on_update)
+	RegisterScriptCallback("coop_world_back", on_world_back)
 end

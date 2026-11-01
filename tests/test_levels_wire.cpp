@@ -935,8 +935,16 @@ TEST(levels_wire_load_wait_roundtrip_and_limits)
 	m.epoch = 41;
 	m.level = 8;
 	m.rows = {{0, 1}, {2, 0}, {5, 1}};
-	check_roundtrip("LoadWait", m, 1 + 4 + 2 + 1 + 3 * 5);
-	check_roundtrip("LoadWait Enter", LoadWaitMsg{LoadWaitMsg::Enter, 42, 8, {}}, 8);
+	check_roundtrip("LoadWait", m, 1 + 4 + 2 + 1 + 1 + 3 * 5);
+	check_roundtrip("LoadWait Enter", LoadWaitMsg{LoadWaitMsg::Enter, 42, 8, {}}, 9);
+	LoadWaitMsg alone;
+	alone.state = LoadWaitMsg::Prepared;
+	alone.epoch = 43;
+	alone.level = 9;
+	alone.reason = LoadWaitMsg::HostAlone;
+	check_roundtrip("LoadWait Prepared of a host who went alone", alone, 9);
+	check_roundtrip("LoadWait Away", LoadWaitMsg{LoadWaitMsg::Away, 42, 8, {}}, 9);
+	check_roundtrip("LoadWait Back", LoadWaitMsg{LoadWaitMsg::Back, 43, 8, {}}, 9);
 
 	// a row of a LoadWait as the test writes it by hand
 	struct WaitRow
@@ -949,6 +957,7 @@ TEST(levels_wire_load_wait_roundtrip_and_limits)
 		w.u8(state);
 		w.u32(1);
 		w.u16(2);
+		w.u8(LoadWaitMsg::Group);
 		w.u8(count);
 		for (const WaitRow& r : rows)
 		{
@@ -974,10 +983,18 @@ TEST(levels_wire_load_wait_roundtrip_and_limits)
 	nine_rows.rows.push_back({0, 1});
 	check_write_refused("LoadWait with 9 rows", nine_rows);
 	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 3, {{1, 1}})), std::string("refused")); // count over the bytes
+	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(6, 0, {})), std::string("refused")); // a state nobody knows
+	Writer bad_reason;
+	bad_reason.u8(0);
+	bad_reason.u32(1);
+	bad_reason.u16(2);
+	bad_reason.u8(2);
+	bad_reason.u8(0);
+	CHECK_EQ(refused<LoadWaitMsg>(bad_reason), std::string("refused"));
 
-	for (uint8_t state = 0; state < 7; ++state)
+	for (uint8_t state = 0; state < 8; ++state)
 	{
-		const bool want = state <= LoadWaitMsg::Cancel;
+		const bool want = state <= LoadWaitMsg::Back;
 		CHECK_EQ(std::string("wait state ") + std::to_string(state) + " " + refused<LoadWaitMsg>(wait_bytes(state, 0, {})),
 		    std::string("wait state ") + std::to_string(state) + (want ? " read" : " refused"));
 	}

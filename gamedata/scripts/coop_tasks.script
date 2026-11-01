@@ -2922,4 +2922,11 @@ function on_game_start()
 	RegisterScriptCallback("coop_events_lost", function()
 		if client_live() then client_request_sync() end
 	end)
+	-- The host's move: this player stayed in his world, the world server's Lua is new: who he is, what task he has on is told again
+	RegisterScriptCallback("coop_world_back", function()
+		if client_live() then
+			cl.active = nil
+			client_request_sync()
+		end
+	end)
 end

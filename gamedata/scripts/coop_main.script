@@ -1191,6 +1191,10 @@ ensure_callback("coop_respawned") -- coop_death adds it at its own start: a subs
 -- Fired by the engine (parity audit D10) when a queue of events dropped some on this machine: coop_events_lost(count).
 -- Events are for effects, state goes over coop.sync; a script with a resync of its own asks for it here (coop_tasks).
 ensure_callback("coop_events_lost")
+-- Fired by the engine (xrCoop/coop_soft_move.h) on who stays in his world through the host's move, a player or a map server: the world
+-- server is away, the world server is back. On the world server: _back, its new Lua is up and its connections open again.
+ensure_callback("coop_world_away")
+ensure_callback("coop_world_back")
 
 -- The callback router's Lua half on every machine with the engine API, the host and single player too: a session
 -- can start in this Lua state, and none holds on the host as well (F2 T10).

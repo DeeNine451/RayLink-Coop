@@ -650,6 +650,11 @@ local function orders_tick(now)
 	end
 end
 
+-- The host's move: the world server's Lua is new, and with it its numbers.
+local function on_world_back()
+	if map_server() then done, done_list = {}, {} end
+end
+
 local function on_do(t, from)
 	if from ~= 0 or not map_server() then return end
 	local q = tonumber(t.q)
@@ -928,6 +933,7 @@ function on_game_start()
 	q.on("far_car", on_vehicle_death, TAG)
 	q.on("far_hit", on_hit, TAG)
 	RegisterScriptCallback("actor_on_update", tick)
+	RegisterScriptCallback("coop_world_back", on_world_back)
 	RegisterScriptCallback("server_entity_on_unregister", on_unregister)
 	RegisterScriptCallback("monster_on_before_hit", monster_on_before_hit)
 	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)

@@ -19,6 +19,9 @@
 	<string id="st_coop_load_server">
 		<text>Waiting for the map server...</text>
 	</string>
+	<string id="st_coop_load_stays">
+		<text>The host went to %s: the world restarts, you stay on your map</text>
+	</string>
 	<string id="st_coop_levels_refused_invalid">
 		<text>This exit cannot be used right now.</text>
 	</string>

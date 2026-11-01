@@ -103,6 +103,19 @@ local function frames(n)
 	end
 end
 
+print("== the host's move: this map server stayed, the world server's Lua is new")
+Ms.new_obj(72, "trader", vec(0, 0, 0))
+tm_m[72] = { cfg_ltx = "trade.ltx", resupply_time = { Y = 2012, M = 5, D = 1, h = 10, m = 0, s = 0, ms = 0 } }
+frames(2)
+check(tm_h[72] ~= nil, "the world server has the row")
+tm_h[72] = nil -- its Lua went with the reload
+frames(2)
+check(tm_h[72] == nil, "the map server does not know that: nothing changed, nothing is sent")
+fire(Ms, "coop_world_back")
+frames(2)
+check(tm_h[72] and tm_h[72].resupply_time.D == 1, "the world is back: everything goes up again")
+tm_m[72] = nil
+
 print("== a trader's restock reaches the save")
 Ms.new_obj(70, "trader", vec(0, 0, 0))
 tm_m[70] = { cfg_ltx = "trade.ltx", resupply_time = { Y = 2012, M = 5, D = 3, h = 10, m = 0, s = 0, ms = 0 } }

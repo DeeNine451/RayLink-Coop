@@ -668,5 +668,18 @@ do
 	check(Hm.tm.task_info.t_f.stage == 2, "a real one passes")
 end
 
+print("== the host's move: he stayed in his world, the world server's Lua is new")
+do
+	local sent_before = #Cm.sent
+	Hm.tm.task_info.t_g = Hm.tm.task_info.t_g
+	fire(Cm, "coop_world_back")
+	local asked = false
+	for i = sent_before + 1, #Cm.sent do
+		if Cm.sent[i].name == "coop_tl_req" then asked = true end
+	end
+	check(asked, "he asks for the whole list: that also tells the new Lua who he is")
+	pump()
+end
+
 print(string.format("== %d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then error("failures") end

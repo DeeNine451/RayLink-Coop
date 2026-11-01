@@ -19,6 +19,9 @@
 	<string id="st_coop_load_server">
 		<text>∆дЄм сервер карты...</text>
 	</string>
+	<string id="st_coop_load_stays">
+		<text>’ост ушЄл на %s: мир перезапускаетс€, вы остаЄтесь на своей карте</text>
+	</string>
 	<string id="st_coop_levels_refused_invalid">
 		<text>Ётим выходом сейчас нельз€ воспользоватьс€.</text>
 	</string>
