@@ -538,3 +538,240 @@ TEST(virtual_a_broadcast_of_the_world_reaches_the_bridge_and_a_stream_does_not)
 	CHECK(k.pump(5000, [&] { return world == 1 && at_a == 1; }));
 	CHECK_EQ(stream, 0u);
 }
+
+// ---------------------------------------------------------------- the host's move (Session::soft_park, xrCoop/coop_soft_move.h)
+
+namespace
+{
+// The rig at the go: a player on the level of the map server; the host's main thread stops here.
+struct Move : Trunk
+{
+	explicit Move(uint16_t port) : Trunk(port)
+	{
+		REQUIRE(start());
+		REQUIRE(connect_server());
+		a = &add_client("Al");
+		map.virtual_join(a->s.self(), "Al");
+		pump_once();
+	}
+	void park()
+	{
+		host.s.soft_park({Session::SoftPlayer{a->s.self(), 7}}, {Session::SoftServer{mapserver::bridge_peer(kMs), 7}});
+	}
+	// Everybody but the host's main thread.
+	bool away(uint32_t timeout_ms, const std::function<bool()>& done)
+	{
+		const uint64_t start = t::now_ms();
+		for (;;)
+		{
+			const uint64_t now = t::now_ms();
+			world.s.update(now);
+			map.update(now);
+			for (auto& c : clients)
+				c->s.update(now);
+			if (done())
+				return true;
+			if (t::now_ms() - start > timeout_ms)
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	Node* a = nullptr;
+};
+} // namespace
+
+TEST(soft_a_player_and_his_map_server_talk_while_the_host_loads)
+{
+	Move k(37230);
+	std::vector<uint32_t> at_map, at_player;
+	k.map.on(Msg::PlayerShot, [&](PeerId from, Reader& r) {
+		CHECK_EQ(from, k.a->s.self());
+		at_map.push_back(r.u32());
+	});
+	k.a->s.on(Msg::ReqResult, [&](PeerId from, Reader& r) {
+		CHECK_EQ(from, kHostPeer);
+		at_player.push_back(r.u32());
+	});
+	k.park();
+	k.away(1300, [] { return false; }); // longer than the helper keeps a link without an owner
+	k.a->s.send(kHostPeer, Lane::Reliable, Msg::PlayerShot, payload(1));
+	k.map.send(k.a->s.self(), Lane::Reliable, Msg::ReqResult, payload(2));
+	REQUIRE(k.away(3000, [&] { return !at_map.empty() && !at_player.empty(); }));
+	CHECK_EQ(at_map[0], 1u);
+	CHECK_EQ(at_player[0], 2u);
+	const Session::SoftStats st = k.host.s.soft_stats();
+	CHECK_EQ(st.to_servers, uint64_t(1));
+	CHECK_EQ(st.to_players, uint64_t(1));
+}
+
+TEST(soft_what_a_parked_player_says_to_the_world_waits_and_keeps_its_order)
+{
+	Move k(37231);
+	std::vector<uint32_t> got;
+	k.host.s.on(Msg::ReqMoney, [&](PeerId, Reader& r) { got.push_back(r.u32()); });
+	k.park();
+	for (uint32_t i = 0; i < 40; ++i)
+		k.a->s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(i));
+	k.away(200, [] { return false; });
+	t::pump_for({&k.host.s}, 100); // the frames of the old world, of the new one: the parking holds
+	CHECK(got.empty());
+	k.host.s.soft_release();
+	REQUIRE(k.pump(3000, [&] { return got.size() == 40; }));
+	for (uint32_t i = 0; i < 40; ++i)
+		CHECK_EQ(got[i], i);
+}
+
+TEST(soft_the_epoch_moves_under_the_parked_without_a_word)
+{
+	Move k(37232);
+	const uint32_t before = k.a->s.world_epoch();
+	std::vector<uint32_t> at_world;
+	k.host.s.on(Msg::ReqMoney, [&](PeerId, Reader& r) { at_world.push_back(r.u32()); });
+	std::vector<uint32_t> at_player, at_bridge;
+	k.a->s.on(Msg::ReqResult, [&](PeerId, Reader& r) { at_player.push_back(r.u32()); });
+	k.world.s.on(Msg::LevelXferDown, [&](PeerId, Reader& r) { at_bridge.push_back(r.u32()); });
+	k.park();
+	k.a->s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(1));
+	k.away(100, [] { return false; });
+	k.host.s.set_world_epoch(before + 1);
+	k.host.s.soft_keep_out();
+	k.host.s.soft_release();
+	k.a->s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(2));
+	k.host.s.send(k.a->s.self(), Lane::Reliable, Msg::ReqResult, payload(3));
+	k.host.s.send(mapserver::bridge_peer(kMs), Lane::Reliable, Msg::LevelXferDown, payload(4));
+	REQUIRE(k.pump(3000, [&] { return at_world.size() == 2 && !at_player.empty() && !at_bridge.empty(); }));
+	CHECK_EQ(k.a->s.world_epoch(), before); // he has not heard of it, and he is not disconnected or stale for it
+	CHECK(!k.host.logged("dropped: made in world epoch"));
+}
+
+// A message the world keeps and the map server needs too: the road sent it, the session must not tunnel it a second time.
+TEST(soft_what_goes_both_ways_reaches_the_map_server_once)
+{
+	Move k(37233);
+	uint32_t at_map = 0, at_world = 0;
+	k.map.on(Msg::PlayerVitals, [&](PeerId, Reader&) { ++at_map; });
+	k.host.s.on(Msg::PlayerVitals, [&](PeerId, Reader&) { ++at_world; });
+	k.park();
+	k.a->s.send(kHostPeer, Lane::Reliable, Msg::PlayerVitals, payload(1));
+	REQUIRE(k.away(3000, [&] { return at_map == 1; }));
+	CHECK_EQ(at_world, 0u);
+	k.host.s.soft_release();
+	REQUIRE(k.pump(3000, [&] { return at_world == 1; }));
+	k.away(100, [] { return false; });
+	CHECK_EQ(at_map, 1u);
+}
+
+TEST(soft_what_the_old_world_says_to_the_parked_is_gone_and_the_new_worlds_comes_first)
+{
+	Move k(37234);
+	std::vector<uint32_t> got;
+	k.a->s.on(Msg::ReqResult, [&](PeerId, Reader& r) { got.push_back(r.u32()); });
+	k.park();
+	k.host.s.send(k.a->s.self(), Lane::Reliable, Msg::ReqResult, payload(1)); // the old world's last frames
+	k.host.s.soft_keep_out(); // the new world exists
+	k.host.s.send(k.a->s.self(), Lane::Reliable, Msg::ReqResult, payload(2));
+	k.host.s.send(k.a->s.self(), Lane::Reliable, Msg::ReqResult, payload(3));
+	t::pump_for({&k.host.s, &k.a->s}, 100);
+	CHECK(got.empty());
+	k.host.s.soft_release();
+	k.host.s.send(k.a->s.self(), Lane::Reliable, Msg::ReqResult, payload(4));
+	REQUIRE(k.pump(3000, [&] { return got.size() == 3; }));
+	CHECK_EQ(got[0], 2u);
+	CHECK_EQ(got[1], 3u);
+	CHECK_EQ(got[2], 4u);
+	const Session::SoftStats st = k.host.s.soft_stats();
+	CHECK_EQ(st.dropped_out, uint64_t(1));
+	CHECK_EQ(st.held_out, uint64_t(2));
+}
+
+// The bucket of a client knows one arrival time; his messages of a minute run in one go, and a lost script event is lost for good.
+TEST(soft_what_waited_is_no_flood)
+{
+	Move k(37235);
+	k.host.s.limit_rate(Msg::ReqMoney, 1, 1000000);
+	uint32_t got = 0;
+	k.host.s.on(Msg::ReqMoney, [&](PeerId, Reader&) { ++got; });
+	k.park();
+	for (uint32_t i = 0; i < 5; ++i)
+		k.a->s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(i));
+	k.away(200, [] { return false; });
+	k.host.s.soft_release();
+	REQUIRE(k.pump(3000, [&] { return got == 5; }));
+}
+
+// What runs in slices after the move: what comes meanwhile stays behind it.
+TEST(soft_what_comes_during_the_replay_goes_behind_it)
+{
+	Move k(37236);
+	std::vector<uint32_t> got;
+	k.host.s.on(Msg::ReqMoney, [&](PeerId, Reader& r) { got.push_back(r.u32()); });
+	k.park();
+	constexpr uint32_t kMany = 3000;
+	for (uint32_t i = 0; i < kMany; ++i)
+	{
+		k.a->s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(i));
+		if (i % 256 == 0)
+			k.a->s.update(t::now_ms());
+	}
+	k.away(500, [] { return false; });
+	t::pump_for({&k.host.s}, 50); // into the parked queue
+	k.host.s.soft_release();
+	k.a->s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(kMany));
+	REQUIRE(k.pump(5000, [&] { return got.size() == kMany + 1; }));
+	for (uint32_t i = 0; i <= kMany; ++i)
+		CHECK_EQ(got[i], i);
+}
+
+// The world's traffic of a map server waits like a player's.
+TEST(soft_what_a_map_server_tells_the_world_waits_too)
+{
+	Move k(37237);
+	std::vector<uint32_t> got;
+	k.host.s.on(Msg::LevelXferUp, [&](PeerId, Reader& r) { got.push_back(r.u32()); });
+	k.park();
+	k.world.s.send(kHostPeer, Lane::Reliable, Msg::LevelXferUp, payload(1));
+	k.world.s.send(kHostPeer, Lane::Reliable, Msg::LevelXferUp, payload(2));
+	k.away(200, [] { return false; });
+	t::pump_for({&k.host.s}, 100);
+	CHECK(got.empty());
+	k.host.s.soft_release();
+	REQUIRE(k.pump(3000, [&] { return got.size() == 2; }));
+	CHECK_EQ(got[0], 1u);
+	CHECK_EQ(got[1], 2u);
+}
+
+// Who is not in the move goes the ordinary way all the time.
+TEST(soft_a_player_who_is_not_parked_is_not_touched)
+{
+	Move k(37238);
+	Node& b = k.add_client("Bo");
+	std::vector<uint32_t> at_world, at_player;
+	k.host.s.on(Msg::ReqMoney, [&](PeerId, Reader& r) { at_world.push_back(r.u32()); });
+	b.s.on(Msg::ReqResult, [&](PeerId, Reader& r) { at_player.push_back(r.u32()); });
+	k.park();
+	CHECK(k.host.s.soft_parked(k.a->s.self()));
+	CHECK(!k.host.s.soft_parked(b.s.self()));
+	b.s.send(kHostPeer, Lane::Reliable, Msg::ReqMoney, payload(1));
+	k.host.s.send(b.s.self(), Lane::Reliable, Msg::ReqResult, payload(2));
+	REQUIRE(k.pump(3000, [&] { return !at_world.empty() && !at_player.empty(); }));
+}
+
+// He leaves in the middle: he is gone when the session hears it, what he said with him, nobody else is touched.
+TEST(soft_a_parked_player_who_leaves_leaves)
+{
+	Move k(37239);
+	Node& b = k.add_client("Bo");
+	k.map.virtual_join(b.s.self(), "Bo");
+	std::vector<uint32_t> at_map;
+	k.map.on(Msg::PlayerShot, [&](PeerId, Reader& r) { at_map.push_back(r.u32()); });
+	k.host.s.soft_park({Session::SoftPlayer{k.a->s.self(), 7}, Session::SoftPlayer{b.s.self(), 7}},
+	    {Session::SoftServer{mapserver::bridge_peer(kMs), 7}});
+	const PeerId gone = k.a->s.self();
+	k.a->s.shutdown("bye");
+	k.away(300, [] { return false; });
+	b.s.send(kHostPeer, Lane::Reliable, Msg::PlayerShot, payload(5));
+	REQUIRE(k.away(3000, [&] { return !at_map.empty(); }));
+	k.host.s.soft_release();
+	REQUIRE(k.pump(5000, [&] { return !k.host.left.empty(); }));
+	CHECK_EQ(k.host.left[0].first, gone);
+}
