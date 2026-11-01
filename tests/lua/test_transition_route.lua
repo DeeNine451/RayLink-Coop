@@ -326,6 +326,42 @@ MW.actor_at = { x = 170, y = 7, z = 600 }
 frames(MW, 600)
 check(#MW.asked == 1, "a route of the new level is seen without waiting for the next list")
 
+-- ================================================================ a scripted level change
+print("== ChangeLevel into a level entered together: no darkening before the go")
+do
+	local LEVEL_OF = { [10] = "l02_garbage", [20] = "l13u_warlab" }
+	local Mc = machine()
+	Mc.env.ChangeLevel = function(pos, lvid, gvid, dir, anim) Mc.fx[#Mc.fx + 1] = { what = "change", gv = gvid, anim = anim } end
+	Mc.R.on_game_start()
+	Mc.env.game_graph = function() return { vertex = function(_, v) return { level_id = function() return v end } end } end
+	Mc.env.alife = function() return { level_name = function(_, l) return LEVEL_OF[l] end } end
+	Mc.split, Mc.players = true, { { id = 0 }, { id = 1 } }
+	Mc.env.coop.players = function() return Mc.players end
+	Mc.env.coop.levels = { split = function() return Mc.split end, gate_of = function(n) return n == "l13u_warlab" and "together" or "free" end }
+	local function trip(gv, anim)
+		Mc.fx = {}
+		Mc.env.ChangeLevel({}, 1, gv, {}, anim)
+		return Mc.fx[1]
+	end
+	local t = trip(20, true)
+	check(t and t.gv == 20 and not t.anim, "split levels: into a level entered together: no fade, it goes to the board at once")
+	t = trip(10, true)
+	check(t and t.anim == true, "a free level: the stock fade: he goes alone")
+	Mc.split = false
+	t = trip(10, true)
+	check(t and not t.anim, "no split levels: the group goes together wherever it goes")
+	Mc.players = { { id = 0 } }
+	t = trip(10, true)
+	check(t and t.anim == true, "nobody else in the session: the stock change")
+	Mc.players = { { id = 0 }, { id = 1 } }
+	Mc.active = false
+	t = trip(10, true)
+	check(t and t.anim == true, "outside a session: the stock change")
+	Mc.active = true
+	t = trip(20, false)
+	check(t and not t.anim, "no fade asked: nothing changes")
+end
+
 -- ================================================================
 local unk = {}
 for k in pairs(UNKNOWN or {}) do unk[#unk + 1] = tostring(k) end
