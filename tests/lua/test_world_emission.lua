@@ -79,10 +79,10 @@ print("== joining at second 130 of the emission")
 host_state({ s = true, sg = 1300, p = false, pg = 0, tf = 10, c = false })
 tick(1)
 check(sm.started == true, "the mirror runs")
-for _, name in ipairs({ "beginning", "siren", "impact", "quake20", "quake40", "quake60", "quake80", "1stwavesnd", "1stwave" }) do
+for _, name in ipairs({ "beginning", "siren", "impact", "1stwavesnd", "1stwave" }) do
 	check(not played(name), name .. ": over before this player came, not played now")
 end
-check(played("quake100"), "the quake that is on now is started: its end is later")
+check(not played("quake20") and not played("quake100"), "the quake is coop_main's own ladder, not the stock's stages")
 check(played("rumble"), "the rumble that is on now is started")
 check(not played("2ndwavesnd"), "what is still to come stays to come")
 host_state({ s = true, sg = 1570, p = false, pg = 0, tf = 10, c = false })

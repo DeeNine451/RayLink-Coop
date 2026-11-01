@@ -174,6 +174,31 @@ for _ = 1, 3 do tick(1) end
 check(pm.started == false and EVENTS.psi_storm_start == 1 and CALLS.psi_finish == 1,
 	"after the host's end the client does not start a new psi storm")
 
+print("== the quake of an emission: the stock's ladder on the host's clock")
+local CAMS, UNCAMS = {}, 0
+level.add_cam_effector = function(path, id, loop) CAMS[#CAMS + 1] = { path = path, id = id, loop = loop } return 3 end
+level.remove_cam_effector = function(id) UNCAMS = UNCAMS + 1 end
+host_state({ s = true, sg = 70 * TF, p = false, pg = 0, tf = TF, c = true })
+tick(1)
+check(#CAMS == 0, "nothing shakes before 80 s")
+host_state({ s = true, sg = 81 * TF, p = false, pg = 0, tf = TF, c = true })
+tick(1)
+check(#CAMS == 1 and CAMS[1].path:find("earthquake_20", 1, true) and CAMS[1].id == 39571 and CAMS[1].loop == true,
+	"the first step, looped, under its own id")
+tick(1)
+check(#CAMS == 1, "a step is played once")
+host_state({ s = true, sg = 107 * TF, p = false, pg = 0, tf = TF, c = true })
+tick(1)
+check(#CAMS == 2 and CAMS[2].path:find("earthquake.anm", 1, true) and UNCAMS == 1, "the strongest step replaces the first")
+host_state({ s = false, sg = 0, p = false, pg = 0, tf = TF, c = true })
+tick(1)
+check(UNCAMS == 2, "the end of the emission ends the quake")
+host_state({ s = true, sg = 150 * TF, p = false, pg = 0, tf = TF, c = true })
+tick(1)
+check(CAMS[#CAMS].path:find("earthquake.anm", 1, true), "a mirror that starts late comes in on the step of that moment")
+host_state({ s = false, sg = 0, p = false, pg = 0, tf = TF, c = true })
+tick(1)
+
 -- the stand-ins must not have hidden a failure: none of the mirror steps raised a Lua error
 local mirror_errors = {}
 for _, line in ipairs(LOG) do
