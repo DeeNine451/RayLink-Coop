@@ -31,10 +31,11 @@
 aaaa_script_fixes_mp = owner
 
 [route_pairs]
-npc_on_update@aaaa_script_fixes_mp = host
-npc_on_hit_callback@aaaa_script_fixes_mp = host
-anomaly_on_before_activate@aaaa_script_fixes_mp = host
-game_object_on_net_spawn@aaaa_script_fixes_mp = host
-game_object_on_net_destroy@aaaa_script_fixes_mp = host
-server_object_on_register@aaaa_script_fixes_mp = host
-actor_on_update@aaaa_script_fixes_mp = host
+; level: what an online object does, on the process that leads its level (with one level for everybody it is host)
+npc_on_update@aaaa_script_fixes_mp = level
+npc_on_hit_callback@aaaa_script_fixes_mp = level
+anomaly_on_before_activate@aaaa_script_fixes_mp = level
+game_object_on_net_spawn@aaaa_script_fixes_mp = level
+game_object_on_net_destroy@aaaa_script_fixes_mp = level
+server_object_on_register@aaaa_script_fixes_mp = level
+actor_on_update@aaaa_script_fixes_mp = level

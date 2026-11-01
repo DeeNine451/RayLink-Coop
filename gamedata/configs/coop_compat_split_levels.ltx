@@ -72,3 +72,21 @@ xr_motivator           = level
 xr_reach_task          = level
 xr_wounded             = level
 xr_zones               = level
+; what a trader sells: the stock restock runs where he is, so do the injections of GAMMA on its timer and the listeners of trader_on_restock
+; (wpo_loot, coffee, campfire wood, the guns: trader_autoinject.update). NPCs bring their loot to a trader where they walk
+trader_autoinject      = level
+exo_loot               = level
+axr_trade_manager      = level
+; a stock release of a squad's NPC switches it offline first, then this one finishes it on a later frame: without it the NPC left its squad
+; and stayed, and the queue grew
+safe_release_manager   = level
+release_body_manager   = level
+release_item_manager   = level
+logic_enforcer         = level
+; GAMMA's rules on NPCs online on the level; each reads sim:actor() for the level it is on, a map server's ghost stands on its own
+grok_no_npc_friendly_fire = level
+grok_nes               = level
+grok_no_north_faction_in_south = level
+grok_sniper_remover    = level
+xcv_phantoms           = level
+xcv_phantoms_fix       = level

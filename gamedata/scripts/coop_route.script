@@ -125,7 +125,10 @@ local function as_player_in_turn(script, f, ...)
 	if not (P and P.everyone and P.with_identity) then return f(...) end
 	local list = P.everyone()
 	local n = #list
-	if n <= 1 then return f(...) end
+	if n == 0 then
+		if P.is_map_server and P.is_map_server() then return end -- its actor is a ghost, nobody is on the level
+		return f(...)
+	end
 	local i = (turn[script] or 0) % n + 1
 	turn[script] = i
 	local who = list[i]
@@ -145,7 +148,7 @@ local function guard(f, d, script, what, skip_ret, err_ret)
 		if client then
 			return finish(d, script, what, err_ret, pcall(f, ...))
 		end
-		if d == "host" and what == "actor_on_update" and ROTATE[script] then
+		if (d == "host" or d == "level") and what == "actor_on_update" and ROTATE[script] then
 			return as_player_in_turn(script, f, ...)
 		end
 		return f(...)

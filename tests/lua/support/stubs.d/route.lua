@@ -19,6 +19,9 @@ ROUTE_ERRORS = {}
 ROUTE_SCRIPT_RULES = {}
 ROUTE_FORCED = {}
 ROUTE_SKIP_FILES = ROUTE_SKIP_FILES or {}
+-- F3a: the keys of [level_scripts] and [level_callbacks] (coop_routes.h Table::level_behaviour), lowercase
+ROUTE_LEVEL_SCRIPTS = {}
+ROUTE_LEVEL_CALLBACKS = {}
 local loaded = false
 
 local BS = string.char(92)
@@ -78,6 +81,7 @@ function route_stub_load()
 	loaded = true
 	coop_native.reset()
 	ROUTE_NONE_FUNCTIONS, ROUTE_FILES, ROUTE_ERRORS, ROUTE_SCRIPT_RULES, ROUTE_FORCED = {}, {}, {}, {}, {}
+	ROUTE_LEVEL_SCRIPTS, ROUTE_LEVEL_CALLBACKS = {}, {}
 	local files = {}
 	for _, name in ipairs(route_files()) do
 		if not ROUTE_SKIP_FILES[name] then files[#files + 1] = name end
@@ -98,6 +102,10 @@ function route_stub_load()
 				end
 			elseif sec == "route_none_functions" then
 				for _, l in ipairs(lines) do ROUTE_NONE_FUNCTIONS[#ROUTE_NONE_FUNCTIONS + 1] = l[1] end
+			elseif sec == "level_scripts" then
+				for _, l in ipairs(lines) do ROUTE_LEVEL_SCRIPTS[l[1]:lower()] = true end
+			elseif sec == "level_callbacks" then
+				for _, l in ipairs(lines) do ROUTE_LEVEL_CALLBACKS[l[1]:lower()] = true end
 			end
 		end
 	end

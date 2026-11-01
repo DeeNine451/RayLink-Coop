@@ -25,9 +25,10 @@ bind_campfire                    = owner  ; matches on a campfire and the campfi
 illish.patches.surge_manager     = host
 illish.patches.axr_companions    = host
 
-; These native wrappers keep the original mod's host-only authority. The general coop_* = view
-; rule must not make an upstream world callback execute on clients merely because we decorated it.
+; These native wrappers keep the original mod's authority: the process that leads the level, never a client. The general
+; coop_* = view rule must not make an upstream world callback execute on clients merely because we decorated it. A pair does
+; not pass Table::level_behaviour, so host here took the wrapped handler away from a map server with the wrapper.
 [route_pairs]
-npc_on_hit_callback@coop_npc_adapters = host
-npc_on_before_hit@coop_npc_adapters   = host
-monster_on_update@coop_npc_phantoms   = host
+npc_on_hit_callback@coop_npc_adapters = level
+npc_on_before_hit@coop_npc_adapters   = level
+monster_on_update@coop_npc_phantoms   = level
