@@ -305,6 +305,28 @@ TEST(ids_each_map_server_has_its_slice_and_nobody_shares_it)
 	CHECK(next - 1 < 0xffff); // 0xffff is no id
 }
 
+TEST(ids_a_slice_holds_a_busy_level_and_the_world_stays_below_them)
+{
+	// k00_marsh: four traders are some 570 objects, and 48 ids go to each player's lease
+	CHECK(kLeaderIdsEach >= 4095u);
+	CHECK(kLeaderIdFirst > 27296u); // GAMMA's world by the log, ids dense from the bottom of the generator
+	CHECK_EQ(uint32_t(leader_ids_of(kLeaderSlots)) + kLeaderIdsEach - 1, 0xFFF8u);
+	CHECK_EQ(0x10000u - kLeaderSlots * kLeaderIdsEach > 27296u, true); // even with every slice kept
+}
+
+TEST(ids_the_world_keeps_the_slices_that_can_be_used_and_no_more)
+{
+	CHECK_EQ(leader_slots_kept(3, 0), 3u); // the default: 12285 ids, the rest stays the world's
+	CHECK_EQ(leader_slots_kept(0, 0), 0u);
+	CHECK_EQ(leader_slots_kept(7, 2), 7u);
+	CHECK_EQ(leader_slots_kept(3, 2), 3u);
+	// a lost server keeps number 3 while its players wait, another level takes the free place under number 4
+	CHECK_EQ(leader_slots_kept(3, 4), 4u);
+	CHECK_EQ(leader_slots_kept(1, 3), 3u); // the console lowered the setting under a running server
+	CHECK_EQ(leader_slots_kept(9, 0), kLeaderSlots);
+	CHECK_EQ(leader_slots_kept(0, 9), kLeaderSlots);
+}
+
 // ---------------------------------------------------------------- the world server's book
 
 TEST(keeper_a_take_marks_the_object_and_the_client_gets_its_state)

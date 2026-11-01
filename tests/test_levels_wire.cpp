@@ -448,13 +448,13 @@ TEST(levels_wire_snapshot_and_entity_headers_leave_the_body)
 	nowhere.write(wn);
 	CHECK_EQ(refused<LevelSnapshotHead>(wn), std::string("refused"));
 
-	for (uint8_t op = 0; op < 8; ++op)
+	for (uint8_t op = 0; op < 12; ++op)
 	{
 		Writer we;
 		we.u8(op);
 		LevelEntityHead e;
 		Reader re(we.ptr(), we.size());
-		const bool want = op <= LevelEntityHead::Tent;
+		const bool want = op <= LevelEntityHead::Stash;
 		CHECK_EQ(std::string("op ") + std::to_string(op) + (e.read(re) ? " read" : " refused"),
 		    std::string("op ") + std::to_string(op) + (want ? " read" : " refused"));
 	}

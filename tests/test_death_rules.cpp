@@ -1184,6 +1184,22 @@ TEST(death_new_character_request)
 	CHECK(on_new_character(evacuated, false) == NewCharVerdict::NotOut);
 }
 
+TEST(death_retire_on_a_map_server_waits_for_its_word)
+{
+	// the body and the things are its objects: its word says how the stash ended
+	CHECK(remote_stash_outcome(false, false, 0) == StashOutcome::Pending);
+	CHECK(remote_stash_outcome(true, false, 0) == StashOutcome::Done);
+	CHECK(remote_stash_outcome(true, true, 0) == StashOutcome::GaveUp);
+	// it may wait for a player who left: no sooner than the stash itself gives up
+	CHECK(kRemoteStashWaitMs > kStashAwayWaitMs);
+	CHECK(remote_stash_outcome(false, false, kStashAwayWaitMs) == StashOutcome::Pending);
+	// no word at all (the process is gone): he keeps his character and his things, retire_step cancels and he may ask again
+	CHECK(remote_stash_outcome(false, false, kRemoteStashWaitMs) == StashOutcome::GaveUp);
+	CHECK(retire_step(true, remote_stash_outcome(false, false, kRemoteStashWaitMs), false, true) == RetireStep::Cancel);
+	// a late word changes nothing the wait decided, an early one ends the wait
+	CHECK(retire_step(true, remote_stash_outcome(true, false, 1000), false, true) == RetireStep::Finish);
+}
+
 TEST(death_retire_waits_for_the_stash)
 {
 	// Review R2 of T9: nothing of a retiring character changes while his stash waits for his things (his key, his

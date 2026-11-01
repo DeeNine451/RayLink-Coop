@@ -203,6 +203,15 @@ TEST(command_tail_holds_what_the_key_needs)
 	CHECK(fsltx_of(tail.c_str()) == "fsgame_ms4.ltx");
 }
 
+TEST(command_tail_a_map_server_has_its_sounds)
+{
+	// -nosound leaves a sound with no file and no length: its players hear nothing of the level, its scripts' sound_end comes at once.
+	// The silent core is the engine's own choice for this key (x_ray.cpp, psSoundSilent).
+	Args a;
+	a.token = token_of(5);
+	CHECK(command_tail(a, 1, "fsgame_ms1.ltx").find("-nosound") == std::string::npos);
+}
+
 // ---------------------------------------------------------------- who may connect
 
 TEST(hello_only_the_loopback_with_an_issued_token)
