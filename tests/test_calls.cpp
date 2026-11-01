@@ -198,6 +198,29 @@ TEST(calls_decide)
 	}
 }
 
+// F3a: a map server asks as a client and leads its level. Live 2026-11-01: all of these were refused there, no trader had stock.
+TEST(calls_map_server_leads_its_level)
+{
+	for (std::string_view name : kLevelCalls)
+	{
+		CHECK(has_row(std::string(name)));
+		CHECK(decide_leading(name, Gate::Refuse, true) == Gate::Run);
+		CHECK(decide_leading(name, Gate::Refuse, false) == Gate::Refuse); // a bad number runs nowhere
+		CHECK(decide_leading(name, Gate::Request, true) == Gate::Request); // our actor's side keeps its way to the host
+	}
+	for (const char* live : {"game_object:buy_supplies", "game_object:set_npc_position", "game_object:transfer_item", "game_object:destroy_object"})
+		CHECK(is_level_call(live));
+	CHECK(is_level_call("GAME_OBJECT:Buy_Supplies"));
+	// the world's stay the world's, on a map server too
+	for (const char* world : {"level:change_game_time", "level:set_game_difficulty", "game_object:give_task", "game_object:set_task_state",
+	         "game_object:give_info_portion", "game_object:set_goodwill", "game_object:set_relation", "game_object:set_community_goodwill",
+	         "alife:set_switch_online", "level:set_weather"})
+	{
+		CHECK(!is_level_call(world));
+		CHECK(decide_leading(world, Gate::Refuse, true) == Gate::Refuse);
+	}
+}
+
 // The "own target" of each gated call site (engine code passes these to client_gate_own).
 TEST(calls_own_rules)
 {
