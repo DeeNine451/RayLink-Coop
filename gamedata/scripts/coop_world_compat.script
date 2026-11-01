@@ -7,9 +7,16 @@
 	- info_portions is host-only, and it is what refreshes the PDA rankings when the PDA is raised. A client asks here;
 	  coop_quests_pda's calculate_rankings turns that into a request to the host.
 	- Companion hotkeys: axr_companions runs on the host and its cycles walk the host's companion list. On a client the same
-	  keys walk this player's companions with the dialog actions, which coop_npc_companions sends to the host.
+	  keys walk the companions this player leads with the dialog actions, which coop_npc_companions sends to the host.
 	- Remote mine planting of ui_hud_dotmarks creates the bomb itself, which a client cannot: it goes the way of
 	  txr_mines.plant_bomb (coop_npc_world asks the host).
+	- A player is nobody to talk to: no mark of ui_hud_dotmarks on a player's character (the dot and "[F] Talk: <nick>", owner
+	  2026-11-01). Muting him is not enough: the mod reads the flag on a throttled check and keeps the prompt of the object it
+	  has locked on. A mark made before the character was known goes on the next tick.
+	- An open stash, corpse or companion follows what other players do (owner 2026-11-01: "I take something and it stays with
+	  the others"). GAMMA's window for them is the Lua ui_inventory, the engine's menu with its live refresh
+	  (coop_trade refresh_actor_menu) never shows. LMode_RefreshInventories is the stock's own step after a move: it adds and
+	  removes cells by id, so it runs here on a timer, not while the player holds an item or its menu is open.
 	Everything here is a no-op outside a co-op session, on the host the stock code runs.
 --]]
 
@@ -22,7 +29,13 @@ local P -- coop_npc_players
 
 local function report(what, err) P.report(TAG, what, err) end
 
-local stats = { rankings = 0, hotkeys = 0, mines = 0 }
+local stats = { rankings = 0, hotkeys = 0, mines = 0, marks = 0, loot_refreshes = 0 }
+local AVATAR = "coop_player_avatar"
+local MARKS_EVERY_MS = 1000
+local dotmarks = nil -- ui_hud_dotmarks with what drop_player_marks needs
+local next_marks = 0
+local LOOT_EVERY_MS = 250
+local next_loot = 0
 
 local function module_of(name)
 	local m = rawget(_G, name)
@@ -74,9 +87,12 @@ local CYCLES = {
 
 local function own_companions()
 	local list = {}
+	local comp = module_of("coop_npc_companions")
 	for _, id in pairs(db.OnlineStalkers or {}) do
 		local npc = level.object_by_id(id)
-		if npc and npc:alive() and npc:has_info("npcx_is_companion") then list[#list + 1] = npc end
+		if npc and npc:alive() and npc:has_info("npcx_is_companion") and (not comp or comp.held_here(npc)) then
+			list[#list + 1] = npc
+		end
 	end
 	return list
 end
@@ -103,9 +119,8 @@ end
 -------------------------------------------------------------------------------
 -- Remote mine planting
 -------------------------------------------------------------------------------
-local function patch_dotmarks()
-	local dm = module_of("ui_hud_dotmarks")
-	local f = type(dm) == "table" and dm.replace_invitem_with_bomb
+local function patch_mines(dm)
+	local f = dm.replace_invitem_with_bomb
 	if type(f) ~= "function" then return end
 	dm.replace_invitem_with_bomb = function(used_id, mode, delay)
 		if not P.client_live() then return f(used_id, mode, delay) end
@@ -117,12 +132,64 @@ local function patch_dotmarks()
 	end
 end
 
+local function is_player_character(id)
+	if P.is_proxy(id) then return true end
+	local obj = level.object_by_id(id)
+	return obj ~= nil and obj:section() == AVATAR
+end
+
+local function patch_marks(dm)
+	local setup = dm.setup_marker_for_object
+	if not (type(setup) == "function" and type(dm.get_mark) == "function" and type(dm.destroy_marker) == "function") then return end
+	dm.setup_marker_for_object = function(id, args)
+		if is_player_character(id) then return end
+		return setup(id, args)
+	end
+	dotmarks = dm
+end
+
+local function patch_dotmarks()
+	local dm = module_of("ui_hud_dotmarks")
+	if type(dm) ~= "table" then return end
+	patch_mines(dm)
+	patch_marks(dm)
+end
+
+local function refresh_open_loot()
+	local now = time_global()
+	if now < next_loot or not P.active() then return end
+	next_loot = now + LOOT_EVERY_MS
+	local inv = module_of("ui_inventory")
+	local gui = type(inv) == "table" and inv.GUI
+	if not gui then return end
+	local ok, err = pcall(function()
+		if not (gui:IsShown() and gui.mode == "loot" and gui:GetPartner()) then return end
+		if gui.item_in_hold or gui.item_props:IsShown() or gui.box_init_update.state then return end
+		stats.loot_refreshes = stats.loot_refreshes + 1
+		gui:LMode_RefreshInventories()
+	end)
+	if not ok then report("open container", err) end
+end
+
+local function drop_player_marks()
+	local now = time_global()
+	if not dotmarks or now < next_marks then return end
+	next_marks = now + MARKS_EVERY_MS
+	for _, obj in ipairs(P.others()) do
+		local mark = dotmarks.get_mark(obj:id())
+		if mark then
+			stats.marks = stats.marks + 1
+			dotmarks.destroy_marker(mark.mark_id, "a player")
+		end
+	end
+end
+
 -------------------------------------------------------------------------------
 -- Install
 -------------------------------------------------------------------------------
 function print_status()
-	P.log(TAG, "rankings asked %d, companion hotkeys %d, mines planted %d | errors %d", stats.rankings, stats.hotkeys, stats.mines,
-		P.error_count(TAG))
+	P.log(TAG, "rankings asked %d, companion hotkeys %d, mines planted %d, marks off players %d | errors %d", stats.rankings,
+		stats.hotkeys, stats.mines, stats.marks, P.error_count(TAG))
 end
 
 function on_game_start()
@@ -135,4 +202,6 @@ function on_game_start()
 	end
 	RegisterScriptCallback("actor_on_info_callback", actor_on_info_callback)
 	RegisterScriptCallback("on_key_release", on_key_release)
+	RegisterScriptCallback("actor_on_update", drop_player_marks)
+	RegisterScriptCallback("actor_on_update", refresh_open_loot)
 end

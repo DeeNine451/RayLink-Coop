@@ -107,6 +107,9 @@ Hm.env.dynamic_news_helper = { GetPointDescription = function() return "at the b
 host_tick()
 check(Cm.env.tasks_guide.prec_1(900) == true, "the client's dialog sees the offer: the stock test reads the mirrored table")
 check(Cm.guide.offer().zarplata == 1000, "with its numbers")
+local walking = { has_info = function(_, i) return i == "npcx_is_companion" end }
+check(Cm.env.tasks_guide.prec_1(900, walking) == false, "a companion of the group does not get the offer's line again and again")
+check(Cm.env.tasks_guide.prec_1(900, { has_info = function() return false end }) == true, "a stranger does")
 check(Cm.tips and Cm.tips[1] == "l02_garbage|at the bridge|name_700", "the news of the offer on the client's PDA")
 local sends = #Hm.sent
 host_tick()
@@ -123,6 +126,10 @@ check(Hm.guide.job().coop_taker == 1, "and remembers who took it")
 host_tick()
 check(Cm.env.tasks_guide.prec_1(900) == true and Cm.guide.job().squad_id == 900, "the client's dialog sees the running job")
 check(Cm.guide.offer().squad_id == nil, "the offer is gone everywhere")
+local squad_of = Cm.env.get_object_squad
+Cm.env.get_object_squad = function() return { id = 900 } end
+check(Cm.env.tasks_guide.prec_1(900, walking) == true, "the guide of the running job keeps his line")
+Cm.env.get_object_squad = squad_of
 check(Cm.spots[333] == true, "the target's map spot on the client")
 NOW = NOW + 2000
 Rq(Cm.actor, Cm.npc)

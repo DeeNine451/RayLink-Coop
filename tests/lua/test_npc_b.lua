@@ -180,7 +180,11 @@ NOW = NOW + 1
 H.env.axr_beh.action_beh.execute({ object = comp })
 check(H.beh_actor == 500, "companion thinks with 'actor' = its leader's proxy")
 H.env.db.actor._pos = vec(12, 0, 1)
-H.env.dialogs_axr_companion.remove_companions_from_squad(H.env.db.actor, comp) -- the host dismisses it directly (stock)
+H.env.actor_menu = { set_msg = function(_, m) H.refused_msg = m end }
+H.env.dialogs_axr_companion.remove_companions_from_squad(H.env.db.actor, comp)
+check(CH._leaders()[300] == 500 and H.refused_msg ~= nil, "only who holds control dismisses it: the host hears why")
+C.env.dialogs_axr_companion.remove_companions_from_squad(C.env.db.actor, comp_c)
+pump()
 NOW = NOW + 3000
 H.fire("actor_on_update")
 check(CH._leaders()[300] == nil, "leader forgotten once the squad is no longer a companion squad")
@@ -222,7 +226,8 @@ local function recruit()
 	return H.became ~= nil
 end
 local function dismiss()
-	H.env.dialogs_axr_companion.remove_companions_from_squad(H.env.db.actor, comp)
+	C.env.dialogs_axr_companion.remove_companions_from_squad(C.env.db.actor, comp_c) -- who holds control dismisses it
+	pump()
 	NOW = NOW + 3000
 	H.fire("actor_on_update")
 end

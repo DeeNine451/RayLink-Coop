@@ -48,7 +48,8 @@
 	The guide job (tasks_guide) is no task of the task manager: a timer offers it, two tables of the module hold the offer and
 	the running job, and the dialog reads them on the talker's machine. The host sends the tables to every client (quests.guide)
 	with the offer's news, a client's take and turn-in are relayed, the job remembers its taker: his pay, and his fine when it
-	runs late.
+	runs late. The offer's line is for a stranger: a companion of the group with no running job does not get it again and
+	again (live 2026-11-01).
 
 	NPE tutorials: one task id and its text in module locals, so a tutorial is personal: given and checked on its machine.
 --]]
@@ -621,6 +622,21 @@ local function client_on_guide(t, from)
 	guide.offer = g.squad_id
 end
 
+-- What stayed in the offer's table says nothing to a companion who walks with the group already.
+local function patch_guide_offer()
+	local m = qc.mod("tasks_guide")
+	local prec = m and m.prec_1
+	if type(prec) ~= "function" then return end
+	m.prec_1 = function(actor, npc, ...)
+		local res = prec(actor, npc, ...)
+		if not res then return res end
+		local dl = qc.mod("dialogs")
+		local who = dl and dl.who_is_npc and dl.who_is_npc(actor, npc) or npc
+		if who and who:has_info("npcx_is_companion") and not guide_is("curr_guid", who) then return false end
+		return res
+	end
+end
+
 -- The late job's reputation and fine are the taker's: his ledger stands in for the host's money.
 local function patch_guide_timers()
 	local m = qc.mod("tasks_guide")
@@ -674,7 +690,8 @@ local function install()
 	if installed then return end
 	installed = true
 	for _, s in ipairs({ { "relay", patch_client_relay }, { "status kill", patch_status_kill },
-		{ "guide timers", patch_guide_timers }, { "npe", patch_npe }, { "stash", patch_client_stash },
+		{ "guide timers", patch_guide_timers }, { "guide offer", patch_guide_offer }, { "npe", patch_npe },
+		{ "stash", patch_client_stash },
 		{ "trade", patch_client_trade }, { "no-ops", patch_client_noops }, { "hidden threat", patch_slht_rewards } }) do
 		local ok, err = pcall(s[2])
 		if not ok then qc.report(TAG, "install " .. s[1], err) end

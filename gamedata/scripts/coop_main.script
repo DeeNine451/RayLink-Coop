@@ -526,7 +526,9 @@ local function mirror_start_surge(m)
 	m.game_time_factor = level.get_time_factor()
 	if m.finalize then m:finalize() end
 	m.started, m.finished = true, false
-	m.blowout_waves, m.objects_to_kill, m.stages, m.body_tears = {}, {}, {}, {}
+	-- false: the stock neither starts nor fades these, quake_step plays them
+	m.blowout_waves, m.objects_to_kill, m.body_tears = {}, {}, {}
+	m.stages = { quake20 = false, quake40 = false, quake60 = false, quake80 = false, quake100 = false }
 	m.hitFactor, m.zombie_count = 0, 0
 	m.effector_set, m.second_message_given, m.ui_disabled = false, false, false
 	m.task_given = false -- audit E2: the stock update gives this player's personal hide task at its moment
@@ -561,11 +563,36 @@ local function mirror_update(m, game_sec, what, limit_field)
 end
 
 -- A mirror that starts late (the player joined during it): the stock update plays every stage that is due at once. A
--- stage is over this many stock seconds in. The rumble and the last step of the quake ladder are not listed: they are
--- on now, and they end later.
-local SURGE_STAGES_OVER = { beginning = 5, siren = 30, impact = 52, quake20 = 100, quake40 = 102, quake60 = 104, quake80 = 106,
+-- stage is over this many stock seconds in. The rumble is not listed: it is on now, and it ends later.
+local SURGE_STAGES_OVER = { beginning = 5, siren = 30, impact = 52,
 	["1stwavesnd"] = 120, ["1stwave"] = 124, ["2ndwavesnd"] = 168, ["2ndwave"] = 172 }
 local PSI_STAGES_OVER = { beginning = 5, siren = 15 }
+
+-- The quake on a client (live 2026-11-01: the emission ran and nothing shook, the cause not found by reading): the stock's ladder
+-- of surge_manager.update, played here from the host's clock with an effector id of its own, each step in the log. A mirror that
+-- starts late comes in on the step of that moment. Stock seconds; the last row of each pair of lines is the fade.
+local QUAKE_CAM = 39571 -- free in the stock, next to the contusion's 39570
+local QUAKE = { { 80, "earthquake_20" }, { 100, "earthquake_40" }, { 102, "earthquake_60" }, { 104, "earthquake_80" },
+	{ 106, "earthquake" }, { 200, "earthquake_80" }, { 202, "earthquake_60" }, { 206, "earthquake_40" }, { 209, "earthquake_20" } }
+local quake_on = nil
+
+local function quake_stop()
+	if not quake_on then return end
+	quake_on = nil
+	pcall(level.remove_cam_effector, QUAKE_CAM)
+end
+
+local function quake_step(sec)
+	local name = nil
+	for _, row in ipairs(QUAKE) do
+		if sec >= row[1] then name = row[2] end
+	end
+	if not name or name == quake_on then return end
+	quake_stop()
+	local ok, res = pcall(level.add_cam_effector, "camera_effects\\" .. name .. ".anm", QUAKE_CAM, true, "", 0, false)
+	quake_on = name
+	log("emission quake: %s at %d s, %s", name, sec, ok and ("runs " .. tostring(res) .. " s") or tostring(res))
+end
 
 local function skip_stages_over(m, over, game_sec)
 	local sec = game_sec / (env_cl.tf or level.get_time_factor())
@@ -590,7 +617,9 @@ local function client_env_tick()
 				skip_stages_over(sm, SURGE_STAGES_OVER, env_cl.sg + dt)
 			end
 			mirror_update(sm, env_cl.sg + dt, "emission mirror", "surge_time")
+			quake_step((env_cl.sg + dt) / (env_cl.tf or level.get_time_factor()))
 		elseif sm.started then
+			quake_stop()
 			with_cover(true, function() sm:end_surge() end, "emission end")
 			log("emission ended by the host")
 		end

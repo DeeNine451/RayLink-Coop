@@ -128,7 +128,17 @@ do
 	-- planting
 	local planted = {}
 	C.env.txr_mines = { plant_bomb = function(obj, mode, delay) planted[#planted + 1] = { obj:id(), mode, delay } end }
-	C.env.ui_hud_dotmarks = { replace_invitem_with_bomb = function() error("alife_create answers nil on a client") end }
+	local marked, dropped = {}, {}
+	local avatar = C.add(make_obj(820, 1, 0, 0))
+	avatar.section = function() return "coop_player_avatar" end
+	local stalker = C.add(make_obj(821, 1, 0, 0))
+	stalker.section = function() return "stalker" end
+	local stale = C.add(make_obj(822, 1, 0, 0))
+	stale.section = function() return "stalker" end
+	C.env.ui_hud_dotmarks = { replace_invitem_with_bomb = function() error("alife_create answers nil on a client") end,
+		setup_marker_for_object = function(id) marked[#marked + 1] = id end,
+		get_mark = function(id) return id == 822 and { mark_id = "dotmark_822" } or nil end,
+		destroy_marker = function(id, why) dropped[#dropped + 1] = id end }
 	H.env.ui_hud_dotmarks = { replace_invitem_with_bomb = function(id) H.bomb = id end }
 	-- TB
 	local cubes = 0
@@ -157,6 +167,58 @@ do
 	C.env.db.OnlineStalkers = {}
 	C.fire("on_key_release", 102)
 	check(#orders == 2, "no companions: nothing")
+
+	C.env.ui_hud_dotmarks.setup_marker_for_object(820, {})
+	check(#marked == 0, "no mark on a player's character: no dot, no [F] Talk")
+	C.env.ui_hud_dotmarks.setup_marker_for_object(821, {})
+	check(marked[1] == 821, "an NPC keeps its mark")
+	C.env.coop_npc_players = C.env.coop_npc_players or {}
+	local others = C.env.coop_npc_players.others
+	C.env.coop_npc_players.others = function() return { stale } end
+	NOW = NOW + 1100
+	C.fire("actor_on_update")
+	check(dropped[1] == "dotmark_822", "a mark made before the character was known goes on the next tick")
+	C.env.coop_npc_players.others = others
+
+	-- an open stash, corpse or companion in GAMMA's Lua window follows the others
+	local refreshes, holding, props, shown, partner, mode = 0, nil, false, true, {}, "loot"
+	C.env.ui_inventory = { GUI = {
+		IsShown = function() return shown end,
+		GetPartner = function() return partner end,
+		LMode_RefreshInventories = function() refreshes = refreshes + 1 end,
+		item_props = { IsShown = function() return props end },
+		box_init_update = { state = false },
+	} }
+	local gui = C.env.ui_inventory.GUI
+	gui.mode = mode
+	local function step() NOW = NOW + 300; C.fire("actor_on_update") end
+	step()
+	check(refreshes == 1, "an open loot window refreshes on the timer")
+	C.fire("actor_on_update")
+	check(refreshes == 1, "and not more often")
+	gui.item_in_hold = true
+	step()
+	check(refreshes == 1, "not while the player holds an item")
+	gui.item_in_hold = nil
+	props = true
+	step()
+	check(refreshes == 1, "not while an item's menu is open")
+	props = false
+	gui.box_init_update.state = true
+	step()
+	check(refreshes == 1, "not while a box fills on opening")
+	gui.box_init_update.state = false
+	gui.mode = "trade"
+	step()
+	check(refreshes == 1, "the trade window keeps its own deal")
+	gui.mode = "loot"
+	partner = nil
+	step()
+	check(refreshes == 1, "a partner that is gone: nothing to read")
+	partner = {}
+	shown = false
+	step()
+	check(refreshes == 1, "a closed window: nothing")
 
 	local item = C.add(make_obj(900, 0, 0, 0))
 	C.env.ui_hud_dotmarks.replace_invitem_with_bomb(900, 2, 5)

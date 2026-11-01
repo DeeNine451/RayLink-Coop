@@ -23,7 +23,14 @@
 	                                           named by the nick.
 	Body Health System (zzz_player_injuries)   after a co-op revive head/torso get back above zero and the medkit
 	                                           heals the limbs (the mod's own heal never runs on a revive);
-	                                           head_tbl is per player.
+	                                           head_tbl is per player. Its concussion waits until the player stands:
+	                                           hits on a body turned the volume down and up again and again.
+	Grok's actor damage balancer               the armour, the body part and the limb of Body Health System are its work,
+	                                           and it leaves a bullet alone when the weapon of the hit is not on this
+	                                           machine: the shooter's hands stand in, else the bullet is counted with
+	                                           no armour piercing. Every hit by a player is in the log.
+	AGDD Voiced Actor                          a player who is down or dead says nothing: grunts over the teammate he
+	                                           watches (live 2026-11-01).
 	Oleh's Extended MovementSFX                footsteps of other players' characters (when the engine reports
 	                                           avatar steps through coop_mods_core.on_avatar_step).
 --]]
@@ -375,9 +382,20 @@ local function bhs_save(b)
 	end
 end
 
+-- What a concussion left behind when the player fell: the volume, its two effectors, the head's last value.
+local function bhs_clear_concussion(b)
+	local head = C().find_local(b, "head_tbl")
+	if type(head) ~= "table" then return end
+	head.previous, head.stage = nil, 0
+	if head.volume then exec_console_cmd("snd_volume_eff " .. tostring(head.volume)) end
+	level.remove_pp_effector(99123)
+	level.remove_pp_effector(99133)
+end
+
 local function bhs_on_revived(reviver, section)
 	local b = C().mod("zzz_player_injuries")
 	if not (bhs_tables(b) and db.actor) then return end
+	bhs_clear_concussion(b)
 	-- The mod keeps the player down while head or torso is at zero.
 	if (b.health.head or 0) <= 0 then b.health.head = 1 end
 	if (b.health.torso or 0) <= 0 then b.health.torso = 1 end
@@ -408,6 +426,7 @@ local function bhs_on_respawned()
 		b.health[k] = b.maxhp[k]
 		b.timedhp[k] = 0
 	end
+	bhs_clear_concussion(b)
 	bhs_save(b)
 	log("bhs", "respawned: every part back")
 end
@@ -416,9 +435,66 @@ local function install_bhs()
 	local b = C().mod("zzz_player_injuries")
 	if not bhs_tables(b) then return end
 	P().register("head_tbl", { prime = { "zzz_player_injuries" } })
+	local concussion = b.bhs_concussion
+	if type(concussion) == "function" then
+		b.bhs_concussion = function(...)
+			if not coop_npc_players.standing(0) then return end
+			return concussion(...)
+		end
+	end
 	C().listen("actor_revived", bhs_on_revived)
 	C().listen("actor_respawned", bhs_on_respawned)
 	installed[#installed + 1] = "bhs"
+end
+
+-------------------------------------------------------------------------------
+-- Grok's actor damage balancer
+-------------------------------------------------------------------------------
+local function weapon_of_hit(shit)
+	local w = level.object_by_id(shit.weapon_id)
+	if w and IsWeapon(w) then return w end
+	local who = shit.draftsman
+	local ok, item = pcall(function() return who and who:active_item() end)
+	if ok and item and IsWeapon(item) then
+		shit.weapon_id = item:id()
+		return item
+	end
+	return nil
+end
+
+local function install_adb()
+	local m = C().mod("grok_actor_damage_balancer")
+	local before, booster = m and m.actor_on_before_hit, m and m.shit_booster
+	if type(before) ~= "function" or type(booster) ~= "function" then return end
+	local wrapped = function(shit, bone_id, flags)
+		if not coop_npc_players.active() then return before(shit, bone_id, flags) end
+		local bullet = shit.type == hit.fire_wound
+		local weapon = bullet and weapon_of_hit(shit)
+		local who = shit.draftsman
+		if who and coop_npc_players.is_proxy(who:id()) then
+			log("adb", "a player's hit: bone %s, type %s, power %.3f, weapon %s", tostring(bone_id), tostring(shit.type), shit.power,
+				weapon and weapon:section() or "none")
+		end
+		before(shit, bone_id, flags)
+		if bullet and shit.power > 0 then booster(shit, bone_id, 0) end -- it stopped at the weapon or its ammo
+	end
+	m.actor_on_before_hit = wrapped
+	C().swap_callback("actor_on_before_hit", before, wrapped)
+	installed[#installed + 1] = "damage_balancer"
+end
+
+-------------------------------------------------------------------------------
+-- AGDD Voiced Actor: every line of the player's voice goes through actor_speak_base
+-------------------------------------------------------------------------------
+local function install_voiced()
+	local v = C().mod("agdd_voiced_actor")
+	local speak = v and v.actor_speak_base
+	if type(speak) ~= "function" then return end
+	v.actor_speak_base = function(...)
+		if not coop_npc_players.standing(0) then return false end
+		return speak(...)
+	end
+	installed[#installed + 1] = "voiced_actor"
 end
 
 -------------------------------------------------------------------------------
@@ -483,6 +559,8 @@ function on_game_start()
 	start_step("install_zcp", install_zcp)
 	start_step("install_paw", install_paw)
 	start_step("install_bhs", install_bhs)
+	start_step("install_adb", install_adb)
+	start_step("install_voiced", install_voiced)
 	start_step("install_oleh", install_oleh)
 	if C().mod("haru_quick_action_wheel_mcm") then RegisterScriptCallback("actor_on_first_update", actor_on_first_update) end
 	C().status_line("misc", function()

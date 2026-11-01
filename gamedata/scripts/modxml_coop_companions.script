@@ -1,9 +1,9 @@
 --[[
 	Anomaly Coop - companions: the "take control" dialog (gamedata\scripts\modxml_coop_companions.script).
 	The modxml_ prefix makes dxml_core load this script and call on_xml_read() at script start-up, before the engine reads
-	gameplay\dialogs.xml and the first character. A dialog of its own and not a line of dm_is_actor_companion_dialog: that
-	dialog opens on the npcx_is_companion flag, which only the leader's machine has, and its list of commands is the leader's
-	(coop_npc_companions: the "hand over" line goes there by script). This one opens for every other player of the session.
+	gameplay\dialogs.xml and the first character. A dialog of its own and not a line of dm_is_actor_companion_dialog, whose
+	list of commands is a step deeper (coop_npc_companions: the "hand over" line goes there by script): one press, right at
+	the start of the talk. It opens for every player but the leader.
 	Every character that can be a companion gets it. Nothing happens on an exe without co-op.
 --]]
 

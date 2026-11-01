@@ -1462,3 +1462,22 @@ TEST(death_body_lies_still_after_the_last_move)
 	CHECK(!body_still(BodyPose::Standing, 5000, 600000));
 	CHECK(body_still(BodyPose::Dead, 9000, 3000)); // a clock that went back: still, not a new last move
 }
+
+TEST(death_no_hit_counts_while_gone_or_right_after_a_respawn)
+{
+	CHECK(hit_counts(false, 1000, 0));
+	CHECK(!hit_counts(true, 1000, 0));
+	const uint64_t shield = 1000 + kRespawnShieldMs;
+	CHECK(!hit_counts(false, 1000, shield));
+	CHECK(!hit_counts(false, shield - 1, shield));
+	CHECK(hit_counts(false, shield, shield));
+}
+
+TEST(death_the_spectators_volume_comes_in_softly)
+{
+	CHECK(spectate_volume(0) == kSpectateFadeFrom);
+	CHECK(spectate_volume(kSpectateFadeMs / 2) > kSpectateFadeFrom);
+	CHECK(spectate_volume(kSpectateFadeMs / 2) < 1.f);
+	CHECK(spectate_volume(kSpectateFadeMs) == 1.f);
+	CHECK(spectate_volume(kSpectateFadeMs * 10ull) == 1.f);
+}
