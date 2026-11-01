@@ -11,8 +11,8 @@
                         so the folder must be called gamedata);
   - bin\, bin_b\        two exe folders (the engine refuses a second instance from the same exe
                         folder: mutex on the folder path, xrEngine/x_ray.cpp); files are hard links;
-  - fsgame_a.ltx/_b.ltx the game's fsgame.ltx with an own appdata per instance;
-  - appdata_a\, _b\     log, user.ltx (windowed, g_always_active, nick), saves, shader cache, player key.
+  - fsgame_a.ltx/_b.ltx/_server.ltx the game's fsgame.ltx with an own appdata per instance;
+  - appdata_a\, _b\, _server\  log, user.ltx (windowed, g_always_active, nick), saves, shader cache, player key.
   Safe to re-run: links and the gamedata mirror are rebuilt, existing user.ltx files are kept.
 
   With -Profile (GAMMA, default root E:\AnomalyCoopGamma) the root is built from that MO2 profile instead
@@ -159,7 +159,8 @@ $settings = [ordered]@{
     'vid_mode'        = $VidMode
     'g_always_active' = 'on'
 }
-foreach ($inst in 'a', 'b') {
+# server: the dedicated host of this stand (docs\DEDICATED_HOST.md), a folder of its own beside the players'
+foreach ($inst in 'a', 'b', 'server') {
     $appdataName = "appdata_$inst"
     $text = $fsText -replace '(?m)^(\$app_data_root\$\s*=.*\|\s*)appdata\\', "`${1}$appdataName\"
     if ($text -notmatch [regex]::Escape("$appdataName\")) { throw 'fsgame.ltx format unexpected: app_data_root not rewritten' }

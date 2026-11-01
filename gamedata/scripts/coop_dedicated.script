@@ -1,0 +1,44 @@
+--[[ Anomaly Coop: the dedicated host's half in Lua (docs/DEDICATED_HOST.md). The process has a whole game's Lua and a ghost for an actor on the
+	 service level fake_start, and no screen where somebody chooses a new game.
+
+	 A new world: the stock new game reads [character_creation] of axr_options.ltx, which the faction-select screen writes. Without a faction
+	 no storyline is set up; without new_game_story_mode the world gets story_mode_disabled. new_game_map stays out: with it the stock
+	 actor_on_first_update changes the level, and the actor of this process stays where it is. new_game_loadout and new_game_money stay out too:
+	 they are for a character, and this one is nobody.
+
+	 Test map: stock IsTestMode() means "the actor is on fake_start", the empty level of a test or of the moment before a new game moves on. Here
+	 it is where the actor stands for good, and the one-time setup of a new world (game_setup, itms_manager) must not take this for a test.
+]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local NEW_WORLD = {
+	new_game_difficulty = 1,
+	new_game_economy = 1,
+	new_game_economy_treasure = 1,
+	new_game_story_mode = true,
+	new_game_faction = "stalker",
+	new_game_character_name = "server",
+}
+-- A test map from the debug key, a start map from an earlier run: their stock meaning is the opposite of this world's.
+local NEVER = { "new_game_map", "new_game_test", "new_game_money", "new_game_loadout" }
+
+local function on()
+	return api ~= nil and type(api.is_dedicated) == "function" and api.is_dedicated() == true
+end
+
+function new_world_settings()
+	local config = axr_main and axr_main.config
+	if not config then return false end
+	for key, value in pairs(NEW_WORLD) do config:w_value("character_creation", key, value) end
+	for _, key in ipairs(NEVER) do config:w_value("character_creation", key) end
+	return true
+end
+
+function on_game_start()
+	if not on() then return end
+	rawset(_G, "IsTestMode", function() return false end)
+	if api.dedicated_new_world() and not new_world_settings() then
+		printf("! [coop] dedicated: no axr_main.config, the new world starts without its settings")
+	end
+end

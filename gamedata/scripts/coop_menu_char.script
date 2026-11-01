@@ -314,6 +314,7 @@ function join_spawn()
 			if ok then v = r end
 		end
 	end
+	if api and api.is_dedicated and api.is_dedicated() then return "faction_start" end -- nobody starts on the service level
 	return v == "faction_start" and "faction_start" or "host"
 end
 
@@ -431,12 +432,13 @@ end
 
 -- Host: the start of a new character of `faction` (start_for with the host's level, its story mode, its camps).
 function host_start(faction)
+	local own_levels = SPLIT_LEVELS or (api and api.is_dedicated and api.is_dedicated())
 	local actor = db and db.actor
 	local level = actor and level_of(actor:game_vertex_id())
-	if level == nil and not SPLIT_LEVELS then return nil end
+	if level == nil and not own_levels then return nil end
 	local from = actor and actor:position()
 	return start_for(faction, {
-		level = (not SPLIT_LEVELS) and level or nil,
+		level = (not own_levels) and level or nil,
 		level_of = level_of,
 		story = story_mode(),
 		camp = function(f) return faction_camp(f, level, from) end,
@@ -1313,7 +1315,8 @@ end
 function start_preview(faction, level, story, camp_on)
 	local here, away = {}, {}
 	for _, s in ipairs(faction_starts(faction, story)) do
-		if SPLIT_LEVELS or s.image == level then here[#here + 1] = s else away[#away + 1] = s end
+		-- no level in the offer: a dedicated host, whose own level is nobody's
+		if SPLIT_LEVELS or level == "" or s.image == level then here[#here + 1] = s else away[#away + 1] = s end
 	end
 	local info = { here = here, away = away }
 	if #here > 0 then return "start", info end

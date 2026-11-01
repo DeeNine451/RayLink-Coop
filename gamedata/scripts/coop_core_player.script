@@ -222,7 +222,7 @@ local function roster_tick()
 	roster_owners = known
 	if roster == nil then -- first look: who is here already is no news
 		roster = now
-		if api.stash_get and api.stash_get(STASH_SEEN) ~= "1" then
+		if role("is_player", "is_active") and api.stash_get and api.stash_get(STASH_SEEN) ~= "1" then -- a dedicated host has no one to tell
 			if api.stash_set then api.stash_set(STASH_SEEN, "1") end
 			if is_world_server() then
 				notice(tr("st_coop_core_session_host", "You are hosting a co-op session."))
@@ -301,7 +301,7 @@ local function actor_on_update()
 		roster_owners = false
 		return
 	end
-	if not live() then return end
+	if not live() and not is_world_server() then return end -- a dedicated host plays nothing and still keeps the roster
 	if is_mirror() and not after_load_done and db.actor then
 		local ok, err = pcall(client_after_load)
 		if not ok then log("! own state after the world load: %s", tostring(err)) end

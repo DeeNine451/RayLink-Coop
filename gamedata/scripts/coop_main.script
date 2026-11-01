@@ -324,6 +324,13 @@ local function player_in_cover(peer, obj)
 	return sm:pos_in_cover(obj:position()) == true
 end
 
+-- A player on a map server's level has no object here: what his own machine last reported, nil when that is old or there is none.
+local function reported_cover(peer)
+	local rep = env_host.cover_rep[peer]
+	if rep and time_global() - rep.at <= COVER_FRESH_MS then return rep.c end
+	return nil
+end
+
 local function players()
 	if not api then return {} end
 	local ok, list = pcall(api.players)
@@ -350,7 +357,10 @@ local function host_surge_kill_check(m)
 			log("emission: %s (#%d) sleeps on an anabiotic, spared", tostring(p.nick), p.id)
 		elseif not p.is_self and env_host.kill_sent[p.id] ~= env_host.serial then
 			local obj = p.avatar_id and level.object_by_id(p.avatar_id)
-			if obj and obj:alive() and not player_in_cover(p.id, obj) then
+			local exposed
+			if obj then exposed = obj:alive() and not player_in_cover(p.id, obj)
+			else exposed = reported_cover(p.id) == false end -- his machine checks that he is alive
+			if exposed then
 				env_host.kill_sent[p.id] = env_host.serial
 				api.send_event("coop_env_kill", encode({ kind = "surge" }), p.id)
 				log("emission: %s (#%d) is outside a shelter, kill sent", tostring(p.nick), p.id)
@@ -401,7 +411,8 @@ local function host_env_tick()
 			local cover = true
 			if active then
 				local obj = p.avatar_id and level.object_by_id(p.avatar_id)
-				cover = (obj == nil) or player_in_cover(p.id, obj)
+				if obj then cover = player_in_cover(p.id, obj)
+				else cover = reported_cover(p.id) ~= false end
 			end
 			api.send_event("coop_env", encode({ s = s_on, sg = s_gs, p = p_on, pg = p_gs, tf = tf, c = cover }), p.id)
 		end

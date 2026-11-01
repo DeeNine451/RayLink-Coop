@@ -375,7 +375,8 @@ end
 -- Characters of the group on this machine: own actor first, then the other connected players.
 local function party()
 	local out = {}
-	if db and db.actor then out[1] = { obj = db.actor, peer = self_peer(), self = true } end
+	local ghost = api and api.is_dedicated and api.is_dedicated() -- the actor of a dedicated host is nobody's character
+	if db and db.actor and not ghost then out[1] = { obj = db.actor, peer = self_peer(), self = true } end
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and p.avatar_id then
@@ -492,6 +493,13 @@ local function avatar_obj(peer)
 	if peer == 0 or peer == self_peer() then return db.actor end
 	local ok, id = pcall(api.avatar_of, peer)
 	return ok and id and level.object_by_id(id) or nil
+end
+
+local function peer_in_session(peer)
+	for _, p in ipairs(players()) do
+		if p.id == peer then return true end
+	end
+	return false
 end
 
 local function has_clients()
@@ -2649,7 +2657,8 @@ local function host_guides()
 	for peer, id in pairs(host.active) do
 		local rt = tm.task_info[id]
 		if not avatar_obj(peer) then
-			host.active[peer] = nil -- left the game
+			-- left the game; on a map server's level he has no object here and is still in it
+			if not peer_in_session(peer) then host.active[peer] = nil end
 		elseif is_task(rt) and rt.check_level and rt.current_target ~= nil and target_elsewhere(rt.current_target) then
 			local ok, err = qc.with_actor(fields, rt.check_level, rt, rt.current_target)
 			if not ok then report("guide of #" .. tostring(peer), err) end

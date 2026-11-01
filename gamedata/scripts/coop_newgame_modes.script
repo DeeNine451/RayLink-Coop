@@ -105,7 +105,7 @@ local function command_line_hosts()
 	local f = rawget(_G, "command_line")
 	if type(f) ~= "function" then return false end
 	local ok, line = pcall(f)
-	return ok and type(line) == "string" and line:find("%-coop_host") ~= nil
+	return ok and type(line) == "string" and (line:find("%-coop_host") ~= nil or line:find("%-coop_dedicated") ~= nil)
 end
 
 function is_coop_new_game()

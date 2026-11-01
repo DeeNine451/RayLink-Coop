@@ -288,6 +288,8 @@ host_open = function(from, ticket, kind, minutes)
 		return send_verdict(from, ticket, true)
 	end
 	local rule = core.rule("sleep_rule")
+	local api = rawget(_G, "coop")
+	if rule == "host" and api and api.is_dedicated and api.is_dedicated() then rule = "vote" end -- no host to decide: the players do
 	if rule == "host" then
 		if from == core.self_id() then
 			grant(from, ticket, kind, minutes)

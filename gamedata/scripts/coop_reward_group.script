@@ -40,6 +40,7 @@ local turn = 0 -- how many items of shared rewards were given: the next one goes
 function list()
 	local out = api and api.out_of_run
 	local host_out = type(out) == "function" and out(0) == true
+	if api and api.is_dedicated and api.is_dedicated() then host_out = true end -- its actor is nobody: no share for it
 	local group = {}
 	if not host_out then group[1] = { id = 0, peer = 0, in_world = true } end
 	local get = api and api.members

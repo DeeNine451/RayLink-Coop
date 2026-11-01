@@ -238,7 +238,8 @@ end
 -- { {obj, peer, self, id}, ... }: own actor first, then the other connected players' characters.
 function characters()
 	local out = {}
-	if db and db.actor then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
+	local ghost = api and api.is_dedicated and api.is_dedicated() -- the actor of a dedicated host is nobody's character
+	if db and db.actor and not ghost then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and p.avatar_id then

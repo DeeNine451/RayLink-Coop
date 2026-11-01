@@ -96,6 +96,9 @@ TEST(newchar_start_on_the_hosts_level_until_split_levels)
 	CHECK(!newchar::point_usable(true, false));
 	CHECK(!newchar::point_usable(false, true));
 	CHECK(!newchar::point_usable(false, false));
+	// a dedicated host: any level of the world, but still a point of it
+	CHECK(newchar::point_usable(true, false, true));
+	CHECK(!newchar::point_usable(false, false, true));
 }
 
 // ---------------------------------------------------------------- game settings T3 (docs/GAME_SETTINGS.md §8)
