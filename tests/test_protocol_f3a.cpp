@@ -173,6 +173,26 @@ TEST(protocol_f3a_version_is_11)
 	CHECK_EQ(kProtocolVersion, 21u); // 17: EntityVisual, a host creature's new visual; 20: map servers (LevelMap rows, Tunnel lanes); 21: bodies
 }
 
+TEST(protocol_f3a_a_trip_round_trip)
+{
+	levels::wire::LevelMoveMsg a;
+	a.seq = 7;
+	a.kind = levels::wire::LevelMoveMsg::Trip;
+	a.graph = 1234;
+	a.node = 99;
+	a.pos[1] = 3.5f;
+	a.dir[2] = -1.f;
+	Writer w;
+	a.write(w);
+	Reader r(w.data().data(), w.data().size());
+	levels::wire::LevelMoveMsg b;
+	CHECK(b.read(r));
+	CHECK(b.kind == levels::wire::LevelMoveMsg::Trip);
+	CHECK_EQ(b.graph, uint16_t(1234));
+	CHECK_EQ(b.node, uint32_t(99));
+	CHECK(b.pos[1] == 3.5f && b.dir[2] == -1.f);
+}
+
 TEST(protocol_f3a_body_facts_round_trip)
 {
 	levels::wire::LevelBodyFacts a;

@@ -1135,6 +1135,20 @@ TEST(board_host_claim_via_link)
 	CHECK(b.claimed(1, &goal) && goal == kGuideGoal);
 }
 
+TEST(together_the_leading_exit_is_known_before_the_tick)
+{
+	transition::Board b;
+	uint32_t goal = 0;
+	CHECK(!b.leading(goal));
+	b.claim(2, transition::goal_of_exit(70), 2000);
+	b.claim(1, transition::goal_of_exit(90), 3000);
+	CHECK(b.leading(goal));
+	CHECK_EQ(goal, transition::goal_of_exit(70));
+	CHECK(b.release(2));
+	CHECK(b.leading(goal));
+	CHECK_EQ(goal, transition::goal_of_exit(90));
+}
+
 TEST(together_on_target_not_counted)
 {
 	// The together entry (split levels): who already stands on the level the exit leads to does not go, is not waited for and
