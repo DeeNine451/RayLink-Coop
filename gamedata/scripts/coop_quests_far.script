@@ -503,12 +503,23 @@ function at_home(fn, ...)
 	return back(pcall(fn, ...))
 end
 
--- The one line of a task that failed in a scope: what it looked for and what it got.
-function note_fail(task_id)
+local noted = {} -- task -> true: its line is written
+
+-- What the check had in hand, for the line of a task that failed: its stage and whether its giver is on the record.
+local function task_facts(tsk)
+	if tsk == nil then return "" end
+	local giver = tsk.task_giver_id
+	local ok, se = pcall(function() return type(giver) == "number" and alife_object(giver) end)
+	return string.format("; stage %s, giver %s%s", tostring(tsk.stage), tostring(giver), ok and se and "" or " (no record)")
+end
+
+-- The one line of a task that failed in a scope: what it looked for and what it got. One line a task, a session.
+function note_fail(task_id, tsk)
 	local s = scope
-	if not s then return end
-	printf("[coop] far: task %s failed on %s (%s): %s", tostring(task_id), tostring(s.name), tostring(s.what),
-		#s.misses > 0 and table.concat(s.misses, ", ") or "it asked for no object")
+	if not s or noted[task_id] then return end
+	noted[task_id] = true
+	printf("[coop] far: task %s failed on %s (%s): %s%s", tostring(task_id), tostring(s.name), tostring(s.what),
+		#s.misses > 0 and table.concat(s.misses, ", ") or "it asked for no object", task_facts(tsk))
 end
 
 -- A stand-in of id, wherever it stands; nil when it is no more.

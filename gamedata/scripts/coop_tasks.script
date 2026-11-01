@@ -742,6 +742,16 @@ function taker(id)
 	return host.taker[id] or 0
 end
 
+-- The player who took task `id` is in the session and not in the world (on his loading screen): true. One who left is not waited for.
+function taker_away(id)
+	local t = host.taker[id]
+	if not t or t == 0 then return false end
+	for _, p in ipairs(players()) do
+		if p.id == t then return p.avatar_id == nil end
+	end
+	return false
+end
+
 -- Host: the giver of the task a client's request is giving right now (the speaker an on_init effect asks the
 -- host's dialog for; the host is not talking then), or nil.
 function giving_npc()

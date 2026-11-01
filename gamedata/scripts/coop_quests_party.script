@@ -131,6 +131,12 @@ local function patch_check_task()
 			return orig(self, tm, ...)
 		end
 		if not party_on() or in_check or not db.actor then return orig(self, tm, ...) end
+		-- A task that has ended waits for its repeat timeout in task_info, and the stock task_callback leaves last_check_task on it: the early
+		-- return above does not hold, this runs every frame. The stock check returns at once there, no scope is opened for it (live 39.10:
+		-- 21360 lines of a task cancelled long ago).
+		if not (self.t or db.actor:get_task(self.id, true)) then return orig(self, tm, ...) end
+		-- His things and his place cannot be read while he loads: a status functor takes that for lost (tasks_measure: "if item 1 vanished, fail").
+		if ct().taker_away and ct().taker_away(self.id) then return end
 		stats.checks = stats.checks + 1
 		local a = db.actor
 		local real_object = a.object
@@ -160,6 +166,7 @@ local function patch_check_task()
 		end
 		in_check = self.id
 		local args = { ... }
+		local verdict = self.last_check_task
 		local function checked()
 			local far = qc.mod("coop_quests_far")
 			local s = far and far.in_scope()
@@ -174,7 +181,7 @@ local function patch_check_task()
 				local okw, e = qc.with_actor(fields, orig, self, tm, unpack(args))
 				if not okw then error(e, 0) end
 			end)
-			if self.last_check_task == "fail" and far then far.note_fail(self.id) end
+			if self.last_check_task == "fail" and verdict ~= "fail" and far then far.note_fail(self.id, self) end
 		end
 		-- the level of what it is about, for whoever stands there: one target for everybody, a companion on another level can do it
 		local okc, err = pcall(qc.with_target, target_of(self), ct().taker(self.id), self.id, checked)

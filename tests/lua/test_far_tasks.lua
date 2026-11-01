@@ -237,14 +237,64 @@ check(seen.level == "k00_marsh", "level.name is the level of the target")
 check(seen.npc and seen.npc.far == true, "level.object_by_id finds it")
 check(seen.host_actor == false, "the world server's actor is no character there")
 check(Hm.env.level.name() == "l01_escape", "and it is closed after the check")
-tsk.last_check_task = "fail"
+
+print("== a task that failed writes one line, a task that has ended opens no scope")
+-- live 39.10: 21360 lines. The stock task_callback leaves last_check_task on a task that waits for its repeat timeout, and check_task
+-- only returns early while it is nil: the wrapper opened a scope every frame and read what was left as a new fail.
+local verdict = false
+seen.far = 0
+Hm.env.task_status_functor.far_sf = function(tk, id)
+	if Hm.env.level.name() == "k00_marsh" then seen.far = seen.far + 1 end
+	if verdict then tk.last_check_task = "fail" end
+end
+local function fail_lines(from)
+	local n = 0
+	for i = from + 1, #Hm.log do
+		if Hm.log[i]:find("task far_task failed on k00_marsh", 1, true) then n = n + 1 end
+	end
+	return n
+end
+local function frames(n)
+	for _ = 1, n do Hm.env.task_manager.get_task_manager():update() end
+end
 local before = #Hm.log
-Hm.env.task_manager.get_task_manager():update()
-local line = false
-for i = before + 1, #Hm.log do line = line or Hm.log[i]:find("task far_task failed on k00_marsh", 1, true) ~= nil end
-check(line, "a fail in a scope writes one line")
+verdict = true
+frames(1)
+check(fail_lines(before) == 1, "a fail in a scope writes one line")
+local says_stage = false
+for i = before + 1, #Hm.log do says_stage = says_stage or Hm.log[i]:find("stage 0, giver 700", 1, true) ~= nil end
+check(says_stage, "and what the check had in hand")
+frames(5)
+check(fail_lines(before) == 1, "the engine has not taken it yet: the same fail is no new line")
+-- the engine took it: task_callback dropped the task and left the verdict
+Hm.engine_tasks.far_task = nil
+tsk.t = nil
+tsk.timeout = {}
+local far_before = seen.far
+frames(20)
+check(seen.far == far_before, "a task that waits for its repeat timeout opens no scope")
+check(fail_lines(before) == 1, "and writes nothing")
 tsk.last_check_task = nil
 Hm.tm.task_info.far_task = nil
+Hm.engine_tasks.far_task = nil
+
+print("== the task of a player who is not in the world yet is not judged")
+Hm.ini.away_task = { status_functor = "away_sf" }
+local judged = 0
+Hm.env.task_status_functor.away_sf = function() judged = judged + 1 end
+T.run_as(1, function() Hm.tm:give_task("away_task", 700) end)
+check(T.taker("away_task") == 1, "he took it")
+frames(1)
+check(judged == 1, "in the world: judged")
+Hm.players = { PLAYERS_H[1], { id = 1, is_self = false } }
+frames(1)
+check(judged == 1, "on his loading screen: his things and his place cannot be read, nothing is judged")
+Hm.players = { PLAYERS_H[1] }
+frames(1)
+check(judged == 2, "he left: the task goes on as before")
+Hm.players = PLAYERS_H
+Hm.tm.task_info.away_task = nil
+Hm.engine_tasks.away_task = nil
 
 print("== the death relay")
 local far = Hm.env.coop_quests_far
