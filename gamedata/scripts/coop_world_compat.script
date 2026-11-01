@@ -7,7 +7,7 @@
 	- info_portions is host-only, and it is what refreshes the PDA rankings when the PDA is raised. A client asks here;
 	  coop_quests_pda's calculate_rankings turns that into a request to the host.
 	- Companion hotkeys: axr_companions runs on the host and its cycles walk the host's companion list. On a client the same
-	  keys walk this player's companions with the dialog actions, which coop_npc_companions sends to the host.
+	  keys walk the companions this player leads with the dialog actions, which coop_npc_companions sends to the host.
 	- Remote mine planting of ui_hud_dotmarks creates the bomb itself, which a client cannot: it goes the way of
 	  txr_mines.plant_bomb (coop_npc_world asks the host).
 	- A player is nobody to talk to: no mark of ui_hud_dotmarks on a player's character (the dot and "[F] Talk: <nick>", owner
@@ -81,9 +81,12 @@ local CYCLES = {
 
 local function own_companions()
 	local list = {}
+	local comp = module_of("coop_npc_companions")
 	for _, id in pairs(db.OnlineStalkers or {}) do
 		local npc = level.object_by_id(id)
-		if npc and npc:alive() and npc:has_info("npcx_is_companion") then list[#list + 1] = npc end
+		if npc and npc:alive() and npc:has_info("npcx_is_companion") and (not comp or comp.held_here(npc)) then
+			list[#list + 1] = npc
+		end
 	end
 	return list
 end
