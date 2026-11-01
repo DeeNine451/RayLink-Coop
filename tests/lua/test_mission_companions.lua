@@ -22,6 +22,7 @@ local function stock(M, squads)
 			local i = 0
 			return function() i = i + 1; local m = self.members[i]; if m then return { id = m } end end
 		end
+		function sq:commander_id() return self.members[1] end
 		squads[id] = sq
 		return sq
 	end

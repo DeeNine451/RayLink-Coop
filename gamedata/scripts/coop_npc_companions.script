@@ -121,6 +121,7 @@ local far = {} -- world server: level id -> { squad id -> proxy id }: what the m
 local last_leader = {} -- host: squad id -> who led it when a story's line let it go (0: the world server's player): he gets it back
 local far_last = {} -- world server: level id -> last_leader of that map server, for the save
 local down_heard = false -- map server: it took the leaders of its level from the world server
+local sort_due = false -- the leaders came from a save: those of the other levels are to be sorted out
 local view = {} -- client: NPC id -> peer who holds control of it (npc.comp_info)
 local waiting_flags = {} -- client: NPC id -> flags that came while the NPC was not here
 local visible = {} -- client: NPC id -> { item id = true }: what the leader may take back (npc.comp_items)
@@ -241,10 +242,11 @@ local function patch_client_actions()
 						if refuse_dismiss(npc, dialog_id) then return end
 						note_let_go(squad_of(npc), dialog_id)
 					end
-					local before = kind == "add" and squads_now()
-					f(a, b, dialog_id, ...)
-					if before then give_back(before) end
-					return
+					if kind ~= "add" then return f(a, b, dialog_id, ...) end
+					local before = squads_now()
+					local res = f(a, b, dialog_id, ...)
+					give_back(before)
+					return res
 				end
 				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()), p = paid_period, d = dialog_id }, 0) then
 					stats.cmd_out = stats.cmd_out + 1
@@ -1020,9 +1022,22 @@ local function wrap_task_squads()
 	end
 end
 
--- A save holds the leaders of every level. A squad of another level is its authority's: the world server keeps the word for the next
--- save, a map server drops it.
+-- The stock's marks of a squad, as the binder of its members reads them when they come online.
+local function marks_of(squad)
+	local id = squad:commander_id()
+	local se = id and alife_object(id)
+	if not se then return {} end
+	local name = se:name()
+	return { m = se_load_var(id, name, "companion") and true or nil, d = se_load_var(id, name, "companion_cannot_dismiss") and true or nil,
+		c = se_load_var(id, name, "companion_cannot_teleport") and true or nil }
+end
+
+-- A save holds the leaders of every level: once after a load, a squad of another level is its authority's. The world server keeps the
+-- word for the next save, a map server drops it. Once: a squad a map server adopts later stands, on its copy of the world, where it last
+-- heard of it (the place comes after the word).
 local function keep_own_level()
+	if not sort_due then return end
+	sort_due = false
 	if not split_levels() then return end
 	for squad_id, lead in pairs(leaders) do
 		local squad = alife_object(squad_id)
@@ -1048,7 +1063,10 @@ local function host_refresh()
 		end
 	end
 	for squad_id in pairs(leaders) do
-		if cs[squad_id] == nil or not alife_object(squad_id) then -- a loaded squad is false until its first update
+		local squad = alife_object(squad_id)
+		-- recruited on a map server the table of the save has no line of it, the stock's mark on its members stays (the binder reads it)
+		if squad and cs[squad_id] == nil and marks_of(squad).m then cs[squad_id] = squad end
+		if cs[squad_id] == nil or not squad then -- a loaded squad is false until its first update
 			leaders[squad_id] = nil -- dismissed by the host, dead or released
 		end
 	end
@@ -1076,16 +1094,6 @@ end
 local followers = {} -- world server: squad id -> { p = peer, l = leader's character }
 local adopting = {} -- map server: squad id -> { word of the world server, when it came }: the squad is not here yet
 local ADOPT_WAIT_MS = 60000
-
--- The stock's marks of a squad, as the binder of its members reads them when they come online.
-local function marks_of(squad)
-	local id = squad:commander_id()
-	local se = id and alife_object(id)
-	if not se then return {} end
-	local name = se:name()
-	return { d = se_load_var(id, name, "companion_cannot_dismiss") and true or nil,
-		c = se_load_var(id, name, "companion_cannot_teleport") and true or nil }
-end
 
 -- This process takes the squad. t: the world server's word with the stock's marks, it writes them for a map server's copy of the world.
 local function adopt(squad_id, lead, t)
@@ -1263,12 +1271,7 @@ end
 -- after that is newer than what the world server has heard.
 local function leaders_here()
 	local t = {}
-	for id, lead in pairs(leaders) do
-		local squad = alife_object(id)
-		local _, at = nil, nil
-		if squad then _, at = level_of_squad(squad) end
-		if not at or at == level.name() then t[id] = lead end
-	end
+	for id, lead in pairs(leaders) do t[id] = lead end
 	for id, a in pairs(adopting) do t[id] = a.t.l end
 	return { l = t, b = last_leader }
 end
@@ -1486,6 +1489,7 @@ end
 
 local function load_state(m_data)
 	leaders = {}
+	sort_due = true
 	far = {}
 	last_leader = {}
 	far_last = {}

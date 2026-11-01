@@ -99,7 +99,7 @@ local function stock(M, W)
 	E.TeleportSquad = function(squad, pos, lvid, gvid)
 		M.teleported = { id = squad.id, pos = pos, lvid = lvid, gvid = gvid }
 		local t = W.tables[squad.id]
-		if t then t.m_game_vertex_id = gvid end
+		if t and not W.stale_place then t.m_game_vertex_id = gvid end
 	end
 end
 
@@ -441,11 +441,14 @@ do
 	Mk.add(make_obj(201, 1, 0, 0, { _name = "comp" }))
 	H.objects[201] = nil
 	W.move(1, 2)
+	W.stale_place = true
 	W.refresh()
 	check(H.teleported and H.teleported.id == 300 and H.teleported.gvid == 20, "the world server teleports it to his body")
 	check(L()[300] == nil and H.env.axr_companions.companion_squads[300] == nil, "it is no companion of this level any more")
 	check(W.CM._leaders()[300] == 500 and Mk.env.axr_companions.companion_squads[300] == W.squads[300], "the map server takes it")
 	check(Mk.env.axr_companions.logic[201] ~= nil, "with the logic of a companion")
+	W.refresh()
+	check(W.CM._leaders()[300] == 500, "its copy of the squad's place comes later: the map server does not take it for a stranger meanwhile")
 end
 
 print("== a squad that may not follow stays where it is, and keeps its leader")
@@ -609,7 +612,7 @@ do
 	H.fire("save_state", m)
 	check(m.coop_npc_leaders and m.coop_npc_leaders[400] == 501, "a leader on the map server reaches the save")
 	check(H.env.axr_companions.companion_squad_can_teleport(W.squads[400]) == false, "the world server knows it for somebody's")
-	LM()[300] = 500 -- the save's entry of a squad of another level
+	Mk.fire("load_state", { coop_npc_leaders = { [300] = 500, [400] = 501 } })
 	W.refresh()
 	check(LM()[300] == nil, "a map server keeps only the squads of its level")
 	local row = Mk.share.up[up].get()
@@ -648,6 +651,23 @@ do
 	local m = {}
 	H.fire("save_state", m)
 	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
+end
+
+print("== a squad recruited on a map server: the table of the save does not have it, the stock's mark does")
+do
+	local W = stand()
+	local Mk = W.Mk
+	local ac = Mk.env.axr_companions
+	ac.companion_squads[400] = nil
+	Mk.se[301] = { companion = true }
+	Mk.fire("load_state", { coop_npc_leaders = { [400] = 501 } })
+	W.refresh()
+	check(W.CM._leaders()[400] == 501 and ac.companion_squads[400] == W.squads[400], "it keeps its leader and its place in the table")
+	W.CM._leaders()[400] = 501
+	ac.companion_squads[400] = nil
+	Mk.se[301] = nil
+	W.refresh()
+	check(W.CM._leaders()[400] == nil, "no mark: a dismissed squad, the entry goes")
 end
 
 print("== a map server's companion with no living leader goes to the nearest player, not to the ghost")
