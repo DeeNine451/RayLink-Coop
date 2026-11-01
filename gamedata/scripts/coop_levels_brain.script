@@ -1,0 +1,111 @@
+--[[
+	Anomaly Coop - split levels: one brain of the world (docs\SPLIT_LEVELS.md, plan T15).
+
+	The world server alone decides where squads go, also those a map server holds online. Once a second it picks the
+	targets of a few of them with the stock board (their ALife records are the world's) and tells that map server; there
+	the stock squad update asks the board and gets that answer. A squad nobody decided for yet stays at its smart.
+
+	The logic of an NPC (m_data.game_object[id], what xr_logic reads when it comes online) travels with the object: the
+	engine asks logic_of when it hands an object over and logic_in when it takes one (coop_levels_alife.cpp).
+
+	API:
+		coop_levels_brain.logic_of(id)   the engine: coop.levels.logic_put(bytes of this object's logic)
+		coop_levels_brain.logic_in(id)   the engine: coop.levels.logic_bytes() is the logic of this object
+--]]
+
+local api = rawget(_G, "coop")
+
+local EV_TARGETS = "coop_brain"
+local TICK_MS = 1000
+local AGAIN_MS = 30000 -- a squad's target is looked at this often
+local ROWS_A_TICK = 8 -- get_squad_target walks the whole board
+
+local targets = {} -- map server: squad id -> the target the world gave it
+local decided = {} -- world server: squad id -> when its target is due again
+local next_tick = 0
+
+local function levels()
+	return api and api.levels
+end
+
+local function split()
+	local l = levels()
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+
+local function map_server()
+	return api ~= nil and api.is_map_server ~= nil and api.is_map_server() == true
+end
+
+local function world_server()
+	return api ~= nil and api.is_host() == true
+end
+
+-- World server: the targets of the squads map server `ms` holds.
+local function tell(ms, now)
+	local l = levels()
+	local rows = {}
+	for _, id in ipairs(l.squads_at(ms.bridge)) do
+		if #rows >= ROWS_A_TICK then break end
+		if now >= (decided[id] or 0) then
+			local squad = alife_object(id)
+			local ok, target = pcall(SIMBOARD.get_squad_target, SIMBOARD, squad)
+			if squad and ok and target then
+				decided[id] = now + AGAIN_MS
+				rows[#rows + 1] = id .. ":" .. target.id
+			end
+		end
+	end
+	if #rows > 0 then api.send_event(EV_TARGETS, table.concat(rows, ","), ms.bridge) end
+end
+
+local function on_update()
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	if not (world_server() and split() and SIMBOARD) then return end
+	for _, ms in ipairs(levels().map_servers()) do
+		local ok, err = pcall(tell, ms, now)
+		if not ok then printf("[coop-brain] ! %s", tostring(err)) end
+	end
+end
+
+local function on_targets(payload, from)
+	if not map_server() or from ~= 0 then return end
+	for squad, target in payload:gmatch("(%d+):(%d+)") do
+		targets[tonumber(squad)] = tonumber(target)
+	end
+end
+
+-- The stock squad update asks the board; on a map server the board is the world server's.
+local function patch_board()
+	local cls = sim_board and sim_board.simulation_board
+	if not cls then return end
+	local orig = cls.get_squad_target
+	cls.get_squad_target = function(self, squad)
+		if not map_server() then return orig(self, squad) end
+		local id = targets[squad.id]
+		return (id and alife_object(id)) or (squad.smart_id and alife_object(squad.smart_id)) or squad
+	end
+end
+
+function logic_of(id)
+	local t = alife_storage_manager.get_state().game_object[id]
+	local ok, bytes = pcall(marshal.encode, t)
+	levels().logic_put(t and ok and bytes or "")
+end
+
+function logic_in(id)
+	local ok, t = pcall(marshal.decode, levels().logic_bytes())
+	if ok and type(t) == "table" then alife_storage_manager.get_state().game_object[id] = t end
+end
+
+function _targets() return targets end
+function _tick() next_tick = 0; on_update() end
+
+function on_game_start()
+	if not api then return end
+	patch_board()
+	coop_main.add_event_handler(EV_TARGETS, on_targets)
+	RegisterScriptCallback("actor_on_update", on_update)
+end
