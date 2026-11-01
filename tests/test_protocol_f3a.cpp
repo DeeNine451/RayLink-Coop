@@ -3,8 +3,10 @@
 // receipt), what each needs of a world (wgate::need_of), the client rows of the two a player sends, the Hello of
 // protocol 11 and the version itself. The formats: test_levels_wire.cpp; the scopes: test_scope.cpp.
 #include "test_util.h"
+#include "coop_levels_wire.h"
 #include "coop_limits.h"
 #include "coop_protocol.h"
+#include "coop_revive_hold.h"
 #include "coop_world_gate.h"
 
 #include <cstdio>
@@ -168,7 +170,27 @@ TEST(protocol_f3a_version_is_11)
 {
 	// 11: the F3a messages, Hello carries a role and a token, PlayerState carries the vertices, TransitionState a flags
 	// byte, WeatherSync a weather set; a protocol 10 peer is refused at the handshake.
-	CHECK_EQ(kProtocolVersion, 20u); // 17: EntityVisual, a host creature's new visual; 20: map servers (LevelMap rows, Tunnel lanes)
+	CHECK_EQ(kProtocolVersion, 21u); // 17: EntityVisual, a host creature's new visual; 20: map servers (LevelMap rows, Tunnel lanes); 21: bodies
+}
+
+TEST(protocol_f3a_body_facts_round_trip)
+{
+	levels::wire::LevelBodyFacts a;
+	a.fight = 1;
+	a.place = 3;
+	a.source = 777;
+	Writer w;
+	a.write(w);
+	Reader r(w.data().data(), w.data().size());
+	levels::wire::LevelBodyFacts b;
+	CHECK(b.read(r));
+	CHECK_EQ(b.fight, uint8_t(1));
+	CHECK_EQ(b.place, uint8_t(3));
+	CHECK_EQ(b.source, uint16_t(777));
+	Reader none(w.data().data(), 1);
+	CHECK(!b.read(none));
+	CHECK_EQ(b.source, levels::wire::kNoObject);
+	CHECK(!revive::is_client_op(revive::OpLosses));
 }
 
 TEST(protocol_f3a_hello_carries_a_role_and_a_token)
