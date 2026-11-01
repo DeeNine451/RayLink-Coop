@@ -1368,17 +1368,19 @@ function dlg_take(a, b)
 	if not ok then report("take control", err) end
 end
 
--- The lines go into the list of commands of dm_is_actor_companion_dialog (phrase 1 of the stock's init_func). Conditions with
--- a (n) come to the function in its params table, as a string (engine: DIALOG_UPGRADE); add_dialog of the stock refuses such names.
-local function add_lead_phrases(dialog)
+-- The lines go into the list of commands of dm_is_actor_companion_dialog (phrase 1 of the stock's init_func), or, top = true, make a
+-- dialog of their own (dm_coop_companion_hand: a character with no such list). Conditions with a (n) come to the function in its params
+-- table, as a string (engine: DIALOG_UPGRADE); add_dialog of the stock refuses such names.
+local function add_lead_phrases(dialog, top)
 	local function add(id, prev, text)
 		local phrase = dialog:AddPhrase(text, tostring(id), tostring(prev), PHRASE_GOODWILL)
 		return phrase and phrase:GetPhraseScript()
 	end
-	local script = add(PHRASE_HAND, 1, "st_coop_comp_cmd_hand")
+	local first = top and 0 or PHRASE_HAND
+	local script = add(first, top and "" or 1, "st_coop_comp_cmd_hand")
 	if not script then return end
 	script:AddPrecondition("coop_npc_companions.dlg_can_hand")
-	add(PHRASE_WHOM, PHRASE_HAND, "st_coop_comp_cmd_whom")
+	add(PHRASE_WHOM, first, "st_coop_comp_cmd_whom")
 	for slot = 1, OTHER_PLAYERS do
 		script = add(PHRASE_SLOTS + slot, PHRASE_WHOM, "st_coop_comp_cmd_hand")
 		script:AddPrecondition("coop_npc_companions.dlg_slot(" .. slot .. ")")
@@ -1386,6 +1388,12 @@ local function add_lead_phrases(dialog)
 		script:AddAction("coop_npc_companions.dlg_hand(" .. slot .. ")")
 	end
 	add(PHRASE_BACK, PHRASE_WHOM, "axr_phrase_actor_give_command_nevermind") -- the engine asserts on a list with no line
+end
+
+-- init_func of dm_coop_companion_hand (modxml_coop_companions).
+function dm_init_hand(dialog)
+	local ok, err = pcall(add_lead_phrases, dialog, true)
+	if not ok then report("hand-over dialog", err) end
 end
 
 local function patch_dialog()

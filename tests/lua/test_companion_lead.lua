@@ -325,18 +325,44 @@ H.env.RegisterScriptCallback = function(name, f) hooks[name] = f end
 X.on_xml_read()
 local xml = { query = function() return {} end, insertFromXMLString = function(self, s) inserted[#inserted + 1] = s end }
 hooks.on_xml_read([[gameplay\dialogs.xml]], xml)
-check(#inserted == 1 and inserted[1]:find('id="dm_coop_companion_take"', 1, true)
+check(#inserted == 2 and inserted[1]:find('id="dm_coop_companion_take"', 1, true)
 	and inserted[1]:find("coop_npc_companions.dlg_can_take", 1, true) and inserted[1]:find("coop_npc_companions.dlg_take", 1, true),
 	"the take dialog goes into dialogs.xml")
+check(inserted[2]:find('id="dm_coop_companion_hand"', 1, true) and inserted[2]:find("coop_npc_companions.dlg_can_hand", 1, true)
+	and inserted[2]:find("<init_func>coop_npc_companions.dm_init_hand</init_func>", 1, true), "and the hand-over of a character with no list of commands")
 hooks.on_xml_read([[gameplay\dialogs_bar.xml]], xml)
-check(#inserted == 1, "only there")
-local list = { has = function(self, d) return d == "dm_is_actor_companion_dialog" end,
-	add = function(self, d) self.got = d end }
+check(#inserted == 2, "only there")
+local function char_list(has)
+	local t = { added = {}, first = {} }
+	t.has = function(self, d) return has[d] ~= nil end
+	t.add = function(self, d) self.added[d] = true end
+	t.add_first = function(self, d) self.first[d] = true end
+	return t
+end
+local list = char_list({ dm_is_actor_companion_dialog = true })
 hooks.on_specific_character_dialog_list("sim_default_stalker_0", list)
-check(list.got == "dm_coop_companion_take", "every character with the companion dialog gets it")
-local list2 = { has = function() return false end, add = function(self, d) self.got = d end }
-hooks.on_specific_character_dialog_list("esc_m_trader", list2)
-check(list2.got == nil, "a character that cannot be a companion does not")
+check(list.added.dm_coop_companion_take and not list.first.dm_coop_companion_hand and not list.added.dm_coop_companion_hand,
+	"a character with the list of commands: take; the hand-over is a line of that list")
+local list2 = char_list({ fanat_training_start = true })
+hooks.on_specific_character_dialog_list("esc_2_12_stalker_fanat", list2)
+check(list2.added.dm_coop_companion_take, "the Fanatic has no list of commands: take is a dialog of every character")
+check(list2.first.dm_coop_companion_hand, "and the hand-over, the top line of the talk")
+print("-- the hand-over of a character with no list of commands")
+added = {}
+W.CH.dm_init_hand(fake_dialog())
+check(added["0"] and added["0"].prev == "" and added["0"].text == "st_coop_comp_cmd_hand" and added["0"].cond[1] == "coop_npc_companions.dlg_can_hand",
+	"the first line, for the leader")
+check(added["7001"] and added["7001"].prev == "0", "the companion asks who")
+local top_slots = 0
+for id, s in pairs(added) do
+	if s.prev == "7001" and s.script_text then top_slots = top_slots + 1 end
+end
+check(top_slots == 7, "a line per other player of a full session")
+check(added["7002"] and added["7002"].prev == "7001" and #added["7002"].cond == 0, "and the way out")
+do
+	local dead = { AddPhrase = function() error("no such phrase") end }
+	check(pcall(W.CH.dm_init_hand, dead) == true, "an error here does not stop the game's dialog load")
+end
 
 print("== a leader who leaves: control passes to the host for the time, the save keeps it, he gets it back")
 W = stand()

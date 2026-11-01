@@ -1,14 +1,25 @@
 --[[
-	Anomaly Coop - companions: the "take control" dialog (gamedata\scripts\modxml_coop_companions.script).
+	Anomaly Coop - companions: the dialogs of control (gamedata\scripts\modxml_coop_companions.script).
 	The modxml_ prefix makes dxml_core load this script and call on_xml_read() at script start-up, before the engine reads
-	gameplay\dialogs.xml and the first character. A dialog of its own and not a line of dm_is_actor_companion_dialog, whose
-	list of commands is a step deeper (coop_npc_companions: the "hand over" line goes there by script): one press, right at
-	the start of the talk. It opens for every player but the leader.
-	Every character that can be a companion gets it. Nothing happens on an exe without co-op.
+	gameplay\dialogs.xml and the first character.
+	"Take control": a dialog of its own and not a line of dm_is_actor_companion_dialog, whose list of commands is a step deeper
+	(coop_npc_companions: the "hand over" line goes there by script): one press, right at the start of the talk. It opens for every
+	player but the leader. Every character gets it: a story's companion (the Fanatic) has no list of commands, and what opens it is
+	who leads the squad, not the character.
+	"Hand over": the same for a character with no list of commands, the top line of its talk; the list of players is built by
+	coop_npc_companions.dm_init_hand. Nothing happens on an exe without co-op.
 --]]
 
 local DIALOGS = [[gameplay\dialogs.xml]]
 local ID = "dm_coop_companion_take"
+local HAND_ID = "dm_coop_companion_hand"
+
+local HAND_DIALOG = [[
+<dialog id="dm_coop_companion_hand">
+	<precondition>coop_npc_companions.dlg_can_hand</precondition>
+	<init_func>coop_npc_companions.dm_init_hand</init_func>
+</dialog>
+]]
 
 local DIALOG = [[
 <dialog id="dm_coop_companion_take">
@@ -28,12 +39,13 @@ local DIALOG = [[
 
 local function on_read(xml_file_name, xml_obj)
 	if xml_file_name ~= DIALOGS then return end
-	if #xml_obj:query("dialog[id=" .. ID .. "]") > 0 then return end
-	xml_obj:insertFromXMLString(DIALOG)
+	if #xml_obj:query("dialog[id=" .. ID .. "]") == 0 then xml_obj:insertFromXMLString(DIALOG) end
+	if #xml_obj:query("dialog[id=" .. HAND_ID .. "]") == 0 then xml_obj:insertFromXMLString(HAND_DIALOG) end
 end
 
 local function on_dialog_list(character_id, dialog_list)
-	if dialog_list:has("dm_is_actor_companion_dialog") then dialog_list:add(ID) end
+	dialog_list:add(ID)
+	if not dialog_list:has("dm_is_actor_companion_dialog") then dialog_list:add_first(HAND_ID) end
 end
 
 function on_xml_read()
