@@ -10,6 +10,8 @@
 
 	API (module coop_npc_players):
 	  active() is_host() is_client() client_live() host_with_clients()
+	  is_host() is "this process leads a level with its players": the host's process and a map server (docs\SPLIT_LEVELS.md 7b);
+	  is_world_server() is the first alone, is_map_server() the second.
 	  self_peer() players() to_host(id) to_local(id)
 	  others()                -> { game_object, ... } other players' characters here (alive, cached per frame)
 	  everyone()              -> db.actor (if alive) + others() (cached per frame, do not modify)
@@ -65,8 +67,12 @@ function active()
 	return ok and v == true
 end
 
-function is_host()
+function is_world_server()
 	return active() and api.is_host() == true
+end
+
+function is_host()
+	return is_world_server() or is_map_server()
 end
 
 function is_client()
@@ -141,7 +147,7 @@ local function refresh()
 	cache_everyone = {}
 	cache_peer_by_id = {}
 	local a = real_actor()
-	if a and a:alive() then cache_everyone[1] = a end
+	if a and a:alive() and not is_map_server() then cache_everyone[1] = a end -- a map server's actor is its ghost, nobody
 	if not active() then return end
 	for _, p in ipairs(players()) do
 		if not p.is_self and type(p.avatar_id) == "number" then
@@ -308,8 +314,19 @@ function send(name, t, target)
 	return ok and sent == true
 end
 
--- who: "host" = handled on the host, sender must be a client; "client" = handled on a client, sender must
--- be the host; nil = any machine, any sender. Errors are logged, never thrown (R-11.4).
+-- Split levels: what a player asks of the logic of his level goes to its authority. The world server passes it on with his peer; a
+-- client knows no other process. -> it went
+local function passed_to_his_level(name, t, from)
+	local l = api and api.levels
+	local bridge = l and l.split and l.split() == true and l.bridge_of_player and l.bridge_of_player(from)
+	if not bridge then return false end
+	t._peer = from
+	send(name, t, bridge)
+	return true
+end
+
+-- who: "host" = handled on the process that leads the sender's level, sender must be a client; "client" = handled on a client, sender
+-- must be the host; nil = any machine, any sender. Errors are logged, never thrown (R-11.4).
 function on(name, f, who, tag)
 	local m = cmain()
 	if not (m and m.add_event_handler) then
@@ -317,9 +334,19 @@ function on(name, f, who, tag)
 		return false
 	end
 	return m.add_event_handler(name, function(payload, from)
-		if who == "host" and not (is_host() and type(from) == "number" and from ~= 0) then return end
+		if who == "host" and not (is_host() and type(from) == "number") then return end
 		if who == "client" and not (is_client() and from == 0) then return end
-		local ok, err = pcall(f, decode(payload), from)
+		local t = decode(payload)
+		if who == "host" then
+			if is_map_server() then
+				from = tonumber(t._peer)
+				t._peer = nil
+				if from == nil then return end
+			elseif from == 0 or passed_to_his_level(name, t, from) then
+				return
+			end
+		end
+		local ok, err = pcall(f, t, from)
 		if not ok then report(tag or "events", "event " .. name, err) end
 	end)
 end

@@ -74,6 +74,7 @@ local function report(what, err) P.report(TAG, what, err) end
 local EV_CMD, EV_INFO = "npc.comp", "npc.comp_info"
 local EV_LEAD, EV_MSG, EV_REQ, EV_GO = "npc.comp_lead", "npc.comp_msg", "npc.comp_req", "npc.comp_go"
 local EV_ITEM, EV_ITEMS = "npc.comp_item", "npc.comp_items"
+local EV_FOLLOW, EV_ADOPT = "npc.comp_follow", "npc.comp_adopt"
 
 -- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order.
 local ACTIONS = {
@@ -894,6 +895,84 @@ local function host_refresh()
 end
 
 -------------------------------------------------------------------------------
+-- A leader on another level (split levels, one player moves): his companions go after him. The authority of the level he left lets
+-- them go; the world server teleports them when none of them is online at a map server, and tells the authority of his level.
+-------------------------------------------------------------------------------
+local lead_peer = {} -- squad id -> its leader's peer, while this process knows him
+local followers = {} -- world server: squad id -> { p = peer, l = leader's character }
+
+local function adopt(squad_id, lead)
+	local squad = alife_object(squad_id)
+	if not (squad and axr_companions) then return end
+	leaders[squad_id] = lead
+	axr_companions.companion_squads[squad_id] = squad
+end
+
+local function all_home(squad, l)
+	for k in squad:squad_members() do
+		if l.online_at_server(k.id) then return false end
+	end
+	return true
+end
+
+local function follow_home(l)
+	for squad_id, f in pairs(followers) do
+		local squad = alife_object(squad_id)
+		if not squad then
+			followers[squad_id] = nil
+		elseif all_home(squad, l) then
+			local body = nil
+			for _, p in ipairs(P.players()) do
+				if p.id == f.p then body = p.avatar_id and alife_object(p.avatar_id) end
+			end
+			if body then
+				TeleportSquad(squad, body.position, body.m_level_vertex_id, body.m_game_vertex_id)
+				followers[squad_id] = nil
+				stats.follow = stats.follow + 1
+				local bridge = l.bridge_of_player(f.p)
+				if bridge then
+					axr_companions.companion_squads[squad_id] = nil
+					P.send(EV_ADOPT, { s = squad_id, l = f.l }, bridge)
+				else
+					adopt(squad_id, f.l)
+				end
+			end
+		end
+	end
+end
+
+local function follow_tick()
+	local api = rawget(_G, "coop")
+	local l = api and api.levels
+	if not (l and l.split and l.split() == true) then return end
+	for squad_id, lead in pairs(leaders) do
+		local peer = P.peer_of(lead) or lead_peer[squad_id]
+		lead_peer[squad_id] = peer
+		local there = peer and l.level_name(l.level_of_player(peer))
+		if there and there ~= level.name() then
+			leaders[squad_id], lead_peer[squad_id] = nil, nil
+			if P.is_map_server() then
+				axr_companions.companion_squads[squad_id] = nil
+				P.send(EV_FOLLOW, { s = squad_id, p = peer, l = lead }, 0)
+			else
+				followers[squad_id] = { p = peer, l = lead }
+			end
+		end
+	end
+	if P.is_world_server() then follow_home(l) end
+end
+
+local function on_follow(t, from)
+	if P.is_world_server() and from >= 0x100 and type(t.s) == "number" and type(t.p) == "number" then
+		followers[t.s] = { p = t.p, l = t.l }
+	end
+end
+
+local function on_adopt(t, from)
+	if P.is_map_server() and from == 0 and type(t.s) == "number" and type(t.l) == "number" then adopt(t.s, t.l) end
+end
+
+-------------------------------------------------------------------------------
 -- The commands of the companion's dialog (the machine of the player who talks)
 -------------------------------------------------------------------------------
 -- Who holds control of this NPC, as this machine knows it; nil: a companion of nobody.
@@ -1024,6 +1103,8 @@ local function actor_on_update()
 		next_refresh = now + 2000
 		local ok, err = pcall(host_refresh)
 		if not ok then report("refresh", err) end
+		ok, err = pcall(follow_tick)
+		if not ok then report("follow", err) end
 	end
 	if not host_on then sent_info, sent_items = {}, {} end
 	if P.client_live() then
@@ -1085,6 +1166,8 @@ function on_game_start()
 	P.on(EV_ITEM, host_on_item, "host", TAG)
 	P.on(EV_MSG, client_on_msg, "client", TAG)
 	P.on(EV_ITEMS, client_on_items, "client", TAG)
+	P.on(EV_FOLLOW, on_follow, nil, TAG)
+	P.on(EV_ADOPT, on_adopt, nil, TAG)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("on_key_press", on_key_press)
 	RegisterScriptCallback("ActorMenu_on_item_after_move", on_item_after_move)
@@ -1093,5 +1176,6 @@ function on_game_start()
 end
 
 function _set_host_on(v) host_on = v end
+function _follow_tick() follow_tick() end
 function _leaders() return leaders end
 function _stats() return stats end

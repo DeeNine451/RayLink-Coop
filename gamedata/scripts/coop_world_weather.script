@@ -221,12 +221,12 @@ end
 
 local function tick()
 	local wm = manager()
-	if P.is_host() then
-		if wm then host_tick(wm) end
-		wet_host_tick()
-	elseif P.is_map_server() then
+	if P.is_map_server() then
 		patch_class()
 		if wm then map_server_tick(wm) end
+	elseif P.is_host() then
+		if wm then host_tick(wm) end
+		wet_host_tick()
 	elseif P.client_live() then
 		patch_class()
 		if wm then
