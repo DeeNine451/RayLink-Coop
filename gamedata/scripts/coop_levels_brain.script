@@ -11,6 +11,10 @@
 	whichever side ran it last. Who updates a squad: the world server while it is offline at home, on a map server the binder of
 	its commander while it is online, the engine (coop_levels_xfer.cpp xfer_scheduled) while it is held and offline.
 
+	What a task or a bounty orders a squad (scripted_target, rush_to_target, force_online) is the world server's, also while a map
+	server holds it: it goes there as it changes (coop_orders), and what comes home does not write over it. What a squad does once
+	(sim_squad_scripted first_update) a map server never does: the world server does it, when it comes home if it did not yet.
+
 	treasure_manager.caches says which box holds a stash, and each process has a copy from its save. A box is opened on the authority of its
 	level, the marks and the save are the world server's: every few seconds each side tells the other what changed, the world server
 	each map server what concerns its level (all of it the first time: that save may be older).
@@ -26,6 +30,7 @@ local api = rawget(_G, "coop")
 
 local EV_TARGETS = "coop_brain"
 local EV_CACHES = "coop_caches"
+local EV_ORDERS = "coop_orders"
 local TICK_MS = 1000
 local CACHES_MS = 3000 -- treasure_manager.caches are compared this often
 local CACHE_BYTES = 12000 -- in one event
@@ -35,6 +40,7 @@ local ROWS_A_TICK = 8 -- get_squad_target walks the whole board
 local targets = {} -- map server: squad id -> the target the world gave it
 local decided = {} -- world server: squad id -> when its target is due again
 local next_tick = 0
+local ordered = {} -- world server: squad id -> its orders as a map server knows them
 local cache_next = 0
 local known_up = nil -- map server: stash box -> what the world server has of it
 local told = {} -- world server: bridge -> stash box -> what that map server has of it
@@ -55,6 +61,36 @@ end
 
 local function world_server()
 	return api ~= nil and api.is_host() == true
+end
+
+local function order_row(squad)
+	return tostring(squad.scripted_target or "") .. "|" .. (squad.rush_to_target and 1 or 0) .. "|" .. (squad.force_online and 1 or 0)
+end
+
+-- World server: the orders of the squads map server `ms` holds, those that changed.
+local function tell_orders(ms)
+	local rows = {}
+	for _, id in ipairs(levels().squads_at(ms.bridge)) do
+		local squad = alife_object(id)
+		local row = squad and order_row(squad)
+		if row and ordered[id] ~= row then
+			ordered[id] = row
+			rows[#rows + 1] = id .. "|" .. row
+		end
+	end
+	if #rows > 0 then api.send_event(EV_ORDERS, table.concat(rows, ";"), ms.bridge) end
+end
+
+local function on_orders(payload, from)
+	if not map_server() or from ~= 0 then return end
+	for id, script, rush, force in payload:gmatch("(%d+)|([^|;]*)|(%d)|(%d)") do
+		local squad = alife_object(tonumber(id))
+		if squad then
+			squad.scripted_target = script ~= "" and script or nil
+			squad.rush_to_target = rush == "1" or nil
+			squad.force_online = force == "1" or nil
+		end
+	end
 end
 
 -- World server: the targets of the squads map server `ms` holds.
@@ -192,7 +228,9 @@ local function on_update()
 	next_tick = now + TICK_MS
 	if not (world_server() and split() and SIMBOARD) then return end
 	for _, ms in ipairs(levels().map_servers()) do
-		local ok, err = pcall(tell, ms, now)
+		local ok, err = pcall(tell_orders, ms)
+		if not ok then printf("[coop-brain] ! %s", tostring(err)) end
+		ok, err = pcall(tell, ms, now)
 		if not ok then printf("[coop-brain] ! %s", tostring(err)) end
 	end
 end
@@ -226,19 +264,22 @@ local function mind_of(se)
 	return {
 		smart = se.smart_id, target = se.assigned_target_id, current = se.current_target_id, action = se.current_action,
 		task = se.task_target_id, script = se.scripted_target, idle = se.idle_time, lock = se.__lock or nil,
-		rush = se.rush_to_target, spawn = se.respawn_point_id, prop = se.respawn_point_prop_section,
-		stay = se.stay_time and utils_data.CTime_to_table(se.stay_time) or nil,
+		rush = se.rush_to_target, force = se.force_online, spawn = se.respawn_point_id, prop = se.respawn_point_prop_section,
+		stay = se.stay_time and utils_data.CTime_to_table(se.stay_time) or nil, first = se.first_update == true,
 	}
 end
 
 local function mind_in(se, t)
 	if se.smart_id ~= t.smart then SIMBOARD:assign_squad_to_smart(se, t.smart) end
 	se.assigned_target_id, se.current_target_id, se.current_action = t.target, t.current, t.action
-	se.task_target_id, se.scripted_target, se.idle_time = t.task, t.script, t.idle or se.idle_time
-	se.__lock, se.rush_to_target = t.lock, t.rush
-	se.respawn_point_id, se.respawn_point_prop_section = t.spawn, t.prop
+	se.task_target_id, se.idle_time = t.task, t.idle or se.idle_time
+	se.__lock = t.lock
 	se.stay_time = t.stay and utils_data.CTime_from_table(t.stay) or nil
-	se.first_update = true -- the side it came from did what is done once: the items of item_on_all exist
+	if not map_server() then return end -- the rest is the world server's own
+	se.scripted_target, se.force_online = t.script, t.force
+	se.rush_to_target = t.rush or (not t.first and se.rush) or nil
+	se.respawn_point_id, se.respawn_point_prop_section = t.spawn, t.prop
+	se.first_update = true
 end
 
 function logic_of(id)
@@ -273,5 +314,6 @@ function on_game_start()
 	patch_board()
 	coop_main.add_event_handler(EV_TARGETS, on_targets)
 	coop_main.add_event_handler(EV_CACHES, on_caches)
+	coop_main.add_event_handler(EV_ORDERS, on_orders)
 	RegisterScriptCallback("actor_on_update", on_update)
 end

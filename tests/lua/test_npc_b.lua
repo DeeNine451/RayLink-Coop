@@ -611,6 +611,10 @@ SQ.check_online_status = function(self)
 end
 H.env.sim_squad_scripted = { sim_squad_scripted = SQ }
 H.env.smart_terrain = { se_smart_terrain = {} }
+H.env.se_actor = { se_actor = {
+	get_location = function(self) return self.position, self.m_level_vertex_id, self.m_game_vertex_id end,
+	get_alife_task = function(self) return "ghost's" end,
+} }
 KS = load_script(H, "coop_npc_compat")
 KS.on_game_start()
 KS._set_host_on(true)
@@ -626,7 +630,11 @@ SQ.check_online_status(at_player)
 check(at_player.forced_online_status == false, "a squad 20 m from a player of its level stays offline")
 check(H.env.coop_npc_players.any_within(vector():set(5001, 0, 5000), 50) == false, "nothing is near the ghost")
 check(H.env.coop_npc_players.any_within(proxy:position(), 50) == true, "the player of the level is")
-H.env.sim_squad_scripted, H.env.smart_terrain = nil, nil
+local GHOST = { position = vector():set(5000, 0, 5000), m_level_vertex_id = 1, m_game_vertex_id = 1 }
+check(H.env.se_actor.se_actor.get_location(GHOST) == proxy:position(), "a squad sent at the actor goes to a player of the level")
+H.env.CALifeSmartTerrainTask = function(gv, lv) return { gv = gv, lv = lv } end
+check(H.env.se_actor.se_actor.get_alife_task(GHOST).lv == proxy:level_vertex_id(), "the engine's task too")
+H.env.sim_squad_scripted, H.env.smart_terrain, H.env.se_actor = nil, nil, nil
 
 print("== coop_npc_compat: helicopters hunt every player as the actor (audit B7)")
 H, C, proxy, hav = pair()

@@ -278,6 +278,7 @@ function far_body_class:id() return self[4] end
 function far_body_class:position() return self[1] end
 function far_body_class:level_vertex_id() return self[2] end
 function far_body_class:game_vertex_id() return self[3] end
+function far_body_class:clsid() return clsid.script_stalker end -- the stock IsStalker and character_community ask this first
 function far_body_class:character_community() return alife_object(self[4]):community() end
 function far_body_class:character_rank() return alife_object(self[4]):rank() end
 function far_body_class:alive()

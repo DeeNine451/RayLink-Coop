@@ -280,6 +280,27 @@ local function wrap_squads()
 		end
 	end
 	applied[#applied + 1] = "squad_exclusion"
+	-- A squad sent at "the actor" (a bounty, a task) goes to id 0: on a map server that is its ghost. It goes to a player of the level.
+	local actor = mod("se_actor")
+	local ca = actor and actor.se_actor
+	local function player_here()
+		return host_on and P.is_map_server() and P.others()[1] or nil
+	end
+	local where, task = ca and ca.get_location, ca and ca.get_alife_task
+	if type(where) == "function" then
+		ca.get_location = function(self, ...)
+			local p = player_here()
+			if p then return p:position(), p:level_vertex_id(), p:game_vertex_id() end
+			return where(self, ...)
+		end
+	end
+	if type(task) == "function" then
+		ca.get_alife_task = function(self, ...)
+			local p = player_here()
+			if p then return CALifeSmartTerrainTask(p:game_vertex_id(), p:level_vertex_id()) end
+			return task(self, ...)
+		end
+	end
 end
 
 -- Audit B4: a smart terrain does not respawn within its respawn_radius of the HOST's player only; any player counts. The world

@@ -50,6 +50,11 @@ check(far and far.far == true and far:id() == 500, "a player on another level ha
 check(far:position().x == 5 and far:level_vertex_id() == 77 and far:game_vertex_id() == 20, "it stands where his record stands")
 check(far[1] == far:position() and far[2] == 77 and far[3] == 20 and far[4] == 500, "it is a place for the stock create_item")
 check(far:alive() == true, "alive as his record says")
+clsid = { script_stalker = 44 }
+check(far:clsid() == 44, "the stock IsStalker takes him for a stalker")
+RECORDS[500].community = function() return "actor_army" end
+RECORDS[500].rank = function() return 900 end
+check(far:character_community() == "actor_army" and far:character_rank() == 900, "faction and rank are his record's")
 local n = 0
 far:iterate_inventory(function(x, item)
 	check(x == "x", "the walk hands on its argument")
