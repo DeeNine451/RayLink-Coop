@@ -115,7 +115,7 @@ TEST(host_sends_the_visual_of_a_creature_only)
 	REQUIRE(src.size() > 10000);
 	const std::string hook = between(src, "void host_on_visual(u16 id)", "\n}\n");
 	REQUIRE(!hook.empty());
-	CHECK(hook.find("mgr().is_host()") != npos);
+	CHECK(hook.find("is_map_authority()") != npos); // the host's process and a map server, the host half of a level
 	CHECK(hook.find("g_lock") != npos); // xrServer hooks may run on a game thread
 
 	const std::string send = between(src, "void host_send_visual(u16 id)", "\n}\n");

@@ -255,7 +255,7 @@ TEST(decide_move_together)
 
 TEST(server_life_defaults)
 {
-	CHECK_EQ(kStartTimeoutMs, uint32_t(120000));
+	CHECK_EQ(kStartTimeoutMs, uint32_t(240000)); // a GAMMA load takes minutes
 	CHECK_EQ(kStopTimeoutMs, uint32_t(15000));
 	CHECK_EQ(kDefaultLingerMs, uint32_t(60000)); // coop_mapserver_linger, 60 s
 	CHECK_EQ(kFlushTimeoutMs, uint32_t(3000));

@@ -653,7 +653,7 @@ section("the route: every machine runs it", function()
 end)
 
 section("the engine export", function()
-	local src = readfile("engine/src/xrGame/coop/coop_script.cpp") or ""
+	local src = (readfile("engine/src/xrGame/coop/coop_script.cpp") or ""):gsub("\r\n", "\n") -- a checkout may have either line end
 	check(src:find('{"avatar_headlamp", &l_avatar_headlamp}', 1, true) ~= nil, "coop.avatar_headlamp is registered")
 	local body = src:match("int l_avatar_headlamp%(lua_State%* L%)(.-)\n}\n") or ""
 	check(body:find("arg_local_id", 1, true) ~= nil, "a wrong argument gives false, not an error")
