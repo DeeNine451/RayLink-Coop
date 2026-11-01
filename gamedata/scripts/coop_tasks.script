@@ -495,7 +495,7 @@ local function avatar_obj(peer)
 	return ok and id and level.object_by_id(id) or nil
 end
 
-local function peer_in_session(peer)
+function peer_in_session(peer) -- not local: the chunk is at Lua's limit of 200 with the engine's two (test_engine_header)
 	for _, p in ipairs(players()) do
 		if p.id == peer then return true end
 	end
