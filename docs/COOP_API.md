@@ -26,6 +26,8 @@
 | `coop.avatar_headlamp(id)` | налобный фонарь другого игрока по id персонажа: `true, dx, dy, dz` (единичное направление луча), пока горит; `false`, если выключен, неизвестен или вида ещё нет. Читает `coop_hud_glare` |
 | `coop.revive_progress()` | HUD v2, часть 2: удержания USE при поднятии. `nil` — нечего показывать или нет сессии. Иначе таблица с теми частями, что есть: `reviving = {peer, avatar_id, nick, progress 0..1, ms_left, item "medkit"\|"stimpack", section, sent}` (я поднимаю; `sent` — удержание кончилось, запрос ушёл, до `coop_revive_done` не больше 3 с), `revived_by = {peer, avatar_id, nick, progress, ms_left}` (меня поднимает союзник; я ранен), `give_up = {progress, ms_left}` (я удерживаю USE, чтобы сдаться), `bleed = {left_ms, total_ms}` (я ранен). Вызов говорит движку, что Lua-HUD рисует состояние «ранен / поднимают» сам: свой экранный текст движок прячет. Событие `coop_revive_done(target_peer, medkit_section)` приходит на машину поднимавшего, когда хост поднял игрока |
 | `coop.talk_holder(npc)` | хост: кто сейчас говорит с NPC |
+| `coop.levels.talking(peer)` | СМ: игрок на карте Mk держит замок разговора, по `LevelBodyFacts`, запись старше 5 с даёт `false` |
+| `coop.protocol()` | версия сетевого протокола этого exe, для строки `[coop] context` в логе |
 | `coop.session_info()`, `coop.host(port)`, `coop.connect(addr)`, `coop.disconnect()`, `coop.host_when_ready(port)` | меню коопа |
 
 ### 1.2 Деньги (F2 T1, T6b)

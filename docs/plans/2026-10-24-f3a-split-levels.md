@@ -863,7 +863,7 @@ class LoadBarrier { void start(uint32_t epoch, std::vector<uint32_t> movers, boo
 - [ ] **Шаг 1:** разбор ключа в `x_ray.cpp` до `Engine.Initialize`:
   - `g_dedicated_server = true`, `g_coop_headless = true`;
   - мьютекс одного экземпляра (`:1011-1043`) пропускается;
-  - заставки нет, `-nosound`.
+  - заставки нет, звук без устройства (`psSoundSilent`, было `-nosound`: ядро не создавало звуки, Mk не слал голоса и способности существ).
 - [ ] **Шаг 2:** устройство: `HW.cpp:125` при `g_coop_headless` — `d3d9.dll`; R1; окно 640×480 скрыто; без `Present`;
   30 кадров в секунду.
 - [ ] **Шаг 3:** каждое `#ifdef DEDICATED_SERVER` в `xrEngine` и `Layers` — таблица «перевести или оставить, причина».
