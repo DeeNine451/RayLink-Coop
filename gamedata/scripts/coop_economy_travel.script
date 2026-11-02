@@ -12,7 +12,8 @@
 	    own map: nobody is gathered and nobody follows, and a solo travel moves no shared clock.
 	  - Travel to another level (fast travel to an offline point, guides of ka_travel): the engine turns a
 	    client's level change into a request to the host, the host moves the whole group (coop_join), so only
-	    the time cost is handled here.
+	    the time cost is handled here. A quick pin of a client's own map is no level: Fair Fast Travel takes it for one, what he creates
+	    never goes online on his copy of the world, and with_trip_on_map makes the trip a move on his map.
 	  - xr_effects.teleport_actor (story teleports): the players within teleport_radius of the teleported
 	    player follow to the same point and heading. A replicated restrictor's teleport is left to the NPC
 	    group (coop_npc_logic sends it to the restrictor's audience); this covers the rest (NPC logic on the
