@@ -517,10 +517,18 @@ do
 	local TAKER
 	local W = stand({ env = function(M)
 		M.env.coop_tasks = { reward_peer = function() return TAKER end, giving_npc = function() return nil end }
+		local ac = M.env.axr_companions
+		-- the stock (axr_companions.add_special_squad): only a member this process holds as a live NPC gets the marks
+		function ac.add_special_squad(squad, special, cannot_teleport)
+			ac.companion_squads[squad.id] = squad
+			for k in squad:squad_members() do
+				if M.env.level.object_by_id(k.id) then
+					M.se[k.id] = { companion = true, companion_cannot_dismiss = true, companion_cannot_teleport = cannot_teleport }
+				end
+			end
+		end
 		M.env.xr_effects = { add_task_companion = function(actor, npc, p)
-			local ac = M.env.axr_companions
-			ac.companion_squads[p[1]] = W_squads[p[1]]
-			M.se[301] = { companion = true, companion_cannot_dismiss = true, companion_cannot_teleport = true }
+			ac.add_special_squad(W_squads[p[1]], p[2] == "true", p[3] == "true")
 		end }
 	end })
 	W_squads = W.squads
@@ -531,7 +539,7 @@ do
 	W.not_yet[400] = true
 	W.bodies[301] = { name = function() return "comp2" end }
 	TAKER = 2
-	H.env.xr_effects.add_task_companion(H.env.db.actor, nil, { 400 })
+	H.env.xr_effects.add_task_companion(H.env.db.actor, nil, { 400, "false", "true" })
 	TAKER = nil
 	pump()
 	check(ac.companion_squads[400] == nil, "the squad is not on the map server yet: nothing to take")
@@ -541,6 +549,8 @@ do
 	check(ac.logic[301] ~= nil and ac.logic[301].cannot_dismiss == true, "the logic of a companion: he does not go back to his own walker")
 	check(Mk.se[301] and Mk.se[301].companion == true and Mk.se[301].companion_cannot_dismiss == true
 		and Mk.se[301].companion_cannot_teleport == true, "the stock's marks: the binder reads them when he comes online")
+	check(H.se[301] and H.se[301].companion_cannot_dismiss == true and H.se[301].companion_cannot_teleport == true,
+		"the world server's record has them too: the next word (follow_home) and the save read them there")
 	check(W.CH._leaders()[400] == nil, "the world server does not lead it")
 	check(H.env.axr_companions.companion_squads[400] ~= nil, "its table keeps the squad: task scripts ask it")
 	local m = {}
@@ -550,6 +560,28 @@ do
 	check(#H.env.axr_companions.list_actor_squad_by_id() == 1, "the host's squad list and keys are not for it")
 	W.refresh()
 	check(H.teleported == nil and W.CM._leaders()[400] == 501, "with its leader on its level it stays")
+
+	print("-- with no ban on teleports in the task's call")
+	W.CM._leaders()[400] = nil
+	ac.companion_squads[400] = nil
+	H.env.axr_companions.companion_squads[400] = nil
+	H.se[301], Mk.se[301] = nil, nil
+	W.refresh()
+	TAKER = 2
+	H.env.xr_effects.add_task_companion(H.env.db.actor, nil, { 400 })
+	TAKER = nil
+	pump()
+	check(Mk.se[301].companion_cannot_dismiss == true and not Mk.se[301].companion_cannot_teleport, "it is an escort, and it may follow")
+
+	print("-- the world server has the NPC itself: the stock's marks stand")
+	local H2 = H.env.axr_companions
+	H2.companion_squads[300] = nil
+	H.se[201] = nil
+	TAKER = 1
+	H.env.xr_effects.add_task_companion(H.env.db.actor, nil, { 300 })
+	TAKER = nil
+	check(H.se[201] and H.se[201].companion_cannot_dismiss == true, "(the stock wrote them)")
+	check(W.CH._leaders()[300] == 500, "and its taker leads it")
 end
 
 print("== a companion a status functor writes into the stock table (tasks_agent_rescue): the taker leads it")

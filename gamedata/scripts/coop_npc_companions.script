@@ -50,7 +50,8 @@
 	Split levels (docs\SPLIT_LEVELS.md 7a): leaders[] and the stock's table are the business of the process that leads the squad's level.
 	  A map server's actor is a ghost: a companion with no leader here goes to the nearest player (follows). Its leaders go up into the
 	  world server's save and down onto a new map server (coop_levels_share). A squad claimed by a task on a map server's level goes there
-	  (npc.comp_adopt, with the stock's marks and the logic of a companion). The host's level change takes only his own squads
+	  (npc.comp_adopt, with the stock's marks, which the world server writes itself where the stock has no live NPC to write them on, and the
+	  logic of a companion). The host's level change takes only his own squads
 	  (companion_squad_can_teleport). A leader who goes to another level: the authority lets the squad go, the world server teleports it
 	  to his body when nothing of it is online at a map server, the level of arrival adopts it; a squad the stock forbids to teleport
 	  (told to wait, the Fanatic) stays and keeps its leader's entry. A map server does this with nobody left on its level too; the world
@@ -156,6 +157,7 @@ local asked_lead = {} -- NPC id -> time_global() of this machine's last request 
 local lead_peer = {} -- squad id -> its leader's peer, while this process knows him
 local refuse_dismiss -- host: its own dismiss of a companion somebody else leads (set below, it needs lead_for)
 local claimed_far -- world server: a squad just claimed on a map server's level goes there (set below, it needs adopt)
+local mark_far -- world server: the stock's marks of a task's squad on a map server's level (set below, it needs map_server_of)
 local note_let_go, give_back -- a story's dismissal and its next recruit (set below, they need control_peer, squad_ids)
 local teleport_rule -- axr_companions.companion_squad_can_teleport as this script wrapped it
 
@@ -1030,12 +1032,23 @@ local function wrap_task_squads()
 				else
 					res = { pcall(f, ...) }
 				end
+				if res[1] and t[2] == "add_special_squad" then mark_far(before, ...) end
 				stats.task_squads = stats.task_squads + claim_new_squads(before, peer)
 				if not res[1] then error(res[2], 0) end
 				return unpack(res, 2)
 			end
 		end
 	end
+end
+
+-- The stock's marks of a member, written as the stock writes them on one it holds.
+local function put_marks(id, companion, cannot_dismiss, cannot_teleport)
+	local se = alife_object(id)
+	if not se then return end
+	local name = se:name()
+	se_save_var(id, name, "companion", companion)
+	se_save_var(id, name, "companion_cannot_dismiss", cannot_dismiss)
+	se_save_var(id, name, "companion_cannot_teleport", cannot_teleport)
 end
 
 -- The stock's marks of a squad, as the binder of its members reads them when they come online.
@@ -1119,13 +1132,7 @@ local function adopt(squad_id, lead, t)
 	axr_companions.companion_squads[squad_id] = squad
 	lead_peer[squad_id] = t and t.p or lead_peer[squad_id]
 	for k in squad:squad_members() do
-		local se = alife_object(k.id)
-		if t and se then
-			local name = se:name()
-			se_save_var(k.id, name, "companion", true)
-			se_save_var(k.id, name, "companion_cannot_dismiss", t.d or nil)
-			se_save_var(k.id, name, "companion_cannot_teleport", t.c or nil)
-		end
+		if t then put_marks(k.id, true, t.d or nil, t.c or nil) end
 		local st = db.storage[k.id]
 		local npc = st and st.object or level.object_by_id(k.id)
 		if npc and not npc:has_info("npcx_is_companion") then -- a second setup would reset his orders
@@ -1160,6 +1167,14 @@ claimed_far = function(squad_id, lead, peer)
 	leaders[squad_id] = nil
 	note_far(level_id, squad_id, lead)
 	send_adopt(bridge, squad, lead, peer)
+end
+
+-- The stock's add_special_squad marks a member only where he is a live NPC, and the world server has none of a map server's level: the
+-- escort would come with no ban on dismissing it. The marks go on its record: the word to the map server reads them there, the next word
+-- (follow_home) and the save too. Called with the arguments of the stock function.
+mark_far = function(before, squad, special, cannot_teleport)
+	if not squad or before[squad.id] or not map_server_of(squad) then return end
+	for k in squad:squad_members() do put_marks(k.id, true, true, cannot_teleport and true or nil) end
 end
 
 local function all_home(squad, l)
