@@ -113,9 +113,31 @@ TEST(soft_window_goes_through_its_stages)
 	w.world_up(10000);
 	CHECK_EQ(w.save_ms(), uint64_t(2000));
 	const uint64_t away = w.away_ms(12000);
-	CHECK_EQ(away, uint64_t(9000)); // the world's clock stood from the save on
+	CHECK_EQ(away, uint64_t(9000));
 	w.clear();
 	CHECK(!w.active());
+}
+
+TEST(soft_window_keeps_the_clock_of_its_save)
+{
+	softmove::Window w;
+	w.go(5, 1000);
+	w.saved(3000, 7200000);
+	CHECK_EQ(w.saved_clock(), uint64_t(7200000));
+	w.clear();
+	CHECK_EQ(w.saved_clock(), uint64_t(0));
+}
+
+TEST(soft_clock_goes_only_what_the_new_world_has_not_run_itself)
+{
+	const uint64_t saved = 7200000;
+	// 9.9 s away at factor 10: 99 game seconds. The new world loaded 5.5 s ago and its clock runs from there.
+	CHECK_EQ(softmove::clock_behind(saved, 9900, 10.f, saved + 55000), uint64_t(44000));
+	CHECK_EQ(softmove::clock_behind(saved, 9900, 10.f, saved), uint64_t(99000)); // a clock that stood all the way
+	CHECK_EQ(softmove::clock_behind(saved, 9900, 10.f, saved + 99000), uint64_t(0));
+	CHECK_EQ(softmove::clock_behind(saved, 9900, 10.f, saved + 120000), uint64_t(0)); // never back
+	CHECK_EQ(softmove::clock_behind(saved, 9900, 0.f, saved), uint64_t(0)); // a stopped clock
+	CHECK_EQ(softmove::clock_behind(0, 9900, 10.f, saved), uint64_t(0)); // no clock was read at the save
 }
 
 TEST(soft_window_watchdog_counts_from_the_save)
