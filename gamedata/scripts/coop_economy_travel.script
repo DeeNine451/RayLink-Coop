@@ -197,6 +197,30 @@ local function selected_prop(property_ui)
 	return nil
 end
 
+-- The smart is on the map the actor is on (a client's ALife copy holds the smarts of every map).
+local function on_this_map(se, here)
+	local ok, name = pcall(function()
+		return alife():level_name(game_graph():vertex(se.m_game_vertex_id):level_id())
+	end)
+	return ok and name == here
+end
+
+-- A client's ALife never brings what he creates online: Fair Fast Travel takes a quick pin of his own map for a point of another one and
+-- ends the trip in ChangeLevel, after the fare and the time. The engine has no level changer for that: with one level there is no trip,
+-- with split levels a whole rejoin. While the click runs, a level change to his own map is what the stock does for an online point.
+local function with_trip_on_map(f, ...)
+	local change = rawget(_G, "ChangeLevel")
+	if not (core.is_client() and type(change) == "function") then return f(...) end
+	_G.ChangeLevel = function(pos, lvid, gvid, dir, anim)
+		if on_this_map({ m_game_vertex_id = gvid }, level_name()) then return db.actor:set_actor_position(pos) end
+		return change(pos, lvid, gvid, dir, anim)
+	end
+	local res = pack_n(pcall(f, ...))
+	_G.ChangeLevel = change
+	if not res[1] then error(res[2], 0) end
+	return unpack(res, 2, res.n)
+end
+
 local function patch_pda()
 	local pda = core.mod("pda")
 	if not (pda and type(pda.property_box_clicked) == "function") then
@@ -213,7 +237,7 @@ local function patch_pda()
 			stats.vetoed = stats.vetoed + 1
 			return
 		end
-		return travel_call("travel", party and group.gather_radius() or 0, nil, true, nil, orig, property_ui, ...)
+		return travel_call("travel", party and group.gather_radius() or 0, nil, true, nil, with_trip_on_map, orig, property_ui, ...)
 	end
 end
 
@@ -369,14 +393,6 @@ local VISIT_RADIUS = 50 -- m, smart_terrain.script
 local VISIT_EVERY_MS = 1000
 local VISIT_RESCAN_MS = 30000 -- a map with no point found is looked at again after this
 local visits = { next_at = 0, level = nil, tsmarts = nil, list = nil, scan_at = 0, errors = 0, tried = false }
-
--- The smart is on the map the actor is on (a client's ALife copy holds the smarts of every map).
-local function on_this_map(se, here)
-	local ok, name = pcall(function()
-		return alife():level_name(game_graph():vertex(se.m_game_vertex_id):level_id())
-	end)
-	return ok and name == here
-end
 
 -- { { name, id }, ... }: the points of `tsmarts` on map `here`. The simulation board first (the smarts register
 -- there when their server object does), else the ALife copy: the objects of the current level of the smart clsid, else all.
