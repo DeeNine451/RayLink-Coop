@@ -846,6 +846,31 @@ do
 	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
 end
 
+print("== a map server just loaded: its squad's leader stands elsewhere and was never on it, the world server's word says who he is")
+do
+	local function share_env(M)
+		M.share = { up = {}, down = {} }
+		M.env.coop_levels_share = {
+			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
+			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
+		}
+	end
+	local W = stand({ env = share_env })
+	local H, Mk = W.H, W.Mk
+	W.move(1, 1)
+	local saved = { coop_npc_leaders = { [400] = 500 } }
+	H.fire("load_state", saved)
+	Mk.fire("load_state", saved)
+	W.refresh()
+	check(W.CM._leaders()[400] == 500 and #sent_named(Mk, "npc.comp_follow") == 0, "(its session does not know him)")
+	Mk.share.down.comp_leaders.set(H.share.down.comp_leaders.get())
+	W.refresh()
+	check(W.CM._leaders()[400] == nil and #sent_named(Mk, "npc.comp_follow") == 1, "the map server lets it go")
+	W.refresh()
+	check(H.teleported and H.teleported.id == 400 and H.teleported.gvid == 10, "the world server teleports it to his body")
+	check(W.CH._leaders()[400] == 500, "his level takes it")
+end
+
 print("== a squad recruited on a map server: the table of the save does not have it, the stock's mark does")
 do
 	local W = stand()

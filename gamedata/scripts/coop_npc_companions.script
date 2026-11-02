@@ -1374,7 +1374,11 @@ local function leaders_given(v)
 			local _
 			_, at = level_of_squad(squad)
 		end
-		if at == level.name() and leaders[id] == nil and adopt(id, lead) then lead_peer[id] = peers[lead] end
+		if at == level.name() then
+			if leaders[id] == nil then adopt(id, lead) end
+			-- also for a leader of the save: this session may never have seen him, and follow_tick asks where he stands
+			if leaders[id] == lead then lead_peer[id] = peers[lead] or lead_peer[id] end
+		end
 	end
 end
 
