@@ -53,7 +53,7 @@
 	  (npc.comp_adopt, with the stock's marks and the logic of a companion). The host's level change takes only his own squads
 	  (companion_squad_can_teleport). A leader who goes to another level: the authority lets the squad go, the world server teleports it
 	  to his body when nothing of it is online at a map server, the level of arrival adopts it; a squad the stock forbids to teleport
-	  (told to wait, the Fanatic) stays and keeps its leader's entry.
+	  (told to wait, the Fanatic) stays and keeps its leader's entry. A map server does this with nobody left on its level too.
 	Not covered: the Useful Idiots panel on a client (axr_companions.companion_squads is empty there), unstuck()'s distance to
 	  the host, the overweight gate on a client.
 
@@ -1469,7 +1469,8 @@ local function actor_on_update()
 	next_tick = now + 250
 	host_on = installed and P.host_with_clients()
 	wrap_teleport()
-	if host_on and now >= next_refresh then
+	-- a map server goes on with nobody left: a leader who just went is off its list of players, and his squad has to go after him
+	if (host_on or (installed and P.is_map_server() and split_levels() ~= nil)) and now >= next_refresh then
 		next_refresh = now + 2000
 		local ok, err = pcall(host_refresh)
 		if not ok then report("refresh", err) end

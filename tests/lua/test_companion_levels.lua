@@ -110,12 +110,14 @@ local function stand(opts)
 	local W = { bodies = {}, squads = {}, tables = {}, level_of = { [0] = 1, [1] = 1, [2] = 2 }, split = opts.split ~= false, online = {},
 		not_yet = {} }
 	local H = machine("host", 0, { [0] = 0, [1] = 500, [2] = 501 })
-	local Mk = machine("client", BRIDGE, opts.mk_knows_all and { [1] = 500, [2] = 501 } or { [2] = 501 })
+	local mk_avatars = opts.mk_knows_all and { [1] = 500, [2] = 501 } or { [2] = 501 }
+	local Mk = machine("client", BRIDGE, mk_avatars)
 	local A = machine("client", 1, { [0] = 500, [1] = 0, [2] = 501 })
 	local B = machine("client", 2, { [0] = 501, [1] = 500, [2] = 0 })
 	A.to_host, A.to_local = swap(0, 500), swap(0, 500)
 	B.to_host, B.to_local = swap(0, 501), swap(0, 501)
 	W.H, W.Mk, W.A, W.B = H, Mk, A, B
+	W.mk_avatars = mk_avatars
 	Mk.env.coop.is_map_server = function() return true end
 	Mk.env.coop.is_mirror = function() return false end
 	Mk.env.level.name = function() return NAMES[2] end
@@ -202,10 +204,12 @@ local function stand(opts)
 		end
 		pump()
 	end
-	-- a player moves: the engine's table says so, the character leaves one process and comes to the other
+	-- a player moves: the engine's table says so, the character leaves one process and comes to the other, the session of the map server
+	-- loses him or gets him (coop_trunk server_on_map: virtual_leave, virtual_join)
 	function W.move(peer, level)
 		W.level_of[peer] = level
 		local id = PROXY[peer]
+		W.mk_avatars[peer] = level == 2 and id or nil
 		local obj = H.objects[id] or Mk.objects[id]
 		H.objects[id], Mk.objects[id] = nil, nil
 		local M = level == 1 and H or Mk
@@ -481,12 +485,31 @@ do
 	W.proxy_b._alive = true
 	W.move(2, 1)
 	W.refresh()
+	check(#Mk.env.coop.players() == 0, "(he was its only player: nobody is left in its session)")
 	check(LM()[400] == nil and Mk.env.axr_companions.companion_squads[400] == nil, "the map server lets it go")
 	check(H.teleported == nil, "the world server waits: a member is online at the map server")
 	W.online[301] = nil
 	W.refresh()
 	check(H.teleported and H.teleported.id == 400 and H.teleported.gvid == 10, "then teleports it to his body")
 	check(W.CH._leaders()[400] == 501 and H.env.axr_companions.companion_squads[400] == W.squads[400], "the host's level takes it")
+end
+
+print("== a map server nobody stands on, just loaded: it sorts the save's leaders out, once the map says the world is split")
+do
+	local W = stand()
+	local Mk = W.Mk
+	local LM = W.CM._leaders
+	W.move(2, 1)
+	W.refresh()
+	Mk.env.coop.peer_of_avatar = function(id) return id == 500 and 1 or nil end -- A leads squad 300 on l01_escape: no squad to let go
+	W.split = false -- no LevelMap yet: coop.levels.split() of a map server
+	Mk.fire("load_state", { coop_npc_leaders = { [300] = 500 } })
+	W.refresh()
+	check(LM()[300] == 500, "(nothing is decided before the map came)")
+	W.split = true
+	W.refresh()
+	check(LM()[300] == nil, "a squad of another level is not its own")
+	check(#sent_named(Mk, "npc.comp_follow") == 0, "and it is not its to let go")
 end
 
 print("== a task's squad on a map server's level: the map server takes it, with the logic and the stock's marks")
