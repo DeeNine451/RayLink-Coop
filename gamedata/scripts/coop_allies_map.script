@@ -210,6 +210,7 @@ function hint_of(v)
 	local allies = rawget(_G, "coop_allies") or coop_allies
 	local nick = tostring(v.nick or "?"):gsub("%%", "")
 	local line2 = fmt_dist(v.dist) or ""
+	if v.far and v.elsewhere then line2 = v.elsewhere end
 	local st = state_text(v.state)
 	if st then
 		if v.state == "down" and v.bleed then st = st .. " " .. fmt_time(v.bleed) end

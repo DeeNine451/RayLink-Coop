@@ -29,7 +29,7 @@
 	For other scripts:
 		coop_core_hud.status_of(peer) -> { h = 0..1, s = state, f = community, i = icon, b = bleed s | nil, at } | nil
 		coop_core_hud.views() -> list of other players { peer, slot, nick, host, state, bleed, hp, avatar, dist, icon,
-			pos = {x, y, z} of his avatar | nil }
+			pos = {x, y, z} of his avatar | nil, far = true for one on another map with a record in this world, far_id }
 		coop_core_hud.set_party_enabled(bool) / set_spots_enabled(bool)
 		coop_core_hud.set_revive(peer, frac | nil, by_peer)   revive part 2: his red segments fill in the reviver's colour
 --]]
@@ -133,6 +133,13 @@ local function send_status(tg)
 		local b = allies().engine_bleed(0)
 		if b then t.b = math_min(b, 3600) end
 	end
+	-- Split levels: a mirror's record of a player on another map stands still, his status says where he is (place_far)
+	local lv = api.levels
+	if lv and lv.split and lv.split() then
+		local pos = actor:position()
+		t.x, t.y, t.z = math_floor(pos.x + 0.5), math_floor(pos.y + 0.5), math_floor(pos.z + 0.5)
+		t.l, t.g = actor:level_vertex_id(), actor:game_vertex_id()
+	end
 	local payload = codec().encode(t)
 	if payload == sent.payload and tg - sent.at < STATUS_KEEPALIVE_MS then return end
 	if api.send_event(EV_STATUS, payload, -1) then
@@ -154,7 +161,12 @@ local function on_status(payload, from)
 	local i = type(t.i) == "string" and #t.i <= 96 and t.i:match("^[%w_\\/%.]*$") and t.i or ""
 	local b = tonumber(t.b)
 	b = (s == "down" and b and b >= 0 and b <= 3600) and math_floor(b) or nil
-	status[from] = { h = h, s = s, f = f, i = i, b = b, at = time_global() }
+	local st = { h = h, s = s, f = f, i = i, b = b, at = time_global() }
+	local x, y, z, lv, gv = tonumber(t.x), tonumber(t.y), tonumber(t.z), tonumber(t.l), tonumber(t.g)
+	if x and y and z and lv and gv and lv >= 0 and gv >= 0 and gv < 65535 then
+		st.x, st.y, st.z, st.l, st.g = x, y, z, lv, gv
+	end
+	status[from] = st
 	stats.status_in = stats.status_in + 1
 end
 
@@ -170,6 +182,14 @@ local function avatar_of(p)
 	if type(id) ~= "number" or id <= 0 or id >= 65535 then return nil, nil end
 	local obj = level.object_by_id(id)
 	return obj, obj and id or nil
+end
+
+-- Split levels: his record in this world's ALife, for one with no object here: the PDA map shows a spot on it on his level.
+local function far_avatar(p)
+	local id = p.avatar_id
+	if type(id) ~= "number" or id <= 0 or id >= 65535 then return nil end
+	local record = rawget(_G, "alife_object")
+	return record and record(id) and id or nil
 end
 
 -- Split levels: "on another map: <name>", nil for one who stands here.
@@ -191,6 +211,7 @@ function views(tg)
 			local state, bleed = A.state_of(p, st, tg)
 			local fresh = st and (tg - st.at) <= A.STATUS_STALE_MS
 			local obj, id = avatar_of(p)
+			local far_id = not obj and p.elsewhere == true and far_avatar(p) or nil
 			local icon = st and st.i ~= "" and st.i or nil
 			if not icon and obj then
 				local ok, ic = pcall(obj.character_icon, obj)
@@ -200,18 +221,33 @@ function views(tg)
 				peer = p.id, slot = A.slot(p.id), nick = tostring(p.nick or "?"), host = p.id == 0,
 				state = state, bleed = bleed, hp = fresh and st.h or nil, avatar = id, icon = icon,
 				dist = (obj and actor) and obj:position():distance_to(actor:position()) or nil,
-				elsewhere = elsewhere_of(p),
+				elsewhere = elsewhere_of(p), far = far_id and true or nil, far_id = far_id,
 			}
 			if obj then
 				local okp, p = pcall(obj.position, obj)
 				if okp and p then v.pos = { x = p.x, y = p.y, z = p.z } end
 			end
 			list[#list + 1] = v
-			if id then by_avatar[id] = v end
+			if id or far_id then by_avatar[id or far_id] = v end
 		end
 	end
 	table.sort(list, function(a, b) return a.peer < b.peer end)
 	return list, by_avatar
+end
+
+-- The records of the players on other maps follow what they said of themselves (the world server's move by the map servers' word).
+local far_placed = {}
+
+function place_far(list)
+	local lv = api and api.levels
+	if not (lv and lv.far_place) then return end
+	for _, v in ipairs(list) do
+		local st = v.far_id and status[v.peer]
+		if st and st.g and far_placed[v.peer] ~= st then
+			far_placed[v.peer] = st
+			pcall(lv.far_place, v.far_id, st.x, st.y, st.z, st.l, st.g)
+		end
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -806,7 +842,8 @@ local next_status, next_spots = 0, 0
 local spots_down = false -- somebody is down: the overlay pulses every frame
 
 local function update_spots(tg)
-	local _, by_avatar = views(tg)
+	local list, by_avatar = views(tg)
+	place_far(list)
 	local M = amap()
 	M.sync(by_avatar, spots_enabled)
 	spots_down = false

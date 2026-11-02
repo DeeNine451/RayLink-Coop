@@ -1609,6 +1609,40 @@ do
 	end
 	check(far and far.elsewhere == "on another map: Garbage" and far.pos == nil, "a player on another map says so, no position")
 	check(near and near.elsewhere == nil and near.pos ~= nil, "one who stands here as ever")
+
+	-- his marker stands on his server object: the PDA map shows it on his level
+	E.alife_object = function(id) return id == 501 and {} or nil end
+	local _, by_avatar = E.coop_core_hud.views(NOW)
+	check(by_avatar[501] and by_avatar[501].far == true, "a player on another map has a marker")
+	check(by_avatar[503] and not by_avatar[503].far, "one who stands here is no far marker")
+	E.alife_object = function() return nil end
+	_, by_avatar = E.coop_core_hud.views(NOW)
+	check(by_avatar[501] == nil, "no record of him in this world: no marker")
+
+	-- a mirror's record of a player elsewhere stands still: his own status says where he is
+	local placed = {}
+	E.coop.levels = { split = function() return true end, far_place = function(...) placed[#placed + 1] = { ... } end }
+	E.alife_object = function(id) return id == 501 and {} or nil end
+	status(H, 1, "alive", 1)
+	E.coop_core_hud.place_far(E.coop_core_hud.views(NOW))
+	check(#placed == 0, "a status with no place moves nothing")
+	H.handlers["core.status"](E.coop_main.encode({ h = 1, s = "alive", x = 10, y = 2, z = -30, l = 777, g = 42 }), 1)
+	E.coop_core_hud.place_far(E.coop_core_hud.views(NOW))
+	check(#placed == 1 and placed[1][1] == 501 and placed[1][2] == 10 and placed[1][4] == -30 and placed[1][5] == 777 and placed[1][6] == 42,
+		"the record follows his status")
+	E.coop_core_hud.place_far(E.coop_core_hud.views(NOW))
+	check(#placed == 1, "the same status is not placed twice")
+	H.handlers["core.status"](E.coop_main.encode({ h = 1, s = "alive", x = 10, y = 2, z = -30, l = 777, g = 70000 }), 1)
+	E.coop_core_hud.place_far(E.coop_core_hud.views(NOW))
+	check(#placed == 1, "a place that is no vertex is not taken")
+end
+
+print("== the hint of a marker on another map names the map")
+do
+	local M = machine(2)
+	M.env.coop_allies = M.env.coop_allies or {}
+	local text = M.env.coop_allies_map.hint_of({ peer = 1, nick = "far", state = "alive", far = true, elsewhere = "on another map: Garbage" })
+	check(text:find("on another map: Garbage", 1, true) ~= nil, "hint: " .. tostring(text))
 end
 
 print(("== %d passed, %d failed"):format(PASSES, FAILS))
