@@ -359,6 +359,34 @@ do
 	check(Mk.msgs == nil, "a map server has nobody of its own to tell")
 end
 
+print("== take: the host hears it too: a leader on another level is no squad of his own")
+do
+	local W = stand()
+	local H = W.H
+	local L = W.CH._leaders
+	L()[300] = 501 -- B leads it from l02_garbage: his character is on no level of this process, the squad could not follow him
+	H.se[201] = { companion_cannot_teleport = true }
+	W.refresh()
+	H.msgs = nil
+	W.CH.dlg_take(H.env.db.actor, W.comp)
+	pump()
+	check(L()[300] == 501, "the host's process keeps the leader")
+	check(last(H):find("st_coop_comp_refused_elsewhere", 1, true) and last(H):find("p2", 1, true), "he hears who: " .. last(H))
+end
+
+print("== take: not a squad of the host's that stayed behind while he stands on another level")
+do
+	local W = stand()
+	local B = W.B
+	local L = W.CM._leaders
+	check(L()[400] == nil, "no entry: the host's own")
+	B.msgs = nil
+	W.CB.dlg_take(B.env.db.actor, W.comp2_b)
+	pump()
+	check(L()[400] == nil, "the map server gives it to nobody")
+	check(last(B):find("st_coop_comp_refused_elsewhere", 1, true) and last(B):find("p0", 1, true), "he hears who: " .. last(B))
+end
+
 print("== take: a leader who left the game is no reason to wait")
 do
 	local W = stand()

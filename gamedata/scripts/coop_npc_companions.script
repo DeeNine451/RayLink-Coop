@@ -680,7 +680,8 @@ end
 -- The peer of this squad's leader if he stands on another level than player `peer`.
 local function leader_elsewhere(squad, peer)
 	local id = leaders[squad.id]
-	local lead = id and (P.peer_of(id) or lead_peer[squad.id])
+	local lead = 0 -- no entry: the host player's own, on a map server too
+	if id then lead = P.peer_of(id) or lead_peer[squad.id] end
 	if type(lead) == "number" and lead ~= peer and on_other_level(lead, peer) then return lead end
 	return nil
 end
@@ -705,11 +706,11 @@ local function host_lead(from, act, npc_id, to)
 		target = to
 		if type(target) ~= "number" or target == from then return refuse("player") end
 		if on_other_level(from, target) then return refuse("elsewhere", target) end
-	elseif holder == from then
-		return -- the same request twice
 	else
+		-- before the holder: control_peer says "ours" of a leader out of this process's world
 		local away = leader_elsewhere(squad, from)
 		if away then return refuse("elsewhere", away) end
+		if holder == from then return end -- the same request twice
 	end
 	local who = P.avatar_of_peer(target)
 	if not who then return refuse("player") end

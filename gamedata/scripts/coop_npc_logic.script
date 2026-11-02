@@ -763,6 +763,7 @@ local function client_on_fx(t)
 	local f = xr_effects and xr_effects[name]
 	if type(f) ~= "function" then return end
 	local npc = type(t.i) == "number" and t.i >= 0 and level.object_by_id(P.to_local(t.i)) or nil
+	if name == "sr_teleport" and not npc then return end -- he left the level before it came: the stock's box needs the restrictor
 	if name == "kill_actor" and npc then
 		local gate = KILL_GATES[npc:name()]
 		if gate and db.actor:object(gate) then return end

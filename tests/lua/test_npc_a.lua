@@ -303,6 +303,13 @@ local fx_route = sent_named(H, "npc.fx")
 check(#fx_route == 1 and fx_route[1].target == 1, "sr_teleport relayed to the client that walked in, only to him")
 pump()
 check(#C.fx_runs == 1 and C.fx_runs[1] == "sr_teleport", "the client runs sr_teleport on its own character")
+-- He stands on another level by the time it arrives: the restrictor is no object of his world, and the stock's box needs one.
+do
+	C.fx_runs = {}
+	H.env.coop_npc_players.send("npc.fx", { f = "sr_teleport", i = 99999 }, 1)
+	pump()
+	check(#C.fx_runs == 0, "a relayed sr_teleport with no restrictor here does nothing")
+end
 -- The host walks in alone: it runs on the host, nothing goes to the client.
 H.env.db.storage[103].active_section = "sr_idle@wait"
 H.env.db.actor._pos = vec(201, 0, 0)
