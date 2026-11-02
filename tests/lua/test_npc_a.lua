@@ -330,6 +330,36 @@ H.env.xr_logic.save_obj(H.objects[300], packet)
 check(packet.saved and packet.saved[1] == "logic" and packet.saved[2] == "sr_idle@x", "save before first update keeps the loaded section")
 check(HS[300].section_logic == nil and HS[300].active_section == nil, "storage left as it was")
 
+print("== coop_npc_logic: a map server's look at what a binder would save")
+do
+	local looking = true
+	H.env.coop.levels = H.env.coop.levels or {}
+	local was = H.env.coop.levels.logic_look
+	H.env.coop.levels.logic_look = function() return looking end
+	H.add(make_obj(301, 0, 0, 0))
+	local function said(st)
+		HS[301] = st
+		local p = {}
+		H.env.xr_logic.save_obj(H.objects[301], p)
+		return p.saved ~= nil
+	end
+	check(not said({}), "before its first update, nothing loaded: it says nothing")
+	check(not said({ section_logic = "logic", ini = make_ini({}) }), "no logic in its ini: what its first update stamped is no change")
+	check(not said({ loaded_active_section = "nil", loaded_section_logic = "logic" }), "a loaded blank: the same bytes as a new one")
+	check(said({ section_logic = "logic", ini = make_ini({}), active_section = "sr_idle@a" }), "a section: it says")
+	check(not said({ section_logic = "logic", ini = make_ini({ logic = { { "active", "nil" } } }), ini_filename = "default_custom_data.ltx" }),
+		"an empty custom_data: default_custom_data.ltx starts at nil and stays there")
+	check(said({ section_logic = "logic", ini = make_ini({ logic = { { "active", "sr_idle@a" } } }) }),
+		"its logic is over at nil: it says, a next start would begin again")
+	check(said({ loaded_active_section = "sr_idle@x", loaded_section_logic = "logic" }), "a loaded section before its first update: it says")
+	looking = false
+	check(said({ section_logic = "logic", ini = make_ini({}) }), "a real save writes everything")
+	H.env.coop.levels.logic_look = nil
+	check(said({ section_logic = "logic", ini = make_ini({}) }), "an engine without the look: a save")
+	H.env.coop.levels.logic_look = was
+	HS[301] = nil
+end
+
 print("== coop_npc_effects: voices, cosmetic effects, anabiotic, revive")
 local function stock_effects(M)
 	local E = M.env
