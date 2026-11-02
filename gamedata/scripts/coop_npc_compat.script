@@ -494,8 +494,10 @@ local function wrap_body_release()
 		local queue = self and self.release_objects_table
 		if not host_on or type(queue) ~= "table" then return f(self, all, dist, ...) end
 		if all then
-			if P.others()[1] then return end
-			return f(self, all, dist, ...)
+			local coop_api = mod("coop")
+			local lv = coop_api and coop_api.levels
+			if lv and lv.split and lv.split() == true and P.others()[1] then return end
+			return f(self, all, dist, ...) -- without split levels everybody leaves together
 		end
 		local sim = alife()
 		local near = release_dist_sqr(dist)

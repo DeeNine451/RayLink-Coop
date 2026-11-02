@@ -781,8 +781,14 @@ check(#rb.released == 1 and rb.released[1] == 802, "only the body far from every
 check(rb.release_objects_table[801] == true and rb.release_objects_table[802] == nil, "the body near the client stays queued")
 check(rb.size == 5, "the count follows what was released")
 rb.released = {}
+H.env.coop.levels = { split = function() return true end }
 RB.clear(rb, true)
 check(#rb.released == 0 and rb.release_objects_table[801] == true, "clear(all) with a player on this level: the host's level change takes no bodies from under him")
+H.env.coop.levels.split = function() return false end
+RB.clear(rb, true)
+check(#rb.released == 1 and rb.released[1] == 801, "no split levels: everybody leaves together, the stock's clear(all)")
+rb.released, rb.release_objects_table[801], rb.size = {}, true, rb.size + 1
+H.env.coop.levels = nil
 -- the distance is the player's option, not the stock's default: 100 m from the client is near at 150 m
 bodies[803] = { position = vector():set(proxy:position().x + 100, 0, proxy:position().z) }
 H.env.ui_options = { get = function(key) return key == "gameplay/general/corpse_min_dist" and 150 or nil end }

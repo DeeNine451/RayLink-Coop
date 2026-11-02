@@ -840,10 +840,12 @@ local function on_gui_hide(name)
 	if name == "UIInventory" and api.search_window then api.search_window() end
 end
 
+local DEATH_BAG = "coop_death_stash" -- what a fallen player left: no treasure, the mods' rolls would add to it or take from it
+
 -- smr_loot's physic_object_on_use_callback for a box the client opened: one roll a box, no roll for a stash or a body.
 local function first_roll(smr, box)
 	local id = box:id()
-	if not IsInvbox(box) or stash_section(id) then return false end
+	if not IsInvbox(box) or stash_section(id) or box:section() == DEATH_BAG then return false end
 	local boxes = C().find_local(smr, "boxes") or rolled
 	if boxes[id] then return false end
 	boxes[id] = true
@@ -865,7 +867,7 @@ local function install_box_rolls()
 	C().listen("container_opened", function(_, id)
 		CreateTimeEvent("coop_mods_box", "less_artys_" .. id, LESS_ARTYS_DELAY, function()
 			local box = level.object_by_id(id)
-			local ok, e = pcall(function() return box and less_artys(box) end)
+			local ok, e = pcall(function() return box and box:section() ~= DEATH_BAG and less_artys(box) end)
 			if not ok then C().report("items", "less artefacts", e) end
 			return true
 		end)
