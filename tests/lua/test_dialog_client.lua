@@ -159,6 +159,26 @@ boot(Cm)
 check(Hm.handlers["quests.act"] ~= nil and Cm.handlers["quests.trade"] ~= nil, "the host handles quests.act, the client quests.trade")
 local function wait() NOW = NOW + PACE_WAIT_MS end
 
+print("== a story squad is one in the world with split levels")
+do
+	local E = Hm.env
+	local levels, ini, story, object = E.coop.levels, E.ini_sys, E.story_objects, E.alife_object
+	local on = true
+	E.coop.levels = { split = function() return on end }
+	E.ini_sys = { r_string_ex = function(_, s, k) return s == "story_sq" and k == "story_id" and "st_1" or nil end }
+	E.story_objects = { object_id_by_story_id = { st_1 = 777 } }
+	E.alife_object = function(id) return id == 777 and {} or nil end
+	local stands = E.coop_quests_story.story_squad_stands
+	check(stands("story_sq") == true, "its story id stands: no second one")
+	check(stands("plain_sq") == false, "a squad with no story id is as many as the logic says")
+	E.story_objects.object_id_by_story_id.st_1 = 778
+	check(stands("story_sq") == false, "the story id's object is gone: it may be made again")
+	E.story_objects.object_id_by_story_id.st_1 = 777
+	on = false
+	check(stands("story_sq") == false, "split levels off: as the stock")
+	E.coop.levels, E.ini_sys, E.story_objects, E.alife_object = levels, ini, story, object
+end
+
 print("== the data keys are declared before the world loads")
 for _, M in ipairs({ Hm, Cm }) do
 	local joined = table.concat(M.keys, ",")

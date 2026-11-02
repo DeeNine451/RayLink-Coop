@@ -585,11 +585,33 @@ function print_status()
 end
 
 local installed = false
+-- Split levels: a level's one-shot logic can run again where its state was lost (a new map server of the level): the squad of a story_id is
+-- one in the world, its section makes no second one.
+function story_squad_stands(section)
+	local l = coop and coop.levels
+	if not (l and l.split and l.split() and section and ini_sys and story_objects) then return false end
+	local story = ini_sys:r_string_ex(section, "story_id")
+	local id = story and story_objects.object_id_by_story_id[story]
+	return (id and alife_object(id)) and true or false
+end
+
+local function patch_story_squads()
+	local f = xr_effects and xr_effects.create_squad
+	if type(f) ~= "function" then return end
+	xr_effects.create_squad = function(actor, obj, p)
+		if type(p) == "table" and story_squad_stands(p[1]) then
+			printf("[coop-quests] create_squad(%s): this story squad is in the world already", tostring(p[1]))
+			return
+		end
+		return f(actor, obj, p)
+	end
+end
+
 local function install()
 	if installed then return end
 	installed = true
 	for _, s in ipairs({
-		{ "condlist effects", patch_condlist_effects }, { "host effects", patch_host_effects },
+		{ "condlist effects", patch_condlist_effects }, { "host effects", patch_host_effects }, { "story squads", patch_story_squads },
 		{ "client guards", patch_client_guards }, { "helmets", patch_helmets },
 		{ "new storylines", patch_new_storylines }, { "dao", patch_dao },
 	}) do
