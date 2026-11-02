@@ -676,6 +676,31 @@ do
 	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
 end
 
+print("== a new map server says nothing of its leaders before it sorted the save's out: the word goes on its own timer")
+do
+	local function share_env(M)
+		M.share = { up = {}, down = {} }
+		M.env.coop_levels_share = {
+			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
+			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
+		}
+	end
+	local W = stand({ env = share_env })
+	local H, Mk = W.H, W.Mk
+	local saved = { coop_npc_leaders = { [300] = 500, [400] = 501 } }
+	H.fire("load_state", saved)
+	W.refresh()
+	Mk.fire("load_state", saved)
+	check(Mk.share.up.comp_leaders.get() == nil, "before the sort: nothing to tell, the leaders of every level are in its hands")
+	W.refresh()
+	local row = Mk.share.up.comp_leaders.get()
+	check(row ~= nil and row.l[400] == 501 and row.l[300] == nil, "after it: those of its level")
+	H.share.up.comp_leaders.set(row, 2)
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
+end
+
 print("== a squad recruited on a map server: the table of the save does not have it, the stock's mark does")
 do
 	local W = stand()

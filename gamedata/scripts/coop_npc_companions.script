@@ -1285,6 +1285,7 @@ end
 -- server's. Up: what this map server leads. Down: all of it, a new map server takes the squads of its level, once: what it changed
 -- after that is newer than what the world server has heard.
 local function leaders_here()
+	if sort_due then return nil end -- the leaders of a save are every level's: this word would take them off the rows of the other map servers
 	local t = {}
 	for id, lead in pairs(leaders) do t[id] = lead end
 	for id, a in pairs(adopting) do t[id] = a.t.l end
