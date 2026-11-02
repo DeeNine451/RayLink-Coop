@@ -97,7 +97,7 @@ CB.coop_group_rollback_go()
 check(#RESTORED == before, "no load without a death")
 
 -- a client's F5
-check(HANDLERS.save_req ~= nil and HANDLERS.save_req[2] == "host", "the request is taken from clients, on the host")
+check(HANDLERS.save_req ~= nil and HANDLERS.save_req[2] == "world", "the request is the world server's, wherever the player stands: a map server has no save")
 HANDLERS.save_req[1]({}, 3)
 check(QUICK == 1, "the host's quick save")
 ON_WAY = true

@@ -12,6 +12,9 @@
 	<string id="st_coop_evac_watch">
 		<text>Смотришь: %s</text>
 	</string>
+	<string id="st_coop_evac_no_watch">
+		<text>Здесь наблюдать не за кем.</text>
+	</string>
 	<string id="st_coop_evac_no_allies">
 		<text>Живых не осталось. Мир не откатывается.</text>
 	</string>

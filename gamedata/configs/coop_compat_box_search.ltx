@@ -1,0 +1,9 @@
+; Anomaly Coop - what a player's search starts where the body or the box is: guaranteed_loot (a count of searches, Anomaly) and PBA's less
+; artefacts (zz_treasure_manager_pba_less_artys, GAMMA). Read after every coop_route*.ltx (coop_route.ltx explains the order).
+;
+; Both stay host (generated coop_route_stock.ltx, coop_route_gamma.ltx): their callbacks are the world's. coop_mods_items calls them on the
+; authority of the level for a client's search, and they finish in a time event, which a map server has to run.
+
+[route_pairs]
+time_event@guaranteed_loot = level
+time_event@zz_treasure_manager_pba_less_artys = level

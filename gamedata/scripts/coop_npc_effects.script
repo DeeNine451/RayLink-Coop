@@ -14,7 +14,9 @@
 	  - Looped sounds started/stopped by Lua (xr_sound.play_sound_looped / stop_sound_looped) follow at once
 	    (npc.loop) and as a state (coop.sync, session scope, "npc.loops", every 2 s): the join save holds the
 	    table, nothing plays it, and an object that comes online later needs its loop then. A client plays
-	    what the state lists for objects online here and stops the rest of what it started.
+	    what the state lists for objects online here and stops the rest of what it started. A map server is
+	    refused that scope, and the key is the world server's level: it casts its list to each player of its
+	    level (npc.loops, the list as the args), and that is the state of a player there.
 	  - Cosmetic actor effects of the world logic (camera effectors, complex postprocess, psy gluks,
 	    earthshake, actor sound, PDA tips) run on the host as before and are relayed (npc.cfx): to the audience of a
 	    replicated restrictor, or to everybody when no restrictor fired them. Not while the host's player
@@ -47,7 +49,7 @@ local P -- coop_npc_players
 local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err) P.report(TAG, what, err) end
 
-local EV_SND, EV_LOOP, EV_CFX = "npc.snd", "npc.loop", "npc.cfx"
+local EV_SND, EV_LOOP, EV_CFX, EV_LOOPS = "npc.snd", "npc.loop", "npc.cfx", "npc.loops"
 -- client -> host { on = bool }: this player sleeps on an anabiotic (per-player emission immunity, W5;
 -- coop_main's host kill check asks is_anabiotic(peer))
 local EV_ANA = "npc.anabiotic"
@@ -60,6 +62,7 @@ local stats = { snd_out = 0, snd_in = 0, loop_out = 0, loop_in = 0, cfx_out = 0,
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
 local KEY_LOOPS = "npc.loops" -- session scope: a list of "id|theme", ids in host numbering
 local LOOPS_TICK_MS = 2000
+local LOOPS_RETELL_MS = 20000 -- a map server tells a player his list again: he may have reloaded on the spot
 local SOUND_REACH_MAX = 300 -- m: what the engine's relay clamps a sound to
 
 local function logic_audience(npc)
@@ -188,6 +191,31 @@ end
 -- Host: the loops as a state. The table also changes without the wrappers (xr_sound.stop_sounds_by_id at an object's
 -- net_destroy, a save loaded), so it is read, not tracked.
 local loops_sent = nil
+local loops_told = {} -- map server: peer -> { sig, at }
+
+local function tell_loops(sync, list, sig)
+	-- Mk: this is its way, the session key of the world server is refused here
+	local now = time_global()
+	local here = {}
+	for _, o in ipairs(P.others()) do
+		local peer = P.peer_of(o)
+		if peer then
+			here[peer] = true
+			local t = loops_told[peer]
+			if not t or t.sig ~= sig or now - t.at >= LOOPS_RETELL_MS then
+				local ok, why = sync.broadcast(EV_LOOPS, list, { to = peer })
+				if ok == true then
+					loops_told[peer] = { sig = sig, at = now }
+				else
+					report("loops of #" .. tostring(peer), why)
+				end
+			end
+		end
+	end
+	for peer in pairs(loops_told) do
+		if not here[peer] then loops_told[peer] = nil end -- he comes back with a new Lua state
+	end
+end
 
 local function host_loops_tick()
 	local xs = _G["xr_sound"]
@@ -201,10 +229,12 @@ local function host_loops_tick()
 	end
 	table.sort(list)
 	local sig = table.concat(list, ",")
+	if P.is_map_server() then return tell_loops(sync, list, sig) end
 	if sig ~= loops_sent and sync.set("session", KEY_LOOPS, list) == true then loops_sent = sig end
 end
 
 local client_loops = {} -- "local id|theme" -> { id, theme }: what this machine started for the host
+local level_loops = nil -- client: the list of the map server of his level
 local puppet_voices = {} -- local id -> true: a theme npc.snd played on it
 
 local function loop_ready(id)
@@ -220,9 +250,18 @@ local function client_loop_start(id, theme)
 	client_loops[key] = { id, theme }
 end
 
+-- Split levels: the map server of this player's level tells him; a key of the world server is from the level he came from.
+local function on_map_server_level()
+	local l = api and api.levels
+	if not (l and l.split and l.split() == true and l.my_level and l.led_by_host_process) then return false end
+	local level = l.my_level()
+	return level ~= nil and l.led_by_host_process(level) ~= true
+end
+
 local function client_loops_tick()
 	local sync = api and api.sync
-	local list = sync and sync.get("session", KEY_LOOPS)
+	local list = level_loops
+	if not on_map_server_level() then list = sync and sync.get("session", KEY_LOOPS) end
 	if type(list) ~= "table" then return end
 	local want = {}
 	for _, entry in ipairs(list) do
@@ -546,7 +585,7 @@ local function actor_on_update()
 	if not ok then report("loops", err) end
 	-- host: a save made during the hold comes back with anabiotic_in_process set and no hold in this Lua
 	-- state; the poll clears it after the emission (or 20 s), or the host would be immune for good (W5)
-	if not ana.on and P.is_host() and has_alife_info("anabiotic_in_process") then
+	if not ana.on and P.is_world_server() and has_alife_info("anabiotic_in_process") then
 		ana.on, ana.t0, ana.seen, ana.next_check = true, now, false, 0
 	end
 	ana_poll(now)
@@ -573,6 +612,11 @@ function on_game_start()
 	P.on(EV_SND, client_on_snd, "client", TAG)
 	P.on(EV_LOOP, client_on_loop, "client", TAG)
 	P.on(EV_CFX, client_on_cfx, "client", TAG)
+	if api and api.sync then
+		api.sync.on(EV_LOOPS, function(list, from)
+			if from == 0 and P.is_client() and type(list) == "table" then level_loops = list end
+		end)
+	end
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	P.on(EV_ANA, host_on_ana, "host", TAG)
 	-- created by coop_main at load; fired by the engine on the revived player's machine (C1.6)

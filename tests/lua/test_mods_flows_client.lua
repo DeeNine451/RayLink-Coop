@@ -88,6 +88,7 @@ zzz_player_injuries = { health = { head = 0, torso = 0, leftarm = 5, rightarm = 
 utils_obj = { save_var = function(o, k, v) SAVED = SAVED or {}; SAVED[k] = v end }
 smr_loot = { try_spawn = function() ZCP_LOCAL = true end }
 death_manager = { create_release_item = function() CRI_LOCAL = true end }
+item_money = { actor_on_loot_money = function() MONEY_LOCAL = true end }
 
 start_all()
 local C = coop_mods_core
@@ -172,6 +173,8 @@ grok_stashes_on_corpses.npc_on_use(corpse)
 SendScriptCallback("actor_on_first_update")
 death_manager.create_release_item(corpse)
 check(sent("mods.corpse_loot").n == corpse:id() and not CRI_LOCAL, "corpse loot: a client asks the host, no local roll")
+item_money.actor_on_loot_money(corpse)
+check(not MONEY_LOCAL, "corpse loot: the money is made where the body is, a client makes none")
 check(sent("mods.gso_use").n == corpse:id() and not ORIG_GSO, "corpse stash: rolled by the host")
 
 -------------------------------------------------------------------------------

@@ -914,6 +914,8 @@ local function patch_world_calls()
 	if type(release) == "function" then
 		srm.release = function(se, ...)
 			if held_there(se) then return order(se.id, "release") end
+			local lv = levels()
+			if se and lv and lv.body_stays and lv.body_stays(se.id) then return end -- a squad's remove_npc: the body lies on a map server
 			return release(se, ...)
 		end
 	end

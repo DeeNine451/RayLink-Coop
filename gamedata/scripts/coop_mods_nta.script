@@ -93,6 +93,23 @@ local function any_of_faction(name)
 	return false
 end
 
+local function split_levels()
+	local l = C().engine().levels
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+
+-- A player of the faction on that level. level.name() answers for this process, with split levels each player stands on his own level.
+local function faction_on_level(name, lvl)
+	local split = split_levels()
+	for _, p in ipairs(C().all_players()) do
+		if faction_of(p.obj) == name then
+			local id = split and C().engine().levels.level_of_player(p.peer)
+			if (id and alife():level_name(id) or level.name()) == lvl then return true end
+		end
+	end
+	return false
+end
+
 -------------------------------------------------------------------------------
 -- Range helpers
 -------------------------------------------------------------------------------
@@ -579,8 +596,8 @@ local function urgent_side()
 	if info[URGENT_DUTY] then return "dolg" end
 	if info[URGENT_ARMY] then return "army" end
 	local nu = C().mod("nta_utils")
-	if nu.actor_on_level(nu.levels.bar) and any_of_faction("dolg") then return "dolg" end
-	if nu.actor_on_level(nu.levels.agroprom) and any_of_faction("army") then return "army" end
+	if faction_on_level("dolg", nu.levels.bar) then return "dolg" end
+	if faction_on_level("army", nu.levels.agroprom) then return "army" end
 	return nil
 end
 
@@ -648,7 +665,11 @@ end
 -- The checks of the first update run when clients are not there yet.
 local function on_new_player()
 	local uo = C().mod("tasks_urgent_orders")
-	if uo then uo.actor_on_first_update() end
+	if uo and split_levels() then
+		for _, p in ipairs(C().all_players()) do qc().with_level_of(p.peer, uo.actor_on_first_update) end -- it reads level.name()
+	elseif uo then
+		uo.actor_on_first_update()
+	end
 	local dl = C().mod("dialogs_lostzone")
 	local isg_check = dl and C().find_local(dl, "actor_on_first_update")
 	if isg_check and any_of_faction("isg") and not has_alife_info("lttz_hb_spawned_ds_isg_leader_squad") then isg_check() end

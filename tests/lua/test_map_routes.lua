@@ -58,6 +58,10 @@ check(runs_on_map_server("time_event", "xcv_phantoms_fix"), "phantoms: the relea
 print("== a wrapper of a world handler keeps its domain")
 check(coop_native.route("actor_on_interaction", "coop_levels_tables") == "host", "drx_da_main's handler in a wrapper: world server only, one roll")
 check(domain_on_map_server("actor_on_interaction", "coop_levels_tables") == "host", "and not on a map server")
+-- what a player's search starts runs where the body or the box is: the timers of these two stay at the authority of the level
+check(domain_on_map_server("time_event", "guaranteed_loot") == "level", "the check of guaranteed_loot's search on a map server")
+check(domain_on_map_server("time_event", "zz_treasure_manager_pba_less_artys") == "level", "the clean of PBA's less artefacts on a map server")
+check(coop_native.route("npc_on_use", "guaranteed_loot") == "host", "their other handlers stay as they were")
 check(domain_on_map_server("time_event", "coop_npc_adapters") == "level", "trader_autoinject.timed_update in its wrapper")
 check(not coop_native.runs_here("level", false), "which a client does not run")
 

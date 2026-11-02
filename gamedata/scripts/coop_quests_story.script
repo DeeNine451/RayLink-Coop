@@ -607,11 +607,41 @@ local function patch_story_squads()
 	end
 end
 
+-- A map server's actor is its ghost: goodwill said of "the actor" lies on the players of the level (coop_story, ghost_said), and what logic
+-- asks of the actor is theirs. An enemy of one is an enemy; friend and neutral are the word of the player nearest to the NPC.
+local function patch_ghost_relations()
+	local xc = qc.mod("xr_conditions")
+	if not xc then return end
+	local function of_ghost(actor) return actor ~= nil and qc.is_map_server() and actor:id() == 0 end
+	local function wrap(name, answer)
+		local f = xc[name]
+		if type(f) ~= "function" then return end
+		xc[name] = function(actor, npc, ...)
+			if of_ghost(actor) and npc then return answer(f, actor, npc, ...) end
+			return f(actor, npc, ...)
+		end
+	end
+	for _, name in ipairs({ "actor_enemy", "actor_true_enemy" }) do
+		wrap(name, function(f, _, npc, ...)
+			for _, c in ipairs(qc.characters()) do
+				if f(c.obj, npc, ...) then return true end
+			end
+			return false
+		end)
+	end
+	for _, name in ipairs({ "actor_friend", "actor_true_friend", "actor_neutral", "actor_true_neutral" }) do
+		wrap(name, function(f, actor, npc, ...)
+			return f(qc.nearest_character(npc:position()) or actor, npc, ...)
+		end)
+	end
+end
+
 local function install()
 	if installed then return end
 	installed = true
 	for _, s in ipairs({
 		{ "condlist effects", patch_condlist_effects }, { "host effects", patch_host_effects }, { "story squads", patch_story_squads },
+		{ "ghost relations", patch_ghost_relations },
 		{ "client guards", patch_client_guards }, { "helmets", patch_helmets },
 		{ "new storylines", patch_new_storylines }, { "dao", patch_dao },
 	}) do

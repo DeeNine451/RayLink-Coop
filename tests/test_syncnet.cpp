@@ -973,3 +973,28 @@ TEST(limits_pacer_holds_back_what_the_host_would_drop)
 	CHECK(coop::limits::client_rule(Msg::PlayerAnim) == nullptr);
 	CHECK(coop::limits::client_rule(Msg::ScriptEvent) != nullptr);
 }
+
+// Split levels: a map server is a client of the world and the host of its level. Its effects are the second.
+TEST(syncnet_a_map_server_broadcasts)
+{
+	CHECK(sn::may_broadcast(false, true)); // the host's process
+	CHECK(sn::may_broadcast(false, false)); // no session
+	CHECK(sn::may_broadcast(true, true)); // a map server
+	CHECK(!sn::may_broadcast(true, false)); // a player
+}
+
+// A point means something on one level: a record of a body on another level may well be near the same numbers.
+TEST(syncnet_a_cast_stays_on_its_level)
+{
+	constexpr uint16_t here = 1, there = 2, none = sn::kNoCastLevel;
+	// no level named: this process's own
+	CHECK(sn::cast_reaches(none, here, true));
+	CHECK(!sn::cast_reaches(none, there, false));
+	// a level named, a far view of the world server
+	CHECK(sn::cast_reaches(there, there, false));
+	CHECK(!sn::cast_reaches(there, here, true));
+	CHECK(sn::cast_reaches(here, here, true));
+	// a player the table has no level for: as on_host_level
+	CHECK(sn::cast_reaches(there, none, true));
+	CHECK(!sn::cast_reaches(there, none, false));
+}

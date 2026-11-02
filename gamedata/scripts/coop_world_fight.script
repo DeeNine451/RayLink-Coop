@@ -16,7 +16,8 @@
 
 	Events (ids in host numbering):
 	  world.hit  host -> client  { i = victim, a = amount, b = bone, m = true for a monster }
-	coop.sync: session scope, "world.fight.<peer>" = list of NPC ids.
+	coop.sync: session scope, "world.fight.<peer>" = list of NPC ids. A map server is a client of the world and the engine refuses it that
+	scope: it casts the list to the player (world.fight, the list as the args), and a player on its level reads that instead of the key.
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -30,7 +31,7 @@ local P -- coop_npc_players
 local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err) P.report(TAG, what, err) end
 
-local EV_HIT = "world.hit"
+local EV_HIT, EV_FIGHT = "world.hit", "world.fight"
 local KEY_PREFIX = "world.fight."
 local TICK_MS = 1000
 -- Hits told to one player, as a bucket: a shotgun's pellets come as separate hits.
@@ -65,31 +66,58 @@ local function fights_by_player()
 	return lists
 end
 
+local function tell_list(sync, peer, l)
+	if P.is_map_server() then return sync.broadcast(EV_FIGHT, l, { to = peer }) end
+	return sync.set("session", KEY_PREFIX .. tostring(peer), l)
+end
+
 local function host_tick()
 	local sync = api and api.sync
 	if not sync then return end
 	local lists = fights_by_player()
+	local here = {}
 	for _, o in ipairs(P.others()) do
 		local peer = P.peer_of(o)
 		if peer then
+			here[peer] = true
 			local l = lists[o:id()] or {}
 			table.sort(l)
 			local sig = table.concat(l, ",")
-			if (sent[peer] or "") ~= sig and sync.set("session", KEY_PREFIX .. tostring(peer), l) == true then
-				sent[peer] = sig
-				stats.lists = stats.lists + 1
+			if (sent[peer] or "") ~= sig then
+				local ok, why = tell_list(sync, peer, l)
+				if ok == true then
+					sent[peer] = sig
+					stats.lists = stats.lists + 1
+				else
+					report("list of #" .. tostring(peer), why)
+				end
 			end
+		end
+	end
+	if P.is_map_server() then
+		for peer in pairs(sent) do
+			if not here[peer] then sent[peer] = nil end -- he comes back with a new Lua state: he hears it again
 		end
 	end
 end
 
 local mine = {} -- client: local ids this script put into the table
+local told = nil -- client: the list of the map server of his level
+
+-- Split levels: the map server of this player's level tells him; a key of the world server is from the level he came from.
+local function on_map_server_level()
+	local l = api and api.levels
+	if not (l and l.split and l.split() == true and l.my_level and l.led_by_host_process) then return false end
+	local level = l.my_level()
+	return level ~= nil and l.led_by_host_process(level) ~= true
+end
 
 local function client_tick()
 	local sync = api and api.sync
 	local ci = _G["xr_combat_ignore"]
 	if not (sync and ci and type(ci.fighting_with_actor_npcs) == "table") then return end
-	local list = sync.get("session", KEY_PREFIX .. tostring(P.self_peer()))
+	local list = told
+	if not on_map_server_level() then list = sync.get("session", KEY_PREFIX .. tostring(P.self_peer())) end
 	local want = {}
 	if type(list) == "table" then
 		for _, hid in ipairs(list) do
@@ -222,4 +250,9 @@ function on_game_start()
 	RegisterScriptCallback("npc_on_hit_callback", npc_on_hit_callback)
 	RegisterScriptCallback("monster_on_hit_callback", monster_on_hit_callback)
 	P.on(EV_HIT, client_on_hit, "client", TAG)
+	if api.sync then
+		api.sync.on(EV_FIGHT, function(list, from)
+			if from == 0 and P.is_client() and type(list) == "table" then told = list end
+		end)
+	end
 end

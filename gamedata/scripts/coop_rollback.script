@@ -102,6 +102,6 @@ function on_game_start()
 	RegisterScriptCallback("coop_group_rollback_go", on_go)
 	RegisterScriptCallback("actor_on_first_update", on_first_update)
 	coop_mods_core.on("rollback", function(t) warn(t.n, t.s) end, "client")
-	coop_mods_core.on("save_req", on_save_request, "host")
+	coop_mods_core.on("save_req", on_save_request, "world") -- the save is the world server's: a map server's "host" side has none
 	coop_mods_core.set_limit("save_req", 2, 0.2)
 end

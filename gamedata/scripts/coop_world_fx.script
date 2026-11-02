@@ -25,12 +25,14 @@
 
 	Other scripts: coop_world_fx.play(name, pos, dir) plays a particle here and on the clients near pos.
 
-	coop.sync effects (host -> clients):
+	coop.sync effects (the authority of a level -> its clients; the engine's "everybody" of a map server is the players of its level):
 	  world.part { n = particle, x, y, z, dx, dy, dz }        near the point
 	  world.mark { t = texture, x, y, z, dx, dy, dz, r, s, l, o = object }   near the point
 	  world.snd  { s = path, x, y, z | nothing, v, q }        near the point, or everybody for a 2D sound
 	  world.cfx  { k = cam | uncam | pp | unpp | cpx | uncpx, n = name, i = id, l = loop }   everybody
-	  world.flare { i = object, on = 1 | 0 }                   everybody: the smoke of an emission flare (its light is a lamp, coop_lamps)
+	  world.flare { i = object, on = 1 | 0 }                   its level: the smoke of an emission flare (its light is a lamp, coop_lamps)
+	A point is on the level of this process, or on the one a far view looks at (coop_quests_far): the cast names it. The hit effects of
+	EFFECT_SCRIPTS are all points. "Everybody" stays for the group tasks of TASK_SCRIPTS, whatever level a player stands on.
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -98,11 +100,35 @@ local function allowed()
 	return true
 end
 
+-- The level a far view of the world server looks at, nil outside one: a task's point is on that level.
+local function far_level()
+	local far = rawget(_G, "coop_quests_far")
+	local scope = far and far.in_scope and far.in_scope()
+	return scope and scope.id or nil
+end
+
+local function told(ok, why)
+	if ok == true then return true end
+	report("cast", why)
+	return false
+end
+
 local function cast(name, args, x, y, z, radius)
+	-- Mk: the engine takes it to the players of its level (l_broadcast)
 	local s = api and api.sync
 	if not s then return false end
-	if x then return s.broadcast(name, args, { pos = vector():set(x, y, z), radius = radius }) == true end
-	return s.broadcast(name, args) == true
+	if x then return told(s.broadcast(name, args, { pos = vector():set(x, y, z), radius = radius, level = far_level() })) end
+	return told(s.broadcast(name, args))
+end
+
+-- To the players of this level: an object of it is nowhere else.
+local function cast_level(name, args)
+	-- Mk: the engine takes it to the players of its level (l_broadcast)
+	local s = api and api.sync
+	if not s then return false end
+	local l = api.levels
+	local level = l and l.my_level and l.my_level()
+	return told(s.broadcast(name, args, level and { level = level } or nil))
 end
 
 local function relaying() return host_on and muted == 0 end
@@ -406,7 +432,7 @@ local function wrap_flares()
 	if not class then return end
 	local launch, slow_fly, stop_light = class.launch, class.slow_fly, class.stop_light
 	local function send(self, on)
-		if host_on then cast(EV_FLARE, { i = self.object:id(), on = on }) end
+		if host_on then cast_level(EV_FLARE, { i = self.object:id(), on = on }) end
 	end
 	class.launch = function(self, ...)
 		local started = launch(self, ...)

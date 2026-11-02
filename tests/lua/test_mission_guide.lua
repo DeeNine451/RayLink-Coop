@@ -146,6 +146,21 @@ check(Hm.failed == 1, "the stock function ran")
 check(#grants == 1 and grants[1][1] == 1 and grants[1][2] == -1500, "the fine is the taker's, against his ledger")
 check(Hm.money_moves == nil or #Hm.money_moves == 0, "the host's money is untouched")
 
+print("== a taker on a map server's level: no object of his here, the fine is still his")
+guid_h = Hm.guide.offer()
+Hm.env.tasks_guide.activate()
+local far_job = Hm.guide.job()
+far_job.squad_id, far_job.neustoika, far_job.coop_taker = 903, 1500, 1
+local far_body = Hm.objects[500]
+Hm.objects[500] = nil
+Hm.actor._money = 5000
+Hm.money_moves = {}
+grants = {}
+Hm.env.tasks_guide.fail_complete_late()
+Hm.objects[500] = far_body
+check(#grants == 1 and grants[1][1] == 1 and grants[1][2] == -1500, "the fine comes from him")
+check(#Hm.money_moves == 0, "the host pays nothing")
+
 print("== a host's own job: stock")
 guid_h = Hm.guide.offer()
 Hm.env.tasks_guide.activate()

@@ -190,5 +190,34 @@ do
 	check(H.sync_sets == sets, "a small change of the host's wetness is not sent")
 end
 
+print("== wetness: the host's numbers are of the host's level")
+do
+	local H, C = world_pair()
+	stock_weathers(H, 100)
+	stock_weathers(C, 200)
+	local WH, WC = load_script(H, "coop_world_weather"), load_script(C, "coop_world_weather")
+	WH.on_game_start()
+	WC.on_game_start()
+	local mine = "(1.000000, 0.300000, 0.000000)"
+	C.console.ssfx_wetness_multiplier = mine
+	C.env.coop.levels = {
+		split = function() return true end,
+		my_level = function() return 2 end,
+		level_of_player = function(p) return p == 0 and 1 or 2 end,
+	}
+	H.wet, C.wet = 0.9, 0
+	step(H, C)
+	step(H, C)
+	check(C.console.ssfx_wetness_multiplier == mine, "a map server's level has its own rain: its wetness is not steered")
+	C.env.coop.levels.level_of_player = function() return 2 end
+	step(H, C)
+	step(H, C)
+	check(C.console.ssfx_wetness_multiplier ~= mine, "on the host's level it follows the host again")
+	C.env.coop.levels.level_of_player = function(p) return p == 0 and 1 or 2 end
+	step(H, C)
+	step(H, C)
+	check(C.console.ssfx_wetness_multiplier:find("^%(1"), "and the player's numbers come back when the host leaves")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

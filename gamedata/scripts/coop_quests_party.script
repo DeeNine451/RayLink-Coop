@@ -296,33 +296,45 @@ end
 -- Dialog conditions that read the host's data
 -------------------------------------------------------------------------------
 -- A zone binder's counter and an NPC's pstor are filled by logic that runs on the host only, so a client's dialog saw
--- nothing there. The host reads them once a second (when a player is connected) and sends what changed; the client's
--- conditions read that copy.
+-- nothing there. The authority of the level reads them once a second (when a player is connected) and sends what changed;
+-- the client's conditions read that copy.
 local MIRROR_MS = 1000
 local B32_ZONES = { "jup_b32_anomal_zone", "jup_b201_anomal_zone", "jup_b209_anomal_zone", "jup_b211_anomal_zone", "jup_b10_anomal_zone" }
 local LOOT_NEED = 9 -- loot the bandit companions bring (dialogs_darkvalley.bandit_companion_task_1_complete)
 local LOOT_KEY = "bandit1"
 local mirror = { vals = {}, sent = {}, next = 0, players = 0 }
 
--- Host: the values as the stock conditions read them now. A zone: -1 none there, 0 nothing spawned, 1 an artefact spawned.
+local function split_levels()
+	local l = qc.engine() and qc.engine().levels
+	return l ~= nil and l.split ~= nil and l.split() == true
+end
+
+-- The values as the stock conditions read them now. A zone: -1 none there, 0 nothing spawned, 1 an artefact spawned. With split levels a
+-- process says only what stands on its own level: the rest is the other process's to say, and two voices would flip the client's copy.
 local function mirror_values()
 	local out = {}
+	local split = split_levels()
 	local by_name = db.anomaly_by_name or {}
 	for _, zone in ipairs(B32_ZONES) do
 		local z = by_name[zone]
-		out["b32:" .. zone] = z == nil and -1 or ((tonumber(z.spawned_count) or 0) > 0 and 1 or 0)
+		if z ~= nil or not split then
+			out["b32:" .. zone] = z == nil and -1 or ((tonumber(z.spawned_count) or 0) > 0 and 1 or 0)
+		end
 	end
 	local gs = rawget(_G, "get_story_squad")
 	local squad = gs and gs("bandit_companion_task_1")
-	local total = 0
+	local total, here = 0, false
 	if squad then
 		for k in squad:squad_members() do
 			local st = db.storage[k.id]
 			local npc = st and st.object
-			if npc then total = total + (load_var(npc, "s_loot_count") or 0) end
+			if npc then
+				here = true
+				total = total + (load_var(npc, "s_loot_count") or 0)
+			end
 		end
 	end
-	out[LOOT_KEY] = total >= LOOT_NEED and 1 or 0
+	if here or not split then out[LOOT_KEY] = total >= LOOT_NEED and 1 or 0 end
 	return out
 end
 
@@ -680,7 +692,7 @@ local function actor_on_update()
 	if qc.client_live() then
 		local ok, err = pcall(measure_tick)
 		if not ok then qc.report(TAG, "measure", err) end
-	elseif qc.is_host() then
+	elseif qc.is_host() or qc.is_map_server() then
 		local ok, err = pcall(mirror_tick)
 		if not ok then qc.report(TAG, "mirror", err) end
 	end

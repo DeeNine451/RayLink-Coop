@@ -17,7 +17,8 @@
 	   Lua has no way to set it: a client that joins a long rain stays dry, at 144 fps it gets wet 3.6 times as fast as a
 	   host at 40. The host writes its value; a client outside a small band steers its own with the two console rates of
 	   ssfx_wetness_multiplier (x build-up in rain, y drying), and puts the player's numbers back inside the band and
-	   when it leaves the world, so user.ltx never keeps a correction.
+	   when it leaves the world, so user.ltx never keeps a correction. On a map server's level it rains by that level's sky:
+	   the host's number says nothing there, the player's own wetness runs on.
 	Everything here is a no-op outside a co-op session.
 --]]
 
@@ -164,6 +165,14 @@ local function wet_release()
 	own = nil
 end
 
+-- This player stands where the host's process stands: with split levels his sky may be another.
+local function on_host_level()
+	local l = api.levels
+	if not (l and l.split and l.split() == true) then return true end
+	local mine, his = l.my_level(), l.level_of_player(0)
+	return mine == nil or his == nil or mine == his
+end
+
 local function faster(base, gap)
 	return math_min(RATE_MAX, base * (1 + gap * RATE_GAIN))
 end
@@ -233,7 +242,7 @@ local function tick()
 			local have, file_changed = apply(wm)
 			if have and file_changed then wm:set_brightness_boosts() end
 		end
-		wet_client_tick()
+		if on_host_level() then wet_client_tick() else wet_release() end
 	end
 end
 

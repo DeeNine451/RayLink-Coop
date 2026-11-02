@@ -123,7 +123,7 @@
 | `on_change(scope, prefix, fn \| nil)` | `fn(key, value, old, by_peer)`; для `"object"` пятый аргумент — id объекта; `nil` снимает подписку |
 | `handler(name, fn \| nil)` | хост: `fn(peer, args) -> ok, result` — обработчик запросов |
 | `request(name, args, fn \| nil)` | кто угодно: обработчик хоста, ответ — `fn(ok, result)` |
-| `broadcast(name, args, opts) -> true, machines` | хост: эффект всем (`nil`), одному (`{to = peer}`) или в радиусе (`{pos = vector, radius = m}`); хост — тоже получатель |
+| `broadcast(name, args, opts) -> true, machines` | авторитет карты: эффект всем (`nil`), одному (`{to = peer}`), в радиусе (`{pos = vector, radius = m}`) или всем на карте (`{level = id}`); хост — тоже получатель. Сервер карты шлёт только игрокам своей карты и сам получателем не бывает. Точка лежит на карте процесса, `level = id` рядом с `pos` называет другую. `args` — плоская таблица, как значение `set` |
 | `on(name, fn \| nil)` | `fn(args, from)` — эффект пришёл |
 | `near(peer, obj_id, dist)`, `owns(peer, item_id)`, `in_container(peer, item_id, box_id)` | проверки для обработчиков хоста: персонаж игрока рядом, предмет у него, предмет в ящике рядом с ним (15 м) |
 | `limit(name, burst, per_sec)` | хост: частота запросов `name` от одного игрока; по умолчанию 20 подряд, затем 10 в секунду |

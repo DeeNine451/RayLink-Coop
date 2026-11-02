@@ -434,6 +434,18 @@ do
 	deliver_all()
 	check(has(A.HUD, "smart900"), "the capture tip reaches the client")
 
+	-- split levels: the coordinates of a player on another level say nothing of this one
+	stw.manual_point = nil
+	H.coop.levels = {
+		split = function() return true end,
+		my_level = function() return 1 end,
+		level_of_player = function(p) return p == 1 and 2 or 1 end,
+	}
+	stw.process_manual_capture(smart)
+	check(stw.manual_point == nil, "a player on another level captures nothing here")
+	H.coop.levels = nil
+	stw.manual_point = nil
+
 	-- world loot
 	local gs = H.game_setup
 	local ammo = add_item(H, 700, "ammo_9x19", 65535)

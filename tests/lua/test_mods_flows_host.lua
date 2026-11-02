@@ -435,6 +435,7 @@ check(sent("mods.sleepy_max").v == 7500, "sleep: the group's most tired value se
 ui_sleep_dialog.UISleep.TestAndShow({})
 check(SLEEP_SEEN == 7500 and actor_status_sleep.get_last_sleep() == 1000, "sleep: the dialog judges the group, the stat stays own")
 local _, zbox = spawn("box", vec3(20, 0, 1))
+zbox._kind = "box"
 coop_mods_core.on_container_opened(1, zbox:id())
 check(ZCP_ROLL and ZCP_ROLL.box == zbox:id() and ZCP_ROLL.actor == 500, "ZCP: a client's container rolled with that player as the actor")
 coop_main.on_event("mods.song", coop_main.encode({ s = "guitar\\song1", l = 3000 }), 1)

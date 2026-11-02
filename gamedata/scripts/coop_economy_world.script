@@ -34,11 +34,14 @@ local stats = { captures_checked = 0, capture_tips = 0, baked = 0, peer_takes = 
 -------------------------------------------------------------------------------
 local capture_depth = 0
 
--- Positions of every player's character on the host (the host actor is measured by stock itself).
+-- Positions of every player's character on the host's level (the host actor is measured by stock itself): a player on another level has
+-- coordinates of that level.
 local function other_player_positions()
 	local out = {}
+	local l = core.split_levels() and core.engine().levels or nil
+	local mine = l and l.my_level()
 	for _, p in ipairs(core.players()) do
-		if not p.is_self and p.pos then out[#out + 1] = p.pos end
+		if not p.is_self and p.pos and (not l or l.level_of_player(p.id) == mine) then out[#out + 1] = p.pos end
 	end
 	return out
 end

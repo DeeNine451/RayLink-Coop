@@ -7,9 +7,13 @@
 
 	The host publishes the hint's six numbers with coop.sync (object scope: it goes when the NPC goes, a joiner gets his copy
 	from the engine); a client keeps them in its own m_data, where the hint reads them. Nothing in stock changes.
+
+	A map server counts the NPCs of its level. coop.sync refuses it an object it does not hold as a player, so the numbers go to the world
+	server as an event, which keeps them for its save and publishes them.
 --]]
 
 local KEY = "npc_stats"
+local EV_UP = "npc_stats_up"
 local HINT = {
 	killed_stalkers = true,
 	killed_monsters = true,
@@ -23,6 +27,8 @@ local installed = false
 
 local function sync() return rawget(_G, "coop") and coop.sync end
 
+local function map_server() return coop.is_map_server ~= nil and coop.is_map_server() == true end
+
 local function publish(npc)
 	local id = npc and npc:id()
 	local se = id and alife_object(id)
@@ -30,7 +36,28 @@ local function publish(npc)
 	if not state then return end
 	local t = {}
 	for k in pairs(HINT) do t[k] = state[k] end
-	sync().set("object:" .. id, KEY, t)
+	if map_server() then
+		t.id = id
+		coop.send_event(EV_UP, coop_main.encode(t), 0)
+	else
+		sync().set("object:" .. id, KEY, t)
+	end
+end
+
+-- World server: the numbers of an NPC of a map server's level.
+local function on_up(payload, from)
+	if not (coop.is_host() and type(from) == "number" and from >= 0x100) then return end
+	local t = coop_main.decode(payload)
+	local id = tonumber(t.id)
+	local se = id and alife_object(id)
+	local state = se and alife_storage_manager.get_se_obj_state(se, true)
+	if not state then return end
+	local v = {}
+	for k in pairs(HINT) do
+		v[k] = tonumber(t[k])
+		state[k] = v[k]
+	end
+	sync().set("object:" .. id, KEY, v)
 end
 
 local function install_host()
@@ -39,7 +66,7 @@ local function install_host()
 	installed = true
 	game_statistics.increment_npc_statistic = function(npc, value, ...)
 		orig(npc, value, ...)
-		if HINT[value] and coop.is_active() and coop.is_host() then
+		if HINT[value] and coop.is_active() and (coop.is_host() or map_server()) then
 			local ok, err = pcall(publish, npc)
 			if not ok then printf("! coop_npc_stats: %s", tostring(err)) end
 		end
@@ -55,9 +82,10 @@ end
 
 function on_game_start()
 	if not sync() then return end
-	if coop.is_client() then
-		coop.sync.on_change("object", KEY, on_change)
-	else
+	if coop.is_client() then coop.sync.on_change("object", KEY, on_change) end
+	if not coop.is_client() or map_server() then
 		install_host() -- also before a session starts: the wrapper asks for one each time
+		local cm = rawget(_G, "coop_main") or coop_main
+		if cm then cm.add_event_handler(EV_UP, on_up) end
 	end
 end

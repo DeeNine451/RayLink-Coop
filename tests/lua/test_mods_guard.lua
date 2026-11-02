@@ -858,6 +858,72 @@ check(new_h ~= nil and SE[se_h.id] == nil and coop.lease_ids() == 0,
 MODE = "client"
 alife, alife_release = base_alife, base_release
 
+-------------------------------------------------------------------------------
+-- C5, C6: what a client's copy must not do
+-------------------------------------------------------------------------------
+print("-- C5: a pack of _bad rounds put into a box")
+function GO:ammo_get_count() return self._rounds or 0 end
+function GO:ammo_box_size() return 30 end
+function GO:ammo_set_count(n) self._rounds = n end
+local function is_box(o) return o and o._kind == "box" end
+IsInvbox = is_box
+_NO_DAMAGED_AMMO = true
+-- alife:create_ammo and alife:create on a client: the parent must be ours (coop_calls.h own_spawn), else refused
+local base_create = alife_create_item
+function alife_create_item(section, owner, t)
+	if owner:id() ~= 0 and not owned(owner:id()) then
+		REQ[#REQ + 1] = { kind = "refused_spawn", sec = section }
+		return nil
+	end
+	return base_create(section, owner, t)
+end
+INI.ammo_test_bad, INI.ammo_test = {}, {}
+local _, ammo_box = spawn("inv_box", vec3(1, 2, 4))
+ammo_box._kind = "box"
+local function bad_pack(rounds)
+	local _, pack = spawn("ammo_test_bad", nil, 0) -- a move to a box waits for the host: here it is still ours
+	pack._rounds = rounds
+	return pack
+end
+if GAMMA then
+	item_weapon.string_find, item_weapon.string_gsub = string.find, string.gsub
+	load(GAMMA_DIR .. BS .. "item_weapon.script", { "function ammo_aggregation(obj, npc)" }, "item_weapon")
+	local pack = bad_pack(20)
+	ok = act(item_weapon.ammo_aggregation, pack, ammo_box)
+	check(ok and destroyed(pack:id()) and count("refused_spawn", "ammo_test") == 1,
+		"bug (documented): the release goes to the host, which took the pack into the box (destroy_check: allowed there), "
+		.. "the new pack into the box is refused: the pack is lost")
+	NOW = NOW + 3000
+	SendScriptCallback("actor_on_update")
+	pack = bad_pack(20)
+	ok = act(item_weapon.ammo_aggregation, pack, ammo_box)
+	check(ok and #REQ == 0, "with the guard: a box is not this machine's, nothing is asked, the pack stays as it is")
+	ok = act(item_weapon.ammo_aggregation, pack)
+	check(ok and destroyed(pack:id()) and count("spawn", "ammo_test") == 1, "the own inventory goes on as in the stock")
+	local mine = bad_pack(20)
+	ok = act(item_weapon.ammo_aggregation, mine, db.actor)
+	check(ok and destroyed(mine:id()) and count("spawn", "ammo_test") == 1, "the actor given by name too")
+	MODE = "host"
+	REQ = {}
+	check(pcall(item_weapon.ammo_aggregation, bad_pack(20), ammo_box), "the host's own box runs the stock")
+	MODE = "client"
+else
+	print("-- skipped: no GAMMA scripts")
+end
+alife_create_item = base_create
+
+print("-- C6: a dying NPC's items are not the client's to keep or release")
+local KEEP = 0
+death_manager = { decide_items_to_keep = function() KEEP = KEEP + 1 end }
+NOW = NOW + 3000
+SendScriptCallback("actor_on_update")
+death_manager.decide_items_to_keep({})
+check(KEEP == 0, "on a client it does nothing: its copy of the NPC follows the host")
+MODE = "host"
+death_manager.decide_items_to_keep({})
+check(KEEP == 1, "the host decides")
+MODE = "client"
+
 print("-- texts: st_coop_mods.xml (eng, rus; windows-1251) and the script's fallbacks")
 local function read_raw(p)
 	local fh = io.open(p, "rb")

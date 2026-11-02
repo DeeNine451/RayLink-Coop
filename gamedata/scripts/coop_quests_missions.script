@@ -683,7 +683,7 @@ local function patch_guide_timers()
 			m[name] = function(...)
 				local job = guide_table("curr_guid")
 				local peer = job and job.coop_taker
-				if not (qc.is_host() and peer and qc.avatar_obj(peer)) then return f(...) end
+				if not (qc.is_host() and peer and ct().peer_in_session(peer)) then return f(...) end -- on a map server's level he has no object here
 				local dl = qc.mod("dialogs")
 				local relocate = dl.relocate_money
 				dl.relocate_money = function(who, n, typ, ...)

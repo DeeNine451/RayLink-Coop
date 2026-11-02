@@ -6,6 +6,9 @@
 	Dynamic Anomalies Overhaul: each level's anomalies and artefacts are made by whoever leads it, from drx_da_main.updated_anomaly_levels. A
 	map server's row of it goes to the save. What an emission does to all of them is rolled once, on the world server: the levels map servers
 	lead take the part of "the level the actor stands on" (disabled now, cleaned when it loads again), the others stay as they are.
+	bind_anomaly_zone: the mark that a level spawns artefacts after an emission. A level spends it when it loads; a map server spent it in its
+	own copy, so the mark stayed in the save and every new map server of that level spawned them again.
+	smr_loot, zz_treasure_manager_pba_less_artys: a box rolls once, by a table of the save. A map server rolls a box for a player's window.
 	logic_enforcer: an NPC a task gave a logic to may stand on a map server's level.
 	guards_spawner: the squads it made since the map server started: its on_enemy_eval runs there.
 --]]
@@ -175,6 +178,56 @@ local function dao_merge(row, lid)
 end
 
 -------------------------------------------------------------------------------
+-- Artefacts after an emission
+-------------------------------------------------------------------------------
+local spawned_artefacts = 0
+
+-- At the start: the stock asks for this on the first update of a level and at the end of an emission, through its module table.
+local function patch_artefacts()
+	local baz = mod("bind_anomaly_zone")
+	local spawn = baz and baz.force_spawn_artefacts
+	if type(spawn) ~= "function" then return end
+	baz.force_spawn_artefacts = function(...)
+		spawned_artefacts = spawned_artefacts + 1
+		return spawn(...)
+	end
+end
+
+local function artefacts_get()
+	return spawned_artefacts > 0 and { n = spawned_artefacts } or nil
+end
+
+local function artefacts_spent(_, lid)
+	local marks = alife_storage_manager.get_state().artefact_respawn_levels
+	if type(marks) == "table" and lid ~= nil then marks[alife():level_name(lid)] = nil end
+end
+
+-------------------------------------------------------------------------------
+-- Boxes rolled for a player's window
+-------------------------------------------------------------------------------
+local BOX_TABLES = { "smr_loot", "zz_treasure_manager_pba_less_artys" }
+
+local function box_table(name)
+	local m = mod(name)
+	return m and coop_mods_core.find_local(m, "boxes") or nil
+end
+
+local function boxes_get()
+	local out = {}
+	for _, name in ipairs(BOX_TABLES) do out[name] = box_table(name) end
+	return out
+end
+
+local function boxes_merge(tables)
+	for name, ids in pairs(tables) do
+		local boxes = box_table(name)
+		if boxes and type(ids) == "table" then
+			for id, v in pairs(ids) do boxes[id] = v end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Start
 -------------------------------------------------------------------------------
 local function logic_get()
@@ -205,8 +258,11 @@ function on_game_start()
 	local share = coop_levels_share
 	share.up("trade", trade_rows, trade_merge, 10000)
 	share.up("dao", dao_row, dao_merge, 5000)
+	share.up("artefacts", artefacts_get, artefacts_spent, 1000)
+	share.up("boxes", boxes_get, boxes_merge, 15000)
 	share.down("logic", logic_get, logic_set)
 	share.down("guards", guards_get, guards_set, 15000)
 	coop_main.add_event_handler(EV_DAO, on_dao)
+	patch_artefacts()
 	RegisterScriptCallback("actor_on_first_update", patch_dao)
 end

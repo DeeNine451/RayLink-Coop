@@ -12,6 +12,9 @@
 	<string id="st_coop_evac_watch">
 		<text>Watching: %s</text>
 	</string>
+	<string id="st_coop_evac_no_watch">
+		<text>Nobody here to watch.</text>
+	</string>
 	<string id="st_coop_evac_no_allies">
 		<text>Nobody is left alive. The world is not rolled back.</text>
 	</string>

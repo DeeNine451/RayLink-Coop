@@ -59,8 +59,7 @@ local function host_on_rank_req(t, from)
 	local list = p.get_coc_ranking_list()
 	local size = p.get_rankings_array_size and p.get_rankings_array_size() or 100
 	local sim = alife()
-	local mine = qc.avatar_obj(from)
-	local mine_id = mine and mine:id()
+	local mine_id = qc.engine().avatar_of(from) -- on a map server's level he has no object here
 	local entries = {}
 	for i = 1, size do
 		local id = list[i]
@@ -473,10 +472,26 @@ local function announce_other(s, nick)
 	if not ok then qc.report(TAG, "article news " .. s, err) end
 end
 
+-- A map server's logic has no player of its own: the name is of one who stands on its level, the news is the world's to tell.
+local function level_nick()
+	for _, p in ipairs(qc.players()) do
+		if not p.is_self then return qc.nick_of(p.id) end
+	end
+	return nil
+end
+
+-- The name a world server takes for what `from` says: a player's own, a map server's word for one of its level.
+local function nick_from(from, t)
+	if from >= 0x100 then return type(t.n) == "string" and t.n or nil end
+	return qc.nick_of(from) -- the host knows who sent it, a client's own word is not taken
+end
+
 local function announce_ency(s)
 	if ency.applying or not qc.active() then return end
 	if qc.is_client() then
 		if qc.client_live() then qc.send("ency", { s = s }, 0) end
+	elseif qc.is_map_server() then
+		qc.send("ency", { s = s, n = level_nick() }, 0)
 	elseif qc.host_party() then
 		qc.send("ency", { s = s, n = qc.nick_of(0) }, -1)
 	end
@@ -487,7 +502,7 @@ local function on_ency(t, from)
 	if type(t.s) ~= "string" or #t.s > 200 then return end
 	if qc.is_host() then
 		if type(from) ~= "number" or from == 0 then return end
-		local nick = qc.nick_of(from) -- the host knows who sent it, a client's own word is not taken
+		local nick = nick_from(from, t)
 		local fresh = apply_ency(t.s)
 		if fresh then announce_other(t.s, nick) end
 		for _, p in ipairs(qc.players()) do
@@ -701,6 +716,8 @@ local function on_earned(name)
 	if achv_applying or type(name) ~= "string" or not qc.active() then return end
 	if qc.is_client() then
 		if qc.client_live() then qc.send("achv", { a = name }, 0) end
+	elseif qc.is_map_server() then
+		qc.send("achv", { a = name, n = level_nick() }, 0)
 	elseif qc.host_party() then
 		qc.send("achv", { a = name, n = qc.nick_of(0) }, -1)
 	end
@@ -711,7 +728,7 @@ local function on_achv(t, from)
 	if type(t.a) ~= "string" or not t.a:match("^[%w_]+$") then return end
 	if qc.is_host() then
 		if type(from) ~= "number" or from == 0 then return end
-		local nick = qc.nick_of(from) -- the host knows who sent it, a client's own word is not taken
+		local nick = nick_from(from, t)
 		apply_achv(t.a, nick)
 		for _, p in ipairs(qc.players()) do
 			if not p.is_self and p.id ~= from then qc.send("achv", { a = t.a, n = nick }, p.id) end

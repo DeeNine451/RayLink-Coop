@@ -91,6 +91,24 @@ Ms.env.guards_spawner = { guarded_smarts = {} }
 Hm.env.xr_effects.reward_money = function(a, b, p) Hm.rewarded = (Hm.rewarded or 0) + 1 end
 Ms.env.xr_effects.reward_money = function(a, b, p) Ms.rewarded = (Ms.rewarded or 0) + 1 end
 
+-- bind_anomaly_zone.script:30-38, 42-60: a level spends its mark when it loads, the end of an emission marks every level but this one
+local function stock_zone(M)
+	local baz = { spawned = 0 }
+	function baz.force_spawn_artefacts() baz.spawned = baz.spawned + 1 end
+	function baz.first_update()
+		local m = M.m_data
+		local name = M.level_name
+		if m.artefact_respawn_levels and m.artefact_respawn_levels[name] == true then
+			m.artefact_respawn_levels[name] = nil
+			M.env.bind_anomaly_zone.force_spawn_artefacts()
+		end
+	end
+	M.m_data = {}
+	M.env.bind_anomaly_zone = baz
+	M.env.alife_storage_manager = { get_state = function() return M.m_data end }
+end
+stock_zone(Hm); stock_zone(Ms)
+
 boot(Hm); boot(Ms)
 fire(Hm, "actor_on_first_update"); fire(Ms, "actor_on_first_update")
 
@@ -222,6 +240,44 @@ Hm.paid, Hm.rewarded = nil, nil
 Ms.env.xr_effects.reward_money(Ms.actor, nil, { "500" })
 pump()
 check(Hm.paid == nil and Hm.rewarded == nil, "out of a condlist a map server pays nobody")
+
+print("== artefacts after an emission: a level spends its mark in the world's save")
+Hm.m_data.artefact_respawn_levels = { k00_marsh = true, zaton = true }
+local function start_map_server()
+	Ms.m_data = { artefact_respawn_levels = {} } -- the save it got
+	for name, v in pairs(Hm.m_data.artefact_respawn_levels) do Ms.m_data.artefact_respawn_levels[name] = v end
+	Ms.env.bind_anomaly_zone.first_update()
+end
+start_map_server()
+frames(2)
+check(Ms.env.bind_anomaly_zone.spawned == 1, "the map server of the marked level spawns its artefacts")
+check(Hm.m_data.artefact_respawn_levels.k00_marsh == nil, "the mark of its level is gone from the world's save")
+check(Hm.m_data.artefact_respawn_levels.zaton == true, "the marks of the other levels stay")
+start_map_server()
+frames(2)
+check(Ms.env.bind_anomaly_zone.spawned == 1, "the next map server of that level does not spawn them again")
+Hm.m_data.artefact_respawn_levels.k00_marsh = true -- the next emission, this map server lives: it spawned them at its end
+Ms.env.bind_anomaly_zone.force_spawn_artefacts()
+frames(2)
+check(Hm.m_data.artefact_respawn_levels.k00_marsh == nil, "the emission a live map server served is spent too")
+Hm.m_data.artefact_respawn_levels.l01_escape = true
+Hm.env.bind_anomaly_zone.first_update()
+frames(2)
+check(Hm.m_data.artefact_respawn_levels.l01_escape == nil and Hm.env.bind_anomaly_zone.spawned == 1, "the world server's own level is as in the stock")
+
+print("== a box rolled for a player's window stays rolled in the world's save")
+local function rolls(M)
+	M.env.smr_loot = { boxes = { [500] = true } } -- the save
+	M.env.zz_treasure_manager_pba_less_artys = { boxes = {} }
+	M.env.coop_mods_core.find_local = function(m, name) return m[name] end
+end
+rolls(Hm); rolls(Ms)
+Ms.env.smr_loot.boxes[501] = true
+Ms.env.zz_treasure_manager_pba_less_artys.boxes[502] = true
+frames(2)
+check(Hm.env.smr_loot.boxes[501] == true and Hm.env.smr_loot.boxes[500] == true, "Zone Customization Project's table, added to")
+check(Hm.env.zz_treasure_manager_pba_less_artys.boxes[502] == true, "PBA's table")
+check(Hm.env.smr_loot.boxes[502] == nil, "each its own")
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

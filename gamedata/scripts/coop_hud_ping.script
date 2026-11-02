@@ -7,7 +7,8 @@
 	Flow (script events of the core): the client asks the host (core.ping_req -> host), the host keeps it and sends it to
 	everybody (core.ping, -1) with the author's peer id and a number of its own; the author shows it when it comes back, so
 	every machine shows the same pings. The host's own ping goes the same way without the first step. A ping lives 20 s
-	on every machine, the author's included.
+	on every machine, the author's included. With split levels the host relays a ping of another level as it is and does not
+	show it: a machine shows the pings of the level it stands on.
 	Limits: one ping in 2 s per player, on the client (the key) and on the host (per sender; 250 ms of slack for the
 	network's jitter, F2 T3 caps script events in the engine as well). At most 3 live pings per author (the oldest goes),
 	24 in all. Bad coordinates, another level, a relay that did not come from the host: dropped and counted.
@@ -164,7 +165,8 @@ end
 
 local function host_keep(from, x, y, z, lvl, tg)
 	host_seq = host_seq + 1
-	add_ping(from, host_seq, x, y, z, tg)
+	local here = level_name()
+	if not (lvl and here) or lvl == here then add_ping(from, host_seq, x, y, z, tg) end
 	local t = { x = r2(x), y = r2(y), z = r2(z), p = from, n = host_seq }
 	if lvl then t.l = lvl end
 	if api.send_event(EV_PING, codec().encode(t), -1) then stats.relayed = stats.relayed + 1 end
@@ -194,22 +196,27 @@ function request(tg)
 	return true
 end
 
--- x, y, z of a payload on this level, or nil
-local function parse(t)
+-- x, y, z of a payload, or nil
+local function coords(t)
 	local x, y, z = coord(t.x), coord(t.y), coord(t.z)
 	if not (x and y and z) then return nil end
+	return x, y, z
+end
+
+-- x, y, z of a payload on this level, or nil
+local function parse(t)
 	if type(t.l) == "string" then
 		local here = level_name()
 		if here and here ~= t.l then return nil end
 	end
-	return x, y, z
+	return coords(t)
 end
 
 -- Host: a client's request.
 function on_req(payload, from)
 	if not (api and is_host()) or type(from) ~= "number" or from <= 0 then return end
 	local t = codec().decode(payload)
-	local x, y, z = parse(t)
+	local x, y, z = coords(t)
 	if not x then
 		stats.bad = stats.bad + 1
 		return

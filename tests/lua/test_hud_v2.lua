@@ -920,7 +920,33 @@ NOW = NOW + 2100
 H.handlers["core.ping_req"](H.env.coop_main.encode({ x = 1e9, y = 0, z = 1, l = "l01_escape" }), 2)
 H.handlers["core.ping_req"](H.env.coop_main.encode({ x = 1, y = 0, z = 1, l = "l02_garbage" }), 2)
 H.handlers["core.ping_req"](H.env.coop_main.encode({ y = 0, z = 1, l = "l01_escape" }), 2)
-check(#H.ping.active() == n0, "bad coordinates / another level / no x: dropped")
+check(#H.ping.active() == n0, "bad coordinates / another level / no x: not on the host's screen")
+-- split levels: the author stands on a map server's level, the host's process relays what it cannot show
+run(2050)
+local relays = #(H.sent_all or {})
+local cn = #CL.ping.active()
+H.handlers["core.ping_req"](H.env.coop_main.encode({ x = 7, y = 0, z = 7, l = "l02_garbage" }), 2)
+run(32)
+local far_relay
+for i = relays + 1, #(H.sent_all or {}) do
+	local e = H.sent_all[i]
+	if e.name == "core.ping" then far_relay = H.env.coop_main.decode(e.payload) end
+end
+check(far_relay and far_relay.p == 2 and far_relay.l == "l02_garbage", "a ping of another level goes out with its level")
+check(#H.ping.active() == n0, "and stays off the host's screen")
+check(#CL.ping.active() == cn, "a player elsewhere does not see it")
+CL.level = "l02_garbage"
+CL.handlers["core.ping"](CL.env.coop_main.encode({ x = 7, y = 0, z = 7, p = 2, n = far_relay and far_relay.n or 1, l = "l02_garbage" }), 0)
+check(#CL.ping.active() == cn + 1, "its author on that level sees it")
+CL.level = nil
+CL.ping.clear()
+H.ping.clear()
+run(2050)
+CL.ping.request()
+run(32)
+run(2050)
+CL.ping.request()
+run(32)
 -- a client takes pings only from the host
 CL.handlers["core.ping"](CL.env.coop_main.encode({ x = 1, y = 0, z = 1, p = 3, n = 1, l = "l01_escape" }), 3)
 check(#CL.ping.active() == 2, "a client ignores a ping that did not come from the host")

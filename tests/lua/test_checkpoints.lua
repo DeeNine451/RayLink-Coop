@@ -272,6 +272,40 @@ case("story_calls_engine", function()
 	check(xr_effects.scenario_autosave ~= mod_fn, "a mod that replaced it is wrapped again")
 end)
 
+-- Split levels: the logic of a map server's level runs there, the checkpoint is the world server's to set.
+case("story_of_a_map_server", function()
+	local handlers = {}
+	coop_main = {
+		add_event_handler = function(name, f) handlers[name] = f; return true end,
+		encode = function(t) return t.r or "" end,
+		decode = function(s) return { r = s ~= "" and s or nil } end,
+	}
+	fresh("client")
+	coop.is_map_server = function() return true end
+	SENT = {}
+	xr_effects.scenario_autosave(nil, nil, { "st_save_x" })
+	check(#STORIES == 0 and #EXEC == 0 and ORIG_STORY == 0, "a map server sets nothing itself and saves nothing")
+	check(#SENT == 1 and SENT[1].target == 0 and SENT[1].payload == "st_save_x", "it passes the call on to the world server")
+	local name = SENT[1].name
+	xr_effects.scenario_autosave(nil, nil, { string.rep("x", 300) })
+	check(#SENT[2].payload == 128, "the reason is cut as the world server cuts it")
+	coop.is_map_server = nil
+
+	SENT = {}
+	xr_effects.scenario_autosave(nil, nil, { "st_save_x" })
+	check(#SENT == 0, "a player passes nothing on")
+
+	fresh("host")
+	coop_mods_core = { is_bridge = function(peer) return peer == 0x101 end }
+	local fn = handlers[name]
+	check(type(fn) == "function", "the world server listens for it")
+	fn("st_save_y", 0x101)
+	check(#STORIES == 1 and STORIES[1].reason == "st_save_y", "the map server's call sets the story checkpoint")
+	fn("st_save_z", 1)
+	check(#STORIES == 1, "a player's event of that name does not")
+	coop_mods_core, coop_main = nil, nil
+end)
+
 case("story_outside_session_original", function()
 	fresh("sp")
 	xr_effects.scenario_autosave(nil, nil, { "st_save_x" })

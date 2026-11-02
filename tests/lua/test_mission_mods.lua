@@ -23,6 +23,7 @@ avatar.active_item = function(self) return self._held end
 local OTHER_USES = 0
 death_manager = { create_release_item = function(npc) CRI_RUNS = (CRI_RUNS or 0) + 1; CRI_ACTOR = db.actor:id() end }
 tasks_mystery_of_the_swamps = { npc_on_use = function(npc, who) MYSTERY = { npc = npc:id(), who = who:id() } end }
+item_money = { actor_on_loot_money = function(npc) MONEY = { npc = npc:id(), actor = db.actor:id() } end }
 
 start_all()
 SendScriptCallback("actor_on_first_update")
@@ -48,6 +49,7 @@ local _, corpse = spawn("bandit", vec3(21, 0, 0), nil, { alive = false })
 corpse._kind = "stalker"
 from_client("corpse_loot", { n = corpse:id() })
 check(CRI_RUNS == 1 and CRI_ACTOR == 500, "the body is still filled for the requesting player")
+check(MONEY and MONEY.npc == corpse:id() and MONEY.actor == 500, "the money of the body is made here too: a client's own call is refused")
 check(MYSTERY and MYSTERY.npc == corpse:id() and MYSTERY.who == 500, "the mystery handler got (corpse, the client's character)")
 check(OTHER_USES == 0, "no npc_on_use callback broadcast: the loot and stash handlers do not run twice")
 MYSTERY = nil

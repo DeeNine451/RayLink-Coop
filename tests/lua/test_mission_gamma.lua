@@ -292,6 +292,31 @@ if have_gamma then
 	E.coop.is_host, E.coop.is_client = client_side, function() return false end
 end
 
+print("== Urgent Orders: the check of the first update looks at the level of each player")
+do
+	local H, E = host_world()
+	local at = {}
+	E.tasks_urgent_orders = { is_from_duty = function() return false end, is_from_army = function() return false end,
+		actor_on_first_update = function() at[#at + 1] = E.PEER_SEEN end }
+	E.dialogs = { actor_true_isg = function() return false end }
+	E.dialogs_lostzone = {}
+	E.xr_effects.lttz_set_squad_enemy_to_actor = function() end
+	E.utils_slht = { valid_faction_actor = function() return false end, actor_in_smart = function() return false end }
+	E.coop.levels = {
+		split = function() return true end,
+		my_level = function() return 1 end,
+		level_of_player = function(p) return p == 1 and 2 or 1 end,
+	}
+	E.coop_quests_core.with_level_of = function(peer, fn, ...)
+		E.PEER_SEEN = peer
+		return fn(...)
+	end
+	start_nta(H)
+	local his = false
+	for _, p in ipairs(at) do his = his or p == 1 end
+	check(his, "the player on a map server's level is looked at on his level")
+end
+
 print("== Urgent Orders, Hidden Threat, the ISG: a player of the faction is enough")
 do
 	local H, E = host_world()
@@ -321,6 +346,16 @@ do
 	check(uo.is_from_duty(), "a running task says whose it is, wherever the group is")
 	E.TASKS.bar_dolg_leader_task_urgent_orders = nil
 	check(OFIRST >= 1, "the check of the first update runs when a player is seen")
+	-- split levels: the faction's level is the level the player stands on, not the world server's
+	E.coop.levels = {
+		split = function() return true end,
+		my_level = function() return 1 end,
+		level_of_player = function(p) return p == 1 and 2 or 1 end,
+	}
+	E.alife = function() return { level_name = function(_, l) return l == 2 and "l05_bar" or "l01_escape" end } end
+	E.LEVEL = "l01_escape"
+	check(uo.is_from_duty(), "a Duty player at the Bar of a map server, the host elsewhere: Duty's Urgent Orders")
+	E.coop.levels = nil
 	H.objects[500]._comm = "actor_isg"
 	check(E.dialogs.actor_true_isg() == true, "an ISG client")
 	E.xr_effects.lttz_set_squad_enemy_to_actor()

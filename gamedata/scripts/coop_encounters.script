@@ -21,9 +21,13 @@
 	The Bar arena takes a fighter's whole inventory into a box and has no way out but winning: a fighter who falls gets his gear
 	back when he respawns, through the stock end of a fight, at the arena's door; the fight ends by the rule. A bet at the
 	totalizator takes the gear the same way, and its way back is the bettor's alone, whoever's machine runs the restrictor.
-	A level the group left answers "nobody there". There is one level for everybody today (coop_levels.cpp level_of_player).
+	A level the group left answers "nobody there".
 
-	Host only. Status: coop_status line "encounters".
+	Split levels: the rules are the world server's. What stands on a map server's level is done there: the target of a heal through the far
+	view, the arena's opponents, items and trigger on the world server's word (enc_arena), the helis' timers by the map server itself, while
+	the world server's rule says so (share "encounters"). The arena's point is on the Bar only: its map server tells it (share "arena_point").
+
+	Status: coop_status line "encounters".
 --]]
 
 local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
@@ -46,6 +50,9 @@ local entries = {}
 local by_id = {}
 local recs = {} -- entry id -> { seen, away }
 local wounded = {} -- id -> true (a creature) | "car": to be healed when online
+local arena_at = nil -- world server: the arena's point { x, y, z }, as the map server of the Bar told it
+local arena_back = nil -- map server: the fight the world server rolled back: its trigger goes to the start when its infos are gone here
+local map_ruled = false -- map server: the world server's rule is on
 local stats = { rollbacks = 0, healed = 0, doom_seconds = 0, guarded_hits = 0, errors = 0 }
 
 local function log(fmt, ...) P.log(TAG, fmt, ...) end
@@ -146,6 +153,17 @@ local function level_of(e, tsk)
 	return e.level
 end
 
+-- The bridge of the map server that leads a level; nil when none does.
+local function bridge_of(name)
+	local l = rawget(_G, "coop") and coop.levels
+	if not (l and l.split and l.split() == true and l.map_servers) then return nil end
+	local sim = alife()
+	for _, ms in ipairs(l.map_servers()) do
+		if sim:level_name(ms.level) == name then return ms.bridge end
+	end
+	return nil
+end
+
 local function present_at(e, tsk)
 	local lvl = level_of(e, tsk)
 	if lvl and #bodies_on(lvl) == 0 then return false end
@@ -167,8 +185,11 @@ end
 local function check(e, now)
 	local tsk = e.task and task_of(e.task) or nil
 	local live = (e.task == nil or in_progress(tsk)) and e.live(tsk, e) == true
-	-- a scene that needs its level loaded waits for the group to be back on it
-	if live and e.on_level and level_of(e, tsk) ~= level.name() then return end
+	-- a scene that needs its level loaded waits for the group to be back on it, here or on a map server
+	if live and e.on_level then
+		local lvl = level_of(e, tsk)
+		if lvl ~= level.name() and not bridge_of(lvl) then return end
+	end
 	if step(recs[e.id], live, e.armed, live and present_at(e, tsk), now, e.grace or GRACE_MS) then roll_back(e, tsk) end
 end
 
@@ -326,21 +347,46 @@ local function arena_trigger()
 	return nil
 end
 
-local function arena_reset()
-	local n = arena_fight()
+-- What stands on the Bar: its authority does this.
+local function arena_clear()
 	for _, id in pairs(db.OnlineStalkers or {}) do
 		local o = level.object_by_id(id)
 		if o and o:section():find("bar_arena_stalker", 1, true) == 1 then safe_release_manager.release({ id = id }) end
 	end
 	local xz = C().mod("xr_zones")
 	if xz and xz.purge_arena_items then xz.purge_arena_items("bar_arena") end
+end
+
+local function arena_to_start()
+	local zone, st = arena_trigger()
+	if zone then xr_logic.switch_to_section(zone, st.ini, "sr_idle@idle") end
+end
+
+local function arena_reset()
+	local n = arena_fight()
+	local bridge = level.name() ~= ARENA_LEVEL and bridge_of(ARENA_LEVEL) or nil
+	if bridge then C().send("enc_arena", { n = n }, bridge) else arena_clear() end
 	disable_info("bar_arena_fight_begin")
 	if n then
 		disable_info("bar_arena_fight_" .. n)
 		for i = 1, ARENA_OPPONENTS do disable_info(string.format("bar_arena_fight_%d_stalker_%d_die", n, i)) end
 	end
-	local zone, st = arena_trigger()
-	if zone then xr_logic.switch_to_section(zone, st.ini, "sr_idle@idle") end
+	if not bridge then arena_to_start() end
+end
+
+-- A map server: the fight is off. The infos come by another road: back at sr_idle@idle with one of them still here the trigger would start
+-- the fight again.
+local function on_arena_rolled(t)
+	if not P.is_map_server() then return end
+	arena_clear()
+	arena_back = tonumber(t.n) or 0
+end
+
+local function arena_back_tick()
+	if arena_back and not has_alife_info("bar_arena_fight_" .. arena_back) then
+		arena_back = nil
+		arena_to_start()
+	end
 end
 
 local function install_entries()
@@ -390,8 +436,9 @@ local function install_entries()
 	end
 	add({ id = "bar_arena", level = ARENA_LEVEL, on_level = true, armed = true, reset = arena_reset, live = arena_on,
 		zone = function()
-			if not level.patrol_path_exists(ARENA_POINT) then return nil end
-			return patrol(ARENA_POINT):point(0), ARENA_RADIUS
+			if level.patrol_path_exists(ARENA_POINT) then return patrol(ARENA_POINT):point(0), ARENA_RADIUS end
+			if arena_at then return vector():set(arena_at.x, arena_at.y, arena_at.z), ARENA_RADIUS end
+			return nil
 		end })
 end
 
@@ -523,18 +570,24 @@ end
 -------------------------------------------------------------------------------
 -- Tick
 -------------------------------------------------------------------------------
-local function heal_tick()
-	for id, kind in pairs(wounded) do
-		local o = level.object_by_id(id)
-		if o then
-			wounded[id] = nil
-			if kind == "car" or o:alive() then
-				o:set_health_ex(1)
-				stats.healed = stats.healed + 1
-			end
-		elseif not alife_object(id) then
-			wounded[id] = nil
+local function heal_one(id, kind)
+	local o = level.object_by_id(id)
+	if o then
+		wounded[id] = nil
+		if kind == "car" or o:alive() then
+			o:set_health_ex(1)
+			stats.healed = stats.healed + 1
 		end
+	elseif not alife_object(id) then
+		wounded[id] = nil
+	end
+end
+
+local function heal_tick()
+	local qc = rawget(_G, "coop_quests_core") or coop_quests_core
+	for id, kind in pairs(wounded) do
+		-- on a map server's level: the far view shows it, the change goes there as an order
+		if qc then qc.with_target(id, nil, "a healed enemy", heal_one, id, kind) else heal_one(id, kind) end
 	end
 end
 
@@ -546,6 +599,14 @@ local function actor_on_update()
 	local now = time_global()
 	if now < next_tick then return end
 	next_tick = now + TICK_MS
+	if P.is_map_server() then
+		arena_back_tick()
+		if map_ruled then
+			local ok, err = pcall(evac_tick)
+			if not ok then report("evacuation", err) end
+		end
+		return
+	end
 	if not (db.actor and ruled()) then return end
 	for _, e in ipairs(entries) do
 		local ok, err = pcall(check, e, now)
@@ -575,7 +636,14 @@ function on_game_start()
 			for id in pairs(guarded) do guarded[id] = nil end
 			for id in pairs(t) do guarded[id] = true end
 		end)
+		share.down("encounters", function() return { on = ruled() } end, function(t) map_ruled = t.on == true end)
+		share.up("arena_point", function()
+			if level.name() ~= ARENA_LEVEL or not level.patrol_path_exists(ARENA_POINT) then return nil end
+			local p = patrol(ARENA_POINT):point(0)
+			return { x = p.x, y = p.y, z = p.z }
+		end, function(t) arena_at = t end, 30000)
 	end
+	C().on("enc_arena", on_arena_rolled, "client")
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
 	RegisterScriptCallback("coop_respawned", on_respawned)

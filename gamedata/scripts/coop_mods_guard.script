@@ -53,6 +53,11 @@
 	I2  (part data and spawn budget of a swap) F2 T12b: the parts and m_data go to the clone's real id; the host charges
 	    the budget only what the clone costs more than its source and creates it together with the source's release, so
 	    a queue that drops it loses nothing.
+	C5  item_weapon.ammo_aggregation of a box or a corpse (item_weapon's move, after an ammo pack is put there): the move waits for
+	    the host, so a damaged pack is still ours here and its release goes out, the host allows it in the box, and the new pack
+	    into the box is refused: the pack is gone. Merging packs there would change copies. A client sorts its own inventory only.
+	C6  death_manager.decide_items_to_keep (xr_motivator, every dying NPC): the items are the host's, a client's releases and
+	    condition changes are only refused or overwritten.
 --]]
 
 local api = rawget(_G, "coop")
@@ -438,6 +443,23 @@ local function inspect_tick(now)
 end
 
 -------------------------------------------------------------------------------
+-- C5, C6: a client's copy leaves these alone
+-------------------------------------------------------------------------------
+local function own_ammo_only(orig)
+	return function(obj, npc, ...)
+		if C().is_client() and npc ~= nil and npc:id() ~= db.actor:id() then return true end
+		return orig(obj, npc, ...)
+	end
+end
+
+local function host_only(orig)
+	return function(...)
+		if C().is_client() then return end
+		return orig(...)
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Entry points, kept outermost
 -------------------------------------------------------------------------------
 local function module_of(name) return function() return C().mod(name) end end
@@ -493,6 +515,8 @@ local GUARDS = {
 	{ label = "ui_workshop.UIWorkshopUpgrade.Upgrade", tbl = class_of("ui_workshop", "UIWorkshopUpgrade"),
 		key = "Upgrade", make = close_after(its_owner) },
 	{ label = "af_inspect.inspect", tbl = module_of("af_inspect"), key = "inspect", make = inspect_guard },
+	{ label = "item_weapon.ammo_aggregation", tbl = module_of("item_weapon"), key = "ammo_aggregation", make = own_ammo_only },
+	{ label = "death_manager.decide_items_to_keep", tbl = module_of("death_manager"), key = "decide_items_to_keep", make = host_only },
 }
 for _, g in ipairs(GUARDS) do g.n = 0 end
 

@@ -21,7 +21,7 @@ namespace
 // The wire order of Rules, written out by hand so that a test can send values the host would never send itself.
 // Build 10: the share multiplier (coop_death_share) closes the packet.
 std::vector<uint8_t> pack(uint8_t mode, uint8_t drop, uint32_t bleedout, float revive, uint32_t delay,
-	uint32_t contusion, uint8_t money, uint8_t wear, uint8_t rank, uint8_t share = 100)
+	uint32_t contusion, uint8_t money, uint8_t wear, uint8_t rank, uint8_t share = 100, uint8_t party = kPartyFriendlyFire)
 {
 	coop::Writer w;
 	w.u8(mode);
@@ -34,6 +34,7 @@ std::vector<uint8_t> pack(uint8_t mode, uint8_t drop, uint32_t bleedout, float r
 	w.u8(wear);
 	w.u8(rank);
 	w.u8(share);
+	w.u8(party);
 	return w.data();
 }
 
@@ -95,6 +96,38 @@ TEST(death_rules_defaults)
 	CHECK_EQ(int(r.wear_pct), 10);
 	CHECK_EQ(int(r.rank_pct), 0);
 	CHECK_EQ(int(r.share_pct), 100); // build 10: the ltx shares as they are
+	CHECK(r.friendly_fire); // as the consoles' defaults
+	CHECK(!r.finish_downed);
+}
+
+// Split levels: a map server has no game record of its own, what it judges a hit and a downed player by comes with the rules.
+TEST(death_rules_carry_the_party_rules)
+{
+	const Rules d;
+	Rules a;
+	a.friendly_fire = false;
+	CHECK(!(a == d));
+	a = d;
+	a.finish_downed = true;
+	CHECK(!(a == d));
+	a.friendly_fire = false;
+	coop::Writer w;
+	a.write(w);
+	coop::Reader rd(w.ptr(), w.size());
+	Rules b;
+	REQUIRE(b.read(rd));
+	CHECK(a == b);
+	CHECK(!b.friendly_fire);
+	CHECK(b.finish_downed);
+	CHECK_EQ(rd.remaining(), size_t(0));
+
+	Rules c;
+	REQUIRE(read_rules(pack(0, 0, 60000, 0.3f, 30000, 600, 10, 10, 0, 100, kPartyFinishDowned), c));
+	CHECK(!c.friendly_fire);
+	CHECK(c.finish_downed);
+	REQUIRE(read_rules(pack(0, 0, 60000, 0.3f, 30000, 600, 10, 10, 0, 100, 0xFC), c));
+	CHECK(!c.friendly_fire); // bits nobody knows are nobody's
+	CHECK(!c.finish_downed);
 }
 
 TEST(death_rules_wire_roundtrip)

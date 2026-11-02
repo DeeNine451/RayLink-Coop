@@ -25,9 +25,9 @@ local function load_real(M, name)
 	return mod
 end
 
-local function make_world(role)
-	reset_world()
-	local M = machine(role or "host", role == "client" and 1 or 0, { [0] = 0, [1] = 500 })
+local function make_world(role, peer)
+	if not peer then reset_world() end -- a second machine of the same world comes with its peer
+	local M = machine(role or "host", peer or (role == "client" and 1 or 0), peer and { [1] = 500 } or { [0] = 0, [1] = 500 })
 	local E = M.env
 	E.coop_npc_players = load_script(M, "coop_npc_players")
 	E.coop_mods_core = load_script(M, "coop_mods_core")
@@ -422,6 +422,119 @@ do
 	check(PURGED == "bar_arena" and SWITCHED == "sr_idle@idle", "the items are purged, the trigger is at its start")
 	check(E.INFOS.bar_arena_fight_3_done == nil, "not a win: no reward, the fight can be asked for again")
 	check(E.INFOS.bar_arena_fight_3_stalker_1_die == nil, "the deaths of this try are forgotten")
+end
+
+print("== split levels: the Bar is a map server's, the world server stands at Agroprom")
+do
+	local BRIDGE = 0x101
+	local LEVELS = { "l03_agroprom", "l05_bar" }
+	local W, E, enc = make_world()
+	local Mk, F, mk_enc = make_world("client", BRIDGE)
+	local function stage(env, mine)
+		env.coop.levels = {
+			split = function() return true end,
+			my_level = function() return mine end,
+			level_of_player = function(p) return p == 1 and 2 or 1 end,
+			map_servers = function() return { { bridge = BRIDGE, level = 2 } } end,
+			bridge_of_player = function(p) return p == 1 and BRIDGE or nil end,
+			carried = function() return {} end,
+		}
+		env.LEVEL = LEVELS[mine]
+		env.alife = function() return { level_name = function(_, l) return LEVELS[l] end } end
+		env.game_graph = function() return { vertex = function(_, v) return { level_id = function() return v end } end } end
+		env.level.patrol_path_exists = function() return mine == 2 end
+		env.patrol = function() return { point = function() return vec(0, 0, 0) end } end
+		env.PURGED, env.SWITCHED = nil, nil
+		env.xr_zones = { purge_arena_items = function(n) env.PURGED = n end }
+		env.xr_logic = { switch_to_section = function(_, _, s) env.SWITCHED = s end }
+		env.coop_quests_core = load_script(mine == 1 and W or Mk, "coop_quests_core")
+		env.coop_levels_share = load_script(mine == 1 and W or Mk, "coop_levels_share")
+		env.coop_levels_share.on_game_start()
+	end
+	stage(E, 1)
+	stage(F, 2)
+	F.coop.is_map_server = function() return true end
+	F.coop.is_mirror = function() return false end
+	F.db.actor._pos = vec(0, 0, 0) -- its ghost stands at the point: nobody
+	enc.on_game_start()
+	mk_enc.on_game_start()
+	local body = { id = 500, position = vec(5, 0, 5), m_level_vertex_id = 1, m_game_vertex_id = 2 }
+	E.SE[500] = body
+	local player = Mk.add(make_obj(500, 5, 0, 5))
+	-- the opponents, the trigger: on the map server
+	F.db.OnlineStalkers = { 300, 301 }
+	Mk.add(make_obj(300, 5, 0, 5, { _section = "bar_arena_stalker_3_1" }))
+	Mk.add(make_obj(301, 5, 0, 5, { _section = "stalker_bartender" }))
+	F.db.zone_by_name.trigger = make_obj(310, 0, 0, 0)
+	F.db.storage[310] = { active_section = "sr_idle@wait_finish", ini = { section_exist = function(_, s) return s == "sr_cutscene@fight_1" end } }
+	for _, env in ipairs({ E, F }) do env.INFOS.bar_arena_fight_begin, env.INFOS.bar_arena_fight_3 = true, true end
+	local function both(seconds)
+		for _ = 1, seconds do
+			run_for(W, 1)
+			run_for(Mk, 1)
+			pump()
+		end
+	end
+	both(40)
+	check(E.INFOS.bar_arena_fight_3 == true, "the fighter in the arena of a map server's level: nothing")
+	body.position, player._pos = vec(500, 0, 5), vec(500, 0, 5)
+	both(25)
+	check(E.INFOS.bar_arena_fight_3 == nil and E.INFOS.bar_arena_fight_begin == nil, "he is gone: the world server takes the fight off")
+	check(#F.RELEASED == 1 and F.RELEASED[1] == 300 and #E.RELEASED == 0, "the map server releases the opponents, the world server has none")
+	check(F.PURGED == "bar_arena" and E.PURGED == nil, "the map server purges the arena")
+	check(F.SWITCHED == nil, "the trigger waits: back at its start with the infos still here it would start the fight again")
+	F.INFOS.bar_arena_fight_begin = nil
+	both(2)
+	check(F.SWITCHED == nil, "the info of the fight itself is what it starts on")
+	F.INFOS.bar_arena_fight_3 = nil
+	both(2)
+	check(F.SWITCHED == "sr_idle@idle" and E.SWITCHED == nil, "the infos are gone: the trigger is back at its start, on the map server")
+
+	-- the evacuation: the zone and the timers are the map server's, the rule the world server's
+	F.db.zone_by_name.pri_a28_scene_end_zone = make_obj(320, 0, 0, 0, { _radius = 50 })
+	F.db.zone_by_name.evac = make_obj(322, 0, 0, 0)
+	local evac = { active_section = "sr_timer@got_one_minute", activation_time = 5 }
+	F.db.storage[320], F.db.storage[322] = {}, evac
+	F.MODE = nil -- a map server's console knows nothing of the rule
+	both(5)
+	check(evac.activation_time == NOW, "nobody at the helis of a map server's level: the timer stands still")
+	player._pos = vec(10, 0, 0)
+	local t1 = evac.activation_time
+	both(3)
+	check(evac.activation_time == t1, "a player at the helis: the timers run")
+	player._pos = vec(500, 0, 5)
+	E.MODE = "hardcore"
+	both(5)
+	t1 = evac.activation_time
+	both(3)
+	check(evac.activation_time == t1, "the world server's rule says hardcore: stock")
+	E.MODE = "checkpoint"
+
+	-- a hunt's target on a map server's level is healed through the far view
+	local tid = "bar_dolg_leader_task_2"
+	E.TASKS[tid] = { id = tid, stage = 0 }
+	local squad = { id = 800, position = vec(500, 0, 5), m_game_vertex_id = 2 }
+	function squad:section_name() return "special_bloodsucker_task2_squad" end
+	function squad:squad_members()
+		local i = 0
+		return function() i = i + 1; return i == 1 and { id = 801 } or nil end
+	end
+	E.SE[800], E.SE[801] = squad, se_creature(801)
+	E.SIMBOARD = { smarts_by_names = { trc_sim_9 = { id = 33, position = vec(500, 0, 5) } }, smarts = { [33] = { squads = { [800] = true } } } }
+	local through
+	local stand_in = make_obj(801, 500, 0, 5, { set_health_ex = function(self, v) self._hp = v end })
+	E.coop_quests_core.with_target = function(id, peer, what, fn, ...)
+		through = id
+		local real = E.level.object_by_id
+		E.level.object_by_id = function(i) return i == id and stand_in or real(i) end
+		local ok, err = pcall(fn, ...)
+		E.level.object_by_id = real
+		if not ok then error(err, 0) end
+	end
+	both(3)
+	body.position = vec(2000, 0, 5)
+	both(25)
+	check(through == 801 and stand_in._hp == 1, "the target of a hunt on another level is healed on its level")
 end
 
 print("== the Bar arena: the gear comes back on the fighter's respawn")

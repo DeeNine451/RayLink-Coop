@@ -56,6 +56,31 @@ local function world(M)
 	}
 	e.coop_mods_core = { find_local = function(m, name) return m["_local_" .. name] end }
 	e.axr_companions = { companion_squads = {} }
+	-- the stock of what coop_quests_party mirrors and coop_quests_pda shares
+	e.dialogs_darkvalley = { bandit_companion_task_1_complete = function() return "stock" end }
+	e.dialogs_jupiter = {
+		jup_b32_anomaly_has_af = function()
+			local z = e.db.anomaly_by_name.jup_b32_anomal_zone
+			return z ~= nil and z.spawned_count > 0
+		end,
+		jup_b32_anomaly_do_not_has_af = function() return false end,
+	}
+	M.unlocked = {}
+	e.ui_pda_encyclopedia_tab = {
+		unlock_note = function(s) M.unlocked[s] = true end,
+		unlock_article = function(s) M.unlocked[s] = true end,
+		is_unlocked_note = function(s) return M.unlocked[s] == true end,
+		is_unlocked_article = function(s) return M.unlocked[s] == true end,
+	}
+	M.earned = {}
+	e.game_statistics = { has_actor_achievement = function(n) return M.earned[n] == true end }
+	-- the stock of what logic asks of the actor
+	M.ObjMT.relation = function(self, who) return self._rel and self._rel[who:id()] or 1 end
+	for name, want in pairs({ actor_friend = 0, actor_true_friend = 0, actor_neutral = 1, actor_true_neutral = 1 }) do
+		e.xr_conditions[name] = function(actor, npc) return npc:relation(actor) == want end
+	end
+	e.xr_conditions.actor_enemy = function(actor, npc) return npc:relation(actor) >= 2 end
+	e.xr_conditions.actor_true_enemy = e.xr_conditions.actor_enemy
 	e.utils_data = { CTime_from_table = function(t) return t end }
 end
 
@@ -410,6 +435,13 @@ pump()
 check(released_ms[1] == 700 and not Hm.released_here, "it goes to the map server: the world server's own would be refused")
 Hm.env.safe_release_manager.release({ id = 4000, online = false })
 check(Hm.released_here == true, "what is not held stays here")
+Hm.released_here = false
+Hm.env.coop.levels.body_stays = function(id) return id == 4001 end
+Hm.env.safe_release_manager.release({ id = 4001, online = false })
+check(not Hm.released_here, "a body that fell online on a map server stays: the stock releases what it sees offline")
+Hm.env.safe_release_manager.release({ id = 4002, online = false })
+check(Hm.released_here == true, "what died offline goes as in the stock")
+Hm.env.coop.levels.body_stays = nil
 
 print("== hits only of what a task waits for")
 local hit_seen = {}
@@ -461,6 +493,134 @@ Hm.env.coop_route = { domain_handlers = function(cb) return cb == "vehicle_on_de
 fire(Ms, "vehicle_on_death_callback", Ms.npc)
 pump()
 check(cars[1] == 700, "its death reaches the task on the world server")
+
+print("== the dialogs' mirror: a map server's level is told by its map server")
+do
+	-- "everybody" of a map server: the players of its level, through the world, from 0
+	local send = Ms.env.coop.send_event
+	Ms.env.coop.send_event = function(name, payload, target)
+		if target == -1 or target == nil then
+			Ms.sent[#Ms.sent + 1] = { name = name, payload = payload, target = -1 }
+			QUEUE[#QUEUE + 1] = { to = Cm, name = name, payload = payload, from = 0 }
+			return true
+		end
+		return send(name, payload, target)
+	end
+	local ids = { 730, 731 }
+	local squad = {}
+	function squad:squad_members()
+		local i = 0
+		return function() i = i + 1; return ids[i] and { id = ids[i] } or nil end
+	end
+	for i, id in ipairs(ids) do
+		local o = Ms.new_obj(id, "bandit", vec(0, 0, 0), { _stalker = true })
+		Ms.env.db.storage[id] = { object = o, pstor = { s_loot_count = i == 1 and 5 or 4 } }
+	end
+	for _, M in ipairs({ Hm, Ms }) do
+		M.env.get_story_squad = function(sid) return sid == "bandit_companion_task_1" and squad or nil end
+	end
+	Ms.env.db.anomaly_by_name.jup_b32_anomal_zone = { spawned_count = 1 }
+	for _ = 1, 3 do
+		NOW = NOW + 1100
+		fire(Ms, "actor_on_update")
+		fire(Hm, "actor_on_update")
+		pump()
+	end
+	check(count_sent(Ms, "quests.mirror") > 0, "the map server of the level sends what its zones and its NPCs hold")
+	check(Cm.env.dialogs_jupiter.jup_b32_anomaly_has_af() == true, "the artefact in a zone of a map server's level is seen from the dialog")
+	check(Cm.env.dialogs_darkvalley.bandit_companion_task_1_complete() == true, "the loot of the bandit companions on a map server's level is seen")
+	local foreign = 0
+	for _, s in ipairs(Hm.sent) do
+		if s.name == "quests.mirror" then
+			local k = Hm.env.coop_main.decode(s.payload).k
+			if k == "bandit1" or tostring(k):find("b32:", 1, true) == 1 then foreign = foreign + 1 end
+		end
+	end
+	check(foreign == 0, "the world server says nothing of zones and NPCs it does not have")
+end
+
+print("== the guide marker of a target for a player on a map server's level")
+do
+	local seen = {}
+	function Hm.env.task_objects.CGeneralTask:check_level(target)
+		seen[#seen + 1] = { target = target, level = Hm.env.level.name(), active = Hm.env.db.actor:is_active_task(self.t) }
+	end
+	records[960] = { id = 960, parent_id = 65535, m_game_vertex_id = 1, position = vec(0, 0, 0) }
+	Hm.ini.far_marker_task = {}
+	Hm.tm:give_task("far_marker_task", 700)
+	local rt = Hm.tm.task_info.far_marker_task
+	rt.current_target = 960
+	Hm.handlers["coop_tq"]("op=sactive;i=sfar_marker_task", 1)
+	NOW = NOW + 3000
+	fire(Hm, "actor_on_update")
+	check(seen[1] and seen[1].target == 960, "the stock check runs for his active task")
+	check(seen[1] and seen[1].level == "k00_marsh", "from his level: the exit is on it")
+	check(seen[1] and seen[1].active == true, "as the active task")
+	Hm.tm.task_info.far_marker_task = nil
+end
+
+print("== the rating: a player on a map server's level is told which line is his")
+do
+	Hm.env.pda = {
+		calculate_rankings = function() end,
+		get_coc_ranking_list = function() return { 500 } end,
+		get_rankings_array_size = function() return 1 end,
+	}
+	Hm.env.ranks = Hm.env.ranks or {}
+	Hm.env.ranks.get_se_obj_rank_name = function() return "novice" end
+	Hm.env.utils_obj = { get_reputation_name = function() return "rep" end }
+	local r = records[500]
+	r.character_name = function() return "player" end
+	r.rank = function() return 100 end
+	r.reputation = function() return 0 end
+	r.character_icon = function() return "icon" end
+	r.alive = function() return true end
+	local sim = Hm.env.alife()
+	function sim:object(id) return id == 500 and records[500] or nil end
+	Hm.handlers["quests.rank_req"](Hm.env.coop_main.encode({ q = 1, r = 0 }), 1)
+	local got = last_sent(Hm, "quests.rank")
+	local list = got and Hm.env.coop_quests_core.des(got.d)
+	check(list and list[1] and list[1].me == true, "the line of his record is marked")
+end
+
+print("== the encyclopedia and the achievements of a map server's logic are the world's")
+do
+	Ms.players[1].nick = "fighter"
+	fire(Hm, "actor_on_first_update")
+	fire(Cm, "actor_on_first_update")
+	fire(Ms, "actor_on_first_update")
+	Ms.env.ui_pda_encyclopedia_tab.unlock_article("art_far")
+	pump()
+	check(Hm.unlocked.art_far == true, "an article its logic opened reaches the world server")
+	check(Cm.unlocked.art_far == true, "and goes from there to the players")
+	local relay = last_sent(Hm, "quests.ency")
+	check(relay and relay.n == "fighter", "under the name of a player of that level, not the host's")
+	fire(Ms, "actor_on_achievement_earned", "tourist")
+	local up = last_sent(Ms, "quests.achv")
+	check(up and up.n == "fighter", "an achievement goes the same way")
+	local to_world = false
+	for _, s in ipairs(Ms.sent) do if s.name == "quests.achv" and s.target == 0 then to_world = true end end
+	check(to_world, "to the world server, not to its level alone")
+end
+
+print("== goodwill said of the actor lies on the players: what logic asks of the actor is theirs")
+do
+	local xc, npc = Ms.env.xr_conditions, Ms.npc
+	local ghost = Ms.actor
+	check(xc.actor_neutral(ghost, npc) == true and xc.actor_enemy(ghost, npc) == false, "nothing said yet: a neutral")
+	npc._rel = { [500] = 2 }
+	check(xc.actor_enemy(ghost, npc) == true, "an enemy of the player of the level is an enemy of the actor")
+	check(xc.actor_true_enemy(ghost, npc) == true, "the invulnerable of story NPCs reads this one")
+	check(xc.actor_neutral(ghost, npc) == false, "and no neutral")
+	npc._rel = { [500] = 0 }
+	check(xc.actor_friend(ghost, npc) == true and xc.actor_true_friend(ghost, npc) == true, "a friend of his is a friend")
+	npc._rel = nil
+	local proxy = Ms.objects[500]
+	npc._rel = { [500] = 2 }
+	check(xc.actor_enemy(proxy, npc) == true, "asked of a player: of him (combat_ignore passes the enemy)")
+	npc._rel = nil
+	check(Hm.env.xr_conditions.actor_enemy(Hm.actor, Cm.npc) == false, "on the world server stock")
+end
 
 print("== roles")
 check(Ms.env.coop_quests_core.host_party() == true, "a map server's logic pays players")

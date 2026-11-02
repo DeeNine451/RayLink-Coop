@@ -23,8 +23,9 @@
 	   (no tip, no panel mark). Every incoming player also gets coop_checkpoint_changed(0, "none", -1, ...): normal.
 
 	2. Story checkpoints: the stock xr_effects.scenario_autosave (an empty function in stock, ~30 calls from the story
-	   logic; a save in some mods) is replaced in a session: the world server calls coop.checkpoint.story(<save name>), anybody
-	   else does nothing, and no console command is run. Outside a session the original function runs.
+	   logic; a save in some mods) is replaced in a session: the world server calls coop.checkpoint.story(<save name>), a map
+	   server, whose logic ran it, passes the call on to the world server, anybody else does nothing, and no console command
+	   is run. Outside a session the original function runs.
 
 	3. Claims of a player (the world server puts the tent up and takes the item, Ruling F3-6): request(what, delay_ms) with what
 	   "tent" | "sleepbag" | "pack". The player never touches the item. F3a T6: a player is the host player too - the host's
@@ -62,6 +63,7 @@ local SCHEDULE_MS = 15000 -- a claim not sent by now was lost (the delay is a fe
 local TIP_SECONDS = 4
 local TENT_DISTANCE = 3 -- stock: the tent stands 3 m ahead of the player
 local MAX_REASON = 128 -- the engine takes a story reason of at most 128 bytes
+local EV_STORY = "coop_cp_story" -- a map server -> the world server { r = reason }
 
 local TIP_KINDS = { campfire = true, rest = true, tent = true, arrival = true, story = true, mod = true }
 local SPOT_KINDS = { campfire = true, rest = true, tent = true, mod = true } -- arrival and story have no spot (plan decision 7)
@@ -90,6 +92,12 @@ local function is_world_server()
 	if not in_session() then return false end
 	local f = type(api.is_world_server) == "function" and api.is_world_server or api.is_host
 	local ok, yes = pcall(f)
+	return ok and yes == true
+end
+
+local function is_map_server()
+	if not in_session() or type(api.is_map_server) ~= "function" then return false end
+	local ok, yes = pcall(api.is_map_server)
 	return ok and yes == true
 end
 
@@ -564,26 +572,48 @@ end
 -------------------------------------------------------------------------------
 local story_ours = {} -- the wrappers this script made: never wrapped again (review M-1)
 
+local function cmain()
+	return rawget(_G, "coop_main") or coop_main
+end
+
+local function set_story(reason)
+	local cp = checkpoint_api()
+	if not (cp and cp.story) then return end
+	local ok, err = pcall(cp.story, reason)
+	if not ok then log("! story checkpoint failed: %s", tostring(err)) end
+end
+
+-- The save name of the effect's parameters, cut as the engine takes it.
+local function reason_of(p)
+	local reason = type(p) == "table" and p[1] or nil
+	if type(reason) ~= "string" then return nil end
+	return #reason > MAX_REASON and reason:sub(1, MAX_REASON) or reason
+end
+
 -- The body of the wrapper: in a session the world server sets a story checkpoint for every living player (the reason is the
--- save name, only logged), anybody else does nothing, nobody saves; outside a session the function it wraps runs.
+-- save name, only logged), a map server passes the call on to it, anybody else does nothing, nobody saves; outside a session the
+-- function it wraps runs.
 local function story_dispatch(orig, actor, npc, p)
 	if in_session() then
 		if is_world_server() then
-			local cp = checkpoint_api()
-			if cp and cp.story then
-				local reason = type(p) == "table" and p[1] or nil
-				if type(reason) ~= "string" then
-					reason = nil
-				elseif #reason > MAX_REASON then
-					reason = reason:sub(1, MAX_REASON)
-				end
-				local ok, err = pcall(cp.story, reason)
-				if not ok then log("! story checkpoint failed: %s", tostring(err)) end
-			end
+			set_story(reason_of(p))
+		elseif is_map_server() then
+			local sent, why = api.send_event(EV_STORY, cmain().encode({ r = reason_of(p) }), 0)
+			if sent ~= true then log("! story checkpoint not passed on to the world server: %s", tostring(why)) end
 		end
 		return
 	end
 	if orig then return orig(actor, npc, p) end
+end
+
+-- The world server: a map server's logic ran the effect.
+local function on_story_event(payload, from)
+	if not is_world_server() then return end
+	if not coop_mods_core.is_bridge(from) then
+		log("! a story checkpoint from #%s refused: not a map server", tostring(from))
+		return
+	end
+	set_story(cmain().decode(payload).r)
 end
 
 -- One closure per wrapped function, with its own "I am running" flag: a chain of wrappers that comes back to this one (a mod
@@ -620,5 +650,7 @@ function on_game_start()
 	RegisterScriptCallback("actor_on_first_update", on_first_update)
 	RegisterScriptCallback("actor_on_update", on_update)
 	RegisterScriptCallback("actor_on_item_take", on_item_take)
+	local m = cmain()
+	if m and m.add_event_handler then m.add_event_handler(EV_STORY, on_story_event) end
 	wrap_story()
 end

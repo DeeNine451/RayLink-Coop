@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+	<string id="st_coop_items_gun_refused">
+		<text>This machine gun cannot be set up: the item is back in your inventory.</text>
+	</string>
+</string_table>
