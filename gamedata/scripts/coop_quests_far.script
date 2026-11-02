@@ -732,11 +732,30 @@ function host_handlers(callback)
 	return out
 end
 
+-- A stock handler gives the stand-in to the engine where a game object is wanted (dynamic_news_manager: sender:see(victim)). The pcall below
+-- takes the error, but the engine tells _G.COnLuaBindFatalError first, and its window and tempsave say a state is broken that is not.
+local relaying = false
+local window_held = false
+
+local function hold_window()
+	local f = rawget(_G, "COnLuaBindFatalError")
+	if window_held or type(f) ~= "function" then return end
+	window_held = true
+	_G.COnLuaBindFatalError = function(...)
+		if relaying then return end
+		return f(...)
+	end
+end
+
 local function relay(callback, ...)
+	hold_window()
+	local was = relaying
+	relaying = true
 	for _, f in ipairs(host_handlers(callback)) do
 		local ok, err = pcall(f, ...)
 		if not ok then qc().report(TAG, callback, err) end
 	end
+	relaying = was
 end
 
 local function is_monster(se)

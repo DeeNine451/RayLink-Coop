@@ -311,6 +311,22 @@ check(counted == 2, "a new object under the same id is a new death")
 far.on_death(4242, 500)
 check(counted == 2, "an object that is no more: nothing")
 
+print("== a stock handler that gives a stand-in to the engine: the relay takes the error, no window")
+do
+	local windows = 0
+	Hm.env.COnLuaBindFatalError = function() windows = windows + 1 end
+	local routed = Hm.env.coop_route
+	Hm.env.coop_route = { domain_handlers = function(cb)
+		return cb == "monster_on_death_callback" and { function() Hm.env.COnLuaBindFatalError("[Lua] see"); error("C++ exception") end } or {}
+	end }
+	fire(Hm, "server_entity_on_unregister", { id = 710 })
+	far.on_death(710, 500)
+	check(windows == 0, "inside the relay the window stays closed")
+	Hm.env.COnLuaBindFatalError("[Lua] elsewhere")
+	check(windows == 1, "outside it the engine's word stands")
+	Hm.env.coop_route = routed
+end
+
 print("== Semenov's samples count a kill on a map server's level")
 local TISSUE = "yan_ecolog_semenov_task_1_tissue_count"
 Hm.env.save_var(Hm.actor, "yan_ecolog_semenov_task_1_tissue_need", 3)
