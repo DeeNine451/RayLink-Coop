@@ -22,7 +22,7 @@
 	  a call adds are led by his proxy. add_speaker_companion takes the giver of the request for the speaker (the host
 	  is not talking while a client takes the task).
 	Control (owner's request 2026-11-01): a companion squad follows one leader, a player. Only he dismisses it (dm_companion_leave,
-	  any other player gets refused, with the reason; the same action in a story's dialog, the Fanatic's training, is anybody's, and the
+	  any other player gets refused, with the reason; the same action in a story's dialog, the Fanatic's training, is anybody's in a talk with it, and the
 	  story's next recruit gives the companion back to who led it), the other orders are everybody's. The leader hands it to another
 	  player (a line of the companion's list of commands, then a line per player; a character with no such list, the Fanatic, has the
 	  dialog dm_coop_companion_hand), any other player takes it (the dialog dm_coop_companion_take, modxml_coop_companions). The host
@@ -601,10 +601,19 @@ local function host_on_cmd(t, from)
 			stats.refused = stats.refused + 1
 			return
 		end
-		if kind == "remove" and t.d == LEAVE_DIALOG and control_peer(squad) ~= from then
-			stats.refused = stats.refused + 1
-			tell(from, "st_coop_comp_refused_not_yours")
-			return
+		if kind == "remove" and control_peer(squad) ~= from then
+			if t.d == LEAVE_DIALOG then
+				stats.refused = stats.refused + 1
+				tell(from, "st_coop_comp_refused_not_yours")
+				return
+			end
+			-- a story's line comes out of a talk with it: the dialog's name is a client's word
+			if not talked_recently(from, npc, squad) then
+				stats.refused_talk = stats.refused_talk + 1
+				log("dismissal of %s (%s) by player #%s refused: no talk with it or its squad in the last %d ms", npc:name(),
+					tostring(npc:id()), tostring(from), RECRUIT_TALK_MS)
+				return
+			end
 		end
 	end
 	-- Ruling F2-34: a recruit only right after this player's talk with the NPC or its squad

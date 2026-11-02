@@ -1073,6 +1073,40 @@ do
 	check(L()[300] == nil and cs[300] ~= nil, "and he comes back to the host: who took him")
 end
 
+print("== a story's line needs a talk, as a recruit does: a modified client names any dialog")
+do
+	local W = stand()
+	local H, A, B = W.H, W.A, W.B
+	local talked = false
+	H.env.coop.talk_recent = function(peer, npc_id) return talked and peer == 2 and npc_id == 201 end
+	W.move(2, 1)
+	W.proxy_b._pos = vec(6, 0, 0)
+	W.comp_b = B.add(make_obj(201, 7, 0, 0, { _name = "comp" }))
+	local L, cs = W.CH._leaders, H.env.axr_companions.companion_squads
+	L()[300] = 500
+	W.refresh()
+	local da, db_ = A.env.dialogs_axr_companion, B.env.dialogs_axr_companion
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b, "x", "1")
+	pump()
+	check(L()[300] == 500 and cs[300] ~= nil, "no talk with it: within 15 m he does not send away a companion of somebody else")
+	check(W.CH._stats().refused_talk == 1, "the refusal is counted")
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b)
+	pump()
+	check(L()[300] == 500 and cs[300] ~= nil, "nor with no dialog named")
+	talked = true
+	db_.remove_companions_from_squad(B.env.db.actor, W.comp_b, "fanat_training_anomaly_reached", "1")
+	pump()
+	check(L()[300] == nil and cs[300] == nil, "in a talk the story's line goes through")
+	db_.become_actor_companion(B.env.db.actor, W.comp_b, "x", "1")
+	pump()
+	talked = false
+	L()[300] = 500
+	W.refresh()
+	da.remove_companions_from_squad(A.env.db.actor, W.comp_a, "x", "1")
+	pump()
+	check(L()[300] == nil and cs[300] == nil, "its leader's own line asks for no talk")
+end
+
 print("== last leaders of a map server's level reach the save")
 do
 	local function share_env(M)
