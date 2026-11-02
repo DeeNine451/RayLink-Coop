@@ -71,6 +71,9 @@ local function stock(M, W)
 	function ac.get_inventory_table() return {} end
 	function ac.dismiss_special_squad(squad)
 		if ac.companion_squads[squad.id] == nil then return end
+		for k in squad:squad_members() do -- utils_obj.execute_script_on_squad: only a member online here loses the marks
+			if M.objects[k.id] then M.se[k.id] = nil end
+		end
 		ac.companion_squads[squad.id] = nil
 		M.dismissed = squad.id
 	end
@@ -632,6 +635,48 @@ do
 	local sent = #sent_named(H, "npc.comp_drop")
 	ac.dismiss_special_squad(W.squads[300])
 	check(H.dismissed == 300 and #sent_named(H, "npc.comp_drop") == sent, "a squad of the host's level: stock alone")
+end
+
+print("== a task dismisses a squad that stayed behind offline: the stock leaves the marks, the dismissal stands all the same")
+do
+	local W = stand()
+	local H = W.H
+	local L = W.CH._leaders
+	local cs = H.env.axr_companions.companion_squads
+	L()[300] = 500
+	W.refresh()
+	H.objects[201] = nil
+	W.bodies[201] = { name = function() return "comp" end }
+	H.se[201] = { companion = true, companion_cannot_dismiss = true, companion_cannot_teleport = true }
+	W.move(1, 2)
+	W.refresh()
+	check(L()[300] == 500 and H.teleported == nil, "(it stays with its leader's entry)")
+	H.env.axr_companions.dismiss_special_squad(W.squads[300])
+	check(H.dismissed == 300 and L()[300] == nil, "the entry goes with it")
+	W.refresh()
+	check(cs[300] == nil, "the refresh does not bring it back")
+	check(not H.se[201].companion and not H.se[201].companion_cannot_dismiss and not H.se[201].companion_cannot_teleport,
+		"the marks are gone: the binder and the next load do not make it a companion again")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders == nil, "nor is it in the save")
+end
+
+print("== a task dismisses a squad that waits for its teleport: it does not arrive after that")
+do
+	local W = stand()
+	local H, Mk = W.H, W.Mk
+	W.CM._leaders()[400] = 501
+	W.refresh()
+	W.online[301] = true
+	W.move(2, 1)
+	W.refresh()
+	check(H.teleported == nil, "(a member is still online at the map server)")
+	H.env.axr_companions.companion_squads[400] = W.squads[400]
+	H.env.axr_companions.dismiss_special_squad(W.squads[400])
+	W.online[301] = nil
+	W.refresh()
+	check(H.teleported == nil and W.CH._leaders()[400] == nil, "no teleport, no leader")
 end
 
 print("== a member online when the map server takes the squad, a companion of it already")

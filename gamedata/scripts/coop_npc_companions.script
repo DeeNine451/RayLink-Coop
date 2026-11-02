@@ -1317,6 +1317,9 @@ local function patch_dismiss()
 		f(squad)
 		if not squad then return end
 		note_far(nil, squad.id)
+		leaders[squad.id], lead_peer[squad.id], followers[squad.id] = nil, nil, nil
+		-- the stock takes the marks off the members online here: those of the others would make it a companion again (host_refresh, the binder)
+		for k in squad:squad_members() do put_marks(k.id, nil, nil, nil) end
 		if bridge then P.send(EV_DROP, { s = squad.id }, bridge) end
 	end
 end
