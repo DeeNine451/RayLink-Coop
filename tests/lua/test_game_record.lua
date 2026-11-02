@@ -218,7 +218,7 @@ local ENGINE = {
 	{ "coop_death_share", "float", 0, 200, 100 }, -- build 10: CCC_Float 0..200, default 100
 	{ "coop_split_levels", "int", 0, 1, 0 }, -- F3a: CCC_Integer 0..1, off by default
 	{ "coop_story_together", "int", 0, 1, 1 }, -- F3a: CCC_Integer 0..1, on by default
-	{ "coop_finish_downed", "int", 0, 1, 1 }, -- coop_ai.cpp: CCC_Integer 0..1, on = the stock behaviour of a stalker
+	{ "coop_npc_finish_downed", "int", 0, 1, 0 }, -- coop_ai.cpp: CCC_Integer 0..1, on = the stock behaviour of a stalker
 }
 
 do
@@ -571,7 +571,7 @@ local CONSOLE = {
 	coop_death_drop = "drop", coop_bleedout = "60.00000", coop_revive_health = "0.300000", coop_respawn_delay = "30.00000",
 	coop_contusion = "10.00000", coop_death_money = "10.00000", coop_death_wear = "10.00000", coop_death_rank = "0.00000",
 	coop_hardcore_new_kit = "0", coop_checkpoints_group = "1", coop_autosave_interval = "15", coop_autosave_count = "10",
-	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_finish_downed = "1",
+	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_npc_finish_downed = "0",
 	coop_nick = "Bob", fov = "67",
 }
 

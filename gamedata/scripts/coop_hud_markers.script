@@ -38,9 +38,10 @@
 		        per object.
 		deaths  death marks of the group (engine callback coop_death_marker on every machine): kind "death", state corpse |
 		        drop, the fallen player's nick. A mark lives while the host's PDA spot (secondary_task_location, replicated
-		        to the clients) is on the object; 10 s of grace for the spot to arrive. Only in a session.
-		camp    my own camp (coop.checkpoint.get(0)): kind "camp", state tent | campfire | rest | mod. Arrival points and
-		        story checkpoints have no place to point at.
+		        to the clients) is on the object. A spot that never came (a bag on a map server's level) does not take the
+		        mark away: it stays while the bag stands, at the place it was last seen. Only in a session.
+		camp    my own camp (coop.checkpoint.get(0)): kind "camp", state tent | campfire | rest | mod | arrival. An arrival
+		        point has no object, the record's own position is its place. Story checkpoints have no place to point at.
 		pings   coop_hud_ping.active(): kind "ping", in the author's colour, priority 50.
 	Priority order on a crowded bar: ping > down > ally > waypoint > active task > everything else > level changers.
 
@@ -421,17 +422,23 @@ local function src_deaths(tg)
 	local out = {}
 	for id, d in pairs(deaths) do
 		local obj = level.object_by_id(id)
-		local held = false
+		local held, emptied = false, false
 		if obj then
 			local ok, par = pcall(obj.parent, obj)
 			held = ok and par ~= nil
+			if type(obj.is_inv_box_empty) == "function" and tg - d.since > DEATH_GRACE_MS then
+				local ok_e, none = pcall(obj.is_inv_box_empty, obj)
+				emptied = ok_e and none == true
+			end
 		end
-		if held or (tg - d.since > DEATH_GRACE_MS and not has_spot(id, DEATH_SPOT)) then
+		local spot = has_spot(id, DEATH_SPOT)
+		if spot then d.spotted = true end
+		if held or emptied or (d.spotted and not spot) then
 			deaths[id] = nil
-		elseif obj then
-			local p = object_pos(id)
-			if p then
-				out[#out + 1] = { key = "death:" .. id, kind = "death", pos = p, color = COLOR.death, state = d.kind, label = d.nick,
+		else
+			d.pos = (obj and object_pos(id)) or d.pos -- an offline bag has no position on a client's machine
+			if d.pos then
+				out[#out + 1] = { key = "death:" .. id, kind = "death", pos = d.pos, color = COLOR.death, state = d.kind, label = d.nick,
 					priority = PRIORITY.other }
 			end
 		end
@@ -443,13 +450,18 @@ local function src_camp()
 	local cp = api and api.checkpoint
 	if not (type(cp) == "table" and cp.get) then return EMPTY end
 	local ok, r = pcall(cp.get, 0)
-	if not (ok and type(r) == "table" and CAMP_KINDS[r.kind]) then return EMPTY end
-	local src = tonumber(r.source)
-	if not (src and src > 0 and src < 65535) then return EMPTY end
+	if not (ok and type(r) == "table" and (CAMP_KINDS[r.kind] or r.kind == "arrival")) then return EMPTY end
 	if type(r.level) == "string" and r.level ~= "" then
 		local okn, name = pcall(level.name)
 		if okn and type(name) == "string" and name ~= r.level then return EMPTY end
 	end
+	if r.kind == "arrival" then
+		if not (r.x and r.y and r.z) then return EMPTY end
+		return { { key = "camp:arrival", kind = "camp", pos = { x = r.x, y = r.y, z = r.z }, color = COLOR.camp, state = r.kind,
+			priority = PRIORITY.other } }
+	end
+	local src = tonumber(r.source)
+	if not (src and src > 0 and src < 65535) then return EMPTY end
 	local p = object_pos(src)
 	if not p then return EMPTY end
 	return { { key = "camp:" .. src, kind = "camp", pos = p, color = COLOR.camp, state = r.kind, priority = PRIORITY.other } }

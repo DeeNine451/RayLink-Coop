@@ -80,8 +80,8 @@ cvar("coop_death_share", "float", 0, 200, 100)
 -- F3a: each player may be on a different level; the story levels that are entered together (docs/plans/2026-10-24-f3a-split-levels.md 3)
 cvar("coop_split_levels", "int", 0, 1, 0) -- off by default: every map then is the host's, as without split levels
 cvar("coop_story_together", "int", 0, 1, 1)
--- row 20: stalkers finish a player who is down (the stock behaviour, on); off, they leave him as monsters do (coop_ai.cpp)
-cvar("coop_finish_downed", "int", 0, 1, 1)
+-- row 20: stalkers finish a player who is down (the stock behaviour; off by the owner's word 2026-11-02); off, they leave him as monsters do (coop_ai.cpp)
+cvar("coop_npc_finish_downed", "int", 0, 1, 0)
 
 -------------------------------------------------------------------------------
 -- Values: parsing and formatting
@@ -201,7 +201,7 @@ c_item("death", "coop_hardcore_new_kit", "check", { shown_if = { key = "c|coop_d
 c_item("death", "coop_bleedout", "list", { v = { 30, 60, 90, 120, 180, 300 }, unit = "s" })
 c_item("death", "coop_revive_health", "list", { v = { 0.1, 0.2, 0.3, 0.5, 0.75, 1 }, unit = "frac" })
 c_item("death", "coop_checkpoints_group", "check")
-c_item("death", "coop_finish_downed", "check")
+c_item("death", "coop_npc_finish_downed", "check")
 
 -- Tab 2. Group and economy
 c_item("party", "coop_friendly_fire", "check")

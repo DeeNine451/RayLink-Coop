@@ -782,8 +782,20 @@ check(rb.release_objects_table[801] == true and rb.release_objects_table[802] ==
 check(rb.size == 5, "the count follows what was released")
 rb.released = {}
 RB.clear(rb, true)
-check(#rb.released == 1 and rb.released[1] == 801, "clear(all) is the stock's (a level change, the option)")
+check(#rb.released == 0 and rb.release_objects_table[801] == true, "clear(all) with a player on this level: the host's level change takes no bodies from under him")
+-- the distance is the player's option, not the stock's default: 100 m from the client is near at 150 m
+bodies[803] = { position = vector():set(proxy:position().x + 100, 0, proxy:position().z) }
+H.env.ui_options = { get = function(key) return key == "gameplay/general/corpse_min_dist" and 150 or nil end }
+rb.release_objects_table, rb.released = { [803] = true }, {}
+RB.clear(rb)
+check(#rb.released == 0, "a body within the option's distance of a client stays")
+H.env.ui_options = nil
+RB.clear(rb)
+check(#rb.released == 1 and rb.released[1] == 803, "no option: the stock's 75 m")
 KB._set_host_on(false)
+rb.release_objects_table, rb.released = { [801] = true }, {}
+RB.clear(rb, true)
+check(#rb.released == 1, "clear(all) with no other player: the stock's")
 rb.release_objects_table, rb.released = { [801] = true }, {}
 RB.clear(rb)
 check(#rb.released == 1, "single player / no clients: the stock pass")

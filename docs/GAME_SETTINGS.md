@@ -133,7 +133,7 @@
 | 15 | `coop_autosave_interval` | `coop_autosave.cpp:533`, `:51` | 10 мин | 0..120 | таймер (`:628-634`) | Л | `:107`; экран новой игры (`:241`) |
 | 16 | `coop_autosave_count` | `:534`, `:52` | 10 | 1..50 | запись и ротация (`:180`, `:397`) | Л | `:108` |
 | 17 | `coop_death_share` (сборка 10) | `coop_survival.cpp`, рядом с `:2526-2534`, CCC_Float | 100 % | 0..200 | расчёт потерь при смерти: доля категории `[coop_death_drop]` (`mod_system_coop_death.ltx`) = clamp(доля × k / 100, 0, 1), только для drop и lose; `coop_death_preview`. Клиентам — как `coop_death_drop` (`PlayerRules`) | Л | Опции (рядом с `:92`); экран новой игры — список «Сколько выпадает»: 50 / 100 / 150 / 200 % |
-| 20 | `coop_finish_downed` (ночь 2026-10-31) | `coop_ai.cpp`, `register_console`, CCC_Integer | 1 | 0/1 | `CEnemyManager::useful` (`enemy_manager.cpp`): добивает ли сталкер упавшего игрока. Выкл: сталкер оставляет раненого, как мутант (`death::enemy_leaves`); мёртвого и выбывшего не трогает никто | Л | Вкладка «Смерть», «Сталкеры добивают упавшего игрока» |
+| 20 | `coop_npc_finish_downed` (ночь 2026-10-31) | `coop_ai.cpp`, `register_console`, CCC_Integer | 1 | 0/1 | `CEnemyManager::useful` (`enemy_manager.cpp`): добивает ли сталкер упавшего игрока. Выкл: сталкер оставляет раненого, как мутант (`death::enemy_leaves`); мёртвого и выбывшего не трогает никто | Л | Вкладка «Смерть», «Сталкеры добивают упавшего игрока» |
 
 Не входят в «Настройки игры» (технические или свои у каждого игрока):
 - `coop_money_gain_burst`, `_gain_per_min`, `_dialog_cap`, `_dialog_per_min`, `_max`, `_transfer_burst`,
@@ -471,7 +471,7 @@ m_data.coop_game = {
 | `c|coop_bleedout` | 30 / 60 / 90 / 120 / 180 / 300 с | 60 | между | Л |
 | `c|coop_revive_health` | 10 / 20 / 30 / 50 / 75 / 100 % | 30 | между | Л |
 | `c|coop_checkpoints_group` | вкл / выкл | вкл | между | Л |
-| `c|coop_finish_downed` (новый) | вкл / выкл | вкл | между | Л |
+| `c|coop_npc_finish_downed` (новый) | вкл / выкл | выкл | между | Л |
 
 **Вкладка 2. «Группа и экономика»**
 

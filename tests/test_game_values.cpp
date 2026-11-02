@@ -44,7 +44,7 @@ std::string repeat(char c, size_t n) { return std::string(n, c); }
 
 // §1.2: the white list is the 20 rules of the table, nothing else, each once. Rows 18 and 19 are the split-levels rules of
 // F3a (docs/plans/2026-10-24-f3a-split-levels.md §3): the engine registers them (coop_split_levels, coop_story_together).
-// Row 20 is "stalkers finish a downed player" (coop_finish_downed, registered by the NPC AI, coop_ai.cpp).
+// Row 20 is "stalkers finish a downed player" (coop_npc_finish_downed, registered by the NPC AI, coop_ai.cpp).
 TEST(game_values_cvar_list_is_the_twenty_rules)
 {
 	const char* expected[] = {
@@ -52,7 +52,7 @@ TEST(game_values_cvar_list_is_the_twenty_rules)
 		"coop_bleedout", "coop_revive_health", "coop_respawn_delay", "coop_contusion", "coop_death_money",
 		"coop_death_wear", "coop_death_rank", "coop_hardcore_new_kit", "coop_checkpoints_group",
 		"coop_autosave_interval", "coop_autosave_count", "coop_death_share", "coop_split_levels", "coop_story_together",
-		"coop_finish_downed",
+		"coop_npc_finish_downed",
 	};
 	CHECK_EQ(kGameCvarCount, size_t(20));
 	CHECK_EQ(sizeof(expected) / sizeof(expected[0]), kGameCvarCount);

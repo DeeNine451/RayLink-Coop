@@ -137,7 +137,7 @@ CONSOLE = {
 	coop_death_drop = "drop", coop_bleedout = "60.00000", coop_revive_health = "0.30000", coop_respawn_delay = "30.00000",
 	coop_contusion = "10.00000", coop_death_money = "10.00000", coop_death_wear = "10.00000", coop_death_rank = "0.00000",
 	coop_hardcore_new_kit = "0", coop_checkpoints_group = "1", coop_autosave_interval = "10", coop_autosave_count = "10",
-	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_finish_downed = "1",
+	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_npc_finish_downed = "0",
 }
 function get_console_cmd(typ, name) return CONSOLE[name] or "" end
 

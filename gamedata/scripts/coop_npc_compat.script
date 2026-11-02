@@ -473,8 +473,17 @@ end
 
 -- Audit B6 (2026-10-24): an old corpse is released when there are more than five and it lies 75 m from the HOST's
 -- actor (release_body_manager Crelease_body:clear), so a body next to a client went while he came to loot it. A body
--- within that distance of any other player stays in the queue but is not offered to the stock pass this time.
+-- within that distance of any other player stays in the queue but is not offered to the stock pass this time. The stock's
+-- clear(all) at a level change would take every body of a level the others stay on: with a player here it does nothing.
 local RELEASE_DIST_SQR = 5625 -- release_body_manager MIN_RELEASE_DISTANCE (75 m, squared)
+local function release_dist_sqr(dist)
+	if tonumber(dist) then return tonumber(dist) end
+	local o = mod("ui_options")
+	local ok, v = pcall(function() return o and o.get("gameplay/general/corpse_min_dist") end)
+	v = ok and tonumber(v)
+	return v and v * v or RELEASE_DIST_SQR -- the stock keeps the option in a local of its own
+end
+
 local function wrap_body_release()
 	local m = mod("release_body_manager")
 	local cls = m and m.Crelease_body
@@ -483,9 +492,13 @@ local function wrap_body_release()
 	orig.body_release = f
 	cls.clear = function(self, all, dist, ...)
 		local queue = self and self.release_objects_table
-		if all or not host_on or type(queue) ~= "table" then return f(self, all, dist, ...) end
+		if not host_on or type(queue) ~= "table" then return f(self, all, dist, ...) end
+		if all then
+			if P.others()[1] then return end
+			return f(self, all, dist, ...)
+		end
 		local sim = alife()
-		local near = tonumber(dist) or RELEASE_DIST_SQR
+		local near = release_dist_sqr(dist)
 		local kept = {}
 		for id, v in pairs(queue) do
 			local se = sim and sim:object(id)

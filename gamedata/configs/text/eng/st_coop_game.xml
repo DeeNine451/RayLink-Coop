@@ -352,7 +352,7 @@
 	<string id="st_coop_game_faction">
 		<text>World faction</text>
 	</string>
-	<string id="st_coop_game_finish_downed">
+	<string id="st_coop_game_npc_finish_downed">
 		<text>Stalkers finish a downed player</text>
 	</string>
 	<string id="st_coop_game_friendly_fire">

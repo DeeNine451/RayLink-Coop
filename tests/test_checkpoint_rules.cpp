@@ -369,6 +369,16 @@ TEST(cp_resolve_chain)
 		CHECK(c.pick == Pick::Previous);
 		CHECK(near_pos(c.pos, s.prev.pos));
 	}
+	// A level his slot says nothing of wants an arrival point, a level it knows does not.
+	{
+		Slot s;
+		CHECK(needs_arrival(s, here));
+		s.cur = make(Kind::Campfire, 1, "l02_garbage", 5.0f);
+		CHECK(needs_arrival(s, here));
+		s.prev = make(Kind::Arrival, 2, "l01_escape", 6.0f);
+		CHECK(!needs_arrival(s, here));
+		CHECK(!needs_arrival(Slot(), ""));
+	}
 	// Both on another level: the anchor, then the arrival point, then the body.
 	{
 		Slot s;

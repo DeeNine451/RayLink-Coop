@@ -446,7 +446,7 @@ TEST(death_who_is_left_alone)
 	CHECK(!monster_leaves(255));
 }
 
-// Game setting "stalkers finish a downed player" (coop_finish_downed, on by default): only a stalker's choice. A monster
+// Game setting "stalkers finish a downed player" (coop_npc_finish_downed, off by default): only a stalker's choice. A monster
 // leaves a wounded player whatever the setting says; a dead one is nobody's enemy.
 TEST(death_enemy_leaves_by_kind_and_setting)
 {

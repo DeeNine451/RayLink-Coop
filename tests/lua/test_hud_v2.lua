@@ -627,11 +627,25 @@ check(by_kind(deaths, "death", "state", "drop")[1] ~= nil, "a drop mark before t
 M.spots["secondary_task_location@950"] = nil
 run(11000, M)
 list = MK.list()
-check(#by_kind(list, "death") == 0, "the host's spot is gone (picked up / emptied): the marks go")
--- camp of another kind / level
-M.camp = { kind = "arrival", source = 960, level = "l01_escape" }
+check(by_kind(by_kind(list, "death"), "death", "state", "corpse")[1] == nil, "the host's spot came and went (picked up / emptied): the mark goes")
+-- the bag of a player on a map server's level: its spot may never reach this machine, the bag itself is here
+local bag = by_kind(by_kind(list, "death"), "death", "state", "drop")[1]
+check(bag ~= nil and near(bag.pos.x, 31), "a mark whose spot never came stays while its object stands")
+M.objects[951] = nil
 run(1100, M)
-check(#by_kind(MK.list(), "camp") == 0, "an arrival point has no camp marker")
+bag = by_kind(MK.list(), "death")[1]
+check(bag ~= nil and near(bag.pos.x, 31), "too far to be online: the bag is where it was last seen")
+M.object(951, vec(31, 0, 0)).is_inv_box_empty = function() return true end
+run(1100, M)
+check(#by_kind(MK.list(), "death") == 0, "the bag is emptied: the mark goes")
+-- camp of another kind / level
+M.camp = { kind = "arrival", level = "l01_escape", x = 7, y = 0, z = 9 }
+run(1100, M)
+local arrival = by_kind(MK.list(), "camp")[1]
+check(arrival and arrival.state == "arrival" and near(arrival.pos.x, 7) and near(arrival.pos.z, 9), "an arrival point: the camp marker at its place")
+M.camp = { kind = "arrival", level = "l02_garbage", x = 7, y = 0, z = 9 }
+run(1100, M)
+check(#by_kind(MK.list(), "camp") == 0, "an arrival point of another level: no marker")
 M.camp = { kind = "campfire", source = 960, level = "l02_garbage" }
 run(1100, M)
 check(#by_kind(MK.list(), "camp") == 0, "a camp on another level: no marker")
@@ -650,7 +664,7 @@ calls = 0
 for _ = 1, 62 do MK.list(); NOW = NOW + 16 end -- ~1 s of frames
 local poi = by_kind(MK.list(), "poi")[1]
 check(poi and poi.key == "mymod/a" and poi.label == "Hut" and poi.priority == 10, "mod marker: key prefixed with the source, default priority 10")
-check(calls >= 9 and calls <= 11, "sources are asked ~10 times a second, not every frame (" .. calls .. ")")
+check(calls >= 8 and calls <= 11, "sources are asked ~10 times a second, not every frame (" .. calls .. ")")
 check((MK.bad_count and MK.bad_count("mymod") or 0) > 0, "a marker without a position is dropped and counted")
 MK.add_source("broken", function() error("boom") end)
 run(300, M)

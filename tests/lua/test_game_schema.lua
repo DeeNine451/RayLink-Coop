@@ -79,7 +79,7 @@ for i, n in ipairs(FIRST_17) do
 end
 check(same, "the first 17 names keep their order")
 check(schema.CVARS[18] == "coop_split_levels" and schema.CVARS[19] == "coop_story_together", "rows 18 and 19 are the split-levels rules")
-check(schema.CVARS[20] == "coop_finish_downed", "row 20 is the NPC AI rule: stalkers finish a downed player")
+check(schema.CVARS[20] == "coop_npc_finish_downed", "row 20 is the NPC AI rule: stalkers finish a downed player")
 for n, def in pairs({ coop_split_levels = 0, coop_story_together = 1 }) do
 	local c = schema.CVAR[n]
 	check(c ~= nil and c.kind == "int" and c.min == 0 and c.max == 1 and c.def == def, n .. ": an on/off console flag, default " .. def)
@@ -157,7 +157,7 @@ check(schema.to_raw(JOIN, "faction_start") == "faction_start", "to_raw")
 
 -------------------------------------------------------------------------------
 print("== two rules of the 2026-10-31 night: foreign loot, stalkers finish a downed player")
-local LOOT, FINISH = "o|coop/coop_session/loot_claim", "c|coop_finish_downed"
+local LOOT, FINISH = "o|coop/coop_session/loot_claim", "c|coop_npc_finish_downed"
 local loot = schema.item(LOOT)
 check(loot ~= nil and loot.tab == "party" and loot.kind == "check" and loot.src == "o" and loot.def == true,
 	"Foreign loot: a check on the group tab, on by default")
@@ -166,8 +166,8 @@ check(loot and loot.when == "session" and schema.editable(LOOT, true) and schema
 check(schema.normalize(LOOT, "false") == false and schema.normalize(LOOT, "true") == true and schema.normalize(LOOT, "maybe") == nil
 	and schema.to_raw(LOOT, false) == "false", "Foreign loot: an option flag is true / false")
 local downed = schema.item(FINISH)
-check(downed ~= nil and downed.tab == "death" and downed.kind == "check" and downed.src == "c" and downed.cvar == "coop_finish_downed"
-	and downed.def == true, "finish a downed player: a check on the death tab, a console variable, on by default (as today)")
+check(downed ~= nil and downed.tab == "death" and downed.kind == "check" and downed.src == "c" and downed.cvar == "coop_npc_finish_downed"
+	and downed.def == false, "finish a downed player: a check on the death tab, a console variable, off by default (owner 2026-11-02)")
 check(downed and downed.range and downed.range[1] == 0 and downed.range[2] == 1 and downed.int == true
 	and schema.to_raw(FINISH, false) == "0" and schema.to_raw(FINISH, true) == "1", "finish a downed player: 0..1, the console form")
 check(downed and downed.shown_if == nil, "finish a downed player: always shown")
@@ -176,7 +176,7 @@ check(downed and downed.shown_if == nil, "finish a downed player: always shown")
 print("== strings")
 local ids = schema.text_ids()
 local want = { "st_coop_game_split_levels", "st_coop_game_story_together", "st_coop_game_join_spawn",
-	"st_coop_game_loot_claim", "st_coop_game_finish_downed",
+	"st_coop_game_loot_claim", "st_coop_game_npc_finish_downed",
 	"st_coop_game_join_spawn_host", "st_coop_game_join_spawn_faction_start" }
 for _, id in ipairs(want) do
 	check(index_of(ids, id) ~= nil, "text_ids names " .. id)

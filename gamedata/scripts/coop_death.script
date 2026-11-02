@@ -105,6 +105,15 @@ local function is_world_server()
 	return ok and yes == true
 end
 
+-- The bag of a player on a map server's level is an object of that level: the world server hears of it neither the callback nor
+-- the object. The map server marks it, and coop_story takes that spot through the world server to every player.
+local function marks_here()
+	if is_world_server() then return true end
+	if not in_session() or type(api.is_map_server) ~= "function" then return false end
+	local ok, yes = pcall(api.is_map_server)
+	return ok and yes == true
+end
+
 -------------------------------------------------------------------------------
 -- Texts
 -------------------------------------------------------------------------------
@@ -490,7 +499,7 @@ end
 
 -- coop_death_marker(player_local_id, marker_local_id, "drop" | "corpse")
 local function on_death_marker(lid, id, kind)
-	if not is_world_server() then return end -- the spots are the world server's, clients get them replicated
+	if not marks_here() then return end -- the spots are the level authority's, clients get them replicated
 	if type(lid) ~= "number" or type(id) ~= "number" or id ~= math_floor(id) or id < 0 or id >= NO_PARENT then return end
 	if kind ~= "drop" and kind ~= "corpse" then return end
 	add_marker(lid, id, kind, false, time_global())
@@ -567,7 +576,7 @@ local function on_first_update()
 	handled, handled_count = {}, 0 -- the actor is new, its falls are counted from 0 again
 	update_contusion(now)
 	if contusion then put_contusion(now) end
-	if not is_world_server() then return end -- the marks are the world server's
+	if not marks_here() then return end -- the marks are the level authority's
 	for _, m in pairs(markers) do
 		m.since = now
 		if spot_exists(m.id) ~= true then m.added = add_spot(m.id, hint_of(m)) end
