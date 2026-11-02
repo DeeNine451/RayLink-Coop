@@ -621,6 +621,26 @@ TEST(soft_what_a_parked_player_says_to_the_world_waits_and_keeps_its_order)
 		CHECK_EQ(got[i], i);
 }
 
+TEST(soft_the_parking_lasts_until_the_inbox_is_empty_too)
+{
+	// A connection's queue can run dry while the transport still holds what the road sent on: read outside the parking, it would go
+	// to the map server a second time.
+	Move k(37233);
+	std::vector<uint32_t> at_map;
+	k.map.on(Msg::PlayerVitals, [&](PeerId, Reader& r) { at_map.push_back(r.u32()); });
+	k.park();
+	k.away(1300, [] { return false; }); // longer than the helper keeps a link without an owner
+	for (uint32_t i = 0; i < 5; ++i)
+		k.a->s.send(kHostPeer, Lane::Reliable, Msg::PlayerVitals, payload(i));
+	REQUIRE(k.away(3000, [&] { return at_map.size() == 5; }));
+	k.host.s.limit_events_per_update(1);
+	k.host.s.soft_release();
+	CHECK(k.host.s.soft_replaying());
+	k.pump(400, [] { return false; });
+	CHECK(!k.host.s.soft_replaying());
+	CHECK_EQ(at_map.size(), size_t(5));
+}
+
 TEST(soft_the_epoch_moves_under_the_parked_without_a_word)
 {
 	Move k(37232);

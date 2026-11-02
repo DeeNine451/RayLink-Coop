@@ -244,6 +244,31 @@ TEST(lease_client_pool_take)
 	CHECK_EQ(pool.size(), size_t(0));
 }
 
+TEST(lease_client_pool_keeps_its_ids_when_the_epoch_moves_under_it)
+{
+	// the host's move: who stayed lives on in his world, the epoch moves at the world's return: what his pool has is still his
+	lease::ClientPool pool;
+	const auto take_here = [](uint16_t) { return true; };
+	std::vector<uint16_t> rejected;
+	CHECK_EQ(pool.add(4, {101, 102}, take_here, rejected), size_t(2));
+	pool.keep_epoch(5);
+	CHECK_EQ(pool.add(5, {103}, take_here, rejected), size_t(1));
+	CHECK_EQ(pool.size(), size_t(3));
+	CHECK_EQ(pool.take(), uint16_t(101));
+	// a new world is still a new pool
+	CHECK_EQ(pool.add(6, {104}, take_here, rejected), size_t(1));
+	CHECK_EQ(pool.size(), size_t(1));
+}
+
+TEST(lease_an_ids_message_of_the_epoch_before_the_move_still_counts)
+{
+	CHECK(lease::epoch_taken(5, 5, 0));
+	CHECK(lease::epoch_taken(4, 5, 4)); // it was on its way when the world came back
+	CHECK(!lease::epoch_taken(3, 5, 4));
+	CHECK(!lease::epoch_taken(6, 5, 4));
+	CHECK(!lease::epoch_taken(0, 5, 0)); // no move yet: the old epoch means nothing
+}
+
 TEST(lease_client_pool_new_world)
 {
 	// A lease of another world (the host loaded, a level change): the old ids went with the old generator.

@@ -1345,6 +1345,14 @@ TEST(transition_the_one_who_asked_walks_away_from_the_trip)
 	CHECK(s.called_off);
 }
 
+TEST(transition_a_second_trip_does_not_take_the_first_ones_place)
+{
+	constexpr uint16_t kWarlab = 3, kSarcofag = 4;
+	CHECK(ask_trip(false, kWarlab, kSarcofag) == TripAsk::New);
+	CHECK(ask_trip(true, kWarlab, kWarlab) == TripAsk::Joins); // the same way: a yes to the trip that waits
+	CHECK(ask_trip(true, kWarlab, kSarcofag) == TripAsk::Busy);
+}
+
 TEST(transition_movers_of_a_group)
 {
 	// who goes with the group

@@ -139,6 +139,14 @@ TEST(soft_the_clock_goes_on_by_the_window_at_the_time_factor)
 
 // --- the relay
 
+TEST(soft_the_book_waits_for_what_the_map_servers_said_in_the_window)
+{
+	// a grant answered in the window: its commit is among what waited, its time limit must not run out before that is read
+	CHECK(softmove::book_waits(true, false));
+	CHECK(softmove::book_waits(false, true));
+	CHECK(!softmove::book_waits(false, false));
+}
+
 TEST(soft_relay_a_map_message_of_a_player_goes_to_the_map_server_of_his_level)
 {
 	const Relay r = rig();
