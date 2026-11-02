@@ -912,17 +912,13 @@ else
 end
 alife_create_item = base_create
 
-print("-- C6: a dying NPC's items are not the client's to keep or release")
+print("-- a dying NPC's items: a client's copy needs the stock's wear")
 local KEEP = 0
 death_manager = { decide_items_to_keep = function() KEEP = KEEP + 1 end }
 NOW = NOW + 3000
 SendScriptCallback("actor_on_update")
 death_manager.decide_items_to_keep({})
-check(KEEP == 0, "on a client it does nothing: its copy of the NPC follows the host")
-MODE = "host"
-death_manager.decide_items_to_keep({})
-check(KEEP == 1, "the host decides")
-MODE = "client"
+check(KEEP == 1, "on a client it runs: nothing else wears the weapon of its copy, which spawned whole")
 
 print("-- texts: st_coop_mods.xml (eng, rus; windows-1251) and the script's fallbacks")
 local function read_raw(p)
