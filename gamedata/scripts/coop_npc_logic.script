@@ -677,9 +677,26 @@ local function initialize(obj, st, loaded, actor, stype)
 	end
 end
 
+-- A map server's look at what a binder would save (xrCoop/coop_levels_logic.h): the first update stamps every object it initializes, with
+-- logic or without. One with none says nothing, or every restrictor of a level would count as changed and go into the host's save. None
+-- also means a [logic] that starts at nil: an empty custom_data gets default_custom_data.ltx, active = nil.
+local function says_nothing(st)
+	local levels = coop and coop.levels
+	if not (levels and levels.logic_look and levels.logic_look()) then return false end
+	if st.active_section ~= nil then return false end
+	local loaded = st.loaded_active_section
+	if loaded ~= nil and loaded ~= "nil" then return false end
+	local ini, logic = st.ini, st.section_logic or "logic"
+	if not (ini and ini:section_exist(logic)) then return true end
+	local active = ini:r_string_ex(logic, "active")
+	return active == nil or active == "nil"
+end
+
 -- Saved before initialize_obj ran: the loaded state still sits in loaded_*, write that, not a blank one.
 local function save_obj(obj, packet)
-	local st = installed and obj and P.active() and db.storage[obj:id()]
+	local st = installed and obj and db.storage[obj:id()]
+	if st and says_nothing(st) then return end
+	st = st and P.active() and st
 	if st and st.section_logic == nil and st.loaded_active_section ~= nil then
 		local keep = { st.ini_filename, st.section_logic, st.active_section, st.gulag_name }
 		st.ini_filename = st.loaded_ini_filename
