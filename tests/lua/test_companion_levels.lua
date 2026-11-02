@@ -142,7 +142,7 @@ local function stand(opts)
 			end,
 			online_at_server = function(id) return W.online[id] == true end,
 			map_servers = function()
-				return M == H and W.split and { { bridge = BRIDGE, level = 2 } } or {}
+				return M == H and W.split and not W.no_server and { { bridge = BRIDGE, level = 2 } } or {}
 			end,
 		}
 	end
@@ -658,6 +658,74 @@ do
 	LM()[400] = 500
 	Mk.share.down[down].set(given)
 	check(LM()[400] == 500, "the word counts once: what the map server changed since is newer")
+end
+
+print("== a level entered together: the squad stayed behind on a level nobody leads, its leader came with the host")
+do
+	local W = stand()
+	W.no_server = true -- l02_garbage is what they left: no map server on it
+	local H = W.H
+	local cs = H.env.axr_companions.companion_squads
+	cs[400] = false -- the stock's table of the save
+	W.move(1, 1)
+	H.fire("load_state", { coop_npc_leaders = { [400] = 500 } })
+	W.refresh()
+	check(H.teleported and H.teleported.id == 400 and H.teleported.gvid == 10, "the world server teleports it to his body")
+	check(W.CH._leaders()[400] == 500 and cs[400] == W.squads[400], "the level of arrival takes it, his leader keeps it")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders[400] == 500, "the save has the leader, once")
+	W.refresh()
+	check(W.CH._leaders()[400] == 500, "it stays his")
+end
+
+print("== left behind and forbidden to teleport: it stays with its leader's entry, and the save keeps it")
+do
+	local W = stand()
+	W.no_server = true
+	local H = W.H
+	H.se[301] = { companion_cannot_teleport = true }
+	W.move(1, 1)
+	H.fire("load_state", { coop_npc_leaders = { [400] = 500 } })
+	W.refresh()
+	W.refresh()
+	check(H.teleported == nil, "not teleported")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders[400] == 500, "the save has the leader")
+	H.se[301] = nil
+	W.refresh()
+	check(H.teleported and H.teleported.id == 400, "the mark gone, it goes after him")
+end
+
+print("== left behind, its leader's character back in the list a moment after the world: it goes all the same")
+do
+	local W = stand()
+	W.no_server = true
+	local H = W.H
+	local away = true
+	W.move(1, 1)
+	local players, peer_of = H.env.coop.players, H.env.coop.peer_of_avatar
+	H.env.coop.players = function()
+		local list = players()
+		for _, p in ipairs(list) do
+			if away and p.id == 1 then p.avatar_id = nil end
+		end
+		return list
+	end
+	H.env.coop.peer_of_avatar = function(id)
+		if away and id == 500 then return nil end
+		return peer_of(id)
+	end
+	H.fire("load_state", { coop_npc_leaders = { [400] = 500 } })
+	W.refresh()
+	check(H.teleported == nil, "nobody to go to yet")
+	local m = {}
+	H.fire("save_state", m)
+	check(m.coop_npc_leaders[400] == 500, "the save has the leader meanwhile")
+	away = false
+	W.refresh()
+	check(H.teleported and H.teleported.id == 400 and W.CH._leaders()[400] == 500, "he is back: it goes")
 end
 
 print("== a save with leaders of every level: each process keeps its own")

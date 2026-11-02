@@ -53,7 +53,8 @@
 	  (npc.comp_adopt, with the stock's marks and the logic of a companion). The host's level change takes only his own squads
 	  (companion_squad_can_teleport). A leader who goes to another level: the authority lets the squad go, the world server teleports it
 	  to his body when nothing of it is online at a map server, the level of arrival adopts it; a squad the stock forbids to teleport
-	  (told to wait, the Fanatic) stays and keeps its leader's entry. A map server does this with nobody left on its level too.
+	  (told to wait, the Fanatic) stays and keeps its leader's entry. A map server does this with nobody left on its level too; the world
+	  server stands in for a level nobody leads (a level entered together leaves a squad behind while its leader comes along).
 	Not covered: the Useful Idiots panel on a client (axr_companions.companion_squads is empty there), unstuck()'s distance to
 	  the host, the overweight gate on a client.
 
@@ -1203,6 +1204,27 @@ local function may_follow(squad)
 	return type(f) ~= "function" or f(squad) == true
 end
 
+-- World server: it stands in for the authority of a level nobody leads. A level entered together leaves a squad somebody else leads behind
+-- (teleport_rule) while its leader comes along: the squad goes after him as any other. Every tick and not with the sort of the save: a
+-- character is back in the list of players a moment after the world. Its word stays in `far` until it is taken: the save needs it.
+local function left_behind(l)
+	local led = {}
+	for _, ms in ipairs(l.map_servers()) do led[ms.level] = true end
+	for level_id, row in pairs(far) do
+		if not led[level_id] then
+			for squad_id, lead in pairs(row) do
+				local squad = alife_object(squad_id)
+				local peer = P.peer_of(lead)
+				local there = peer and l.level_name(l.level_of_player(peer))
+				if squad and there and not followers[squad_id] then
+					local _, at = level_of_squad(squad)
+					if at and there ~= at and may_follow(squad) then followers[squad_id] = { p = peer, l = lead } end
+				end
+			end
+		end
+	end
+end
+
 local function follow_tick()
 	local l = split_levels()
 	if not l then return end
@@ -1221,7 +1243,10 @@ local function follow_tick()
 			end
 		end
 	end
-	if P.is_world_server() then follow_home(l) end
+	if P.is_world_server() then
+		left_behind(l)
+		follow_home(l)
+	end
 end
 
 -- The stock's level change takes every companion along; with split levels a squad somebody else leads stays where it is. Useful Idiots

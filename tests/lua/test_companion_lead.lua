@@ -734,6 +734,7 @@ do
 		level_of_player = function(peer) return level_of[peer] end,
 		level_name = function(id) return id == 2 and "l02_garbage" or "l01_escape" end,
 		online_at_server = function(id) return false end,
+		map_servers = function() return { { bridge = 0x101, level = 2 } } end,
 	}
 	W.CH._leaders()[300] = 500
 	W.refresh()
