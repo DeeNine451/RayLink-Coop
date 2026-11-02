@@ -394,18 +394,19 @@ local VISIT_EVERY_MS = 1000
 local VISIT_RESCAN_MS = 30000 -- a map with no point found is looked at again after this
 local visits = { next_at = 0, level = nil, tsmarts = nil, list = nil, scan_at = 0, errors = 0, tried = false }
 
--- { { name, id }, ... }: the points of `tsmarts` on map `here`. The simulation board first (the smarts register
--- there when their server object does), else the ALife copy: the objects of the current level of the smart clsid, else all.
+-- { { name, id }, ... }: the points of `tsmarts` on map `here`. The simulation board first (a script class: a userdata; the smarts of
+-- every map register there when their server object does): with anything on it its answer is final, a map with no point would be walked
+-- every VISIT_RESCAN_MS for nothing. Before that the ALife copy: the objects of the current level of the smart clsid, else all.
 local function find_smarts(tsmarts, here)
 	local found = {}
 	local board = rawget(_G, "SIMBOARD")
-	local by_name = type(board) == "table" and type(board.smarts_by_names) == "table" and board.smarts_by_names or nil
-	if by_name then
+	local by_name = board and type(board.smarts_by_names) == "table" and board.smarts_by_names or nil
+	if by_name and next(by_name) ~= nil then
 		for name in pairs(tsmarts) do
 			local se = by_name[name]
 			if se and on_this_map(se, here) then found[#found + 1] = { name = name, id = se.id } end
 		end
-		if #found > 0 then return found end
+		return found
 	end
 	local sim = alife()
 	local cls = rawget(_G, "clsid") and clsid.smart_terrain
@@ -426,7 +427,7 @@ local function find_smarts(tsmarts, here)
 end
 
 local function visit_tick()
-	if not (core.is_client() and core.live() and db.actor) then return end
+	if not (core.is_client() and core.live() and db.actor) or core.is_map_server() then return end -- a map server's actor is a ghost
 	local now = core.now()
 	if now < visits.next_at then return end
 	visits.next_at = now + VISIT_EVERY_MS

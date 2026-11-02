@@ -3,6 +3,7 @@
 -- smarts never update, so game_statistics and Fair Fast Travel (state 1: only the places visited) saw nothing there.
 -- coop_economy_travel counts it on the client, once a second, for the fast travel points of its map. Not shipped.
 dofile("tests/lua/support/harness_economy.lua")
+dofile("tests/lua/support/luabind_like.lua")
 
 local SMART = 77 -- clsid.smart_terrain of the stand-in
 local LEVEL_OF = { [10] = "l01", [20] = "l02" } -- game vertex -> level name
@@ -96,7 +97,7 @@ end
 section("a client: the fast travel points within 50 m of his map are visited")
 do
 	local H, A = setup()
-	A.SIMBOARD = { smarts_by_names = {} }
+	A.SIMBOARD = luabind_object({ smarts_by_names = {} }) -- sim_board: a script class, a userdata in the game
 	for _, id in ipairs({ 900, 901, 902, 903 }) do A.SIMBOARD.smarts_by_names[A.SE[id]:name()] = A.SE[id] end
 	tick(A, 1000)
 	check(same(told(A), "esc_smart_terrain_2_12"), "the point within reach is visited, the one on another map and the one that is no point are not")
@@ -132,13 +133,30 @@ do
 	tick(A, 1000)
 	check(A.ITER.level == 1, "kept: no walk again every second")
 	-- the board is there but empty (nothing registered yet)
-	A.SIMBOARD = { smarts_by_names = {} }
+	A.SIMBOARD = luabind_object({ smarts_by_names = {} })
 	A.CALLS = {}
 	LEVEL = "l02"
 	POS[1] = { x = 10, y = 0, z = 0 }
 	tick(A, 1000)
 	check(same(told(A), "gar_smart_terrain_3_7"), "another map: its points are looked for again (an empty board does not hide them)")
 	check(A.ITER.level == 2, "walked again for the new level")
+	LEVEL = "l01"
+end
+
+section("a map with no point: the board knows every map, its answer is final")
+do
+	local H, A = setup({ level_iter = false })
+	A.SIMBOARD = luabind_object({ smarts_by_names = {} })
+	for _, id in ipairs({ 900, 901, 902, 903 }) do A.SIMBOARD.smarts_by_names[A.SE[id]:name()] = A.SE[id] end
+	A.game_fast_travel.tsmarts = { gar_smart_terrain_3_7 = true } -- a point of another map only
+	tick(A, 1000)
+	check(#A.CALLS == 0, "nothing to visit here")
+	for _ = 1, 3 do tick(A, 31000) end
+	check(A.ITER.all == 0 and A.ITER.level == 0, "the ALife copy is not walked, neither now nor every 30 s")
+	LEVEL = "l02"
+	POS[1] = { x = 10, y = 0, z = 0 }
+	tick(A, 1000)
+	check(same(told(A), "gar_smart_terrain_3_7"), "the map with the point has it from the board")
 	LEVEL = "l01"
 end
 
@@ -183,6 +201,10 @@ do
 	A4.coop.is_live = function() return false end
 	tick(A4, 1000)
 	check(#A4.CALLS == 0, "a client that has not loaded the host's world yet: nothing")
+	local H6, A6 = setup()
+	A6.coop.is_map_server = function() return true end
+	tick(A6, 1000)
+	check(#A6.CALLS == 0 and A6.ITER.level == 0 and A6.ITER.all == 0, "a map server: is_client is true there, its actor is a ghost, it visits nothing")
 	local H5, A5 = setup()
 	A5.alife = function() error("no simulator yet") end
 	tick(A5, 1000)
