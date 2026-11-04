@@ -164,6 +164,21 @@ local function trader(C, P, active)
 	return true
 end
 
+local function trade_scheme(C, P)
+	local m = C.mod("mob_trade")
+	if not m then return false end
+	-- ALife runs on_game_start before loading the world. Patch the class before
+	-- setup_generic_scheme captures on_trade for NPCs, including loaded saves.
+	return C.wrap(m.mob_trade, "on_trade", "mob_trade.on_trade", function(old)
+		return function(self, ...)
+			-- A remote deal has no host ActorMenu_on_trade_started to seed this
+			-- counter. Preserve existing totals and the stock reaction/UI flags.
+			if P.is_host() and self.st.all_money == nil then self.st.all_money = 0 end
+			return old(self, ...)
+		end
+	end)
+end
+
 -- G.A.M.M.A. No NPC Friendly Fire zeroes a hit between friendly or neutral NPCs and resets their relation unless the
 -- shooter is db.actor. On the host a client's character is an NPC of his faction, so his shots at friendly and neutral
 -- NPCs did no damage and the NPCs never turned on him (live 2026-10-29). A player's character shoots like the actor;
@@ -189,7 +204,7 @@ function install(P, active, applied)
 	if not (C and type(C.find_local) == "function") then return end
 	installed = true
 	for _, spec in ipairs({ { "ai_hit", ai }, { "danger_corpse", corpse }, { "stealth", stealth }, { "trader", trader },
-		{ "friendly_fire", friendly_fire } }) do
+		{ "trade_scheme", trade_scheme }, { "friendly_fire", friendly_fire } }) do
 		local ok, result = pcall(spec[2], C, P, active)
 		if not ok then
 			P.report("compat", "native " .. spec[1], result)
