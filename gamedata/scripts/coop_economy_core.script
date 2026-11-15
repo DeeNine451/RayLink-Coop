@@ -189,6 +189,20 @@ function send_clients(name, t, except)
 	return n
 end
 
+-- The world server with split levels: the bridges of its map servers (coop.levels.map_servers), the peers it reaches them by.
+-- A map server is in no players() row. Empty anywhere else.
+function bridges()
+	local out = {}
+	local l = api and api.levels
+	if not (is_host() and type(l) == "table" and type(l.map_servers) == "function") then return out end
+	local ok, list = pcall(l.map_servers)
+	if not (ok and type(list) == "table") then return out end
+	for _, ms in ipairs(list) do
+		if type(ms) == "table" and type(ms.bridge) == "number" then out[#out + 1] = ms.bridge end
+	end
+	return out
+end
+
 -- What a player asks of the logic of his level: func runs on its authority, from = he (coop_main.add_level_handler).
 function on_level(name, func)
 	local cm = rawget(_G, "coop_main") or mod("coop_main")

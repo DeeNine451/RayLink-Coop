@@ -43,6 +43,7 @@ end
 function V:sub(o) self.x, self.y, self.z = self.x - o.x, self.y - o.y, self.z - o.z return self end
 function V:getH() return math.atan2(-self.x, self.z) end
 function V:distance_to(o) local dx, dy, dz = self.x - o.x, self.y - o.y, self.z - o.z return math.sqrt(dx * dx + dy * dy + dz * dz) end
+function V:distance_to_sqr(o) local d = self:distance_to(o) return d * d end
 function V.__unm(a) return vec(-a.x, -a.y, -a.z) end
 
 -------------------------------------------------------------------------------
@@ -54,9 +55,12 @@ POS = {} -- peer -> {x,y,z}
 LEVEL = "l01"
 WORLDS = {} -- peer -> world
 QUEUE = {}
+-- Map servers of split levels (coop_mapserver): bridge peer (>= 0x100, as the world server sees it) -> { nick, players = {peer, ...} }.
+-- A map server is a world of its own (WORLDS[bridge]), not a player: it is in no coop.players() list of the world server.
+BRIDGES = {}
 
 local function to_local(W, hid)
-	if W.PEER == 0 then return hid end
+	if W.PEER == 0 or BRIDGES[W.PEER] then return hid end -- a map server keeps the world server's numbering (it has no proxy)
 	local p = PLAYERS[W.PEER].proxy
 	if hid == 0 then return p elseif hid == p then return 0 end
 	return hid
@@ -88,9 +92,26 @@ local function net_send(W, name, payload, target)
 	if W.ACTIVE == false then return false, "not in a co-op world" end
 	target = target or -1
 	if target ~= -1 and target == W.PEER then return false, "target is this machine" end
-	if target ~= -1 and not PLAYERS[target] then return false, "no such player" end
+	local bridge = BRIDGES[W.PEER]
+	if bridge then
+		-- a map server (flush_outbox / server_on_script_event): 0 is the world server; a player of its level, or each of them for
+		-- -1, through the world server, which says the event comes from 0 ("what a map server tells a player, the world tells him")
+		if target ~= -1 and target ~= 0 and not PLAYERS[target] then return false, "no such player" end
+		W.SENT[#W.SENT + 1] = { name = name, payload = payload, target = target }
+		if target == 0 then
+			push(0, W.PEER, name, payload)
+		elseif target == -1 then
+			for _, p in ipairs(bridge.players) do push(p, 0, name, payload) end
+		else
+			push(target, 0, name, payload)
+		end
+		return true
+	end
+	if target ~= -1 and not PLAYERS[target] and not (W.PEER == 0 and BRIDGES[target]) then return false, "no such player" end
 	W.SENT[#W.SENT + 1] = { name = name, payload = payload, target = target }
-	if W.PEER == 0 then
+	if W.PEER == 0 and BRIDGES[target] then
+		push(target, 0, name, payload) -- the world server to a map server (host_send to its bridge)
+	elseif W.PEER == 0 then
 		for peer in pairs(PLAYERS) do
 			if peer ~= 0 and (target == -1 or target == peer) then push(peer, 0, name, payload) end
 		end
@@ -119,6 +140,9 @@ local function char_obj(W, peer, local_id)
 	function o:name() return "char_" .. tostring(peer) end
 	function o:section() return "coop_player_avatar" end
 	function o:give_money(n) PLAYERS[peer].money_on_char = (PLAYERS[peer].money_on_char or 0) + n end
+	function o:alive() return true end
+	function o:level_vertex_id() return 7 end
+	function o:game_vertex_id() return 8 end
 	return o
 end
 
@@ -144,7 +168,7 @@ function make_world(peer)
 		local ok, s = pcall(string.format, fmt, ...)
 		s = ok and s or tostring(fmt)
 		W.LOG[#W.LOG + 1] = s
-		if VERBOSE then print("   [" .. PLAYERS[peer].nick .. "] " .. s) end
+		if VERBOSE then print("   [" .. tostring((PLAYERS[peer] or BRIDGES[peer] or {}).nick or peer) .. "] " .. s) end
 	end
 	W.time_global = function() return W.NOW end
 
@@ -205,7 +229,7 @@ function make_world(peer)
 				local ok, err = pcall(f, payload, from, name)
 				if not ok then
 					W.HANDLER_ERRORS = (W.HANDLER_ERRORS or 0) + 1
-					print("   handler error on " .. PLAYERS[peer].nick .. " (" .. name .. "): " .. tostring(err))
+					print("   handler error on " .. tostring((PLAYERS[peer] or BRIDGES[peer] or {}).nick or peer) .. " (" .. name .. "): " .. tostring(err))
 				end
 			end
 		end,

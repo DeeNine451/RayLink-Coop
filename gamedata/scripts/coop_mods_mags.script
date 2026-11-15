@@ -19,6 +19,10 @@
 	  requester's inventory (a gun the player is taking into the bag meanwhile, coop_mods_items take first, is stripped there
 	  with its other calls); swapping a part into such a weapon is checked by the host against the slot the
 	  client saw (mods.wpo_swap) and finished on the client when the host's new part state has arrived.
+  Every refusal or no-op of a strip is told to the requester (mods.wpo_no with a code). When parts of an item arrive from the
+  network, an open inventory window draws that item's cell again (its dots, Item Icon Info). Split levels: the authority of a
+  level rolls the parts of its loot (mods.wpo_eval; an item it knows already is answered with mods.wpo_parts, a refusal with
+  mods.wpo_eval_no, then the client rolls); what a client carries has a stand-in table of its own meanwhile.
 --]]
 
 local api = rawget(_G, "coop")
@@ -304,7 +308,9 @@ end
 -------------------------------------------------------------------------------
 -- Weapon Parts Overhaul and part states
 -------------------------------------------------------------------------------
-local WPO = { w = nil, j = nil, orig_strip = nil, orig_replace = nil, orig_eval = nil, strips = {}, swaps = {}, asked = {} }
+local WPO = { w = nil, j = nil, orig_strip = nil, orig_replace = nil, orig_eval = nil, strips = {}, swaps = {}, asked = {},
+	provisional = {} } -- provisional: id -> time a stand-in table of this machine gives way to a roll here (split levels, client)
+local EVAL_WAIT_MS = 5000
 
 local function parts_of(wpn)
 	local ok, p = pcall(item_parts.get_parts_con, wpn)
@@ -322,8 +328,9 @@ local function strippable(parts, name)
 	return false
 end
 
-local function wpo_tip(id, suffix)
-	local msg = C().text(id, id)
+-- `fallback`: the string shown when `id` is not translated (a build without the newer string).
+local function wpo_tip(id, suffix, fallback)
+	local msg = C().text(id, fallback and C().text(fallback, fallback) or id)
 	if suffix and ui_item and ui_item.get_sec_name then msg = msg .. " " .. ui_item.get_sec_name(suffix) end
 	if db.actor and news_manager and news_manager.send_tip then pcall(news_manager.send_tip, db.actor, msg, nil, "swiss_knife", 6000) end
 end
@@ -363,6 +370,13 @@ local function strip_refused(t, from, why, code)
 	C().to_peer(from, "wpo_no", { w = t.w, r = code })
 end
 
+-- The authority's parts of item `id` to one player (his copy lacks them or is behind: an ask for a roll of an item rolled already,
+-- a strip of parts that are off here).
+local function send_parts(peer, id, parts)
+	local s = C().ser(parts)
+	if s and #s < 3000 then C().to_peer(peer, "wpo_parts", { w = C().hid(id), d = s }) end
+end
+
 local function host_strip(t, from)
 	local id = C().lid(tonumber(t.w))
 	local wpn = type(id) == "number" and id ~= 0 and level.object_by_id(id)
@@ -380,7 +394,14 @@ local function host_strip(t, from)
 		for n in t.p:gmatch("[^,]+") do
 			if parts[n] and parts[n] ~= -1 then names[#names + 1] = n end
 		end
-		if #names == 0 then return end
+		-- nothing of it is on the weapon here: his dots are behind this table, he gets it (this ended silently)
+		if #names == 0 then
+			send_parts(from, id, parts)
+			return strip_refused(t, from, "the parts are off already", "none")
+		end
+	elseif not strippable(parts) then
+		send_parts(from, id, parts)
+		return strip_refused(t, from, "nothing to strip", "none")
 	end
 	-- The parts go into db.actor, here the requester's character.
 	if names then
@@ -388,12 +409,15 @@ local function host_strip(t, from)
 			local ok, e = C().as_player(who, WPO.orig_strip, id, n)
 			if not ok then
 				C().report("mags", "strip", e)
-				break
+				return strip_refused(t, from, "strip failed", "error")
 			end
 		end
 	else
 		local ok, e = C().as_player(who, WPO.orig_strip, id, nil)
-		if not ok then C().report("mags", "strip", e) end
+		if not ok then
+			C().report("mags", "strip", e)
+			return strip_refused(t, from, "strip failed", "error")
+		end
 	end
 	st.strips = st.strips + 1
 end
@@ -437,25 +461,135 @@ local function rolls_parts(obj)
 	return ok and list ~= nil and list ~= ""
 end
 
+-- The asker hears of a refusal: nobody rolls the item for him then, his machine does (wpo_eval_no on the client). Live 2026-11-15:
+-- a map server refused ("unknown item", "carried by someone"), the client asked again every 3 s and its gun in hand had no parts.
+local function eval_refused(t, from, why)
+	refuse("wpo_eval", from, why)
+	C().to_peer(from, "wpo_eval_no", { w = t.w })
+end
+
 -- Authority of the level: roll the parts of loot near the requester, or of a weapon he carries, with this machine's condition.
 local function host_eval(t, from)
 	local id = C().lid(tonumber(t.w))
 	local wpn = type(id) == "number" and id ~= 0 and level.object_by_id(id)
 	local who = C().avatar(from)
-	if not (wpn and who and WPO.orig_eval) then return refuse("wpo_eval", from, "unknown item") end
+	if not (wpn and who and WPO.orig_eval) then return eval_refused(t, from, "unknown item") end
 	if C().root_of(id) ~= who:id() then
 		local cont = wpn:parent()
-		if cont and not container_of(wpn) then return refuse("wpo_eval", from, "carried by someone") end
-		if not near(cont or wpn, who) then return refuse("wpo_eval", from, "too far") end
+		if cont and not container_of(wpn) then return eval_refused(t, from, "carried by someone") end
+		if not near(cont or wpn, who) then return eval_refused(t, from, "too far") end
 	end
-	if parts_of(wpn) then return end -- rolled already: the mirror has them on the way
+	-- Known here already (the world server sends every map server the vars players write): never rolled over, the asker gets them.
+	local known = parts_of(wpn)
+	if known then return send_parts(from, id, known) end
 	local ok, e = pcall(WPO.orig_eval, wpn)
 	if not ok then C().report("mags", "parts roll", e) end
 	st.rolls = st.rolls + 1
 end
 
+local STRIP_NO = {
+	loaded = "st_coop_mods_wpo_strip_loaded",
+	none = "st_coop_mods_wpo_strip_none", -- the parts are off already (his dots were behind)
+	busy = "st_coop_mods_wpo_strip_busy", -- over the world server's limit of requests
+}
+local STRIP_NO_NEW = { none = true, busy = true } -- newer strings: a text pack without them shows the general refusal
 local function client_strip_refused(t)
-	wpo_tip(t.r == "loaded" and "st_coop_mods_wpo_strip_loaded" or "st_coop_mods_wpo_strip_refused")
+	local refused = "st_coop_mods_wpo_strip_refused"
+	wpo_tip(STRIP_NO[t.r] or refused, nil, STRIP_NO_NEW[t.r] and refused or nil)
+end
+
+-- se vars kept on this machine while f runs (coop_economy_mdata.quietly); without it there is nothing that would send them.
+local function quiet(f, ...)
+	local em = C().mod("coop_economy_mdata")
+	if em and C().fn(em, "quietly") then return em.quietly(f, ...) end
+	return f(...)
+end
+
+local function drop_parts_here(id)
+	quiet(function() se_save_var(id, nil, "parts", nil) end)
+end
+
+-- Client: the parts of `obj` rolled on this machine and published, as single player rolls them.
+local function roll_here(obj)
+	local id = obj:id()
+	local stand_in = WPO.provisional[id] ~= nil
+	WPO.asked[id], WPO.provisional[id] = nil, nil
+	if stand_in then drop_parts_here(id) end -- WPO rolls only an item without a table
+	local ok, e = pcall(WPO.orig_eval, obj)
+	if not ok then C().report("mags", "parts roll here", e) end
+end
+
+-- Client: ask the authority of the level to roll. False when it cannot be asked.
+local function ask_eval(id)
+	WPO.asked[id] = time_global() + 3000 -- the answer is on its way; asked again only if it got lost
+	st.asks = st.asks + 1
+	return C().to_host("wpo_eval", { w = C().hid(id) }) == true
+end
+
+-- Client: the authority refused to roll it: rolled here.
+local function client_eval_refused(t)
+	local id = C().lid(tonumber(t.w))
+	local obj = type(id) == "number" and id > 0 and id < 65535 and level.object_by_id(id)
+	if not (obj and (WPO.provisional[id] or WPO.asked[id])) then return end
+	if not WPO.provisional[id] and parts_of(obj) then return end -- they came meanwhile
+	roll_here(obj)
+end
+
+-- Client: the authority's parts sent to this player alone (an answer to an ask, a strip of parts that were off already).
+local function client_parts(t)
+	local id = C().lid(tonumber(t.w))
+	if not (type(id) == "number" and id > 0 and id < 65535 and type(t.d) == "string") then return end
+	local v = C().deser(t.d)
+	if type(v) ~= "table" then return end
+	local em = C().mod("coop_economy_mdata")
+	if em and C().fn(em, "apply_se") then em.apply_se(id, "parts", v) end
+end
+
+-- Client: a stand-in table the authority never answered: rolled here; an item he no longer carries goes back to asking.
+local function wpo_provisional_due()
+	if not next(WPO.provisional) then return end
+	local now = time_global()
+	for id, due in pairs(WPO.provisional) do
+		if now >= due then
+			local obj = level.object_by_id(id)
+			if obj and own(id) then
+				roll_here(obj)
+			else
+				WPO.provisional[id] = nil
+				drop_parts_here(id)
+			end
+		end
+	end
+end
+
+-- An open inventory window draws the cell of item `id` again (ui_inventory.GUI, its containers CC: UICellContainer:UpdateItem
+-- is the stock way to refresh one cell, "force it to get game object again for updated stats"). Z's Item Icon Info draws the
+-- dots of the parts in it (z_item_icon_info.Add_Parts_Bars from UICellItem:Add_ProgressBar); a cell is drawn when it is built,
+-- and the parts of an item in a body or a box come later on split levels. No window shown: nothing.
+local function refresh_cell(id)
+	local inv = rawget(_G, "ui_inventory")
+	local gui = type(inv) == "table" and inv.GUI
+	if not gui then return end
+	local ok, shown = pcall(function() return gui:IsShown() end)
+	if not (ok and shown == true) then return end
+	local obj = level.object_by_id(id)
+	if not obj then return end
+	local ok2, list = pcall(function() return gui.CC end)
+	if not (ok2 and type(list) == "table") then return end
+	for _, cc in pairs(list) do
+		local found, ci = pcall(function() return cc:GetCell_ID(id) end)
+		if found and ci then
+			local drawn, e = pcall(function() cc:UpdateItem(obj) end)
+			if not drawn then C().report("mags", "cell refresh", e) end
+		end
+	end
+end
+
+-- Any machine: parts of an item came from the network.
+local function wpo_heard(id, var)
+	if var ~= "parts" then return end
+	WPO.provisional[id], WPO.asked[id] = nil, nil
+	refresh_cell(id)
 end
 
 -- Client: a swap into a weapon this player does not carry is finished once the host's part state is here.
@@ -557,19 +691,36 @@ local function install_wpo()
 	C().wrap(item_parts, "evaluate_parts", "item_parts.evaluate_parts", function(orig)
 		WPO.orig_eval = orig
 		return function(obj, ...)
-			if not (obj and C().is_client() and split()) or parts_of(obj) or not rolls_parts(obj) then return orig(obj, ...) end
-			local id, now = obj:id(), time_global()
+			if not (obj and C().is_client() and split()) or not rolls_parts(obj) then return orig(obj, ...) end
+			local id = obj:id()
+			if WPO.provisional[id] then return end -- a stand-in table is here, the real one is on its way: nothing re-evaluated
+			if parts_of(obj) then return orig(obj, ...) end
+			local now = time_global()
+			if own(id) then
+				-- What this player carries never goes without a table (single player always leaves one): arti_jamming reads the
+				-- parts of the gun in hand every second (live 2026-11-15: "arti_jamming.script:384: bad argument #1 to 'pairs'",
+				-- 30 times). A stand-in rolled here and kept on this machine until the authority's roll comes; no answer or a
+				-- refusal: rolled here for good.
+				WPO.provisional[id] = now + EVAL_WAIT_MS
+				local ok, e = pcall(quiet, orig, obj, ...)
+				if not ok then C().report("mags", "stand-in parts", e) end
+				if not ask_eval(id) then roll_here(obj) end
+				return
+			end
 			if (WPO.asked[id] or 0) > now then return end
-			WPO.asked[id] = now + 3000 -- the answer is on its way; asked again only if it got lost
-			st.asks = st.asks + 1
-			C().to_host("wpo_eval", { w = C().hid(id) })
+			ask_eval(id)
 		end
 	end)
+	local em = C().mod("coop_economy_mdata")
+	if em and C().fn(em, "on_se_value") then em.on_se_value(wpo_heard) end
 	C().on("wpo_strip", host_strip, "host")
 	C().on("wpo_swap", host_swap, "host")
 	C().on("wpo_eval", host_eval, "host")
 	C().on("wpo_no", client_strip_refused, "client")
-	C().set_limit("wpo_strip", 8, 3)
+	C().on("wpo_eval_no", client_eval_refused, "client")
+	C().on("wpo_parts", client_parts, "client")
+	-- a request the limit drops is answered too (several strips of one frame are one request already)
+	C().set_limit("wpo_strip", 8, 3, function(t, from) strip_refused(t, from, "too many requests", "busy") end)
 	C().set_limit("wpo_swap", 6, 2)
 	C().set_limit("wpo_eval", 20, 4)
 end
@@ -589,6 +740,8 @@ local function actor_on_update()
 		local ok, e = pcall(mirror_flush, m)
 		if not ok then C().report("mags", m.verb .. " flush", e) end
 	end
+	local ok, e = pcall(wpo_provisional_due)
+	if not ok then C().report("mags", "stand-in parts", e) end
 end
 
 -- The mod registers its drag-drop handler by value in its own start: take that over at the first update.

@@ -46,4 +46,10 @@
 	<string id="st_coop_mods_wpo_strip_loaded">
 		<text>Деталь не снята: сначала разрядите оружие на земле.</text>
 	</string>
+	<string id="st_coop_mods_wpo_strip_none">
+		<text>Деталь не снята: её уже нет на оружии.</text>
+	</string>
+	<string id="st_coop_mods_wpo_strip_busy">
+		<text>Деталь не снята: слишком много действий подряд, повторите.</text>
+	</string>
 </string_table>

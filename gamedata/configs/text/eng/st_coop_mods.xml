@@ -46,4 +46,10 @@
 	<string id="st_coop_mods_wpo_strip_loaded">
 		<text>The part was not removed: unload the weapon on the ground first.</text>
 	</string>
+	<string id="st_coop_mods_wpo_strip_none">
+		<text>The part was not removed: it is no longer on the weapon.</text>
+	</string>
+	<string id="st_coop_mods_wpo_strip_busy">
+		<text>The part was not removed: too many requests at once, try again.</text>
+	</string>
 </string_table>

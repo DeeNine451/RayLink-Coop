@@ -399,8 +399,9 @@ end
 local buckets = {}
 local limits = {} -- verb -> { burst, per_s }
 
-function set_limit(verb, burst, per_s)
-	limits[verb] = { burst, per_s }
+-- on_limited(t, from), optional: runs for a request the limit drops, so the requester can be told (a dropped strip was silent).
+function set_limit(verb, burst, per_s, on_limited)
+	limits[verb] = { burst, per_s, type(on_limited) == "function" and on_limited or nil }
 end
 
 local function rate_ok(from, verb)
@@ -462,6 +463,11 @@ function on(verb, f, side)
 			return
 		elseif not rate_ok(from, verb) then
 			stats.limited = stats.limited + 1
+			local told = limits[verb] and limits[verb][3]
+			if told then
+				local ok, e = pcall(told, cm.decode(payload), from)
+				if not ok then report("net", verb .. " limited", e) end
+			end
 			return
 		end
 		if to_his_level and is_world_server() then

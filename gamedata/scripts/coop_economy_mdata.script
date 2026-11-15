@@ -34,7 +34,8 @@
 	   polled on the host, sent to clients on change. coop_economy_mdata.register_world_key(key).
 
 	Events (values are coop_economy_core.pack strings):
-		economy.se   any -> host -> others   { n, i1, v1, d1, ... }   id (host numbering), var, value
+		economy.se   any -> host -> others   { n, i1, v1, d1, ... }   id (host numbering), var, value; the world server passes
+		                                                              what it relays on to every map server but the sender
 		economy.imd  any -> host -> others   { n, i1, k1, d1, ... }   id, m_data key, value
 		economy.pmd  client -> host          { k, d }                 per-player key, value (nil = cleared)
 		economy.wmd  host -> clients         { k, d }                 world key, value
@@ -98,13 +99,22 @@ local function clone_is_retired(id)
 	return true
 end
 
+-- se vars the world server does not send its map servers (filled from SE_HOST_ONLY below): NPC state that the authority of each
+-- level keeps itself, as before.
+local se_not_to_bridges = {}
+
 -- Sends `entries` ({ {id, key, packed}, ... }) as batches of `name`.
-local function send_batches(name, entries, target, except)
+-- bridges (world server, split levels): the map servers to send them to as well; `skip`: vars they do not get.
+local function send_batches(name, entries, target, except, bridges, skip)
 	local batch, size, n = {}, 0, 0
 	local function flush()
 		if n == 0 then return end
 		batch.n = n
-		if core.is_host() then
+		if bridges then
+			for _, b in ipairs(bridges) do
+				if b ~= except then core.send(name, batch, b) end
+			end
+		elseif core.is_host() then
 			core.send_clients(name, batch, except)
 		else
 			core.send(name, batch, target or 0)
@@ -115,9 +125,11 @@ local function send_batches(name, entries, target, except)
 		local instance = e[4] or item_instance(core.local_id(e[1]))
 		local len = #e[3] + #tostring(e[2]) + #instance + 24
 		if len > MAX_VALUE then
-			stats.oversize = stats.oversize + 1
-			core.log("! %s %s/%s not sent: %d bytes", name, tostring(e[1]), tostring(e[2]), len)
-		else
+			if not bridges then
+				stats.oversize = stats.oversize + 1
+				core.log("! %s %s/%s not sent: %d bytes", name, tostring(e[1]), tostring(e[2]), len)
+			end
+		elseif not (skip and skip[e[2]]) then
 			if size + len > MAX_BATCH then flush() end
 			n = n + 1
 			batch["i" .. n], batch["k" .. n], batch["d" .. n] = e[1], e[2], e[3]
@@ -126,6 +138,19 @@ local function send_batches(name, entries, target, except)
 		end
 	end
 	flush()
+end
+
+-- The world server passes the se vars a player or a map server wrote on to its map servers too (except the one they came
+-- from): a map server is the authority of the bodies, boxes and characters of its level and acts on their vars (WPO strips a
+-- weapon by its "parts"). Owner, live 2026-11-15: a client put the parts back on a stripped weapon in his bag, threw it into a
+-- body, and the map server, which had heard only of the strip, found nothing to take off. Every map server gets every such
+-- change, not only the sender's level's: an item moves between levels with its carrier, and a map server holds the entities
+-- of the whole world (it loads the world server's save). What the world server's own scripts write stays as before (its
+-- players only): a "parts = nil" of its own bookkeeping must not wipe the table of a level's authority. Item riders (imd) do
+-- not go this way.
+local function relay_to_bridges(entries, except)
+	local list = core.bridges()
+	if #list > 0 then send_batches("se", entries, nil, except, list, se_not_to_bridges) end
 end
 
 local function read_batch(t)
@@ -152,6 +177,7 @@ local SE_HOST_ONLY = {
 	companion = true, companion_cannot_dismiss = true, companion_cannot_teleport = true, death_dropped = true,
 	dont_release = true, do_not_deactivate = true, healing_charge = true,
 }
+for k in pairs(SE_HOST_ONLY) do se_not_to_bridges[k] = true end
 -- Accepted from a client on any entity (flags a player sets on world objects he deals with).
 local SE_WORLD_VARS = {
 	looted = true, parts = true, info = true, unpatched = true, strapped_item = true,
@@ -252,6 +278,46 @@ local function se_store(local_id, var, value)
 	return true
 end
 
+-- Scripts that act on a value the network brought (coop_mods_mags draws the dots of a weapon again): f(local id, var). Runs after
+-- the value is stored, on every machine; not for this machine's own writes.
+local se_listeners = {}
+function on_se_value(f)
+	if type(f) ~= "function" then return end
+	for _, g in ipairs(se_listeners) do if g == f then return end end
+	se_listeners[#se_listeners + 1] = f
+end
+
+local function se_heard(id, var)
+	for _, f in ipairs(se_listeners) do
+		local ok, err = pcall(f, id, var)
+		if not ok then
+			stats.errors = stats.errors + 1
+			core.log("! se listener %s/%s: %s", tostring(id), tostring(var), tostring(err))
+		end
+	end
+end
+
+-- f(...) with the se vars it writes kept on this machine: a stand-in until the real value comes (coop_mods_mags: the parts of a
+-- weapon a client carries while its authority rolls them). Returns what f returns; an error of f is raised again.
+function quietly(f, ...)
+	local was = applying
+	applying = true
+	local r = { pcall(f, ...) }
+	applying = was
+	if not r[1] then error(r[2], 0) end
+	return unpack(r, 2, table.maxn(r))
+end
+
+-- A value of entity `id` (local numbering) sent to this machine alone (coop_mods_mags: the authority answers an ask with the
+-- parts it has): stored as one that came through "se", without sending it on. False when the entity is not here.
+function apply_se(id, var, value)
+	if type(id) ~= "number" or not_sent(var) then return false end
+	se_sig[tostring(core.host_id(id)) .. "\0" .. var] = core.pack(value)
+	if not se_store(id, var, value) then return false end
+	se_heard(id, var)
+	return true
+end
+
 local function client_may_write(from, hid, var)
 	if clone_busy[hid] or clone_is_retired(hid) then return false end
 	if SE_HOST_ONLY[var] then return false end
@@ -310,11 +376,16 @@ local function on_se(t, from)
 			if not se_store(lid, e.key, e.value) then
 				stats.se_pending = stats.se_pending + 1
 				se_wait[#se_wait + 1] = { lid, e.key, e.value, instance = e.instance, until_ms = core.now() + PENDING_MS }
+			else
+				se_heard(lid, e.key)
 			end
 			if host then relay[#relay + 1] = { e.id, e.key, e.packed } end
 		end
 	end
-	if host and #relay > 0 then send_batches("se", relay, nil, from) end
+	if host and #relay > 0 then
+		send_batches("se", relay, nil, from)
+		relay_to_bridges(relay, from)
+	end
 end
 
 -- Host: held changes whose item is here now are checked like a fresh one, stored and sent to the others.
@@ -327,7 +398,7 @@ local function se_release_held()
 			if client_may_write(h.from, e.id, e.key) and (not e.instance or e.instance == item_instance(e.id)) then
 				se_sig[tostring(e.id) .. "\0" .. e.key] = e.packed
 				stats.se_in = stats.se_in + 1
-				se_store(e.id, e.key, e.value)
+				if se_store(e.id, e.key, e.value) then se_heard(e.id, e.key) end
 				relay[h.from] = relay[h.from] or {}
 				local r = relay[h.from]
 				r[#r + 1] = { e.id, e.key, e.packed }
@@ -341,7 +412,10 @@ local function se_release_held()
 		end
 	end
 	se_hold = keep
-	for from, r in pairs(relay) do send_batches("se", r, nil, from) end
+	for from, r in pairs(relay) do
+		send_batches("se", r, nil, from)
+		relay_to_bridges(r, from)
+	end
 end
 
 local function se_retry()
@@ -351,7 +425,11 @@ local function se_retry()
 	for _, w in ipairs(se_wait) do
 		if not clone_busy[w[1]] and not clone_is_retired(w[1]) and
 			(not alife_object(w[1]) or not w.instance or w.instance == item_instance(w[1])) then
-			if not se_store(w[1], w[2], w[3]) and t < w.until_ms then keep[#keep + 1] = w end
+			if se_store(w[1], w[2], w[3]) then
+				se_heard(w[1], w[2])
+			elseif t < w.until_ms then
+				keep[#keep + 1] = w
+			end
 		end
 	end
 	se_wait = keep

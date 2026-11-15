@@ -102,11 +102,16 @@ else
 	NOW = NOW + 5000
 	item_parts.evaluate_parts(loot)
 	check(sent_count("mods.wpo_eval") == 2, "client: asked again after a while (a lost answer)")
-	-- the weapon just taken: its condition may still be the spawn's too
+	-- the weapon just taken: its condition may still be the spawn's too. What he carries never goes without a table (arti_jamming
+	-- reads the gun in hand every second): a stand-in rolled here, the authority asked for the real one (test_mods_wpo_split.lua
+	-- shows the stand-in stays on this machine and gives way to the authority's roll)
 	local taken = weapon(0, 1)
 	SENT = {}
 	item_parts.evaluate_parts(taken)
-	check(ROLLED[taken:id()] == nil and sent("mods.wpo_eval") ~= nil, "client, split levels: a weapon without parts in the bag is rolled by the authority too")
+	check(sent("mods.wpo_eval") ~= nil, "client, split levels: a weapon without parts in the bag is rolled by the authority too")
+	check(ROLLED[taken:id()] == 1 and PARTS[taken:id()] ~= nil, "client, split levels: meanwhile it has a stand-in table")
+	item_parts.evaluate_parts(taken)
+	check(ROLLED[taken:id()] == 1 and sent_count("mods.wpo_eval") == 1, "client: the stand-in is not evaluated again, nor asked twice")
 	-- parts that exist: the mod's own code (it returns at once)
 	local known = weapon(box:id(), 1)
 	PARTS[known:id()] = { scope = 70 }
