@@ -111,4 +111,7 @@
 	<string id="st_coop_faction_think">
 		<text>Мне надо ещё подумать.</text>
 	</string>
+	<string id="st_coop_faction_split_joined">
+		<text>%s вступил в группировку «%s».</text>
+	</string>
 </string_table>

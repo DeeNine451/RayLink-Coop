@@ -1074,6 +1074,12 @@ end
 local function send_effect(peer, t)
 	local key = effect_key(peer)
 	if key == nil then report("effect", "recipient character is unknown"); return end
+	-- split levels: the world records a player's own faction change itself (coop_faction.on_forward; nothing on a map server)
+	local cf = t.k == "fx" and _G.coop_faction
+	if type(cf) == "table" and type(cf.on_forward) == "function" then
+		local ok, err = pcall(cf.on_forward, key, t, peer)
+		if not ok then report("faction record", err) end
+	end
 	host.fx_seq = host.fx_seq + 1
 	t.q = host.fx_seq
 	if t.t == nil and ctx then t.t = ctx.task end
@@ -2605,7 +2611,11 @@ local function client_on_reward(payload, from)
 		if mlr and mlr.show_goodwill_change_message then mlr.show_goodwill_change_message(t.c, nil, nil, t.g == true) end
 	elseif t.k == "fx" and type(t.f) == "string" and FORWARD_EFFECTS[t.f] then
 		local f = xr_effects and xr_effects[t.f]
-		if type(f) == "function" then f(db.actor, nil, { t.p1, t.p2, t.p3, t.p4 }) end
+		-- coop_faction tells the world's forwarded effect from this machine's own calls (split levels: only this one changes it)
+		local cf = _G.coop_faction
+		local run = type(cf) == "table" and type(cf.run_forwarded) == "function" and cf.run_forwarded
+		if type(f) == "function" and run then run(f, db.actor, nil, { t.p1, t.p2, t.p3, t.p4 })
+		elseif type(f) == "function" then f(db.actor, nil, { t.p1, t.p2, t.p3, t.p4 }) end
 	elseif t.k == "stat" then
 		apply_stat(t)
 	elseif t.k == "lang" then

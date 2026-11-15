@@ -111,4 +111,7 @@
 	<string id="st_coop_faction_think">
 		<text>I need to think it over.</text>
 	</string>
+	<string id="st_coop_faction_split_joined">
+		<text>%s joined the %s faction.</text>
+	</string>
 </string_table>
