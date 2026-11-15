@@ -114,4 +114,43 @@
 	<string id="st_coop_faction_split_joined">
 		<text>%s вступил в группировку «%s».</text>
 	</string>
+	<string id="st_coop_scorcher_on_name">
+		<text>Голос Монолита</text>
+	</string>
+	<string id="st_coop_scorcher_on_text">
+		<text>Неверные заглушили Выжигатель. Монолит требует вернуть ему голос. Иди в лабораторию X10 и включи установку снова.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_0">
+		<text>Выжигатель молчит. Какова воля Монолита?</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_1">
+		<text>Неверные дошли до сердца X10 и заглушили Щит. Монолит не прощает тишины. Спустись туда. Верни Выжигателю голос.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_2">
+		<text>Монолит ведёт меня. Я иду.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_3">
+		<text>Не сейчас.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_4">
+		<text>Иди. Монолит видит тебя.</text>
+	</string>
+	<string id="st_coop_scorcher_refused">
+		<text>Рубильник не поддаётся. Установка ещё не остыла.</text>
+	</string>
+	<string id="st_coop_scorcher_locked">
+		<text>Рубильник заклинило намертво. Больше его не сдвинуть.</text>
+	</string>
+	<string id="st_coop_news_sl_scorcher_off">
+		<text>Мозговыжигатель выключен: чужая фракция продвинула свою главную историю.</text>
+	</string>
+	<string id="st_coop_news_sl_scorcher_on">
+		<text>Мозговыжигатель снова работает: чужая фракция продвинула свою главную историю.</text>
+	</string>
+	<string id="st_coop_news_sl_mm_off">
+		<text>Чудо-машина выключена: чужая фракция продвинула свою главную историю.</text>
+	</string>
+	<string id="st_coop_news_sl_mm_on">
+		<text>Чудо-машина снова работает: чужая фракция продвинула свою главную историю.</text>
+	</string>
 </string_table>

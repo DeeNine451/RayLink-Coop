@@ -50,7 +50,11 @@
 		coop_storyline.meet_random_honcho(faction)                      (authority, inside or outside with_chain)
 		coop_storyline.run_for_task(task_id, peer, fn, ...)             (authority: fn under the task's owner, else peer's faction)
 		coop_storyline.client_may_write(key) -> bool                    (authority: may a client's coop_tvd write this pstor key)
-	Not here (later stages): dialog XML gates (3), main-story ownership (4), the Brain Scorcher (5), a per-player change-faction lock.
+		coop_storyline.may_take(task_id, peer) -> bool                  (authority: may this player take this task; for coop_tasks)
+	Stage 3 (dialog gates, readers) and 4 (main stories), see their sections below:
+		dlg_leader / dlg_cf_free / dlg_story_ll / dlg_story_ms / dlg_story_oa: DXML preconditions (modxml_coop_storyline)
+		owner_of_task(lttz_ll_* / lttz_ms_* / lttz_oa_*) = the faction that started that story, lttz_hb_* = isg
+	Not here: the Brain Scorcher (stage 5, coop_scorcher: its ending_ok(faction) is used by the ending test when present).
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -257,6 +261,24 @@ end
 -------------------------------------------------------------------------------
 -- Owners and claims (authority)
 -------------------------------------------------------------------------------
+-- the main stories (stage 4): lttz_<k>_* tasks, the info their start gives; Hollow Boundaries (hb) is ISG's
+local STORIES = { ll = "living_legend", ms = "mortal_sin", oa = "operation_afterglow" }
+local STORY_KEY = "drx_sl_coop_story_" -- + ll | ms | oa: the authority's copy of a story's owner for the clients' gates
+
+local function story_of_task(id)
+	if type(id) ~= "string" then return nil end
+	local k = id:match("^lttz_(%l%l)_")
+	if k == "hb" or (k and STORIES[k]) then return k end
+	return nil
+end
+
+local function story_owner_raw(k)
+	if k == "hb" then return "isg" end
+	local s = store(false)
+	local f = s and type(s.story) == "table" and s.story[k] or nil
+	return known(f) and f or nil
+end
+
 local function set_owner(id, f)
 	local s = store(true)
 	if not (s and type(id) == "string" and known(f)) then return end
@@ -268,6 +290,8 @@ end
 
 function owner_of_task(id)
 	if not auth_on() or type(id) ~= "string" then return nil end
+	local k = story_of_task(id)
+	if k then return story_owner_raw(k) end
 	local s = store(false)
 	local f = s and s.owner[id]
 	return known(f) and f or nil
@@ -276,6 +300,7 @@ end
 -- coop_tasks host_on_var (a client's write of a shared drx_sl_* key): with chains on a client never writes a chain key,
 -- bare or "<key>@<faction>" (they are the world's: requests change them). Elsewhere: true, as today.
 function client_may_write(k)
+	if type(k) == "string" and k:sub(1, #STORY_KEY) == STORY_KEY then return false end -- the world's record, mirrored
 	if type(k) ~= "string" or not chains_on() then return true end
 	local base = k:match("^([%w_]+)@") or k
 	return not KEYS[base] and k:find("@", 1, true) == nil
@@ -799,6 +824,399 @@ local function host_on_req(payload, from)
 end
 
 -------------------------------------------------------------------------------
+-- Stage 3: who talks; the gates of the leaders' dialogs; the readers of the bare chain keys
+-------------------------------------------------------------------------------
+local CF_INFO = "drx_sl_on_cf_task"
+
+-- the faction of the player who talks on this machine: a client's own true faction, on the authority the host player's
+local function talker_faction()
+	if scope and known(scope.f) then return scope.f end
+	if is_client() then return own_faction() end
+	local cf = mod("coop_faction")
+	local f = cf and call(cf.faction_of, 0)
+	if known(f) then return f end
+	return own_faction()
+end
+
+-- fn(...) reading the talker's chain: on the authority with_chain, on a client the mirrored "<key>@<own faction>" (no write)
+local function as_talker(fn, ...)
+	if scope or not (chains_on() and installed) then return fn(...) end
+	local f = talker_faction()
+	if not known(f) then return fn(...) end
+	if authority() then return with_chain(f, fn, ...) end
+	local prev = scope
+	scope = { f = f, ro = true }
+	local res = { pcall(fn, ...) }
+	scope = prev
+	if not res[1] then error(res[2], 0) end
+	return unpack(res, 2)
+end
+
+local function raw_var(k)
+	local ps = raw_pstor()
+	return ps and ps[k] or nil
+end
+
+-- the leader a meet / start dialog is about: from its id (the engine passes it to a dialog precondition), else the NPC
+local function dialog_honcho(dialog_id, a, b)
+	if type(dialog_id) == "string" then
+		local h = dialog_id:match("^drx_sl_(.+)_meet_dialog$") or dialog_id:match("^drx_sl_(.+)_game_start_dialog_%d+$")
+		if h and is_honcho(h) then return h end
+	end
+	return honcho_of_npc(npc_of(a, b))
+end
+
+-- DXML precondition of the 26 drx_sl_<H>_meet_dialog and the drx_sl_<H>_game_start_dialog_1 (modxml_coop_storyline): true
+-- with chains off; else only for a talker whose faction's chain holds H. Authority: claim_raw(H). Client: his faction's
+-- mirrored drx_sl_current_honcho@<f>, or an open drx_sl_<H>_* chain task in his own task list (the audience shows a chain
+-- task to its faction only). A convenience: the authority refuses another faction's start / give requests (host_on_req).
+function dlg_leader(a, b, dialog_id)
+	if not chains_on() then return true end
+	local h = dialog_honcho(dialog_id, a, b)
+	local f = talker_faction()
+	if not (h and known(f)) then return false end
+	if authority() then return claim_raw(h) == f end
+	if raw_var("drx_sl_current_honcho@" .. f) == h then return true end
+	for id in pairs(task_info() or {}) do
+		if type(id) == "string" and honcho_of_task(id) == h and not id:find("_cf_task_", 1, true) then return true end
+	end
+	return false
+end
+
+-- a task the talker may see as his chain's: its recorded owner, else its taker's faction, else (nothing known) yes
+local function talkers_task(id, f)
+	local o = owner_of_task(id)
+	if o == nil and authority() then
+		local ct, cf = mod("coop_tasks"), mod("coop_faction")
+		local peer = ct and call(ct.taker, id)
+		o = cf and type(peer) == "number" and call(cf.faction_of, peer) or nil
+	end
+	return o == nil or o == f
+end
+
+-- axr_task_manager.drx_sl_get_finished_task (temp/stock_scripts/scripts/axr_task_manager.script:560-614, the commented "old
+-- code" left out) with `mine(task_id)` added to both tests: a task of another faction's chain is not the talker's to turn in
+local function finished_body(npc, is_sim, mine)
+	local CFG_CACHE = axr_task_manager.CFG_CACHE
+	local tm = task_manager.get_task_manager( )
+	local task_info = tm.task_info
+
+	local sec
+	local st = db.storage[npc:id( )]
+
+	-- Check if player is on end game task:
+	local endgame_task = load_var( db.actor, "drx_sl_endgame_task", "" )
+	if ( endgame_task ~= "" ) and mine( endgame_task ) then
+		if ( db.actor:get_task( endgame_task, true ) ~= nil and task_info[endgame_task] and task_info[endgame_task].stage ~= nil and task_info[endgame_task].stage == (CFG_CACHE[endgame_task].stage_complete or 254) ) then
+			if ( task_info[endgame_task].status ~= "fail" and task_info[endgame_task].status ~= "completed" ) then
+				return endgame_task
+			end
+		end
+	end
+
+	if ( st and st.ini and st.section_logic ) then
+		sec = st.ini:r_string_ex( st.section_logic, "task_section" )
+		if ( sec ) then
+			sec = (sec .. "_task_")
+		end
+	end
+	if not ( sec ) then
+		sec = npc:section() ~= "m_trader" and ("drx_sl_" .. npc:section( ) .. "_task_") or ("drx_sl_" .. npc:name( ) .. "_task_")
+	end
+
+	for task_id in pairs(CFG_CACHE) do
+		if starts_with(task_id, sec) and mine( task_id ) then
+			if ( db.actor:get_task( task_id, true ) ~= nil and task_info[task_id] and task_info[task_id].stage ~= nil and task_info[task_id].stage == (CFG_CACHE[task_id].stage_complete or 254) ) then
+				if ( task_info[task_id].status ~= "fail" and task_info[task_id].status ~= "completed" ) then
+					return task_id
+				end
+			end
+		end
+	end
+end
+
+-- the ending's Brain Scorcher rule: coop_scorcher.ending_ok(faction) when the pilot is there, else the stock info test
+local function scorcher_ok(f)
+	local sc = mod("coop_scorcher")
+	if sc and type(sc.ending_ok) == "function" and known(f) then
+		local ok, yes = pcall(sc.ending_ok, f)
+		return ok and yes == true
+	end
+	return has_alife_info( "bar_deactivate_radar_done" ) == true
+end
+
+-- dialogs.drx_sl_is_endgame (temp/gamma_ref/scripts/dialogs.script:156-164) with the Scorcher rule of faction f; runs
+-- inside as_talker (the two keys are f's)
+local function endgame_body(f)
+	if ( (load_var( db.actor, "drx_sl_current_task_number", 1 ) >= load_var( db.actor, "drx_sl_total_task_number", 1 )) and scorcher_ok( f ) ) then
+		return true
+	end
+	return false
+end
+
+-- The change-faction lock (stock: the info drx_sl_on_cf_task given by a cf task's on_init closes the join dialog
+-- drx_sl_change_faction_dialog for everybody through <dont_has_info>). With chains on the authority keeps that info OFF
+-- (cf_lock_tick) and the lock is this precondition, the player's own: he has an open drx_sl_*_cf_task_* of his own.
+-- Client: his task list (the audience shows a cf task to its taker alone). Authority: the tasks coop_tasks.taker gives
+-- the host player (peer 0). Chains off: true (the XML <dont_has_info> does the stock lock).
+local function own_cf_task()
+	local ti = task_info()
+	if not ti then return false end
+	local client = is_client()
+	local ct = mod("coop_tasks")
+	for id in pairs(ti) do
+		if type(id) == "string" and id:sub(1, 7) == "drx_sl_" and id:find("_cf_task_", 1, true) then
+			if client then return true end
+			local peer = ct and call(ct.taker, id)
+			if peer == nil or peer == 0 then return true end
+		end
+	end
+	return false
+end
+
+function dlg_cf_free(a, b)
+	if not chains_on() then return true end
+	return not own_cf_task()
+end
+
+local function cf_lock_tick(s)
+	if has_alife_info(CF_INFO) then
+		disable_info(CF_INFO)
+		s.cf_moved = true
+	end
+end
+
+-- a world played without split levels again: the stock lock comes back while a cf task is open
+local function cf_lock_restore()
+	local s = store(false)
+	if not (s and s.cf_moved) then return end
+	s.cf_moved = nil
+	local ti = task_info() or {}
+	for id in pairs(ti) do
+		if type(id) == "string" and id:sub(1, 7) == "drx_sl_" and id:find("_cf_task_", 1, true) then
+			give_info(CF_INFO)
+			log("no split levels: the change-faction lock is the world's again")
+			return
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Stage 4: a main story has an owner
+-------------------------------------------------------------------------------
+local function story_owner(k)
+	if k == "hb" then return "isg" end
+	if authority() then return story_owner_raw(k) end
+	local v = raw_var(STORY_KEY .. tostring(k))
+	return known(v) and v or nil
+end
+
+local function story_gate(k)
+	if not chains_on() then return true end
+	local o = story_owner(k)
+	if o == nil then return true end -- no story recorded: nothing of it to keep
+	return talker_faction() == o
+end
+
+-- DXML preconditions of the middle dialogs of LL / MS / OA (modxml_coop_storyline): the story's owner's faction only.
+-- Authority twin: coop_storyline.may_take refuses an lttz_* task to a player of another faction (a line for coop_tasks).
+function dlg_story_ll(a, b) return story_gate("ll") end
+function dlg_story_ms(a, b) return story_gate("ms") end
+function dlg_story_oa(a, b) return story_gate("oa") end
+
+local function set_story(s, k, f, why)
+	s.story[k] = f
+	s.story_seq = (tonumber(s.story_seq) or 0) + 1
+	s.story_at[k] = s.story_seq
+	log("the main story %s is the %s faction's (%s)", k, f, why)
+end
+
+local function story_tick(s)
+	local ti = task_info()
+	if not ti then return end
+	if not s.stories_checked then
+		-- once per world: a story that runs with nobody recorded (a save of before) is the world faction's
+		s.stories_checked = true
+		local w = world_faction()
+		for k, info in pairs(STORIES) do
+			local running = has_alife_info(info) == true
+			if not running then
+				for id in pairs(ti) do if story_of_task(id) == k then running = true break end end
+			end
+			if running and not s.story[k] and w then set_story(s, k, w, "a save of before: the world's faction") end
+		end
+	end
+	-- a story's first task given: the taker's faction (coop_tasks ops.give recorded the taker before the task was given)
+	for id in pairs(ti) do
+		local k = story_of_task(id)
+		if k and k ~= "hb" and not s.story[k] then
+			local ct, cf = mod("coop_tasks"), mod("coop_faction")
+			local peer = ct and call(ct.taker, id)
+			local f = cf and type(peer) == "number" and call(cf.faction_of, peer) or nil
+			if known(f) then set_story(s, k, f, "started by #" .. tostring(peer)) end
+		end
+	end
+	-- the mirror a client's gates read (a drx_sl_* key: coop_tasks mirrors it; client_may_write refuses a client's write)
+	local ps = raw_pstor()
+	if ps then
+		for k in pairs(STORIES) do
+			if ps[STORY_KEY .. k] ~= s.story[k] then ps[STORY_KEY .. k] = s.story[k] end
+		end
+	end
+end
+
+-- Authority (for coop_tasks ops.give, a line for the lead): may player `peer` take task `id`? A main story's task: his
+-- faction owns the story (or nobody yet). A change-faction task: he has no other open one. Everything else: yes.
+function may_take(id, peer)
+	if not auth_on() or type(id) ~= "string" or type(peer) ~= "number" then return true end
+	local cf = mod("coop_faction")
+	local f = cf and call(cf.faction_of, peer)
+	local k = story_of_task(id)
+	if k then
+		local o = story_owner_raw(k)
+		return o == nil or o == f
+	end
+	if id:sub(1, 7) == "drx_sl_" and id:find("_cf_task_", 1, true) then
+		local ti = task_info() or {}
+		local ct = mod("coop_tasks")
+		for other in pairs(ti) do
+			if other ~= id and type(other) == "string" and other:sub(1, 7) == "drx_sl_" and other:find("_cf_task_", 1, true)
+				and ct and call(ct.taker, other) == peer then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+-- One news line per world-changing step for the players outside the owner's faction (the owner: the story started last)
+local EV_NEWS = "coop_sl_news" -- authority -> one client: { n = step }
+local WATCH = {
+	{ k = "scorcher", info = "bar_deactivate_radar_done", yes = "scorcher_off", no = "scorcher_on" },
+	{ k = "mm", info = "yan_labx16_switcher_primary_off", yes = "mm_off", no = "mm_on" },
+}
+local NEWS_STEPS = { scorcher_off = true, scorcher_on = true, mm_off = true, mm_on = true }
+
+local function show_news(step)
+	local sid = "st_coop_news_sl_" .. step
+	local nm = rawget(_G, "news_manager") or mod("news_manager")
+	local a = db and db.actor
+	if not (a and nm and type(nm.send_tip) == "function" and pcall(nm.send_tip, a, sid, nil, nil, 9000)) then log("%s", sid) end
+end
+
+local function session_peers()
+	local peers = {}
+	if not is_dedicated() then peers[1] = 0 end
+	local list = call(api.players)
+	for _, p in ipairs(type(list) == "table" and list or {}) do
+		if type(p) == "table" and type(p.id) == "number" and p.id > 0 then peers[#peers + 1] = p.id end
+	end
+	return peers
+end
+
+local function latest_owner(s)
+	local best, at = nil, -1
+	for k, f in pairs(s.story) do
+		local n = tonumber(s.story_at[k]) or 0
+		if known(f) and n > at then best, at = f, n end
+	end
+	return best
+end
+
+local function tell_others(owner, step)
+	local cf = mod("coop_faction")
+	for _, peer in ipairs(session_peers()) do
+		local f = cf and call(cf.faction_of, peer)
+		if known(f) and f ~= owner then
+			if peer == 0 then
+				show_news(step)
+			else
+				local payload = encode({ n = step })
+				if payload then pcall(api.send_event, EV_NEWS, payload, peer) end
+			end
+		end
+	end
+end
+
+local function news_tick(s)
+	for _, w in ipairs(WATCH) do
+		local on = has_alife_info(w.info) == true
+		local before = s.watch[w.k]
+		s.watch[w.k] = on
+		if before ~= nil and before ~= on then
+			local o = latest_owner(s)
+			if o then
+				tell_others(o, on and w.yes or w.no)
+				log("%s: told the players outside the %s faction", on and w.yes or w.no, o)
+			end
+		end
+	end
+end
+
+local function client_on_news(payload, from)
+	if not is_client() or from ~= 0 then return end
+	local r = decode(payload)
+	local n = word(r.n)
+	if n and NEWS_STEPS[n] then show_news(n) end
+end
+
+local function stage34_tick()
+	local s = store(true)
+	if not s then return end
+	if type(s.story) ~= "table" then s.story = {} end
+	if type(s.story_at) ~= "table" then s.story_at = {} end
+	if type(s.watch) ~= "table" then s.watch = {} end
+	cf_lock_tick(s)
+	story_tick(s)
+	news_tick(s)
+end
+
+local function wrap_readers()
+	local d = mod("dialogs")
+	if d then
+		local is_end = d.drx_sl_is_endgame
+		if type(is_end) == "function" then
+			d.drx_sl_is_endgame = function(a, b)
+				if not chains_on() then return is_end(a, b) end
+				local f = talker_faction()
+				return as_talker(endgame_body, f)
+			end
+		end
+		local end_text = d.drx_sl_text_end_game
+		if type(end_text) == "function" then
+			d.drx_sl_text_end_game = function(a, b)
+				if not chains_on() then return end_text(a, b) end
+				return as_talker(end_text, a, b)
+			end
+		end
+	else
+		log("! dialogs not found: the ending reads the world's keys")
+	end
+	local atm = mod("axr_task_manager")
+	if not atm then
+		log("! axr_task_manager not found: the default task and the turn-in lookup are the world's")
+		return
+	end
+	local gen = atm.drx_sl_generate_random_sl_task
+	if type(gen) == "function" then
+		atm.drx_sl_generate_random_sl_task = function(...)
+			if not chains_on() then return gen(...) end
+			return as_talker(gen, ...)
+		end
+	end
+	local fin = atm.drx_sl_get_finished_task
+	if type(fin) == "function" then
+		atm.drx_sl_get_finished_task = function(npc, is_sim)
+			-- a client's list holds his faction's chain tasks only (the audience): the stock as it is; the authority filters
+			if not (chains_on() and authority()) then return fin(npc, is_sim) end
+			local f = talker_faction()
+			if not known(f) then return fin(npc, is_sim) end
+			return finished_body(npc, is_sim, function(id) return talkers_task(id, f) end)
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Wrappers
 -------------------------------------------------------------------------------
 local function wrap_effects()
@@ -957,6 +1375,7 @@ local function install()
 	step("xr_effects", wrap_effects)
 	step("dialogs", wrap_dialogs)
 	step("task callback", wrap_task_callback)
+	step("readers", wrap_readers)
 	log("chains per faction on")
 end
 
@@ -979,6 +1398,7 @@ local function first_update()
 		next_tick = now() + FIRST_TICK_MS
 	elseif authority() and active() and not split_mode() then
 		unmigrate()
+		cf_lock_restore()
 	end
 end
 
@@ -990,6 +1410,7 @@ local function on_update()
 	if not auth_on() then return end
 	sweep()
 	ensure_chains()
+	stage34_tick()
 end
 
 local function save_state(m)
@@ -1009,6 +1430,10 @@ local function register_events()
 			stats.errors = stats.errors + 1
 			log("! a chain request: %s", tostring(err))
 		end
+	end)
+	cm.add_event_handler(EV_NEWS, function(payload, from)
+		local ok, err = pcall(client_on_news, payload, from)
+		if not ok then log("! a news line: %s", tostring(err)) end
 	end)
 end
 

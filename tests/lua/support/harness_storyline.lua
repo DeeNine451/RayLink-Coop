@@ -490,7 +490,210 @@ SETUP_HOOK = function(M)
 		fin = e.dialogs.drx_sl_set_finished_task_complete, give = e.dialogs.drx_sl_give_sl_task,
 		task_callback = e.task_manager.task_callback,
 	}
+	STORYLINE_HOOK_34(M)
 	STORYLINE_HOOK(M)
+end
+
+-------------------------------------------------------------------------------
+-- Stages 3 and 4: the stock dialog functions the gates and readers wrap, and a DXML stand-in over the real XML files
+-------------------------------------------------------------------------------
+-- temp/gamma_ref/scripts/dialogs.script:128-139, 156-169, 247-270
+STOCK_DIALOGS_34 = [[
+function drx_sl_actor_has_finished_task( a, b )
+
+	local npc = who_is_npc( a, b )
+
+	local tsk = axr_task_manager and axr_task_manager.drx_sl_get_finished_task( npc )
+	if ( tsk == nil ) then
+		return false
+	end
+
+	return true
+
+end
+
+function drx_sl_is_endgame( a, b )
+
+	if ( (load_var( db.actor, "drx_sl_current_task_number", 1 ) >= load_var( db.actor, "drx_sl_total_task_number", 1 )) and (has_alife_info( "bar_deactivate_radar_done" )) ) then
+		return true
+	end
+
+	return false
+
+end
+
+function drx_sl_is_not_endgame( a, b )
+	return not drx_sl_is_endgame( )
+end
+
+function drx_sl_text_end_game( a, b )
+
+	local npc = who_is_npc( a, b )
+
+	local text_list = {}
+	local i = 1
+	while ( true ) do
+		local text_id = (load_var( db.actor, "drx_sl_start_task", "" ) .. "_endgame_" .. i)
+		local end_game_text = game.translate_string( text_id )
+		if ( end_game_text and end_game_text ~= "" and end_game_text ~= ("_endgame_" .. i) and end_game_text ~= text_id ) then
+			table.insert( text_list, end_game_text )
+		else
+			break
+		end
+		i = (i + 1)
+	end
+
+	if ( #text_list < 1 ) then
+		return game.translate_string( "drx_sl_default_endgame" )
+	end
+
+	return text_list[math.random( 1, #text_list )]
+
+end
+]]
+
+STORYLINE_HOOK_34 = function(M)
+	local f = assert(loadstring(STOCK_DIALOGS_34, "=stock dialogs (stages 3-4)"))
+	setfenv(f, M.env.dialogs)
+	f()
+	M.stock_fn.is_endgame = M.env.dialogs.drx_sl_is_endgame
+	M.stock_fn.end_text = M.env.dialogs.drx_sl_text_end_game
+	M.stock_fn.finished = M.env.axr_task_manager.drx_sl_get_finished_task
+	M.stock_fn.generate = M.env.axr_task_manager.drx_sl_generate_random_sl_task
+end
+
+-- A stand-in of the DXML xml_obj (engine/DXML.md: query with "name", "[attr=value]", " " and ">", getElementAttr, getText,
+-- insertFromXMLString(xml, where, pos); elements are { el, parent, kids }, "#" text elements) over a real XML file. The
+-- library's own dxml_core.script is not in the references: only the documented API is stood in. Comments and the <?xml?>
+-- line are dropped (they are not elements). Every other mutating call is counted in o.mutations.
+local function parse_xml(src, parent_for_root)
+	src = src:gsub("<!%-%-.-%-%->", ""):gsub("<%?.-%?>", "")
+	local root = parent_for_root or { name = "!doc", attr = {}, kids = {}, el = "<!doc" }
+	local stack = { root }
+	local pos = 1
+	while true do
+		local s, e, close, tag, attrs, selfclose = src:find("<(/?)([%w_:%.%-]+)([^>]-)(/?)>", pos)
+		local text = src:sub(pos, (s or (#src + 1)) - 1)
+		if text:find("%S") then
+			local top = stack[#stack]
+			top.kids[#top.kids + 1] = { el = "#" .. text, text = text, parent = top, kids = {} }
+		end
+		if not s then break end
+		pos = e + 1
+		if close == "/" then
+			assert(stack[#stack].name == tag, "xml: </" .. tag .. "> closes <" .. tostring(stack[#stack].name) .. ">")
+			table.remove(stack)
+		else
+			local attr = {}
+			for k, v in attrs:gmatch('([%w_:%-]+)%s*=%s*"([^"]*)"') do attr[k] = v end
+			local top = stack[#stack]
+			local node = { name = tag, attr = attr, kids = {}, parent = top, el = "<" .. tag }
+			top.kids[#top.kids + 1] = node
+			if selfclose ~= "/" then stack[#stack + 1] = node end
+		end
+	end
+	assert(#stack == 1, "xml: unclosed <" .. tostring(stack[#stack].name) .. ">")
+	return root
+end
+
+local function simple_match(node, simple)
+	if node.name == nil then return false end
+	local name = simple:match("^([%w_:%.%-]*)")
+	if name ~= "" and node.name ~= name then return false end
+	for k, v in simple:gmatch("%[([%w_:%-]+)=([^%]]*)%]") do
+		if node.attr[k] ~= v then return false end
+	end
+	return true
+end
+
+local function descendants(node, out)
+	for _, k in ipairs(node.kids) do
+		if k.name then
+			out[#out + 1] = k
+			descendants(k, out)
+		end
+	end
+	return out
+end
+
+function dxml_over(path)
+	local fh = assert(io.open(path, "rb"))
+	local src = fh:read("*a")
+	fh:close()
+	local o = { root = parse_xml(src), mutations = 0, inserted = {} }
+	function o:query(sel)
+		local steps = {}
+		local comb = " "
+		for tok in sel:gsub(">", " > "):gmatch("%S+") do
+			if tok == ">" then comb = ">" else steps[#steps + 1] = { c = comb, s = tok }; comb = " " end
+		end
+		local cur = { self.root }
+		for _, st in ipairs(steps) do
+			local nxt, seen = {}, {}
+			for _, n in ipairs(cur) do
+				local pool = st.c == ">" and n.kids or descendants(n, {})
+				for _, k in ipairs(pool) do
+					if not seen[k] and simple_match(k, st.s) then
+						seen[k] = true
+						nxt[#nxt + 1] = k
+					end
+				end
+			end
+			cur = nxt
+		end
+		return cur
+	end
+	function o:getElementAttr(el)
+		local t = {}
+		for k, v in pairs(el.attr or {}) do t[k] = v end
+		return t
+	end
+	function o:getText(el)
+		local parts = {}
+		for _, k in ipairs(el.kids or {}) do if k.text then parts[#parts + 1] = k.text end end
+		return #parts > 0 and table.concat(parts) or nil
+	end
+	function o:insertFromXMLString(s, where, pos)
+		where = where or self.root
+		local holder = { name = "!frag", attr = {}, kids = {}, el = "<!frag" }
+		parse_xml(s, holder)
+		pos = pos or (#where.kids + 1)
+		local first = pos
+		for _, k in ipairs(holder.kids) do
+			k.parent = where
+			k.inserted = true
+			table.insert(where.kids, pos, k)
+			self.inserted[#self.inserted + 1] = { node = k, where = where, xml = s }
+			pos = pos + 1
+		end
+		return first
+	end
+	for _, m in ipairs({ "setText", "setElementAttr", "removeElementAttr", "insertFromXMLFile", "insertElement" }) do
+		o[m] = function(self) self.mutations = self.mutations + 1 end
+	end
+	return o
+end
+
+-- the tree as text, attributes sorted, text trimmed; skip_inserted: the elements insertFromXMLString added are left out
+function dxml_dump(node, skip_inserted, out)
+	out = out or {}
+	for _, k in ipairs(node.kids) do
+		if not (skip_inserted and k.inserted) then
+			if k.text then
+				out[#out + 1] = "#" .. k.text:match("^%s*(.-)%s*$")
+			else
+				local keys = {}
+				for a in pairs(k.attr) do keys[#keys + 1] = a end
+				table.sort(keys)
+				local line = "<" .. k.name
+				for _, a in ipairs(keys) do line = line .. " " .. a .. "=" .. k.attr[a] end
+				out[#out + 1] = line
+				dxml_dump(k, skip_inserted, out)
+				out[#out + 1] = "</" .. k.name
+			end
+		end
+	end
+	return out
 end
 
 -- the actor's pstor of machine M

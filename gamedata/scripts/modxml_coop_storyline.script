@@ -1,0 +1,89 @@
+--[[
+	Anomaly Coop - the dialog gates of the storylines per faction (gamedata\scripts\modxml_coop_storyline.script).
+	Plan docs\plans\2026-11-16-storylines-per-faction.md, stages 3 and 4. The modxml_ prefix makes dxml_core load this script
+	and call on_xml_read() at script start-up, before the engine reads the dialog files. Test: tests\lua\test_storyline_dialogs.lua.
+
+	Only ADDS one <precondition> to a dialog (DXML insertFromXMLString into the <dialog> element); nothing else of the XML
+	changes. The functions (coop_storyline) are true unless the world has split levels and story mode, so single player, a
+	group world and sandbox talk as the stock does. The XML is built once per process, so the preconditions are always there.
+	  gameplay\dialogs.xml: every drx_sl_<H>_meet_dialog and drx_sl_<H>_game_start_dialog_<n> (found by their ids, not a
+	    list): coop_storyline.dlg_leader (the talker's faction's chain holds H); drx_sl_change_faction_dialog:
+	    coop_storyline.dlg_cf_free (the change-faction lock is the player's own; its stock <dont_has_info> stays).
+	  gameplay\dialogs_lostzone_ll / _ms / _oa.xml: every dialog without a dialogs.actor_true_* precondition (the start and
+	    report dialogs of a faction leader have one) that gives an info or runs an action (it moves the story):
+	    coop_storyline.dlg_story_<ll|ms|oa> (the talker's faction owns that story). Greetings that change nothing stay open.
+	Nothing happens on an exe without co-op.
+--]]
+
+local DIALOGS = [[gameplay\dialogs.xml]]
+local STORY_FILES = {
+	[ [[gameplay\dialogs_lostzone_ll.xml]] ] = "ll",
+	[ [[gameplay\dialogs_lostzone_ms.xml]] ] = "ms",
+	[ [[gameplay\dialogs_lostzone_oa.xml]] ] = "oa",
+}
+local CF_DIALOG = "drx_sl_change_faction_dialog"
+
+local function dialog_ids(xml_obj)
+	local out = {}
+	for _, el in ipairs(xml_obj:query("dialog")) do
+		local attr = xml_obj:getElementAttr(el)
+		local id = type(attr) == "table" and attr.id or nil
+		if type(id) == "string" then out[#out + 1] = { id = id, el = el } end
+	end
+	return out
+end
+
+local function has_precondition(xml_obj, id, fn)
+	for _, p in ipairs(xml_obj:query("dialog[id=" .. id .. "] > precondition")) do
+		local t = xml_obj:getText(p)
+		if type(t) == "string" and t:match("^%s*(.-)%s*$") == fn then return true end
+	end
+	return false
+end
+
+local function gate(xml_obj, d, fn)
+	if has_precondition(xml_obj, d.id, fn) then return false end
+	xml_obj:insertFromXMLString("<precondition>" .. fn .. "</precondition>", d.el)
+	return true
+end
+
+-- the dialog ids this script gates in one file, with the function of each (the test reads it too)
+function gates_of(xml_file_name, xml_obj)
+	local out = {}
+	if xml_file_name == DIALOGS then
+		for _, d in ipairs(dialog_ids(xml_obj)) do
+			local id = d.id
+			if id:match("^drx_sl_.+_meet_dialog$") or id:match("^drx_sl_.+_game_start_dialog_%d+$") then
+				out[#out + 1] = { d = d, fn = "coop_storyline.dlg_leader" }
+			elseif id == CF_DIALOG then
+				out[#out + 1] = { d = d, fn = "coop_storyline.dlg_cf_free" }
+			end
+		end
+		return out
+	end
+	local k = STORY_FILES[xml_file_name]
+	if not k then return out end
+	for _, d in ipairs(dialog_ids(xml_obj)) do
+		local own = false
+		for _, p in ipairs(xml_obj:query("dialog[id=" .. d.id .. "] > precondition")) do
+			local t = xml_obj:getText(p)
+			if type(t) == "string" and t:find("dialogs.actor_true_", 1, true) then own = true break end
+		end
+		if not own then
+			local moves = #xml_obj:query("dialog[id=" .. d.id .. "] give_info") > 0
+				or #xml_obj:query("dialog[id=" .. d.id .. "] action") > 0
+			if moves then out[#out + 1] = { d = d, fn = "coop_storyline.dlg_story_" .. k } end
+		end
+	end
+	return out
+end
+
+function on_read(xml_file_name, xml_obj)
+	if xml_file_name ~= DIALOGS and not STORY_FILES[xml_file_name] then return end
+	for _, g in ipairs(gates_of(xml_file_name, xml_obj)) do gate(xml_obj, g.d, g.fn) end
+end
+
+function on_xml_read()
+	if not rawget(_G, "coop") then return end
+	RegisterScriptCallback("on_xml_read", on_read)
+end

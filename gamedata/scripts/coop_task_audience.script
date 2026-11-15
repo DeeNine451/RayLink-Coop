@@ -103,6 +103,8 @@ function classify(id)
 		return "story"
 	end
 	if id:find("^lttz_") then return "story" end
+	-- the Brain Scorcher pair (coop_scorcher.script): Monolith's own task, taken by a Monolith player
+	if id:find("^coop_scorcher_") then return "story" end
 	return "side"
 end
 

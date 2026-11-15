@@ -81,7 +81,7 @@ SE[706] = stalker("stalker")
 local stock_alife_object = e.alife_object
 e.alife_object = function(id) return SE[id] or stock_alife_object(id) end
 
-for _, id in ipairs({ "t_side1", "t_side2", "t_side3", "t_free", "t_none", "t_monster", "t_off", "t_noeng", "t_thr",
+for _, id in ipairs({ "t_side1", "t_side2", "t_side3", "t_free", "t_gated", "t_none", "t_monster", "t_off", "t_noeng", "t_thr",
 	"t_gw", "drx_sl_bar_task_1", "lttz_hb_task", "drx_sl_esc_m_trader_cf_task_1", "t_money", "t_group" }) do Hm.ini[id] = {} end
 
 for _, n in ipairs(SCRIPTS) do load_script(Hm, n) end
@@ -180,6 +180,7 @@ do
 	check(AUD.classify("drx_sl_bar_dolg_general_petrenko_stalker_cf_task_1") == "cf", "a long cf id too")
 	check(AUD.classify("drx_sl_bar_task_1") == "story", "other drx_sl_* is storyline")
 	check(AUD.classify("lttz_hb_task") == "story", "lttz_* is storyline")
+	check(AUD.classify("coop_scorcher_on_task") == "story", "the Scorcher pair's task is its faction's alone")
 	check(AUD.classify("esc_2_12_stalker_nimble_task_1") == "side", "anything else is a side task")
 end
 
@@ -288,6 +289,22 @@ do
 	tq(H.encode({ op = "give", i = "t_side1" }), 1)
 	local a = last_to("coop_tl", 1)
 	check(a and a.i == "t_side1" and a.d == true and a.r == 1, "a give of a running id: 'not given' (r = 1)")
+	-- the storyline side says who may take a task at all (a main story of another faction, a second change-faction task): the
+	-- world asks it before the give, whatever the player's dialog let through
+	local asked = {}
+	Hm.env.coop_storyline = { may_take = function(id, peer)
+		asked[#asked + 1] = { id = id, peer = peer }
+		return not (id == "t_gated" and peer == 1)
+	end }
+	tq(H.encode({ op = "give", i = "t_gated" }), 1)
+	check(Hm.tm.task_info.t_gated == nil, "a task the storyline side refuses him is not given")
+	a = last_to("coop_tl", 1)
+	check(a and a.i == "t_gated" and a.d == true, "and he is told it is not his")
+	tq(H.encode({ op = "give", i = "t_gated" }), 2)
+	check(#asked == 2 and asked[1].peer == 1 and asked[2].peer == 2 and asked[2].id == "t_gated",
+		"the world asks for every give, with the sender taken from the transport")
+	Hm.tm.task_info.t_gated = nil
+	Hm.env.coop_storyline = nil
 	tq(H.encode({ op = "complete", i = "t_side1" }), 1)
 	a = last_to("coop_tl", 1)
 	check(a and a.d == true and a.r == nil, "a turn-in: the task is not there for him")

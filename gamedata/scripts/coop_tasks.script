@@ -1045,6 +1045,13 @@ end
 
 function ops.give(tm, id, t, from)
 	if tm.task_info[id] ~= nil and engine_task_running(id) then return false end
+	-- split levels: a main story belongs to the faction that started it, and a player holds one change-faction task at a time
+	-- (coop_storyline.may_take is the world's side of the dialog gates of modxml_coop_storyline)
+	local sl = rawget(_G, "coop_storyline")
+	if type(sl) == "table" and type(sl.may_take) == "function" and sl.may_take(id, from) == false then
+		log("#%s may not take '%s': another faction's main story or a second change-faction task", tostring(from), id)
+		return false
+	end
 	local got_vars = {}
 	if type(t.v) == "string" then
 		for k, v in pairs(unpack_payload(t.v)) do

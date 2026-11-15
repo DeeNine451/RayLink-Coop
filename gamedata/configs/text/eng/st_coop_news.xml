@@ -114,4 +114,43 @@
 	<string id="st_coop_faction_split_joined">
 		<text>%s joined the %s faction.</text>
 	</string>
+	<string id="st_coop_scorcher_on_name">
+		<text>The Voice of the Monolith</text>
+	</string>
+	<string id="st_coop_scorcher_on_text">
+		<text>The unbelievers have silenced the Brain Scorcher. The Monolith demands its voice back. Go to lab X10 and switch the installation on again.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_0">
+		<text>The Scorcher is silent. What is the will of the Monolith?</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_1">
+		<text>The unbelievers reached the heart of X10 and silenced the Shield. The Monolith does not forgive silence. Go down there. Give the Scorcher back its voice.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_2">
+		<text>The Monolith guides me. I go.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_3">
+		<text>Not now.</text>
+	</string>
+	<string id="st_coop_scorcher_dlg_4">
+		<text>Go. The Monolith sees you.</text>
+	</string>
+	<string id="st_coop_scorcher_refused">
+		<text>The switch does not give. The installation has not settled yet.</text>
+	</string>
+	<string id="st_coop_scorcher_locked">
+		<text>The switch is jammed for good. It will not move again.</text>
+	</string>
+	<string id="st_coop_news_sl_scorcher_off">
+		<text>The Brain Scorcher is off: another faction moved its main story on.</text>
+	</string>
+	<string id="st_coop_news_sl_scorcher_on">
+		<text>The Brain Scorcher is on again: another faction moved its main story on.</text>
+	</string>
+	<string id="st_coop_news_sl_mm_off">
+		<text>The Miracle Machine is off: another faction moved its main story on.</text>
+	</string>
+	<string id="st_coop_news_sl_mm_on">
+		<text>The Miracle Machine is on again: another faction moved its main story on.</text>
+	</string>
 </string_table>
