@@ -416,6 +416,11 @@ local function host_split_ask(payload, from)
 			s.chars[id] = { f = claim }
 			stats.boot = stats.boot + 1
 			log("character %s of an older save is in %s (its own word, once)", tostring(id), claim)
+			-- no change, so no news line; but other scripts judged him without a faction until now (coop_task_audience: his
+			-- faction's storyline tasks): they get the callback, old = nil
+			local scb = rawget(_G, "SendScriptCallback") or SendScriptCallback
+			local ok, err = pcall(scb, CHANGED, from, id, nil, claim)
+			if not ok then log("! %s: %s", CHANGED, tostring(err)) end
 		else
 			local f = world_faction()
 			if not f then return end
@@ -534,8 +539,15 @@ local function actor_on_update()
 	if t < cl.next_ask then return end
 	cl.next_ask = t + ASK_RETRY_MS
 	-- split mode: the character's community goes along, the world takes it once for a character of an older save
-	-- (after a load the true faction here is the world's m_data's, the host's; the community is the character's own)
-	send(EV_ASK, split and encode({ b = actor_faction() }) or "", 0)
+	-- (after a load the true faction here is the world's m_data's, the host's; the community is the character's own).
+	-- In a disguise the community is the disguise's: no claim then (the world answers nothing final to an older save's
+	-- character, and this asks again every ASK_RETRY_MS until the disguise is off).
+	local claim = nil
+	if split then
+		local gd = mod("gameplay_disguise")
+		if not (gd and call(gd.is_actor_disguised) == true) then claim = actor_faction() end
+	end
+	send(EV_ASK, split and encode({ b = claim }) or "", 0)
 end
 
 -- coop_tasks.client_on_reward: a player's own effect forwarded by the world runs inside this (fn(...))

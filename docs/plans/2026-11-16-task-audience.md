@@ -57,7 +57,10 @@ A new module: `coop_tasks.script` is at Lua's limit of 200 file-level locals.
   (CT:2919-2923), the giver is the argument. Every current character is judged (`participant_ids()` and the reward group's
   members, so players who are away are judged too). The result is pushed to the engine before the give, so the first
   `TaskUpsert` is already filtered. A re-give of the same id recomputes the record.
-- Pruning: where an id leaves `task_info` in `host_scan` (CT:725-731) the record goes and the engine is told "no audience".
+- A finished task KEEPS its record and its engine entry (review of 2026-11-16: the engine keeps a finished task in the journal
+  for ever, so dropping the entry at the end showed the finished task to everybody). The record is marked finished, saved,
+  pushed again after a load, and nobody is judged into it later. At most 2000 finished records are kept; the oldest go first
+  and their tasks then become visible.
 - Persistence: with the world's save (the module's own save_state / load_state). After a load everything is pushed to the engine
   again on the first host tick (the engine's table is cleared in `story::reset`, CS:2821). Character ids are the host's own.
 - Late joiner: at his `coop_tl_req` (CT:3218) a character in neither `inn` nor `out` of a task is judged, stored, pushed, and

@@ -27,8 +27,14 @@
 		record(id) -> record | nil               { k, gf, sf, t = taker character, inn = { [c] = true }, out = { [c] = true } }
 		sees_character(id, c) -> bool            no record: true
 		judge_new(c) -> changed (bool)           a character's first look at the tasks of now (late joiner)
-		drop(id) / prune(task_info)              the record goes with its task
-		any() -> bool                            at least one record is in use
+		drop(id) / prune(task_info)              the task ended: its record is marked finished and KEPT (see below)
+		any() -> bool                            at least one record of a running task is in use
+	A finished task stays in the engine's journal for ever (its task manager never erases one), so its record and its engine
+	entry stay too: otherwise every peer would be sent it, finished. A finished record is frozen: a late joiner is not judged
+	for it (unjudged = out: he never had it), a faction change does not move it; a re-give of the id makes the record anew.
+	At most FINISHED_MAX finished records are kept (the engine's table holds 4096, engine/src/xrCoop/coop_task_audience.h):
+	beyond it the oldest finished (by a saved sequence number) are dropped with their engine entries, and those old finished
+	tasks become visible to everybody (the accepted cost of the bound), one log line per batch.
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace (nil on an exe without co-op)
@@ -46,11 +52,15 @@ local FACTIONS = {
 	stalker = true, renegade = true, greh = true, isg = true,
 }
 
+FINISHED_MAX = 2000 -- finished records kept at most (module field: a test may lower it)
+
 local aud = {} -- task id -> record
 local need_push = false -- records came from a save: the engine's table is empty (story::reset), push on the first tick
+local was_on = false -- on() at the last tick: off -> on is a session (re)started, the engine's table is empty then too
+local seq = 0 -- the number of the last finished record (saved in each record as n)
 local said_off = false
 local listening = false
-local stats = { made = 0, none = 0, dropped = 0, pushed = 0, refused = 0, late = 0, moved = 0 }
+local stats = { made = 0, none = 0, finished = 0, dropped = 0, pushed = 0, refused = 0, late = 0, moved = 0 }
 
 local function log(fmt, ...)
 	local ok, line = pcall(string_format, fmt, ...)
@@ -271,7 +281,11 @@ function record(id)
 end
 
 function any()
-	return next(aud) ~= nil and on()
+	if next(aud) == nil or not on() then return false end
+	for _, rec in pairs(aud) do
+		if not rec.fin then return true end
+	end
+	return false
 end
 
 function sees_character(id, c)
@@ -285,7 +299,8 @@ function judge_new(c)
 	if type(c) ~= "number" or not on() then return false end
 	local changed = false
 	for id, rec in pairs(aud) do
-		if not rec.inn[c] and not rec.out[c] then
+		-- a finished task is not judged for him: he never had it (unjudged = out)
+		if not rec.fin and not rec.inn[c] and not rec.out[c] then
 			judge(rec, c)
 			stats.late = stats.late + 1
 			if rec.inn[c] then
@@ -297,18 +312,41 @@ function judge_new(c)
 	return changed
 end
 
+-- More than FINISHED_MAX finished records: the oldest finished go, with their engine entries (those tasks are shown to
+-- everybody from now on), one log line for the batch.
+local function trim()
+	local max = tonumber(FINISHED_MAX) or 2000
+	local fin = {}
+	for id, rec in pairs(aud) do
+		if rec.fin then fin[#fin + 1] = id end
+	end
+	if #fin <= max then return end
+	table_sort(fin, function(a, b) return (aud[a].n or 0) < (aud[b].n or 0) end)
+	local n = #fin - max
+	for i = 1, n do
+		aud[fin[i]] = nil
+		if engine_ok() then push(fin[i]) end
+	end
+	stats.dropped = stats.dropped + n
+	log("%d finished task audiences dropped (more than %d kept): those old finished tasks are shown to everybody", n, max)
+end
+
+-- The task left the task manager's task_info (completed, failed, cancelled, removed). The engine keeps it in its journal for
+-- ever: the record and its engine entry stay, marked finished and numbered (the bound drops the oldest first).
 function drop(id)
-	if aud[id] == nil then return end
-	aud[id] = nil
-	stats.dropped = stats.dropped + 1
-	if engine_ok() then push(id) end
+	local rec = aud[id]
+	if rec == nil or rec.fin then return end
+	seq = seq + 1
+	rec.fin, rec.n = true, seq
+	stats.finished = stats.finished + 1
+	trim()
 end
 
 function prune(task_info)
 	if type(task_info) ~= "table" or next(aud) == nil then return end
 	local gone = {}
-	for id in pairs(aud) do
-		if task_info[id] == nil then gone[#gone + 1] = id end
+	for id, rec in pairs(aud) do
+		if not rec.fin and task_info[id] == nil then gone[#gone + 1] = id end
 	end
 	for _, id in ipairs(gone) do drop(id) end
 end
@@ -318,7 +356,7 @@ local function on_faction_changed(peer, c, old, new)
 	if type(c) ~= "number" or not on() then return end
 	local changed = false
 	for id, rec in pairs(aud) do
-		if rec.k == "story" then
+		if rec.k == "story" and not rec.fin then -- a finished task stays as it ended
 			local was = rec.inn[c] == true
 			judge(rec, c)
 			if was ~= (rec.inn[c] == true) then
@@ -351,18 +389,24 @@ local function save_state(m_data)
 	if not (api and call(api.is_host) == true) or call(api.is_map_server) == true then return end
 	local kept = {}
 	for id, rec in pairs(aud) do
-		kept[id] = { k = rec.k, gf = rec.gf, sf = rec.sf, t = rec.t, i = keys(rec.inn), o = keys(rec.out) }
+		kept[id] = { k = rec.k, gf = rec.gf, sf = rec.sf, t = rec.t, i = keys(rec.inn), o = keys(rec.out),
+			f = rec.fin or nil, n = rec.fin and rec.n or nil }
 	end
 	m_data[STORE] = next(kept) and kept or nil
 end
 
 local function load_state(m_data)
 	aud = {}
+	seq = 0
 	local s = m_data[STORE]
 	if type(s) ~= "table" then return end
 	for id, e in pairs(s) do
 		if type(id) == "string" and type(e) == "table" and (e.k == "side" or e.k == "story" or e.k == "cf") then
 			local rec = { k = e.k, gf = e.gf, sf = e.sf, t = tonumber(e.t), inn = {}, out = {} }
+			if e.f == true then
+				rec.fin, rec.n = true, tonumber(e.n) or 0
+				if rec.n > seq then seq = rec.n end
+			end
 			for _, c in ipairs(type(e.i) == "table" and e.i or {}) do if type(c) == "number" then rec.inn[c] = true end end
 			for _, c in ipairs(type(e.o) == "table" and e.o or {}) do if type(c) == "number" then rec.out[c] = true end end
 			aud[id] = rec
@@ -379,18 +423,32 @@ local function listen()
 	RegisterScriptCallback(CHANGED, on_faction_changed)
 end
 
+-- The engine's table is empty after a load (story::reset) and whenever a session starts: everything is pushed again on the
+-- first tick after a load and whenever this module goes from off to on (a session started again without a reload).
 local function actor_on_update()
-	if not need_push or not on() then return end
+	local now_on = on()
+	local came_on = now_on and not was_on
+	was_on = now_on
+	if not now_on or not (need_push or came_on) then return end
+	local why = need_push and "the load" or "the session started"
 	need_push = false
-	for id in pairs(aud) do push(id) end
-	log("%d task audiences given to the engine again after the load", stats.pushed)
+	local n = 0
+	for id in pairs(aud) do
+		push(id)
+		n = n + 1
+	end
+	if n > 0 then log("%d task audiences given to the engine again after %s", n, why) end
 end
 
 function print_status()
-	local n = 0
-	for _ in pairs(aud) do n = n + 1 end
-	log("%s | %d records; made %d, none %d, dropped %d, pushed %d, refused %d, late judged %d, moved %d",
-		on() and "on" or "off", n, stats.made, stats.none, stats.dropped, stats.pushed, stats.refused, stats.late, stats.moved)
+	local n, f = 0, 0
+	for _, rec in pairs(aud) do
+		n = n + 1
+		if rec.fin then f = f + 1 end
+	end
+	log("%s | %d records (%d finished); made %d, none %d, finished %d, dropped by the bound %d, pushed %d, refused %d, late judged %d, moved %d",
+		on() and "on" or "off", n, f, stats.made, stats.none, stats.finished, stats.dropped, stats.pushed, stats.refused, stats.late,
+		stats.moved)
 end
 
 function on_game_start()

@@ -10,6 +10,7 @@ local KEYS = { "drx_sl_total_task_number", "drx_sl_current_task_number", "drx_sl
 	"drx_sl_start_task" }
 local FACTIONS_OF = { [501] = "dolg", [502] = "bandit" }
 local OLD_KEYS = nil -- bare keys of an older save in the host's pstor at load
+local OLD_TASKS = nil -- open tasks of an older save in the host's task manager at load
 
 STORYLINE_HOOK = function(M)
 	if M.role ~= "host" then return end
@@ -17,6 +18,7 @@ STORYLINE_HOOK = function(M)
 	for id, f in pairs(FACTIONS_OF) do chars[id] = { f = f } end
 	M.storage_state.coop_faction = { chars = chars, old = {} }
 	for k, v in pairs(OLD_KEYS or {}) do pstor(M)[k] = v end
+	for _, id in ipairs(OLD_TASKS or {}) do M.tm:give_task(id, 9) end -- open tasks of the older save (no co-op script yet)
 end
 
 local function ticks(M, n)
@@ -33,6 +35,7 @@ local function world(split, opts)
 	ALIVE = opts.alive
 	REL = {}
 	OLD_KEYS = opts.old
+	OLD_TASKS = opts.tasks
 	math.randomseed(1)
 	setup(split, opts.active)
 	if opts.active ~= false then
@@ -348,6 +351,91 @@ do
 	check(Hm.tm.task_info["drx_sl_find_wish_granter_task"] ~= nil and sl.owner_of_task("drx_sl_find_wish_granter_task") == "dolg",
 		"the world gave the Wish Granter task, Duty's")
 	check(chain(Hm, "dolg", "drx_sl_current_task") == "drx_sl_find_wish_granter_task" and not bare_keys(Hm), "in Duty's keys")
+
+	-- D3: the bandits reach their ending after Duty: the one Wish Granter task stays Duty's (the first chain that reaches it)
+	local WISH = "drx_sl_find_wish_granter_task"
+	local TB = "drx_sl_" .. SULTAN .. "_task_1"
+	sl.with_chain("bandit", function()
+		Hm.env.save_var(Hm.actor, "drx_sl_current_honcho", SULTAN)
+		Hm.env.save_var(Hm.actor, "drx_sl_current_task", TB)
+	end)
+	Hm.env.coop_tasks.run_as(2, function() Hm.tm:give_task(TB, 9) end)
+	NOW = NOW + 1500
+	B.env.coop.send_event("coop_sl_req", H.encode({ k = "give", h = SULTAN, t = TB }), 0)
+	pump()
+	check(sl.owner_of_task(TB) == "bandit", "the bandits' task is theirs")
+	Hm.tm.task_info[TB].forced_status = "complete" -- turned in
+	local btask = chain(Hm, "bandit", "drx_sl_current_task")
+	local adv = #Hm.log
+	NOW = NOW + 1500
+	B.env.coop.send_event("coop_sl_req", H.encode({ k = "end", h = SULTAN, t = TB }), 0)
+	pump()
+	check(sl.owner_of_task(WISH) == "dolg", "the Wish Granter task stays Duty's")
+	check(Hm.env.coop_tasks.taker(WISH) == 1, "its taker stays anna")
+	check(chain(Hm, "bandit", "drx_sl_current_task") == btask, "the stock wish effect did not run for the bandits")
+	local said = 0
+	for i = adv + 1, #Hm.log do if Hm.log[i]:find("Wish Granter", 1, true) then said = said + 1 end end
+	check(said == 1, "one log line says why")
+	-- the authority's wrapper of the effect (the host player's own endgame dialog): the same rule
+	Hm.talking = true
+	Hm.env.xr_effects.drx_sl_find_wish_granter(Hm.actor, nil, {})
+	Hm.talking = false
+	check(sl.owner_of_task(WISH) == "dolg" and Hm.env.coop_tasks.taker(WISH) == 1, "the host player's ending: still Duty's, anna's")
+	check(chain(Hm, "stalker", "drx_sl_current_task") ~= WISH, "the loners' chain did not take it")
+end
+
+section("D3: the first chain to reach the Wish Granter owns it (the wrapper's positive path)")
+do
+	local sl = world(true)
+	local WISH = "drx_sl_find_wish_granter_task"
+	Hm.talking = true
+	Hm.env.xr_effects.drx_sl_find_wish_granter(Hm.actor, nil, {})
+	Hm.talking = false
+	check(Hm.tm.task_info[WISH] ~= nil and sl.owner_of_task(WISH) == "stalker", "nobody had it: the host player's chain owns it")
+	check(chain(Hm, "stalker", "drx_sl_current_task") == WISH, "in the loners' keys")
+end
+
+section("D4: an older save's open chain tasks are the world faction's: their turn-in moves the chain")
+do
+	FACTIONS_OF = { [501] = "stalker", [502] = "bandit" }
+	local T = "drx_sl_" .. SID .. "_task_1"
+	local CFT = "drx_sl_" .. SID .. "_cf_task_1"
+	local sl = world(true, { old = { drx_sl_total_task_number = 9, drx_sl_current_task_number = 2, drx_sl_current_honcho = SID,
+		drx_sl_current_task = T, drx_sl_start_task = "drx_sl_esc_m_trader_start_game_1" }, tasks = { T, CFT } })
+	check(Hm.tm.task_info[T] ~= nil and Hm.tm.task_info[CFT] ~= nil, "the older save's tasks are open")
+	check(sl.owner_of_task(T) == "stalker", "the open chain task is the world faction's chain's")
+	check(sl.owner_of_task(CFT) == nil, "a change-faction task is no chain's")
+	Hm.tm.task_info[T].forced_status = "complete" -- turned in
+	local r0 = refusals(Hm)
+	NOW = NOW + 1500
+	B.env.coop.send_event("coop_sl_req", H.encode({ k = "fin", h = SID, t = T }), 0)
+	pump()
+	check(refusals(Hm) == r0 + 1 and last_refusal(Hm):find("from #2 refused: not his faction's task", 1, true) ~= nil,
+		"boris (bandit) cannot move the loners' chain with it")
+	NOW = NOW + 1500
+	A.env.coop.send_event("coop_sl_req", H.encode({ k = "fin", h = SID, t = T }), 0)
+	pump()
+	check(refusals(Hm) == r0 + 1 and has_log(Hm, "#1 advanced the stalker chain (fin)"), "anna (stalker): the same task moves it")
+	check(chain(Hm, "stalker", "drx_sl_current_task_number") == 3, "the loners at task 3")
+	FACTIONS_OF = { [501] = "dolg", [502] = "bandit" }
+end
+
+section("D6: split levels -> one shared world -> split levels again: the shared world's progress is kept")
+do
+	local sl = world(true, { old = { drx_sl_total_task_number = 9, drx_sl_current_task_number = 1, drx_sl_current_honcho = SID,
+		drx_sl_start_task = "drx_sl_esc_m_trader_start_game_1" } })
+	check(chain(Hm, "stalker", "drx_sl_current_task_number") == 1 and not bare_keys(Hm), "migrated")
+	SPLIT = false
+	fire(Hm, "actor_on_first_update") -- the world loaded without split levels
+	check(pstor(Hm).drx_sl_current_task_number == 1 and pstor(Hm).drx_sl_current_honcho == SID, "the bare keys are back")
+	check(chain(Hm, "stalker", "drx_sl_current_task_number") == nil and chain(Hm, "stalker", "drx_sl_current_honcho") == nil,
+		"and the suffixed copies are gone")
+	pstor(Hm).drx_sl_current_task_number = 5 -- the shared world plays on (the stock writes the bare keys)
+	SPLIT = true
+	fire(Hm, "actor_on_first_update") -- split levels again
+	ticks(Hm, 8)
+	check(chain(Hm, "stalker", "drx_sl_current_task_number") == 5, "the progress of the shared world is the world faction's chain")
+	check(not bare_keys(Hm) and sl.has_chain("stalker"), "migrated again")
 end
 
 section("group mode (no split levels): every key name and stock call as today")

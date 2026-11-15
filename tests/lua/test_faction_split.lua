@@ -216,11 +216,48 @@ do
 	check(cf.faction_of(1) == "freedom", "anna's own word is taken once (" .. tostring(cf.faction_of(1)) .. ")")
 	check(cf.faction_of(2) == "csky", "boris's honest word is taken after the refused one")
 	check(comm(A) == "actor_freedom" and A.env.get_actor_true_community() == "freedom", "anna's true faction is her own")
-	check(#Hm.changed == 0 and not has_tip(B, "joined"), "a bootstrap is no change: no callback, no news")
+	check(not has_tip(A, "joined") and not has_tip(B, "joined") and not has_tip(Hm, "joined"), "a bootstrap is no change: no news")
+	-- D5: but the scripts that judged him without a faction (the task audience) are told: coop_faction_changed, old = nil
+	local c1, c2 = Hm.changed[1] or {}, Hm.changed[2] or {}
+	check(#Hm.changed == 2 and c1[1] == 1 and c1[2] == 501 and c1[3] == nil and c1[4] == "freedom",
+		"coop_faction_changed(1, 501, nil, freedom) on the world")
+	check(c2[1] == 2 and c2[2] == 502 and c2[3] == nil and c2[4] == "csky", "coop_faction_changed(2, 502, nil, csky)")
+	check(#A.changed == 0 and #B.changed == 0, "only on the world")
 	NOW = NOW + 5000
 	A.env.coop.send_event("coop_fac_req", H.encode({ b = "army" }), 0)
 	pump()
 	check(cf.faction_of(1) == "freedom" and comm(A) == "actor_freedom", "a second claim is ignored, the answer is the record")
+	check(#Hm.changed == 2, "and sends no callback")
+end
+
+section("D5: an older save's character in a disguise claims nothing until the disguise is off")
+do
+	local cf = split_setup(ALL)
+	A.actor._comm = "actor_bandit" -- a bandit disguise; her own faction is Freedom
+	local disguised = true
+	A.env.gameplay_disguise.is_actor_disguised = function() return disguised end
+	tick(A)
+	pump()
+	check(count_sent(A, "coop_fac_req") == 1, "she asks")
+	check(cf.faction_of_character(501) == nil, "the disguise's faction is not taken")
+	check(#Hm.changed == 0, "no callback")
+	tick(A)
+	check(count_sent(A, "coop_fac_req") == 1, "not at every frame")
+	NOW = NOW + 10000
+	tick(A)
+	pump()
+	check(count_sent(A, "coop_fac_req") == 2 and cf.faction_of_character(501) == nil, "again after ASK_RETRY_MS, still nothing")
+	-- the disguise is off: her own community, the same character and the same question
+	disguised = false
+	A.actor._comm = "actor_freedom"
+	NOW = NOW + 10000
+	tick(A)
+	pump()
+	check(cf.faction_of(1) == "freedom", "her own faction is taken (" .. tostring(cf.faction_of(1)) .. ")")
+	check(#Hm.changed == 1 and (Hm.changed[1] or {})[3] == nil and (Hm.changed[1] or {})[4] == "freedom", "the callback, old = nil")
+	NOW = NOW + 10000
+	tick(A)
+	check(count_sent(A, "coop_fac_req") == 3, "answered: she stops asking")
 end
 
 section("a new character gets the world's faction")

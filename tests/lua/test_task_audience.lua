@@ -433,12 +433,14 @@ end
 print("== the record goes with its task, a re-give judges anew")
 do
 	tick(Hm)
-	check(AUD.record("t_side1") == nil and W.eng.t_side1 == nil, "a finished task: record and engine entry gone")
+	-- the engine keeps a finished task in the journal for ever: its audience stays (D1)
+	check(AUD.record("t_side1") ~= nil and AUD.record("t_side1").fin == true and W.eng.t_side1 ~= nil,
+		"a finished task: its record stays (finished) and so does its engine entry")
 	Hm.tm.task_info.t_free = nil
 	local mark = #Hm.sent
 	tick(Hm)
 	local to = targets("coop_tl", "t_free", mark + 1)
-	check(AUD.record("t_free") == nil and W.eng.t_free == nil, "a removed task: gone")
+	check(AUD.record("t_free") ~= nil and AUD.record("t_free").fin == true and W.eng.t_free ~= nil, "a removed task: kept, finished")
 	check(to[2] == 1 and to[BRIDGE] == 1 and to[-1] == nil, "its removal goes to its audience and the bridge")
 	Hm.tm.task_info.t_monster = nil
 	tick(Hm)
@@ -478,6 +480,156 @@ do
 	local tsk = { get_id = function() return "lttz_hb_task" end, get_title = function() return "l" end }
 	check(e.news_manager.send_task(Hm.actor, "new", tsk) == true, "no line on its ghost for a task with an audience")
 	W.dedicated = false
+end
+
+for _, id in ipairs({ "t_fin1", "t_fin2", "t_fin3", "t_fin4", "t_run", "t_eng", "lttz_hb_d5" }) do Hm.ini[id] = {} end
+
+local function finish_task(id)
+	Hm.tm.task_info[id] = nil -- it ends: the Lua task goes, the engine keeps it in the journal
+	Hm.engine_tasks[id] = nil
+	tick(Hm)
+end
+
+local function count_log(pat)
+	local n = 0
+	for _, l in ipairs(Hm.log) do if l:find(pat, 1, true) then n = n + 1 end end
+	return n
+end
+
+-- ---------------------------------------------------------------- D1: finished tasks
+print("== D1: a finished hidden task stays hidden (record and engine entry kept)")
+do
+	W.rel["bandit>dolg"] = -1000
+	give(2, "t_fin1", 700) -- B (a stalker now) takes it from a bandit: A (dolg) is out
+	local r = AUD.record("t_fin1")
+	check(r and r.inn[501] == true and r.out[500] == true and not r.fin, "running: B in, A out")
+	finish_task("t_fin1")
+	r = AUD.record("t_fin1")
+	check(r ~= nil and r.fin == true and r.inn[501] == true and r.out[500] == true, "finished: the record stays, marked finished")
+	check(W.eng.t_fin1 ~= nil and same(W.eng.t_fin1, { 0, 501, 502 }), "the engine's entry stays: A is not sent the finished task")
+	check(AUD.sees_character("t_fin1", 500) == false and AUD.sees_character("t_fin1", 501) == true,
+		"A does not see it, B does (same ids)")
+
+	-- a late joiner: judged for the running tasks, never for a finished one (he never had it)
+	give(2, "t_run", 700)
+	W.fac[504] = "stalker"
+	Hm.players[#Hm.players + 1] = { id = 5, avatar_id = 504 }
+	W.members[#W.members + 1] = { id = 504, peer = 5, in_world = true }
+	Hm.new_obj(504, "coop_player_avatar", vec(40, 0, 0))
+	Hm.handlers.coop_tl_req("", 5)
+	check(AUD.record("t_run").inn[504] == true and set(W.eng.t_run)[504] == true, "a running task: the late joiner is judged in")
+	check(AUD.record("t_fin1") ~= nil and AUD.record("t_fin1").inn[504] == nil and W.eng.t_fin1 ~= nil and not set(W.eng.t_fin1)[504],
+		"a finished task: he stays out of it")
+
+	-- the request gate: an outsider's request about the finished task is refused there, the insider's is not
+	local tq = Hm.handlers.coop_tq
+	tq(H.encode({ op = "complete", i = "t_fin1" }), 1)
+	check(has_log(Hm, "#1: complete 't_fin1' refused: not his task"), "A's turn-in of the finished hidden task: refused by the gate")
+	tq(H.encode({ op = "complete", i = "t_fin1" }), 2)
+	check(not has_log(Hm, "#2: complete 't_fin1' refused: not his task"), "B's request passes the gate (same task)")
+	local a = last_to("coop_tl", 1)
+	check(a and a.i == "t_fin1" and a.d == true and a.st == nil, "A learns nothing of it")
+	-- a new give of that id is a new task: judged anew, whoever asks (the engine's give refuses only a running task too)
+	tq(H.encode({ op = "give", i = "t_fin1", g = 700 }), 1)
+	r = AUD.record("t_fin1")
+	check(Hm.tm.task_info.t_fin1 ~= nil and r and not r.fin and r.t == 500 and r.inn[500] == true, "a re-give recomputes the record")
+	finish_task("t_fin1")
+
+	-- the late joiner's list does not start listing the finished task, nor the lists of the others
+	local mark = #Hm.sent
+	NOW = NOW + 20000
+	tick(Hm)
+	check(not listed_to(5, "t_fin1", mark + 1) and not listed_to(1, "t_fin1", mark + 1), "no list carries a finished task")
+	check(listed_to(5, "t_run", mark + 1), "the running one is in his list")
+end
+
+print("== D1: finished records are saved and given to the engine again after a load")
+do
+	give(2, "t_fin2", 700)
+	finish_task("t_fin2")
+	local md = {}
+	fire(Hm, "save_state", md)
+	local s = md.coop_task_audience
+	check(type(s) == "table" and type(s.t_fin2) == "table" and s.t_fin2.f == true and type(s.t_fin2.n) == "number",
+		"a finished record is saved, with its mark and its number")
+	check(type(s.t_run) == "table" and s.t_run.f == nil, "a running one has no mark")
+	W.eng = {} -- story::reset
+	fire(Hm, "load_state", md)
+	tick(Hm)
+	check(AUD.record("t_fin2") and AUD.record("t_fin2").fin == true, "it comes back finished")
+	check(W.eng.t_fin2 ~= nil and same(W.eng.t_fin2, { 0, 501, 502, 504 }), "and the engine has its audience again")
+	check(W.eng.t_run ~= nil, "the running ones as before")
+end
+
+print("== D1: at most FINISHED_MAX finished records; the oldest go first, one log line")
+do
+	check(AUD.FINISHED_MAX == 2000, "the bound is 2000")
+	AUD.FINISHED_MAX = 2
+	give(2, "t_fin3", 700)
+	finish_task("t_fin3") -- finished after the load: a newer number than t_fin2's
+	local before = count_log("finished task audiences dropped")
+	give(2, "t_fin4", 700)
+	finish_task("t_fin4")
+	check(AUD.record("t_fin3") and AUD.record("t_fin4") and W.eng.t_fin3 ~= nil and W.eng.t_fin4 ~= nil, "the two newest stay")
+	check(AUD.record("t_fin2") == nil and W.eng.t_fin2 == nil, "an older one is dropped and its engine entry cleared")
+	check(AUD.record("t_side1") == nil and W.eng.t_side1 == nil, "every older one")
+	check(AUD.record("t_run") ~= nil, "a running record is never dropped by the bound")
+	check(count_log("finished task audiences dropped") == before + 1, "one log line for the batch")
+	AUD.FINISHED_MAX = 2000
+end
+
+-- ---------------------------------------------------------------- D2: the engine's give
+print("== D2: a give through the engine (host_on_task_give) asks coop_storyline.may_take for its player")
+do
+	local asked = {}
+	e.coop_storyline = { may_take = function(id, peer)
+		asked[#asked + 1] = { id = id, peer = peer }
+		return not (id == "t_eng" and peer == 1)
+	end }
+	-- coop_story.cpp host_on_task_give: lua_note("taker", id, from), then tm:give_task(id, giver) on the host
+	CT.host_note("t_eng", "taker", 1)
+	local ok, err = pcall(function() Hm.tm:give_task("t_eng", 700) end)
+	check(ok, "a refused give raises no error (" .. tostring(err) .. ")")
+	check(Hm.tm.task_info.t_eng == nil and Hm.engine_tasks.t_eng == nil, "refused for A: no task")
+	check(AUD.record("t_eng") == nil and W.eng.t_eng == nil, "no record, no engine entry")
+	check(#asked == 1 and asked[1].peer == 1 and asked[1].id == "t_eng", "asked for the player the give is for")
+	CT.host_note("t_eng", "taker", 2)
+	Hm.tm:give_task("t_eng", 700)
+	check(Hm.tm.task_info.t_eng ~= nil and AUD.record("t_eng") and AUD.record("t_eng").t == 501, "the same id for B: given")
+	finish_task("t_eng")
+	-- a script's give with nobody to attribute it to is not the storyline's to refuse
+	e.coop_storyline.may_take = function() return false end
+	Hm.tm:give_task("t_eng", 700)
+	check(Hm.tm.task_info.t_eng ~= nil, "a script's give for nobody is not refused")
+	e.coop_storyline = nil
+end
+
+-- ---------------------------------------------------------------- D5 (audience side)
+print("== D5: an older character's first word re-judges the storyline tasks for him")
+do
+	W.fac[504] = nil -- an older save's character that has not told his faction yet
+	give(2, "lttz_hb_d5", nil) -- B (stalker) takes a storyline task
+	check(AUD.record("lttz_hb_d5").out[504] == true and AUD.record("lttz_hb_d5").inn[501] == true, "unknown: out (B in)")
+	W.fac[504] = "stalker"
+	local n = #W.resent
+	fire(Hm, "coop_faction_changed", 5, 504, nil, "stalker") -- coop_faction after the bootstrap claim: old = nil
+	check(AUD.record("lttz_hb_d5").inn[504] == true and set(W.eng.lttz_hb_d5)[504] == true, "now in")
+	check(#W.resent == n + 1 and W.resent[#W.resent] == 5, "and his list is sent again")
+end
+
+-- ---------------------------------------------------------------- D8: a session started again
+print("== D8: a session started again without a load gets every audience again")
+do
+	tick(Hm)
+	W.split = false -- the session ends: off
+	tick(Hm)
+	W.eng = {} -- the engine clears its table when a session starts
+	W.split = true
+	tick(Hm)
+	check(W.eng.t_run ~= nil and W.eng.lttz_hb_d5 ~= nil and W.eng.t_fin3 ~= nil, "every record is pushed again when it comes on")
+	local n = W.eng_calls
+	tick(Hm)
+	check(W.eng_calls == n, "once")
 end
 
 print(string.format("\n%d passed, %d failed", PASSES, FAILS))

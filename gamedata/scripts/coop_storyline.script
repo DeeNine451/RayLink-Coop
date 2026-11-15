@@ -556,10 +556,18 @@ local function migrate(s)
 			moved = true
 		end
 	end
+	-- the chain tasks open in that save are the world faction's chain's (else their turn-in request is "not his faction's")
+	local owned = 0
+	for id in pairs(task_info() or {}) do
+		if type(id) == "string" and id:sub(1, 7) == "drx_sl_" and not id:find("_cf_task_", 1, true) and s.owner[id] == nil then
+			set_owner(id, w)
+			owned = owned + 1
+		end
+	end
 	if moved then
 		s.chains[w] = true
 		stats.migrated = stats.migrated + 1
-		log("the chain of an older save is the %s chain now", w)
+		log("the chain of an older save is the %s chain now (%d open tasks)", w, owned)
 	end
 end
 
@@ -573,6 +581,8 @@ local function unmigrate()
 	for _, k in ipairs(KEY_LIST) do
 		local v = ps[k .. "@" .. w]
 		if v ~= nil and ps[k] == nil then ps[k] = v end
+		-- gone: the bare keys are the chain now; a later migrate (split levels again) takes them, not a stale copy
+		ps[k .. "@" .. w] = nil
 	end
 	s.migrated = false
 	s.chains[w] = nil
@@ -745,6 +755,16 @@ local function owner_or_recent(id)
 	return r and r.f or nil
 end
 
+-- The Wish Granter ending is one per world (one task id): the first chain that reaches it owns it. True when faction f may
+-- not take it: the task is there already, or another faction is its recorded owner.
+local function wish_taken(f)
+	local ti = task_info()
+	if ti and ti[WISH_TASK] ~= nil then return true end
+	local s = store(false)
+	local o = s and s.owner[WISH_TASK]
+	return known(o) and o ~= f
+end
+
 local function as_player(from, fn, ...)
 	local ct = mod("coop_tasks")
 	if ct and type(ct.run_as) == "function" then return ct.run_as(from, fn, ...) end
@@ -790,6 +810,7 @@ local function host_on_req(payload, from)
 		local th = honcho_of_task(id)
 		if not th or (h and h ~= th) or cur ~= th then return refuse(from, "not his chain's leader", k) end
 		if not task_finished(id) then return refuse(from, "the task is not turned in", k) end
+		if k == "end" and wish_taken(f) then return refuse(from, "the Wish Granter task is taken already (one per world)", k) end
 		advanced[id] = t
 		if k == "fin" then
 			as_player(from, with_chain, f, meet_body, f)
@@ -1257,6 +1278,10 @@ local function wrap_effects()
 			if is_client() then return end -- only the endgame turn-in calls it: its request does it on the world
 			if not authority() then return stock.wish(a, b, p) end
 			local f = chain_for_effect()
+			if known(f) and wish_taken(f) then
+				log("the Wish Granter task is taken already (one per world): nothing for the %s chain", f)
+				return
+			end
 			local res = { with_chain(f, stock.wish, a, b, p) }
 			local ti = task_info()
 			if known(f) and ti and ti[WISH_TASK] ~= nil then set_owner(WISH_TASK, f) end

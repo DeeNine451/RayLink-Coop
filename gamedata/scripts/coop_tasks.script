@@ -469,6 +469,7 @@ local host = {
 	news_count = 0,
 	exec_peer = nil, -- peer whose request is being executed
 	giver = nil, -- giver (npc id) of the client's give request being run
+	take_asked = nil, -- id whose give ops.give runs now, coop_storyline.may_take asked already
 	next_scan = 0,
 	next_list = 0,
 	shared = {}, -- key -> encoded "k=v" pair of a shared var as the clients have it
@@ -1075,7 +1076,9 @@ function ops.give(tm, id, t, from)
 	if npc and not _spoke_to(from, sp) then npc = nil end
 	local stock_speaker = rawget(_G, "get_speaker")
 	if npc then _G.get_speaker = function() return npc end end
+	host.take_asked = id -- may_take was asked above: the patched give_task does not ask again for this id
 	local gave, gerr = pcall(tm.give_task, tm, id, giver)
+	host.take_asked = nil
 	if npc then _G.get_speaker = stock_speaker end
 	host.giver = nil
 	if not gave then
@@ -1145,8 +1148,9 @@ local function host_on_request(payload, from)
 	local tm = tmgr()
 	if not tm then return end
 	-- a player out of the task's audience can neither take, turn in, cancel nor stage it; for him it is not there. A map server's
-	-- logic is no player: not gated (what it causes is cut at the rewards).
-	if from < 0x100 and not host.aud_sees(id, from) then
+	-- logic is no player: not gated (what it causes is cut at the rewards). A finished task keeps its record (the engine keeps
+	-- it in the journal): a give of an id that is not running is a new task, judged anew by its give (as the engine's give).
+	if from < 0x100 and not host.aud_sees(id, from) and not (op == "give" and tm.task_info[id] == nil) then
 		stats.refused = stats.refused + 1
 		log("#%s: %s '%s' refused: not his task", tostring(from), tostring(op), id)
 		send(EV_STATE, pack(op == "give" and { i = id, d = true, r = 1 } or { i = id, d = true }), from)
@@ -3073,6 +3077,22 @@ local function patch_task_manager()
 				return
 			end
 			if is_host() and type(id) == "string" then
+				-- split levels: may this player take it (coop_storyline.may_take)? A give for a player - his Lua request (ops.give
+				-- asked already) or the engine's TaskReqGive (coop_story.cpp host_on_task_give: lua_note "taker", then this) - is
+				-- asked before anything of it is made; a script's give for nobody is not the storyline's to refuse.
+				if (host.exec_peer or host.taker_note[id]) and host.take_asked ~= id then
+					local sl = rawget(_G, "coop_storyline")
+					local okm, may = true, true
+					if type(sl) == "table" and type(sl.may_take) == "function" then
+						okm, may = pcall(sl.may_take, id, host.exec_peer or host.taker_note[id])
+					end
+					if okm and may == false then
+						log("#%s may not take '%s': another faction's main story or a second change-faction task",
+							tostring(host.exec_peer or host.taker_note[id]), id)
+						host.taker_note[id] = nil
+						return
+					end
+				end
 				-- news: a player's action gave it (a request, the host's own dialog, the reward of a player's task)
 				local who = host.exec_peer or host.taker_note[id]
 				if who == nil and ctx and ctx.rcpt ~= nil and ctx.rcpt ~= 0 then who = ctx.rcpt end
