@@ -871,6 +871,22 @@ function world_faction()
 	return nil
 end
 
+-- The world's faction changed in the game (coop_faction: the whole group moved, the host only): the record keeps it (rev + 1,
+-- the card at once; the save takes it with the next save_state) and the engine gives it to new characters. -> bool
+function set_world_faction(f)
+	if client_now() or not S.rec then return false end
+	if type(f) ~= "string" or #f > 32 or not f:find("^[%a_]+$") then return false end
+	if S.rec.faction ~= f then
+		S.rec.faction = f
+		S.rec.rev = (tonumber(S.rec.rev) or 0) + 1
+		local ok, err = pcall(write_running_card)
+		if not ok then log("! the card after the world's faction change: %s", tostring(err)) end
+		log("the world's faction is %s now", f)
+	end
+	push_faction()
+	return true
+end
+
 local function norm_src(src)
 	if src == "o" or src == "options" then return "o" end
 	if src == "m" or src == "mcm" then return "m" end

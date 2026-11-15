@@ -1,0 +1,447 @@
+--[[
+	Anomaly Coop - the group's faction (gamedata\scripts\coop_faction.script)
+	Owner 2026-11-16: in a world WITHOUT split levels every player is in one and the same faction. A move to another faction
+	moves everybody, those who are offline as well, and the dialog says so first. With split levels (coop.levels.split) a
+	faction change stays one player's own, as before (coop_tasks forwards drx_sl_change_factions to the finisher).
+
+	"Group mode" = a live co-op session whose levels are not split.
+	  - One place decides: the host. set_actor_true_community (_g.script) on the host runs the stock function (the host's
+	    character changes; in story mode the stock storyline recycle runs here, once, on the host's shared task manager), then
+	    the world's faction is set (coop_game_settings.set_world_faction: the record, saved with the world; and
+	    coop.game.set_world_faction: new characters get it), and every client is told ("coop_fac", k = set). Everybody gets a
+	    news line "<nick> joined <faction>: the whole group is in it now". coop_tasks does not forward drx_sl_change_factions
+	    in group mode: the task's on_complete runs it on the host (the payment from the finisher's ledger stays).
+	  - A client takes the word from peer 0 only and changes its OWN actor with gameplay_disguise.update_default(new, true),
+	    nothing else (the storyline and the LTTZ infos are the host's and shared). Its own scripts' calls of
+	    set_actor_true_community (a dialog's effect, the debug launcher) change nothing and ask nothing: a log line and a tip.
+	    No client verb changes the world's faction.
+	  - A client that is in the game asks the host for the group's faction ("coop_fac_req", read-only, answered at most once per
+	    ANSWER_GAP_MS per peer) until it gets an answer (k = sync); a character in another faction is moved and told "While you
+	    were away the group joined <faction>".
+	  - Dialogs (every machine: a dialog runs on the talking player's machine): the explanation of the join dialog
+	    (dialogs.drx_sl_text_npc_has_change_factions_task_to_give) ends with a warning; the turn-in dialog
+	    (dialog_manager.drx_sl_cf_task_completed_dialog) asks a last question before the stock completion, and "I need to think
+	    it over" leaves the task ready. The engine builds a dialog's phrases once per process (CPhraseDialog shared data), so the
+	    turn-in dialog carries both branches and preconditions choose at the time of the talk: outside group mode it is the
+	    stock dialog phrase for phrase.
+	Outside a session and with split levels every wrapper calls the stock function unchanged; on an exe without co-op nothing
+	is installed.
+
+	For other scripts:
+		coop_faction.group_mode() -> bool        a live session without split levels
+		coop_faction.group_faction() -> string   host: the faction of the group (nil elsewhere)
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local string_format = string.format
+local tostring, tonumber, type, pcall = tostring, tonumber, type, pcall
+
+local TAG = "[coop-faction]"
+local EV_SET = "coop_fac" -- host -> client(s): the group's faction (k = set: it changed now, k = sync: the answer to a question)
+local EV_ASK = "coop_fac_req" -- client -> host: which faction is the group in (read-only)
+local ASK_RETRY_MS = 10000
+local ANSWER_GAP_MS = 2000
+local NICK_MAX = 32
+-- gameplay_disguise.possible_factions (temp/gamma_ref/scripts/gameplay_disguise.script:166-179)
+local FACTIONS = {
+	army = true, bandit = true, csky = true, dolg = true, ecolog = true, freedom = true, killer = true, monolith = true,
+	stalker = true, renegade = true, greh = true, isg = true,
+}
+
+local stock_set = nil -- set_actor_true_community as it was
+local installed = false
+local cl = { known = false, next_ask = 0 } -- client: the group's faction was answered in this Lua state
+local answered = {} -- host: peer -> time of the last answer
+local stats = { changes = 0, applied = 0, refused = 0, blocked = 0, answers = 0, errors = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("%s %s", TAG, ok and line or tostring(fmt))
+end
+
+-- Script module by name, or nil (loaded by _G.__index on the first use).
+local function mod(name)
+	local m = rawget(_G, name)
+	if m == nil then
+		local ok, r = pcall(function() return _G[name] end)
+		m = ok and r or nil
+	end
+	return type(m) == "table" and m or nil
+end
+
+-------------------------------------------------------------------------------
+-- Who we are
+-------------------------------------------------------------------------------
+local function call(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, ...)
+	return ok and v or nil
+end
+
+local function active() return api ~= nil and call(api.is_active) == true end
+local function is_host() return active() and call(api.is_host) == true end
+local function is_client() return active() and call(api.is_client) == true end
+local function now() return time_global() end
+
+-- coop_economy_core.split_levels: true when the engine says the levels are split
+local function split_levels()
+	local l = api and api.levels
+	if type(l) ~= "table" or type(l.split) ~= "function" then return false end
+	local ok, v = pcall(l.split)
+	return ok and v == true
+end
+
+function group_mode()
+	return active() and not split_levels()
+end
+
+local function tr(id) return game.translate_string(id) end
+
+local function faction_name(f) return tr("st_faction_" .. tostring(f)) end
+
+-- A translated text with arguments; the text is ours, the arguments (a nick) are never a format.
+local function text(id, ...)
+	local ok, s = pcall(string_format, tr(id), ...)
+	return ok and s or tr(id)
+end
+
+local function tip(line)
+	local actor = db and db.actor
+	local nm = rawget(_G, "news_manager") or mod("news_manager")
+	if actor and nm and type(nm.send_tip) == "function" and pcall(nm.send_tip, actor, line, nil, "completionist", 9000) then return end
+	local am = mod("actor_menu")
+	if not (am and type(am.set_msg) == "function" and pcall(am.set_msg, 1, line, 6)) then log("%s", line) end
+end
+
+local function encode(t)
+	local cm = mod("coop_main")
+	return cm and cm.encode(t) or nil
+end
+local function decode(s)
+	local cm = mod("coop_main")
+	return cm and type(s) == "string" and cm.decode(s) or {}
+end
+
+local function send(name, payload, target)
+	local ok, sent = pcall(api.send_event, name, payload or "", target)
+	return ok and sent == true
+end
+
+local function players()
+	local list = call(api and api.players)
+	return type(list) == "table" and list or {}
+end
+
+local function nick_of(peer)
+	for _, p in ipairs(players()) do
+		if p.id == peer and type(p.nick) == "string" and p.nick ~= "" then return p.nick end
+	end
+	if peer == 0 then
+		local info = call(api and api.session_info)
+		if type(info) == "table" and type(info.nick) == "string" and info.nick ~= "" then return info.nick end
+	end
+	return "#" .. tostring(peer)
+end
+
+local function cut(s)
+	s = (tostring(s or "")):gsub("[%c]", " ")
+	if #s > NICK_MAX then s = s:sub(1, NICK_MAX) end
+	return s
+end
+
+-- the actor's true faction (no "actor_"), nil when it cannot be read
+local function true_faction()
+	local f = rawget(_G, "get_actor_true_community") or get_actor_true_community
+	local v = call(f)
+	return type(v) == "string" and v or nil
+end
+
+local function actor_faction()
+	local actor = db and db.actor
+	if not actor then return nil end
+	local ok, c = pcall(function() return actor:character_community() end)
+	return ok and type(c) == "string" and (c:gsub("^actor_", "")) or nil
+end
+
+-------------------------------------------------------------------------------
+-- Host
+-------------------------------------------------------------------------------
+-- The faction of the group: the host's character's. A world server's own seat plays no character: the world's faction.
+function group_faction()
+	if not is_host() then return nil end
+	if call(api.is_dedicated) == true then
+		local gs = mod("coop_game_settings")
+		local f = gs and call(gs.world_faction)
+		if type(f) ~= "string" or f == "" then f = call(api.game and api.game.world_faction) end
+		if type(f) == "string" and FACTIONS[f] then return f end
+	end
+	local f = true_faction()
+	return f and FACTIONS[f] and f or nil
+end
+
+local function set_world(f)
+	local gs = mod("coop_game_settings")
+	if gs and type(gs.set_world_faction) == "function" then
+		local ok, r = pcall(gs.set_world_faction, f)
+		if not ok or r ~= true then log("! the world's record did not take the faction %s: %s", f, tostring(r)) end
+	end
+	local g = api.game
+	if type(g) == "table" and type(g.set_world_faction) == "function" then
+		local ok, r = pcall(g.set_world_faction, f)
+		if not ok or r ~= true then log("! the engine did not take the world's faction %s", f) end
+	end
+end
+
+-- who turned the task in: coop_tasks keys a task's effects to him; else the host's own doing
+local function changer_nick()
+	local ct = mod("coop_tasks")
+	local peer = ct and call(ct.reward_peer)
+	return cut(nick_of(tonumber(peer) or 0))
+end
+
+local function host_change(new_comm, now_flag)
+	local before = true_faction()
+	stock_set(new_comm, now_flag)
+	local f = true_faction()
+	if f ~= new_comm or not FACTIONS[f] then
+		log("! the faction %s was not taken (the true faction is %s): the group stays", tostring(new_comm), tostring(f))
+		return
+	end
+	if f == before then
+		-- a script set the faction the group is in already (a game mode's own bookkeeping): nobody joined anything, the world's
+		-- record only follows
+		set_world(f)
+		return
+	end
+	stats.changes = stats.changes + 1
+	set_world(f)
+	local nick = changer_nick()
+	send(EV_SET, encode({ k = "set", f = f, n = nick }), -1)
+	log("the group joined %s (%s)", f, nick)
+	tip(text("st_coop_faction_group_joined", nick, faction_name(f)))
+end
+
+local function host_on_ask(_, from)
+	if not is_host() or type(from) ~= "number" or from <= 0 or not group_mode() then return end
+	local t = now()
+	local last = answered[from]
+	if last and t - last < ANSWER_GAP_MS and t >= last then return end
+	answered[from] = t
+	local f = group_faction()
+	if not f then return end
+	stats.answers = stats.answers + 1
+	send(EV_SET, encode({ k = "sync", f = f }), from)
+end
+
+-------------------------------------------------------------------------------
+-- Client
+-------------------------------------------------------------------------------
+-- Does this character have to move to f? Its true faction, or (not in a disguise) its community, is another one.
+local function differs(f)
+	if true_faction() ~= f then return true end
+	local gd = mod("gameplay_disguise")
+	local disguised = gd and call(gd.is_actor_disguised) == true
+	return not disguised and actor_faction() ~= f
+end
+
+local function client_apply(f)
+	if not differs(f) then return false end
+	local gd = mod("gameplay_disguise")
+	if not (gd and type(gd.update_default) == "function") then
+		log("! gameplay_disguise.update_default is not there: the group's faction %s is not applied", f)
+		return false
+	end
+	gd.update_default(f, true)
+	stats.applied = stats.applied + 1
+	log("this character joined the group's faction %s", f)
+	return true
+end
+
+local function client_on_word(payload, from)
+	if from ~= 0 then
+		stats.refused = stats.refused + 1
+		log("! a faction word from #%s, not the host: ignored", tostring(from))
+		return
+	end
+	if not is_client() or not group_mode() then return end
+	local t = decode(payload)
+	local f = t.f
+	if type(f) ~= "string" or not FACTIONS[f] then
+		stats.refused = stats.refused + 1
+		log("! the host's faction word names no faction: ignored")
+		return
+	end
+	if t.k == "sync" then
+		cl.known = true
+		if client_apply(f) then tip(text("st_coop_faction_away", faction_name(f))) end
+	elseif t.k == "set" then
+		cl.known = true
+		client_apply(f)
+		tip(text("st_coop_faction_group_joined", cut(t.n), faction_name(f)))
+	end
+end
+
+local function on_word(payload, from)
+	if is_host() then
+		if from ~= 0 then
+			stats.refused = stats.refused + 1
+			log("! a faction word from #%s reached the host: ignored", tostring(from))
+		end
+		return
+	end
+	client_on_word(payload, from)
+end
+
+local function actor_on_update()
+	if cl.known or not is_client() or call(api.is_live) ~= true or not group_mode() then return end
+	local t = now()
+	if t < cl.next_ask then return end
+	cl.next_ask = t + ASK_RETRY_MS
+	send(EV_ASK, "", 0)
+end
+
+-------------------------------------------------------------------------------
+-- set_actor_true_community
+-------------------------------------------------------------------------------
+local function wrapped_set(new_comm, now_flag)
+	if not group_mode() then return stock_set(new_comm, now_flag) end
+	if is_host() then
+		local ok, err = pcall(host_change, new_comm, now_flag)
+		if not ok then
+			stats.errors = stats.errors + 1
+			log("! the group's faction change: %s", tostring(err))
+		end
+		return
+	end
+	stats.blocked = stats.blocked + 1
+	log("a faction change to %s on this machine was not made: the group changes it at the faction's leader", tostring(new_comm))
+	tip(tr("st_coop_faction_by_group"))
+end
+
+local function install_set()
+	local f = rawget(_G, "set_actor_true_community")
+	if type(f) ~= "function" then
+		log("! set_actor_true_community is not there: the group's faction is not kept")
+		return
+	end
+	stock_set = f
+	_G.set_actor_true_community = wrapped_set
+end
+
+-------------------------------------------------------------------------------
+-- Dialogs
+-------------------------------------------------------------------------------
+-- preconditions of the turn-in dialog's two branches
+function dlg_group() return group_mode() end
+function dlg_not_group() return not group_mode() end
+
+local function install_join_text()
+	local d = mod("dialogs")
+	local orig = d and d.drx_sl_text_npc_has_change_factions_task_to_give
+	if type(orig) ~= "function" then
+		log("! dialogs.drx_sl_text_npc_has_change_factions_task_to_give is not there: the join dialog has no warning")
+		return
+	end
+	d.drx_sl_text_npc_has_change_factions_task_to_give = function(...)
+		local res = orig(...)
+		if group_mode() and rawget(d, "last_task_id") ~= nil and type(res) == "string" then
+			res = res .. "\n\n" .. tr("st_coop_faction_warning")
+		end
+		return res
+	end
+end
+
+-- dialog_manager.add_dialog (temp/stock_scripts/scripts/dialog_manager.script:45-96) for a dialog of our own
+local function add(dialog, p_id, id, phrase_id, cond, act, script_text)
+	local phrase = dialog:AddPhrase(phrase_id, tostring(id), tostring(p_id), -10000)
+	if not phrase then return end
+	local ps = phrase:GetPhraseScript()
+	local ud = mod("utils_data")
+	local function known(name)
+		return not (ud and type(ud.findfunction) == "function") or ud.findfunction(name, _G) ~= nil
+	end
+	for _, c in ipairs(cond or {}) do
+		if known(c) then ps:AddPrecondition(c) else log("! dialog: no function %s", c) end
+	end
+	for _, a in ipairs(act or {}) do
+		if known(a) then ps:AddAction(a) else log("! dialog: no function %s", a) end
+	end
+	if script_text then ps:SetScriptText(phrase_id) end
+end
+
+-- drx_sl_cf_task_completed_dialog (dialog_manager.script:225-240) with the last question of group mode
+local function build_turn_in(dialog)
+	local FIN, ACT = "dialogs.drx_sl_actor_has_finished_cf_task", "dialogs.drx_sl_set_finished_cf_task_complete"
+	-- Actor returns to npc and states job is done:
+	add(dialog, "", 0, "st_ordered_task_query_finished")
+	-- the stock: NPC replies, actor thanks and leaves
+	add(dialog, 0, 1, "dialogs.drx_sl_text_cf_task_finish", { FIN, "coop_faction.dlg_not_group" }, { ACT }, true)
+	add(dialog, 1, 3, "dm_universal_actor_exit_thanks")
+	-- group mode: NPC asks for the last time
+	add(dialog, 0, 4, "st_coop_faction_confirm", { FIN, "coop_faction.dlg_group" })
+	add(dialog, 4, 5, "st_coop_faction_yes")
+	add(dialog, 5, 6, "dialogs.drx_sl_text_cf_task_finish", { FIN }, { ACT }, true)
+	add(dialog, 6, 7, "dm_universal_actor_exit_thanks")
+	add(dialog, 4, 8, "st_coop_faction_think")
+end
+
+local function install_turn_in()
+	local dm = mod("dialog_manager")
+	local orig = dm and dm.drx_sl_cf_task_completed_dialog
+	if type(orig) ~= "function" then
+		log("! dialog_manager.drx_sl_cf_task_completed_dialog is not there: the turn-in dialog asks nothing")
+		return
+	end
+	dm.drx_sl_cf_task_completed_dialog = function(dialog, ...)
+		local ok, err = pcall(build_turn_in, dialog)
+		if ok then return end
+		log("! the turn-in dialog: %s", tostring(err))
+		return orig(dialog, ...)
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Start
+-------------------------------------------------------------------------------
+local function register_events()
+	local cm = mod("coop_main")
+	if not (cm and cm.add_event_handler) then
+		log("! coop_main.add_event_handler not found: the group's faction is not told")
+		return
+	end
+	cm.add_event_handler(EV_SET, function(payload, from)
+		local ok, err = pcall(on_word, payload, from)
+		if not ok then log("! faction word: %s", tostring(err)) end
+	end)
+	cm.add_event_handler(EV_ASK, function(payload, from)
+		local ok, err = pcall(host_on_ask, payload, from)
+		if not ok then log("! faction question: %s", tostring(err)) end
+	end)
+end
+
+function print_status()
+	log("group mode %s, changes %d, applied here %d, words refused %d, local calls blocked %d, answers %d, errors %d",
+		tostring(group_mode()), stats.changes, stats.applied, stats.refused, stats.blocked, stats.answers, stats.errors)
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5).
+local function start_step(what, f)
+	local ok, err = pcall(f)
+	if not ok then printf("! [coop_faction] %s failed: %s", what, tostring(err)) end
+end
+
+function on_game_start()
+	if not api then return end
+	if not installed then
+		installed = true
+		start_step("set_actor_true_community", install_set)
+		start_step("join dialog", install_join_text)
+		start_step("turn-in dialog", install_turn_in)
+		start_step("events", register_events)
+	end
+	start_step("callbacks", function()
+		RegisterScriptCallback("actor_on_update", actor_on_update)
+		RegisterScriptCallback("coop_world_back", function() cl.known, cl.next_ask = false, 0 end)
+	end)
+end

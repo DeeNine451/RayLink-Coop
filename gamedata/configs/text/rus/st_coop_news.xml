@@ -90,4 +90,25 @@
 	<string id="st_coop_news_task_not_given">
 		<text>Задание не выдано: у хоста при его запуске произошла ошибка. Попробуйте взять его ещё раз.</text>
 	</string>
+	<string id="st_coop_faction_group_joined">
+		<text>%s вступил в группировку «%s». Вся группа теперь в ней.</text>
+	</string>
+	<string id="st_coop_faction_away">
+		<text>Пока вас не было, группа перешла в группировку «%s».</text>
+	</string>
+	<string id="st_coop_faction_by_group">
+		<text>Группировку меняет вся группа сразу: это делается у главы группировки.</text>
+	</string>
+	<string id="st_coop_faction_warning">
+		<text>Имей в виду: вместе с тобой к нам перейдут все твои товарищи — и те, кого сейчас нет рядом. Обратной дороги не будет. Решай.</text>
+	</string>
+	<string id="st_coop_faction_confirm">
+		<text>Дело сделано. Спрашиваю последний раз: ты и все твои товарищи, даже те, кого сейчас нет, переходите к нам. Уверен?</text>
+	</string>
+	<string id="st_coop_faction_yes">
+		<text>Да. Мы с вами.</text>
+	</string>
+	<string id="st_coop_faction_think">
+		<text>Мне надо ещё подумать.</text>
+	</string>
 </string_table>

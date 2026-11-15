@@ -90,4 +90,25 @@
 	<string id="st_coop_news_task_not_given">
 		<text>The task was not given: the host ran into an error while starting it. Try taking it again.</text>
 	</string>
+	<string id="st_coop_faction_group_joined">
+		<text>%s joined the %s faction. The whole group is in it now.</text>
+	</string>
+	<string id="st_coop_faction_away">
+		<text>While you were away the group joined the %s faction.</text>
+	</string>
+	<string id="st_coop_faction_by_group">
+		<text>The faction is changed by the whole group at once: this is done at the faction's leader.</text>
+	</string>
+	<string id="st_coop_faction_warning">
+		<text>Mind this: all your comrades come over with you, those who are not around now as well. There is no way back. Decide.</text>
+	</string>
+	<string id="st_coop_faction_confirm">
+		<text>The job is done. I ask for the last time: you and all your comrades, those who are away too, come over to us. Are you sure?</text>
+	</string>
+	<string id="st_coop_faction_yes">
+		<text>Yes. We are with you.</text>
+	</string>
+	<string id="st_coop_faction_think">
+		<text>I need to think it over.</text>
+	</string>
 </string_table>

@@ -1715,7 +1715,10 @@ local function patch_rewards()
 						log("'%s': %s skipped, the task was not paid", tostring(ctx.task), fname)
 						return
 					end
-					if peer and type(p) == "table" then
+					-- a world without split levels changes faction as a group: the host runs it once for all (coop_faction)
+					local cf = _G.coop_faction
+					local together = type(cf) == "table" and type(cf.group_mode) == "function" and cf.group_mode() == true
+					if peer and type(p) == "table" and not together then
 						local t = { k = "fx", f = fname }
 						for i = 1, 4 do
 							if p[i] ~= nil then t["p" .. i] = tostring(p[i]) end
