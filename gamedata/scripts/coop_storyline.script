@@ -1,0 +1,1039 @@
+--[[
+	Anomaly Coop - one DRX questlines chain per faction (gamedata\scripts\coop_storyline.script)
+	Plan: docs\plans\2026-11-16-storylines-per-faction.md, sections 1-2, stage 2.
+
+	"Chains on" = split mode (coop_faction.split_mode(): a live session with split levels) AND story mode (_g IsStoryMode).
+	Everything below is a no-op otherwise: single player, a group world (no split levels) and sandbox run the stock code,
+	key for key. The wrappers are installed only at the first update of a game with chains on (nothing on an exe without
+	coop, nothing in a group or sandbox world).
+
+	The stock chain keeps its state in five pstor keys of the actor (KEYS), in info portions and in tasks, one of each per
+	world. With chains on:
+	  - with_chain(faction, fn, ...) (authority): while fn runs, the global load_var / save_var of the actor read and write
+	    "<key>@<faction>" for the five keys; every other key and every other object passes through. The "drx_sl_" prefix
+	    stays, so coop_tasks mirrors the suffixed keys to every client like any drx_sl_* key.
+	    Composition with coop_tasks' save_var wrapper (client routing of shared keys): this module installs at the first
+	    update, after every on_game_start, so it is the OUTER wrapper: on the authority it rewrites the key and coop_tasks'
+	    wrapper below does nothing (it routes on a client only). On a client this module never writes a chain key: the dialog
+	    wrappers swap _G.save_var for the time of the stock call (above whatever chain is installed), so neither order routes
+	    a chain key to the authority.
+	  - Info names cannot be namespaced (condlists and dialog XML read them raw): they are kept from colliding by LEADER
+	    CLAIMS. claim_of(H) = the faction whose chain has H as its current leader or holds an open drx_sl_<H>_* task. The
+	    co-op meet_random_honcho(faction) skips leaders claimed by another faction and tests enemies against the chain's
+	    faction; setup_chain skips a start leader claimed by another faction (Sultan: bandit / renegade, Dushman: killer /
+	    isg) and goes straight to a meet task.
+	  - The owner of a chain task (owner_of_task) is recorded on the authority in ITS m_data (key coop_storyline), saved with
+	    the world. Not in the pstor: coop_tasks lets a client write any drx_sl_* pstor key of the host (event coop_tvd), so
+	    an owner kept there could be forged by a client.
+	  - Bare keys of an older save are the world faction's chain: moved to "@<world faction>" once (record "migrated").
+	    A world that is later played without split levels gets them back (the stock reads bare keys there).
+	  - Chains are set up on the authority: the world faction's at the first tick of a world without a chain for it (after
+	    the migration), another faction's the first time a character of it is known (coop_faction_changed, or a player of
+	    it in the session: the periodic tick). A faction whose last player left keeps its chain.
+	  - Stock chain effects on the authority (xr_effects.drx_sl_meet_random_honcho, drx_sl_decrease_sl_tasks_count,
+	    drx_sl_find_wish_granter) run under the chain of the task being processed (task_manager.task_callback is wrapped to
+	    know it), else of the player the task code runs for (coop_tasks.personal_character / reward_peer), else of the host
+	    player when he talks, else the world's.
+	  - A client's dialog actions that change the chain (dialogs.drx_sl_set_finished_task_complete, its _endgame variant,
+	    drx_sl_give_sl_task, and the start dialogs' xr_effects actions) change nothing of the chain on the client: the turn-in
+	    and the give keep going through coop_tasks; the chain part is ONE request (EV_REQ) to the authority, which takes the
+	    sender from the transport, uses HIS faction, checks the leader's claim and the task's owner, rate-limits, and refuses
+	    anything else with one log line.
+
+	For other scripts:
+		coop_storyline.chains_on() -> bool
+		coop_storyline.with_chain(faction, fn, ...) -> fn's results   (authority with chains on; else fn(...) as it is)
+		coop_storyline.owner_of_task(task_id) -> faction | nil          (authority with chains on; nil elsewhere)
+		coop_storyline.claim_of(honcho) -> faction | nil                (authority with chains on; nil elsewhere)
+		coop_storyline.has_chain(faction) -> bool                       (authority with chains on)
+		coop_storyline.setup_chain(faction) -> bool, cancel_chain(faction) -> bool   (authority with chains on)
+		coop_storyline.meet_random_honcho(faction)                      (authority, inside or outside with_chain)
+		coop_storyline.run_for_task(task_id, peer, fn, ...)             (authority: fn under the task's owner, else peer's faction)
+		coop_storyline.client_may_write(key) -> bool                    (authority: may a client's coop_tvd write this pstor key)
+	Not here (later stages): dialog XML gates (3), main-story ownership (4), the Brain Scorcher (5), a per-player change-faction lock.
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+local string_format = string.format
+
+local TAG = "[coop-storyline]"
+local EV_REQ = "coop_sl_req" -- client -> authority: advance my faction's chain (k = start | fin | end | give, h = leader, t = task)
+local STORE = "coop_storyline" -- m_data of the authority: { chains = { [faction] = true }, owner = { [task] = faction }, migrated = bool }
+local KEYS = {
+	drx_sl_total_task_number = true, drx_sl_current_task_number = true, drx_sl_current_honcho = true,
+	drx_sl_current_task = true, drx_sl_start_task = true,
+}
+local KEY_LIST = { "drx_sl_total_task_number", "drx_sl_current_task_number", "drx_sl_current_honcho", "drx_sl_current_task",
+	"drx_sl_start_task" }
+local FACTIONS = {
+	army = true, bandit = true, csky = true, dolg = true, ecolog = true, freedom = true, killer = true, monolith = true,
+	stalker = true, renegade = true, greh = true, isg = true,
+}
+local WISH_TASK = "drx_sl_find_wish_granter_task"
+local REQ_GAP_MS = 1000 -- one chain request per player per second
+local TICK_MS = 2000
+local FIRST_TICK_MS = 3000 -- after the first update: the stock new game's setup_questlines writes the bare keys first
+local OWNER_GRACE_MS = 30000 -- an owner recorded before the task arrived (a client's give) waits this long
+local RECENT_MS = 60000 -- a finished task's owner, for the turn-in request that follows it
+local ID_MAX = 128
+
+local scope = nil -- { f = faction, ro = true on a client } while a chain is selected
+local stock = {} -- the functions as they were before this module wrapped them
+local installed = false
+local cur_task = nil -- the task whose task_callback runs now (authority)
+local pending = {} -- task -> time an owner was recorded before the task existed
+local recent = {} -- task -> { f = faction, at = time }: owners of tasks that are gone
+local advanced = {} -- task -> time a turn-in request advanced the chain with it (once per task)
+local last_req = {} -- peer -> time of his last chain request
+local next_tick = nil
+local fin_depth = 0 -- > 0 while a client dialog wrapper runs the stock (its inner xr_effects calls are part of it)
+local stats = { scoped = 0, requests = 0, refused = 0, advanced = 0, setups = 0, migrated = 0, dropped = 0, errors = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("%s %s", TAG, ok and line or tostring(fmt))
+end
+
+local function mod(name)
+	local m = rawget(_G, name)
+	if m == nil then
+		local ok, r = pcall(function() return _G[name] end)
+		m = ok and r or nil
+	end
+	return type(m) == "table" and m or nil
+end
+
+local function call(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, ...)
+	return ok and v or nil
+end
+
+local function now() return time_global() end
+local function known(f) return type(f) == "string" and FACTIONS[f] == true end
+
+-------------------------------------------------------------------------------
+-- Who we are
+-------------------------------------------------------------------------------
+local function active() return api ~= nil and call(api.is_active) == true end
+local function is_host() return active() and call(api.is_host) == true end
+local function is_client() return active() and call(api.is_client) == true end
+local function is_map_server() return api ~= nil and call(api.is_map_server) == true end
+local function is_dedicated() return api ~= nil and call(api.is_dedicated) == true end
+local function authority() return is_host() and not is_map_server() end
+
+local function split_mode()
+	local cf = mod("coop_faction")
+	return cf ~= nil and call(cf.split_mode) == true
+end
+
+local function story()
+	local f = rawget(_G, "IsStoryMode") or IsStoryMode
+	return call(f) == true
+end
+
+function chains_on()
+	return api ~= nil and split_mode() and story()
+end
+
+local function auth_on() return chains_on() and authority() end
+
+local function is_actor(obj)
+	local a = db and db.actor
+	if obj == nil or a == nil then return false end
+	local ok, same = pcall(function() return obj:id() == a:id() end)
+	return ok and same == true
+end
+
+local function m_data()
+	local asm = mod("alife_storage_manager")
+	local m = asm and call(asm.get_state)
+	return type(m) == "table" and m or nil
+end
+
+local function store(create)
+	local m = m_data()
+	if not m then return nil end
+	local s = m[STORE]
+	if type(s) ~= "table" then
+		if not create then return nil end
+		s = {}
+		m[STORE] = s
+	end
+	if type(s.chains) ~= "table" then s.chains = {} end
+	if type(s.owner) ~= "table" then s.owner = {} end
+	return s
+end
+
+local function world_faction()
+	local gs = mod("coop_game_settings")
+	local f = gs and call(gs.world_faction)
+	if known(f) then return f end
+	f = call(api and api.game and api.game.world_faction)
+	return known(f) and f or nil
+end
+
+local function tmgr()
+	local tm = mod("task_manager")
+	return tm and call(tm.get_task_manager) or nil
+end
+
+local function task_info()
+	local tm = tmgr()
+	local ok, ti = pcall(function() return tm.task_info end)
+	return ok and type(ti) == "table" and ti or nil
+end
+
+local function honchos()
+	local atm = mod("axr_task_manager")
+	return atm and type(atm.drx_sl_honchos_table) == "table" and atm.drx_sl_honchos_table or {}
+end
+
+local function is_honcho(h)
+	if type(h) ~= "string" then return false end
+	for _, row in ipairs(honchos()) do if row[1] == h then return true end end
+	return false
+end
+
+-- the leader a chain task belongs to: the longest leader H with the task id "drx_sl_<H>_..."
+local function honcho_of_task(id)
+	if type(id) ~= "string" then return nil end
+	local best
+	for _, row in ipairs(honchos()) do
+		local p = "drx_sl_" .. tostring(row[1]) .. "_"
+		if id:sub(1, #p) == p and (best == nil or #row[1] > #best) then best = row[1] end
+	end
+	return best
+end
+
+-------------------------------------------------------------------------------
+-- load_var / save_var
+-------------------------------------------------------------------------------
+local function mapped(obj, k)
+	if scope == nil or not KEYS[k] or not known(scope.f) or not is_actor(obj) then return nil end
+	return k .. "@" .. scope.f
+end
+
+local function wrapped_load(obj, k, def)
+	local m = mapped(obj, k)
+	return stock.load_var(obj, m or k, def)
+end
+
+local function wrapped_save(obj, k, v)
+	local m = mapped(obj, k)
+	if m and scope.ro then
+		stats.dropped = stats.dropped + 1
+		return
+	end
+	return stock.save_var(obj, m or k, v)
+end
+
+local function raw_pstor()
+	local a = db and db.actor
+	local st = a and db.storage and db.storage[a:id()]
+	if not st then return nil end
+	if not st.pstor then st.pstor = {} end
+	return st.pstor
+end
+
+-- authority: fn(...) with the actor's five chain keys being those of faction f
+function with_chain(f, fn, ...)
+	if not (known(f) and auth_on() and installed) then return fn(...) end
+	local prev = scope
+	scope = { f = f }
+	stats.scoped = stats.scoped + 1
+	local res = { pcall(fn, ...) }
+	scope = prev
+	if not res[1] then error(res[2], 0) end
+	return unpack(res, 2)
+end
+
+local function chain_var(f, k, def)
+	return with_chain(f, function() return load_var(db.actor, k, def) end)
+end
+
+-------------------------------------------------------------------------------
+-- Owners and claims (authority)
+-------------------------------------------------------------------------------
+local function set_owner(id, f)
+	local s = store(true)
+	if not (s and type(id) == "string" and known(f)) then return end
+	s.owner[id] = f
+	recent[id] = nil
+	local ti = task_info()
+	if not (ti and ti[id] ~= nil) then pending[id] = now() else pending[id] = nil end
+end
+
+function owner_of_task(id)
+	if not auth_on() or type(id) ~= "string" then return nil end
+	local s = store(false)
+	local f = s and s.owner[id]
+	return known(f) and f or nil
+end
+
+-- coop_tasks host_on_var (a client's write of a shared drx_sl_* key): with chains on a client never writes a chain key,
+-- bare or "<key>@<faction>" (they are the world's: requests change them). Elsewhere: true, as today.
+function client_may_write(k)
+	if type(k) ~= "string" or not chains_on() then return true end
+	local base = k:match("^([%w_]+)@") or k
+	return not KEYS[base] and k:find("@", 1, true) == nil
+end
+
+function has_chain(f)
+	local s = auth_on() and store(false)
+	return s and s.chains[f] == true or false
+end
+
+local function chain_list()
+	local s = store(false)
+	local out = {}
+	for f in pairs(s and s.chains or {}) do if known(f) then out[#out + 1] = f end end
+	table.sort(out)
+	return out
+end
+
+-- the faction whose chain holds leader h: its current leader, or an open drx_sl_<h>_* task it owns (a cancelled chain, whose
+-- failed tasks wait for their callback, claims nothing)
+local function claim_raw(h)
+	if type(h) ~= "string" or h == "" then return nil end
+	for _, f in ipairs(chain_list()) do
+		if chain_var(f, "drx_sl_current_honcho", "") == h then return f end
+	end
+	local s = store(false)
+	local ti = task_info()
+	if s and ti then
+		for id, f in pairs(s.owner) do
+			if ti[id] ~= nil and s.chains[f] and honcho_of_task(id) == h and known(f) then return f end
+		end
+	end
+	return nil
+end
+
+function claim_of(h)
+	if not auth_on() then return nil end
+	return claim_raw(h)
+end
+
+local function claimed_by_other(h, f)
+	for _, g in ipairs(chain_list()) do
+		if g ~= f and chain_var(g, "drx_sl_current_honcho", "") == h then return true end
+	end
+	local s = store(false)
+	local ti = task_info()
+	if s and ti then
+		for id, g in pairs(s.owner) do
+			if g ~= f and s.chains[g] and ti[id] ~= nil and honcho_of_task(id) == h then return true end
+		end
+	end
+	return false
+end
+
+-- owners of tasks that are gone move to `recent` (for the turn-in request that follows a completion), then out
+local function sweep()
+	local s = store(false)
+	local ti = task_info()
+	if not (s and ti) then return end
+	local t = now()
+	for id, f in pairs(s.owner) do
+		if ti[id] == nil and not (pending[id] and t - pending[id] < OWNER_GRACE_MS) then
+			s.owner[id] = nil
+			pending[id] = nil
+			recent[id] = { f = f, at = t }
+		elseif ti[id] ~= nil then
+			pending[id] = nil
+		end
+	end
+	for id, r in pairs(recent) do
+		if t - r.at > RECENT_MS or t < r.at then recent[id] = nil end
+	end
+	for id, at in pairs(advanced) do
+		if t - at > 2 * RECENT_MS or t < at then advanced[id] = nil end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- The chain's stock steps for one faction (authority, inside with_chain)
+-------------------------------------------------------------------------------
+-- xr_effects.drx_sl_meet_random_honcho (temp/gamma_ref/scripts/xr_effects.script:700-779), its logic as it is, with the
+-- enemy test made against the chain's faction (stock: alife():actor():community()) and leaders claimed by another faction
+-- skipped. With nobody free the chain keeps its current leader, as the stock does.
+local function meet_body(f)
+	local drx_sl_honchos_table = axr_task_manager.drx_sl_honchos_table
+	local honcho_list = {}
+	local size_t = 0
+	local own_comm = "actor_" .. f
+	for i = 1, #drx_sl_honchos_table do
+		local honcho = drx_sl_honchos_table[i][1]
+		if ( ((xr_conditions.is_alive( nil, nil, {honcho} )) or (honcho == "esc_m_trader")) and (honcho ~= load_var( db.actor, "drx_sl_current_honcho", "" )) )
+			and not claimed_by_other(honcho, f) then
+			local is_enemy = false
+			for j = 2, #drx_sl_honchos_table[i] do
+				if ( relation_registry.community_relation( drx_sl_honchos_table[i][j], own_comm ) <= -1000 ) then
+					is_enemy = true
+				end
+			end
+			if ( is_enemy == false ) then
+				size_t = size_t + 1
+				honcho_list[size_t] = honcho
+			end
+		end
+	end
+
+	local next_honcho = load_var( db.actor, "drx_sl_current_honcho", "" )
+	if ( size_t > 0 ) then
+		next_honcho = honcho_list[math.random( size_t )]
+	end
+	save_var( db.actor, "drx_sl_current_honcho", next_honcho )
+
+	save_var( db.actor, "drx_sl_current_task_number", (load_var( db.actor, "drx_sl_current_task_number", 1 ) + 1) )
+	printf( "DRX SL task count [%s]: %s", f, tostring(load_var( db.actor, "drx_sl_current_task_number", 1 )) )
+
+	local task_ltx_file = task_manager.task_ini
+	local honcho_task_list = {}
+	size_t = 0
+	local honcho_task_id = ""
+	local i = 1
+	while ( true ) do
+		honcho_task_id = ("drx_sl_" .. next_honcho .. "_meet_task_" .. i)
+		if ( task_ltx_file:section_exist( honcho_task_id ) ) then
+			size_t = size_t + 1
+			honcho_task_list[size_t] = honcho_task_id
+			i = (i + 1)
+		else
+			break
+		end
+	end
+
+	if ( size_t > 0 ) then
+		honcho_task_id = honcho_task_list[math.random( size_t )]
+		save_var( db.actor, "drx_sl_current_task", honcho_task_id )
+		printf( "DRX SL current storyline task [%s]: %s", f, honcho_task_id )
+		give_info( ("drx_sl_meet_honcho_" .. next_honcho) )
+		set_owner(honcho_task_id, f)
+		task_manager.get_task_manager():give_task( honcho_task_id )
+	else
+		printf( "DRX SL no meet honcho tasks available for %s !!", tostring(next_honcho) )
+		return
+	end
+end
+
+function meet_random_honcho(f)
+	if not (known(f) and auth_on()) then return end
+	return with_chain(f, meet_body, f)
+end
+
+-- xr_effects.drx_sl_setup_questlines (gamma :823-869) for one faction; a start leader claimed by another faction: the
+-- start dialog's two actions at once (decrease, meet: gamma configs/gameplay/dialogs.xml:54-56), a meet task right away
+local function setup_body(f)
+	save_var( db.actor, "drx_sl_total_task_number", math.random( 8, 12 ) )
+	save_var( db.actor, "drx_sl_current_task_number", 1 )
+
+	local honcho_table = axr_task_manager.drx_sl_main_honcho_table
+	local start_game_honcho = honcho_table[f] or ""
+	if (not honcho_table[f]) then
+		printf( "DRX SL no available game start honchos !!" )
+	end
+
+	local honcho_start_ltx_file = task_manager.task_ini
+	local honcho_start_list = {}
+	local honcho_start_id = ""
+	local i = 1
+	while ( true ) do
+		honcho_start_id = ("drx_sl_" .. start_game_honcho .. "_start_game_" .. i)
+		if ( honcho_start_ltx_file:section_exist( honcho_start_id ) ) then
+			table.insert( honcho_start_list, honcho_start_id )
+			i = (i + 1)
+		else
+			break
+		end
+	end
+
+	if ( #honcho_start_list > 0 ) then
+		local dev = rawget(_G, "device") or device
+		if type(dev) == "function" then math.randomseed( dev( ):time_global( ) ) end
+		honcho_start_id = honcho_start_list[math.random( #honcho_start_list )]
+		save_var( db.actor, "drx_sl_start_task", honcho_start_id )
+		if claimed_by_other(start_game_honcho, f) then
+			printf( "DRX SL [%s]: the start leader %s is another faction's: a meet task instead", f, start_game_honcho )
+			meet_body(f)
+		else
+			printf( "DRX SL current storyline task [%s]: %s", f, honcho_start_id )
+			save_var( db.actor, "drx_sl_current_honcho", start_game_honcho )
+			give_info( ("drx_sl_start_game_" .. start_game_honcho) )
+		end
+		printf( "DRX questlines are successfuly set for [%s] faction", f )
+	else
+		printf( "DRX SL no start game tasks available for %s !!", start_game_honcho )
+	end
+end
+
+function setup_chain(f)
+	if not (known(f) and auth_on() and installed) then return false end
+	local s = store(true)
+	if not s then return false end
+	s.chains[f] = true
+	with_chain(f, setup_body, f)
+	stats.setups = stats.setups + 1
+	log("the %s chain is set up", f)
+	return true
+end
+
+-- Only faction f's chain: its five keys, the infos of the leaders it claims, the tasks it owns, its claims. Never the
+-- stock drx_sl_cancel_questlines (every drx_sl_* task of the world) with chains on.
+function cancel_chain(f)
+	if not (known(f) and auth_on() and installed) then return false end
+	local s = store(true)
+	if not s then return false end
+	local leaders = {}
+	local h = chain_var(f, "drx_sl_current_honcho", "")
+	if h ~= "" then leaders[h] = true end
+	local ti = task_info() or {}
+	for id, g in pairs(s.owner) do
+		if g == f and ti[id] ~= nil then
+			local th = honcho_of_task(id)
+			if th then leaders[th] = true end
+			ti[id].forced_status = "fail"
+			ti[id].cancelled_by_actor = true
+			if id == WISH_TASK then disable_info("drx_sl_on_find_wish_granter") end
+		end
+	end
+	with_chain(f, function()
+		for _, k in ipairs(KEY_LIST) do save_var(db.actor, k, nil) end
+	end)
+	for leader in pairs(leaders) do
+		if not claimed_by_other(leader, f) then
+			disable_info("drx_sl_meet_honcho_" .. leader)
+			disable_info("drx_sl_start_game_" .. leader)
+		end
+	end
+	s.chains[f] = nil
+	log("the %s chain is cancelled", f)
+	return true
+end
+
+-------------------------------------------------------------------------------
+-- Chains of the world (authority)
+-------------------------------------------------------------------------------
+-- bare keys of an older save -> the world faction's chain, once
+local function migrate(s)
+	if s.migrated then return end
+	s.migrated = true
+	local w = world_faction()
+	local ps = raw_pstor()
+	if not (w and ps) then return end
+	local moved = false
+	for _, k in ipairs(KEY_LIST) do
+		if ps[k] ~= nil then
+			if ps[k .. "@" .. w] == nil then ps[k .. "@" .. w] = ps[k] end
+			ps[k] = nil
+			moved = true
+		end
+	end
+	if moved then
+		s.chains[w] = true
+		stats.migrated = stats.migrated + 1
+		log("the chain of an older save is the %s chain now", w)
+	end
+end
+
+-- a world once played with split levels, now without: the world faction's chain goes back to the bare keys the stock reads
+local function unmigrate()
+	local s = store(false)
+	if not (s and s.migrated) then return end
+	local w = world_faction()
+	local ps = raw_pstor()
+	if not (w and ps) then return end
+	for _, k in ipairs(KEY_LIST) do
+		local v = ps[k .. "@" .. w]
+		if v ~= nil and ps[k] == nil then ps[k] = v end
+	end
+	s.migrated = false
+	s.chains[w] = nil
+	log("no split levels: the %s chain is the world's chain again", w)
+end
+
+local function ensure_chains()
+	local s = store(true)
+	if not s then return end
+	migrate(s)
+	local w = world_faction()
+	if w and not s.chains[w] then setup_chain(w) end
+	local cf = mod("coop_faction")
+	if not cf then return end
+	local list = call(api.players)
+	local peers = {}
+	if not is_dedicated() then peers[1] = 0 end
+	for _, p in ipairs(type(list) == "table" and list or {}) do
+		if type(p) == "table" and type(p.id) == "number" and p.id > 0 then peers[#peers + 1] = p.id end
+	end
+	for _, peer in ipairs(peers) do
+		local f = call(cf.faction_of, peer)
+		if known(f) and not s.chains[f] then setup_chain(f) end
+	end
+end
+
+local function on_faction_changed(peer, id, old, new)
+	if not auth_on() or not known(new) then return end
+	local s = store(true)
+	if s and not s.chains[new] then setup_chain(new) end
+end
+
+-------------------------------------------------------------------------------
+-- Stock chain effects on the authority: the right chain
+-------------------------------------------------------------------------------
+local function chain_for_effect()
+	if scope and known(scope.f) then return scope.f end
+	local f = cur_task and owner_of_task(cur_task)
+	if f then return f end
+	if cur_task and recent[cur_task] then return recent[cur_task].f end
+	local cf = mod("coop_faction")
+	local ct = mod("coop_tasks")
+	if cf and ct then
+		local id = call(ct.personal_character)
+		f = type(id) == "number" and call(cf.faction_of_character, id) or nil
+		if known(f) then return f end
+		local peer = call(ct.reward_peer)
+		f = type(peer) == "number" and call(cf.faction_of, peer) or nil
+		if known(f) then return f end
+	end
+	if cf and not is_dedicated() then
+		local talking = false
+		pcall(function() talking = db.actor:is_talking() == true end)
+		f = talking and call(cf.faction_of, 0) or nil
+		if known(f) then return f end
+	end
+	return world_faction()
+end
+
+function run_for_task(id, peer, fn, ...)
+	if not auth_on() then return fn(...) end
+	local f = owner_of_task(id)
+	if not f then
+		local cf = mod("coop_faction")
+		f = cf and type(peer) == "number" and call(cf.faction_of, peer) or nil
+	end
+	return with_chain(known(f) and f or world_faction(), fn, ...)
+end
+
+-------------------------------------------------------------------------------
+-- Client: dialog actions become one request
+-------------------------------------------------------------------------------
+local function encode(t)
+	local cm = mod("coop_main")
+	return cm and cm.encode(t) or nil
+end
+local function decode(s)
+	local cm = mod("coop_main")
+	return cm and type(s) == "string" and cm.decode(s) or {}
+end
+
+local function npc_of(a, b)
+	local d = mod("dialogs")
+	if d and type(d.who_is_npc) == "function" and a ~= nil and b ~= nil then
+		local ok, npc = pcall(d.who_is_npc, a, b)
+		if ok then return npc end
+	end
+	return nil
+end
+
+-- the leader an NPC is (axr_task_manager names a chain task after npc:section(), m_trader after npc:name())
+local function honcho_of_npc(npc)
+	if npc == nil then return nil end
+	local sec = call(function() return npc:section() end)
+	local name = call(function() return npc:name() end)
+	for _, row in ipairs(honchos()) do
+		if row[1] == sec or row[1] == name then return row[1] end
+	end
+	return nil
+end
+
+local function own_faction()
+	local f = call(rawget(_G, "get_actor_true_community") or get_actor_true_community)
+	return known(f) and f or nil
+end
+
+local function client_on() return chains_on() and is_client() and installed end
+
+local function send_req(t)
+	local s = encode(t)
+	if not s then return false end
+	local ok, sent = pcall(api.send_event, EV_REQ, s, 0)
+	return ok and sent == true
+end
+
+-- the stock dialog function on a client with its own chain read (the authority's mirror of "<key>@<own faction>") and no
+-- chain write: the five keys and drx_sl_meet_honcho_* infos are swallowed, what the stock wanted is returned
+local function client_run(fn, ...)
+	local captured = {}
+	local prev_scope, prev_save, prev_dis = scope, _G.save_var, _G.disable_info
+	scope = { f = own_faction(), ro = true }
+	_G.save_var = function(obj, k, v)
+		if KEYS[k] and is_actor(obj) then
+			captured[k] = v
+			stats.dropped = stats.dropped + 1
+			return
+		end
+		return prev_save(obj, k, v)
+	end
+	_G.disable_info = function(info)
+		if type(info) == "string" and info:sub(1, 19) == "drx_sl_meet_honcho_" then
+			captured.info = info
+			return
+		end
+		return prev_dis(info)
+	end
+	fin_depth = fin_depth + 1
+	local res = { pcall(fn, ...) }
+	fin_depth = fin_depth - 1
+	scope, _G.save_var, _G.disable_info = prev_scope, prev_save, prev_dis
+	if not res[1] then error(res[2], 0) end
+	return captured
+end
+
+-------------------------------------------------------------------------------
+-- Authority: a client's request
+-------------------------------------------------------------------------------
+local function refuse(from, why, k)
+	stats.refused = stats.refused + 1
+	log("! a chain request (%s) from #%s refused: %s", tostring(k), tostring(from), why)
+end
+
+local function word(v)
+	return type(v) == "string" and #v > 0 and #v <= ID_MAX and v:find("^[%w_]+$") ~= nil and v or nil
+end
+
+local function task_finished(id)
+	local ti = task_info()
+	local tsk = ti and ti[id]
+	if tsk == nil then return recent[id] ~= nil end
+	local ok, yes = pcall(function() return tsk.forced_status == "complete" or tsk.status == "completed" end)
+	return ok and yes == true
+end
+
+local function owner_or_recent(id)
+	local s = store(false)
+	local f = s and s.owner[id]
+	if known(f) then return f end
+	local r = recent[id]
+	return r and r.f or nil
+end
+
+local function as_player(from, fn, ...)
+	local ct = mod("coop_tasks")
+	if ct and type(ct.run_as) == "function" then return ct.run_as(from, fn, ...) end
+	return fn(...)
+end
+
+local function host_on_req(payload, from)
+	if not is_host() or type(from) ~= "number" or from <= 0 then return end
+	if not auth_on() then return end
+	stats.requests = stats.requests + 1
+	local t = now()
+	local last = last_req[from]
+	if last and t >= last and t - last < REQ_GAP_MS then return refuse(from, "too often") end
+	last_req[from] = t
+	local r = decode(payload)
+	local k = r.k
+	if k ~= "start" and k ~= "fin" and k ~= "end" and k ~= "give" then return refuse(from, "no such request") end
+	local cf = mod("coop_faction")
+	local f = cf and call(cf.faction_of, from)
+	if not known(f) then return refuse(from, "his faction is not known", k) end
+	local s = store(false)
+	if not (s and s.chains[f]) then return refuse(from, "his faction has no chain", k) end
+	local h = r.h ~= nil and word(r.h) or nil
+	if r.h ~= nil and not (h and is_honcho(h)) then return refuse(from, "no such leader", k) end
+	local id = r.t ~= nil and word(r.t) or nil
+	if r.t ~= nil and not id then return refuse(from, "a bad task id", k) end
+	local cur = chain_var(f, "drx_sl_current_honcho", "")
+
+	if k == "start" then
+		-- the start dialog (decrease + meet): the chain stands at its start leader with no task yet
+		if cur == "" or (h and h ~= cur) then return refuse(from, "not at his chain's leader", k) end
+		if chain_var(f, "drx_sl_current_task", "") ~= "" then return refuse(from, "his chain has started", k) end
+		if claim_raw(cur) ~= f then return refuse(from, "the leader is another faction's", k) end
+		as_player(from, with_chain, f, function()
+			disable_info("drx_sl_start_game_" .. cur)
+			stock.decrease(nil, nil, {})
+			meet_body(f)
+		end)
+	elseif k == "fin" or k == "end" then
+		if not id then return refuse(from, "no task", k) end
+		if owner_or_recent(id) ~= f then return refuse(from, "not his faction's task", k) end
+		if advanced[id] then return refuse(from, "this task has advanced the chain already", k) end
+		local th = honcho_of_task(id)
+		if not th or (h and h ~= th) or cur ~= th then return refuse(from, "not his chain's leader", k) end
+		if not task_finished(id) then return refuse(from, "the task is not turned in", k) end
+		advanced[id] = t
+		if k == "fin" then
+			as_player(from, with_chain, f, meet_body, f)
+		else
+			as_player(from, with_chain, f, function()
+				stock.wish(nil, nil, {})
+				set_owner(WISH_TASK, f)
+			end)
+		end
+	else -- give
+		if not (id and h) then return refuse(from, "no leader or no task", k) end
+		if claim_raw(h) ~= f then return refuse(from, "the leader is another faction's", k) end
+		if honcho_of_task(id) ~= h or id:find("_meet_task_", 1, true) or id:find("_cf_task_", 1, true) then
+			return refuse(from, "not a task of that leader", k)
+		end
+		local owner = owner_or_recent(id)
+		if owner and owner ~= f then return refuse(from, "another faction's task", k) end
+		-- the give itself came before this request, the old way (coop_tasks ops.give): the task is there and his
+		local ti = task_info()
+		local ct = mod("coop_tasks")
+		if not (ti and ti[id] ~= nil) or (ct and type(ct.taker) == "function" and call(ct.taker, id) ~= from) then
+			return refuse(from, "the task was not given to him", k)
+		end
+		with_chain(f, function()
+			disable_info("drx_sl_meet_honcho_" .. h)
+			save_var(db.actor, "drx_sl_current_task", id)
+		end)
+		set_owner(id, f)
+	end
+	stats.advanced = stats.advanced + 1
+	log("#%s advanced the %s chain (%s)", tostring(from), f, k)
+end
+
+-------------------------------------------------------------------------------
+-- Wrappers
+-------------------------------------------------------------------------------
+local function wrap_effects()
+	local xe = mod("xr_effects")
+	if not xe then
+		log("! xr_effects not found: the chains are not kept apart")
+		return
+	end
+	stock.meet = xe.drx_sl_meet_random_honcho
+	stock.decrease = xe.drx_sl_decrease_sl_tasks_count
+	stock.wish = xe.drx_sl_find_wish_granter
+	if type(stock.meet) == "function" then
+		xe.drx_sl_meet_random_honcho = function(a, b, p)
+			if not chains_on() then return stock.meet(a, b, p) end
+			if is_client() then
+				if fin_depth > 0 then return end -- part of a turn-in dialog: the request carries it
+				-- a start dialog's action (gamma configs/gameplay/dialogs.xml:54-56): one request
+				if send_req({ k = "start", h = honcho_of_npc(npc_of(a, b)) }) then log("the start of my chain is asked of the world") end
+				return
+			end
+			if not authority() then return stock.meet(a, b, p) end
+			local f = chain_for_effect()
+			if not known(f) then return stock.meet(a, b, p) end
+			return with_chain(f, meet_body, f)
+		end
+	end
+	if type(stock.decrease) == "function" then
+		xe.drx_sl_decrease_sl_tasks_count = function(a, b, p)
+			if not chains_on() then return stock.decrease(a, b, p) end
+			if is_client() then return end -- the start request does it on the world
+			if not authority() then return stock.decrease(a, b, p) end
+			return with_chain(chain_for_effect(), stock.decrease, a, b, p)
+		end
+	end
+	if type(stock.wish) == "function" then
+		xe.drx_sl_find_wish_granter = function(a, b, p)
+			if not chains_on() then return stock.wish(a, b, p) end
+			if is_client() then return end -- only the endgame turn-in calls it: its request does it on the world
+			if not authority() then return stock.wish(a, b, p) end
+			local f = chain_for_effect()
+			local res = { with_chain(f, stock.wish, a, b, p) }
+			local ti = task_info()
+			if known(f) and ti and ti[WISH_TASK] ~= nil then set_owner(WISH_TASK, f) end
+			return unpack(res)
+		end
+	end
+end
+
+-- after a dialog of the host player that gave a chain task: the task is his chain's
+local function own_given(f)
+	local id = chain_var(f, "drx_sl_current_task", "")
+	local ti = task_info()
+	local s = store(true)
+	if id ~= "" and ti and ti[id] ~= nil and s and s.owner[id] == nil then set_owner(id, f) end
+end
+
+local function host_dialog(orig, a, b)
+	local cf = mod("coop_faction")
+	local f = cf and call(cf.faction_of, 0)
+	if not known(f) then return orig(a, b) end
+	local res = { with_chain(f, orig, a, b) }
+	own_given(f)
+	return unpack(res)
+end
+
+local function wrap_dialogs()
+	local d = mod("dialogs")
+	if not d then
+		log("! dialogs not found: a client's chain dialogs change his mirror")
+		return
+	end
+	local function turn_in(name, kind)
+		local orig = d[name]
+		if type(orig) ~= "function" then
+			log("! dialogs.%s is not there", name)
+			return
+		end
+		d[name] = function(a, b)
+			if not chains_on() then return orig(a, b) end
+			if authority() then return host_dialog(orig, a, b) end
+			if not client_on() then return orig(a, b) end
+			local npc = npc_of(a, b)
+			local atm = mod("axr_task_manager")
+			local id = npc and atm and call(atm.drx_sl_get_finished_task, npc) or nil
+			-- the stock: the turn-in (coop_tasks sends it to the world) and the next step (swallowed: the request below)
+			client_run(orig, a, b)
+			if type(id) ~= "string" then
+				log("! no finished chain task at this leader: nothing asked")
+				return
+			end
+			send_req({ k = kind, h = honcho_of_task(id) or honcho_of_npc(npc), t = id })
+		end
+	end
+	turn_in("drx_sl_set_finished_task_complete", "fin")
+	turn_in("drx_sl_set_finished_task_complete_endgame", "end")
+	local give = d.drx_sl_give_sl_task
+	if type(give) ~= "function" then
+		log("! dialogs.drx_sl_give_sl_task is not there")
+		return
+	end
+	d.drx_sl_give_sl_task = function(a, b)
+		if not chains_on() then return give(a, b) end
+		if authority() then return host_dialog(give, a, b) end
+		if not client_on() then return give(a, b) end
+		local npc = npc_of(a, b)
+		-- the stock: the give goes to the world through coop_tasks; the chain's bookkeeping is the request below
+		local got = client_run(give, a, b)
+		local id = got.drx_sl_current_task
+		if type(id) ~= "string" then return end
+		send_req({ k = "give", h = honcho_of_task(id) or honcho_of_npc(npc), t = id })
+	end
+end
+
+-- the task whose callback runs now (its owner picks the chain of the effects inside)
+local function wrap_task_callback()
+	local tmod = mod("task_manager")
+	local orig = tmod and tmod.task_callback
+	if type(orig) ~= "function" then
+		log("! task_manager.task_callback not found: task effects run under the player's chain")
+		return
+	end
+	tmod.task_callback = function(tsk, state)
+		if not auth_on() then return orig(tsk, state) end
+		local prev = cur_task
+		local ok, id = pcall(function() return tsk:get_id() end)
+		cur_task = ok and type(id) == "string" and id or nil
+		local res = { pcall(orig, tsk, state) }
+		cur_task = prev
+		if not res[1] then error(res[2], 0) end
+		return unpack(res, 2)
+	end
+end
+
+local function install_vars()
+	local l, s = rawget(_G, "load_var"), rawget(_G, "save_var")
+	if type(l) ~= "function" or type(s) ~= "function" then
+		log("! load_var / save_var not found: the chains are not kept apart")
+		return
+	end
+	stock.load_var, stock.save_var = l, s
+	_G.load_var, _G.save_var = wrapped_load, wrapped_save
+end
+
+local function step(what, f)
+	local ok, err = pcall(f)
+	if not ok then
+		stats.errors = stats.errors + 1
+		printf("! [coop_storyline] %s failed: %s", what, tostring(err))
+	end
+end
+
+local function install()
+	if installed or not api then return end
+	installed = true
+	step("load_var / save_var", install_vars)
+	step("xr_effects", wrap_effects)
+	step("dialogs", wrap_dialogs)
+	step("task callback", wrap_task_callback)
+	log("chains per faction on")
+end
+
+-------------------------------------------------------------------------------
+-- Start
+-------------------------------------------------------------------------------
+local changed_registered = false
+local function first_update()
+	-- here, not in on_game_start: coop_faction declares the callback in its on_game_start (a callback registered before it is
+	-- declared is dropped by axr_main)
+	if not changed_registered then
+		changed_registered = true
+		RegisterScriptCallback("coop_faction_changed", function(...)
+			local ok, err = pcall(on_faction_changed, ...)
+			if not ok then log("! faction change: %s", tostring(err)) end
+		end)
+	end
+	if split_mode() and story() then
+		install()
+		next_tick = now() + FIRST_TICK_MS
+	elseif authority() and active() and not split_mode() then
+		unmigrate()
+	end
+end
+
+local function on_update()
+	if not (installed and next_tick) then return end
+	local t = now()
+	if t < next_tick then return end
+	next_tick = t + TICK_MS
+	if not auth_on() then return end
+	sweep()
+	ensure_chains()
+end
+
+local function save_state(m)
+	if not auth_on() then return end
+	sweep()
+end
+
+local function register_events()
+	local cm = mod("coop_main")
+	if not (cm and cm.add_event_handler) then
+		log("! coop_main.add_event_handler not found: a client's chain requests are not handled")
+		return
+	end
+	cm.add_event_handler(EV_REQ, function(payload, from)
+		local ok, err = pcall(host_on_req, payload, from)
+		if not ok then
+			stats.errors = stats.errors + 1
+			log("! a chain request: %s", tostring(err))
+		end
+	end)
+end
+
+function print_status()
+	log("chains on %s, chains %s | scoped %d, requests %d, refused %d, advanced %d, set up %d, migrated %d, client writes dropped %d, errors %d",
+		tostring(chains_on()), table.concat(chain_list(), ","), stats.scoped, stats.requests, stats.refused, stats.advanced,
+		stats.setups, stats.migrated, stats.dropped, stats.errors)
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5)
+function on_game_start()
+	if not api then return end
+	step("events", register_events)
+	step("callbacks", function()
+		RegisterScriptCallback("actor_on_first_update", function()
+			local ok, err = pcall(first_update)
+			if not ok then log("! first update: %s", tostring(err)) end
+		end)
+		RegisterScriptCallback("actor_on_update", function()
+			local ok, err = pcall(on_update)
+			if not ok then
+				stats.errors = stats.errors + 1
+				log("! tick: %s", tostring(err))
+			end
+		end)
+		RegisterScriptCallback("save_state", save_state)
+	end)
+end

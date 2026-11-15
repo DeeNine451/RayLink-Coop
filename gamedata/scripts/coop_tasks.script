@@ -894,6 +894,12 @@ local function host_on_var(payload, from)
 	local k = t.k
 	local ps = actor_pstor(true)
 	if not (is_shared_key(k) and ps) then return end
+	-- split levels: a faction's chain is moved by the world alone (coop_storyline), never by a client's write of its keys
+	local sl = rawget(_G, "coop_storyline")
+	if type(sl) == "table" and type(sl.client_may_write) == "function" and not sl.client_may_write(k) then
+		stats.refused = stats.refused + 1
+		return
+	end
 	if t.op == "add" and type(t.d) == "number" then
 		ps[k] = (tonumber(ps[k]) or 0) + t.d
 	elseif t.op == "set" and t.v ~= nil and var_value_ok(t.v) then
