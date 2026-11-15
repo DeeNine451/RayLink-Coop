@@ -224,8 +224,12 @@ c_item("party", "coop_story_together", "check", { applies = "load",
 -- A new player appears at the base of the world's faction (F3a; it was "next to the host" before the levels were split)
 add("party", RULE .. "join_spawn", "list", { v = { "host", "faction_start" }, def = "faction_start" })
 add("party", RULE .. "party_fast_travel", "check", { def = true })
+-- a yes to a level change from afar has a fare (coop_transition_fare.script, owner 2026-11-16); free within gather_radius
+add("party", RULE .. "transition_fare", "check", { def = true })
 add("party", RULE .. "gather_radius", "list", { v = { 10, 20, 30, 50, 100 }, def = 20, range = { 5, 100 }, unit = "m" })
-add("party", RULE .. "travel_time", "check", { def = true })
+-- a trip takes game time; off by default (owner 2026-11-16). The key was travel_time (on by default): the new name leaves the
+-- old value of every world and machine unread, so they all start without the time of a trip
+add("party", RULE .. "travel_takes_time", "check", { def = false })
 add("party", RULE .. "teleport_radius", "list", { v = { 0, 25, 50, 100, 200 }, def = 50, range = { 0, 200 }, unit = "m" })
 add("party", RULE .. "sleep_rule", "list", { v = { "vote", "safe_or_vote", "gather", "host" }, def = "vote" })
 add("party", RULE .. "sleep_radius", "list", { v = { 3, 6, 10, 20, 30 }, def = 6, range = { 2, 30 }, unit = "m" })

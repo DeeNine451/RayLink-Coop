@@ -14,13 +14,15 @@
 	    "economy.skip" with the approval ticket, and the host moves the clock (TimeSync reaches everybody).
 	  - the sleep (ui_sleep_dialog) is NOT a proposal any more (F3 T14): it is the shared rest of coop_rest.script and
 	    the engine (coop.rest), the time is skipped when every player rests. Nothing here wraps the sleep dialog.
-	  - travel (fast travel, backpack travel, guides): the time cost of a group travel lands once, on the host
-	    (coop_economy_travel arms it). A solo travel (party rule off) does not move the shared clock.
+	  - travel (fast travel, backpack travel, guides): a trip takes no game time (owner 2026-11-16: "time must not run ahead
+	    on a travel, let only the move work"): its level.change_game_time is dropped on the traveller's machine, the host's
+	    own trip included. With the world's rule travel_takes_time on, the time cost of a group travel lands once, on the host
+	    (coop_economy_travel arms it); a solo travel (party rule off, split levels) never moves the shared clock.
 	  - other players see a fade and a PDA line when the host skipped time for somebody.
 	Outside a session every wrapper calls the stock function unchanged.
 
 	For other scripts:
-		coop_economy_group.gather_radius() / party_fast_travel() / travel_as_group()
+		coop_economy_group.gather_radius() / party_fast_travel() / travel_as_group() / travel_takes_time()
 		coop_economy_group.veto_if_ungathered(radius, msg_id, fallback) -> true = blocked, tip shown
 		coop_economy_group.request_skip(kind, minutes, cont) -> true = proposal sent, cont() runs on approval
 		coop_economy_group.with_arm(kind, fn, ...)   run fn; a level.change_game_time inside goes to the host
@@ -68,7 +70,7 @@ local st = {
 	bypass = false,
 }
 
-local stats = { proposals = 0, approved = 0, denied = 0, skips = 0, refused = 0, fades = 0, errors = 0 }
+local stats = { proposals = 0, approved = 0, denied = 0, skips = 0, refused = 0, fades = 0, errors = 0, trips_no_time = 0 }
 
 -------------------------------------------------------------------------------
 -- Rules and the gather check (xrRazom group-action gate)
@@ -78,6 +80,8 @@ function party_fast_travel() return core.rule("party_fast_travel") ~= false end
 -- A travel moves the group (everybody gathered first, the others follow) when the rule is on and the levels are not
 -- split: with split levels a player goes alone, the others are on maps of their own.
 function travel_as_group() return party_fast_travel() and not core.split_levels() end
+-- A trip takes game time only where the world's settings say so (off by default).
+function travel_takes_time() return core.rule("travel_takes_time") == true end
 
 local function my_pos()
 	return db.actor and core.position_of_id(0)
@@ -164,6 +168,10 @@ local function cgt_wrapper(d, h, m)
 	if not core.live() then return orig_cgt(d, h, m) end
 	local minutes = minutes_of(d, h, m)
 	local a = take_arm()
+	if a and a.kind == "travel" and not travel_takes_time() then
+		stats.trips_no_time = stats.trips_no_time + 1
+		return -- a trip takes no game time in this world: nothing for the engine, nothing for the host
+	end
 	if core.is_host() then
 		local r = orig_cgt(d, h, m)
 		if a and minutes > 0 then after_skip(a.kind, minutes, core.self_id()) end
@@ -480,7 +488,7 @@ local function host_skip(from, t)
 	end
 	if kind == "travel" then
 		local last = st.last_travel[from]
-		if not (core.rule("travel_time") and travel_as_group()) or minutes > TRAVEL_MAX_MIN
+		if not (travel_takes_time() and travel_as_group()) or minutes > TRAVEL_MAX_MIN
 			or (last and core.now() - last < TRAVEL_GAP_MS) then
 			stats.refused = stats.refused + 1
 			core.log("travel time of %s (%d min) not applied (solo travel or too often)", core.nick_of(from), minutes)
@@ -664,9 +672,9 @@ end
 function print_status()
 	local np = 0
 	for _ in pairs(st.props) do np = np + 1 end
-	core.log("group: rule %s, party travel %s (radius %d m) | proposals %d, approved %d, refused %d, skips applied %d, refused skips %d, fades %d, errors %d, open votes %d",
-		tostring(core.rule("sleep_rule")), tostring(party_fast_travel()), gather_radius(), stats.proposals, stats.approved,
-		stats.denied, stats.skips, stats.refused, stats.fades, stats.errors, np)
+	core.log("group: rule %s, party travel %s (radius %d m), a trip takes time %s | proposals %d, approved %d, refused %d, skips applied %d, refused skips %d, trips without time %d, fades %d, errors %d, open votes %d",
+		tostring(core.rule("sleep_rule")), tostring(party_fast_travel()), gather_radius(), tostring(travel_takes_time()), stats.proposals,
+		stats.approved, stats.denied, stats.skips, stats.refused, stats.trips_no_time, stats.fades, stats.errors, np)
 end
 
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an

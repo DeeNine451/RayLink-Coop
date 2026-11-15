@@ -12,6 +12,10 @@
 	                                           player's inventory any more are dropped at the first update.
 	Kill Tracker (ish_kill_tracker)            a player's character is named by the player's nick; the mod's
 	                                           own records are per player (keys found from its save_state).
+	New Player Experience (npe_director)       what was shown is per player (its key npe): a client loads the host's
+	                                           save at every level change and was taught everything anew (live 2026-11-16).
+	Fair Fast Travel (game_fast_travel)        the cooldowns, the count of found points and the paused hunger are per
+	                                           player (sub-keys of fast_travel_system; the zones it spawned are the world's).
 	Guitar / harmonica (guitar_anim, harmonica_anim)  original Daiviey HUD entry points feed bounded native
 	                                           coop.instrument state; older engines retain event mods.song.
 	Immersive Sleep (ui_sleep_dialog)          the tiredness veto judges the most tired player of the group
@@ -51,6 +55,8 @@ local function log(tag, fmt, ...) C().log(tag, fmt, ...) end
 -- Experience Framework, Quick Action Wheel, Kill Tracker: per-player keys
 -------------------------------------------------------------------------------
 local EF_SUBS = { "XP", "skills_savedata", "traits_savedata", "tasks_manager", "potion_xp_buff" }
+-- game_fast_travel.save_state: the rest of the table (spawned_travel_zones, zone_spawn_version) names objects of the world
+local FFT_SUBS = { "cooldowns", "locations_found", "survival_paused", "stored_satiety" }
 
 local function install_pdata()
 	local inspect = C().mod("grok_doom_weapons_inspect")
@@ -71,6 +77,16 @@ local function install_pdata()
 	if C().mod("ish_kill_tracker") then
 		local n = P().register_module("ish_kill_tracker")
 		installed[#installed + 1] = "kill_tracker(" .. n .. " keys)"
+	end
+	local npe = C().mod("npe_director")
+	if npe and C().fn(npe, "get_state") then
+		-- its save_state writes a line and the whole table to the log each time: the state is asked for directly
+		P().register("npe", { get = function() return { npe_state = npe.get_state() } end })
+		installed[#installed + 1] = "tutorials"
+	end
+	if C().mod("game_fast_travel") then
+		P().register("fast_travel_system", { subs = FFT_SUBS, prime = { "game_fast_travel" } })
+		installed[#installed + 1] = "fast_travel"
 	end
 end
 

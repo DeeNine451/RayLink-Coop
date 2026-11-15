@@ -380,7 +380,7 @@ check(count_c(D) == 21 and D["c|coop_bleedout"] == "60" and D["c|coop_revive_hea
 	"the 21 console rules, canonical (the console prints 60.00000 / 0.30000)")
 check(D["o|alife/event/emission_frequency"] == "24" and D["o|coop/coop_session/gather_radius"] == "20",
 	"host options come from the machine")
-check(D["o|coop/coop_session/travel_time"] == "true" and D["o|coop/coop_session/join_spawn"] == "faction_start",
+check(D["o|coop/coop_session/travel_takes_time"] == "false" and D["o|coop/coop_session/join_spawn"] == "faction_start",
 	"a catalog option the machine lacks gets the catalog's default (join_spawn: at the faction's base since F3a)")
 check(D["m|drx_da/anomaly_amount_modifier"] == "1.5", "a listed MCM option of the machine")
 check(D["o|video/basic/fov"] == nil and D["o|coop/coop_player/nick"] == nil and D["m|drx_da/debug_mode"] == nil,
@@ -773,9 +773,9 @@ check(gs.game_of_save("plain") == nil and gs.game_of_save("nothere") == nil and 
 
 section("save_edits and take_machine")
 local E0 = card_of(ga.id)
-local ok1, why1 = gs.save_edits(ga.id, { ["c|coop_bleedout"] = 120, ["o|coop/coop_session/travel_time"] = false })
+local ok1, why1 = gs.save_edits(ga.id, { ["c|coop_bleedout"] = 120, ["o|coop/coop_session/travel_takes_time"] = false })
 local E1 = card_of(ga.id)
-check(ok1 == true and E1.rev == E0.rev + 1 and E1.values["c|coop_bleedout"] == "120" and E1.values["o|coop/coop_session/travel_time"] == "false",
+check(ok1 == true and E1.rev == E0.rev + 1 and E1.values["c|coop_bleedout"] == "120" and E1.values["o|coop/coop_session/travel_takes_time"] == "false",
 	"save_edits: rev + 1, the values")
 check(E1.last_save == "a_save" and E1.last_played == "2026-10-20 10:00" and E1.name == "Alpha", "the rest of the card stays")
 local ok2, why2 = gs.save_edits(ga.id, { ["c|coop_death_mode"] = "hardcore" })
@@ -917,7 +917,7 @@ for k, v in pairs(coop_economy_core.RULES) do
 	n = n + 1
 	check(cs.rule("economy/" .. k) == v, "rule economy/" .. k .. " = RULES default (" .. tostring(v) .. ")")
 end
-check(n == 13, "13 economy rules")
+check(n == 14, "14 economy rules")
 check(cs.rule("core/join_spawn") == "faction_start", "core rule join_spawn is at the faction's base (the catalog's default since F3a)")
 check(cs.rule("economy/nope") == nil and cs.rule("core/client_quicksave") == nil and cs.rule("other/gather_radius") == nil and cs.rule(5) == nil,
 	"unknown rules are nil")

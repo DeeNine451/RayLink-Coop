@@ -90,12 +90,12 @@ end
 local EXPECT_TABS = { "death", "party", "world", "difficulty", "saves", "other" }
 check(deep_equal(schema.TABS, EXPECT_TABS), "TABS are death, party, world, difficulty, saves, other")
 
-local EXPECT_COUNT = { death = 13, party = 21, world = 21, difficulty = 2, saves = 2, other = 0 }
+local EXPECT_COUNT = { death = 13, party = 22, world = 21, difficulty = 2, saves = 2, other = 0 }
 for _, tab in ipairs(EXPECT_TABS) do
 	check(#schema.items(tab) == EXPECT_COUNT[tab], "tab " .. tab .. " has " .. EXPECT_COUNT[tab] .. " items (docs 3.6)")
 end
 check(#schema.items("nope") == 0, "an unknown tab has no items")
-check(#schema.keys() == 59, "59 catalog keys in all")
+check(#schema.keys() == 60, "60 catalog keys in all")
 check(schema.item("c|nope") == nil and schema.item(nil) == nil, "an unknown key has no item")
 
 do
@@ -339,7 +339,7 @@ do
 				if (type(def) == "boolean") ~= (it.kind == "check") then bad[#bad + 1] = id .. ": kind" end
 			end
 		end
-		check(n == 13, "coop_economy_core.RULES has the 13 rules of docs 1.3")
+		check(n == 14, "coop_economy_core.RULES has the 14 rules of docs 1.3")
 		check(#bad == 0, "every economy rule is a catalog item with the rule's own default (" .. table.concat(bad, "; ") .. ")")
 		local extra = {}
 		for _, k in ipairs(schema.keys()) do
@@ -706,12 +706,12 @@ do
 	check(next(rec.diff(a.values, a.values)) == nil and rec.diff(a.values, b.values)["o|x/y"] == "2", "plain value tables work too")
 	check(next(rec.diff(nil, nil)) == nil, "no tables: empty")
 
-	local changes = { ["c|coop_revive_health"] = 0.5, ["o|coop/coop_session/travel_time"] = false, ["g|hit_power"] = 2.5,
+	local changes = { ["c|coop_revive_health"] = 0.5, ["o|coop/coop_session/travel_takes_time"] = false, ["g|hit_power"] = 2.5,
 		["c|coop_death_mode"] = "checkpoint", ["faction"] = "monolith", ["c|coop_autosave_interval"] = 500, ["w|story"] = false,
 		["m|a/b"] = 5, ["x|zzz"] = true }
 	local out, refused, n = rec.apply(a, changes)
 	check(out ~= a and a.rev == 0 and a.values["c|coop_revive_health"] == "0.3", "apply returns a new record, the old one is as it was")
-	check(out.values["c|coop_revive_health"] == "0.5" and out.values["o|coop/coop_session/travel_time"] == "false"
+	check(out.values["c|coop_revive_health"] == "0.5" and out.values["o|coop/coop_session/travel_takes_time"] == "false"
 		and out.values["g|hit_power"] == 2.5 and out.values["m|a/b"] == nil and out.values["x|zzz"] == nil,
 		"typed changes are written in the raw form, the factor as it is")
 	check(contains(refused, "m|a/b") and contains(refused, "x|zzz"), "an option outside the catalog and an unknown source are refused")

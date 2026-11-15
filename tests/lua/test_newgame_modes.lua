@@ -508,8 +508,8 @@ local tab_texts = {}
 for _, tab in ipairs(view.tabs) do tab_texts[#tab_texts + 1] = view.buttons[tab].text end
 check(table.concat(tab_texts, "|") == "Death|Party|World|Saves|Other", "the strip: " .. table.concat(tab_texts, "|"))
 check(view.tab == "death" and view.scrolls.death.shown and not view.scrolls.world.shown, "the first tab is open")
-check(#view.rows.death == 13 and #view.rows.party == 21 and #view.rows.world == 15 and #view.rows.saves == 2,
-	"rows: 13 / 21 / 15 (no addon) / 2")
+check(#view.rows.death == 13 and #view.rows.party == 22 and #view.rows.world == 15 and #view.rows.saves == 2,
+	"rows: 13 / 22 / 15 (no addon) / 2")
 check(view.rows.death[1].list.parent == view.rows.death[1].row and d.registered[view.rows.death[1].name] == view.rows.death[1].list,
 	"a combo sits in its row and is registered in the dialog")
 check(d.coop_hint and d.coop_hint.text == STRINGS.st_coop_newgame_hint and d.coop_hint.shown ~= false, "the hint is under the block")
@@ -586,7 +586,7 @@ check(CONSOLE.coop_death_mode == "hardcore" and CONSOLE.coop_death_drop == "keep
 	"the machine remembers the rules for the next new game")
 check(cfg_options("coop/coop_session/party_fast_travel") == "false" and cfg_options("coop/coop_session/gather_radius") == "50",
 	"the changed session rules are written to axr [options]")
-check(cfg_options("coop/coop_session/travel_time") == nil and cfg_options("coop/coop_session/give_radius") == nil
+check(cfg_options("coop/coop_session/travel_takes_time") == nil and cfg_options("coop/coop_session/give_radius") == nil
 	and cfg_options("coop/coop_session/sleep_rule") == nil, "and the unchanged ones are not")
 check(cfg_options("alife/event/emission_state") == nil and cfg_options("alife/event/emission_frequency") == nil
 	and CFG["mcm&drx_da/anomaly_amount_modifier"] == nil and not has_other_keys(), "stock options and MCM keys of the machine are not written")
@@ -617,8 +617,8 @@ pick_key(d, "c|coop_death_share", 4)
 pick_key(d, "c|coop_death_share", item_index("c|coop_death_share", 100))
 pick_key(d, "c|coop_death_drop", 4)
 pick_key(d, "c|coop_death_drop", 1)
-pick_key(d, "o|coop/coop_session/travel_time", 2)
-pick_key(d, "o|coop/coop_session/travel_time", 1)
+pick_key(d, "o|coop/coop_session/travel_takes_time", 1)
+pick_key(d, "o|coop/coop_session/travel_takes_time", 2)
 click_start(d)
 check(#EXEC == 0 and not has_rule_keys(), "picked back to the machine's values: nothing written (" .. table.concat(EXEC, "; ") .. ")")
 check(STAGED[1].values["c|coop_death_share"] == "100" and STAGED[1].values["c|coop_death_drop"] == "drop", "and the record has them")

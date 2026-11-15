@@ -82,4 +82,16 @@
 	<string id="st_coop_transition_feed_consent">
 		<text>%s идёт с группой на %s</text>
 	</string>
+	<string id="st_coop_transition_fare_hint">
+		<text>%s · %d руб.</text>
+	</string>
+	<string id="st_coop_transition_fare_poor">
+		<text>идти с группой: %d руб., у вас %d</text>
+	</string>
+	<string id="st_coop_transition_fare_poor_tip">
+		<text>Идти с группой отсюда стоит %d руб., у вас %d. Подойдите ближе: станет дешевле, а у самого выхода бесплатно.</text>
+	</string>
+	<string id="st_coop_transition_fare_paid">
+		<text>Переход с группой: списано %d руб.</text>
+	</string>
 </string_table>

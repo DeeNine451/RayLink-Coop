@@ -4,12 +4,22 @@
 
 	Who travels and what happens to the others:
 	  - Fast travel and backpack travel (PDA map menu), marsh guides (dialogs_mlr *_guid): with the party rule
-	    on (core rule party_fast_travel) everybody must be within gather_radius of the traveller, else the
-	    travel is refused with a tip. The traveller moves as in single player; the players who stood within
-	    gather_radius of the start are moved to the destination too ("economy.tp"). The time cost of the
-	    travel is applied once, by the host (coop_economy_group). Fair Fast Travel's rows count as well: fast
-	    travel, backpack travel and a hired guide. With split levels (coop.levels.split) every player walks his
-	    own map: nobody is gathered and nobody follows, and a solo travel moves no shared clock.
+	    on (core rule party_fast_travel) the traveller moves as in single player and pays his fare alone, and
+	    every other player on the map is OFFERED the trip (a yes / no window, "economy.tp" with q): who says yes
+	    is moved to the destination for nothing, who says no or does not answer within the vote's time stays
+	    (owner 2026-11-16; before that a trip was refused until the group stood within gather_radius, and who
+	    stood there was moved unasked). Fair Fast Travel's rows count as well: fast travel, backpack travel and a
+	    hired guide. With split levels (coop.levels.split) every player walks his own map: one player travels and
+	    nobody is asked.
+	  - Time: a trip takes no game time in a session (owner 2026-11-16, "time must not run ahead on a travel, let only
+	    the move work, and hunger and the rest with it"): coop_economy_group drops the trip's level.change_game_time,
+	    and Fair Fast Travel is told before a trip that it is one without time (on_before_fast_travel, trip.notime: it
+	    then moves no clock, pauses no hunger, tells no surge that time ran and forces no weather). The fare, the
+	    cooldown and the wear of the gear are the mod's own and stay. With the world's rule travel_takes_time on, the
+	    time cost of a group travel is applied once, by the host; a solo travel never moves the shared clock.
+	  - Companions: the squads the traveller leads come with him, as in single player (Fair Fast Travel: "unless you asked
+	    them to wait"): after his own trip on his map and after his yes to another's, coop_npc_companions.bring_mine asks the
+	    authority of his level to move them. A story teleport brings nobody, as the stock.
 	  - Travel to another level (fast travel to an offline point, guides of ka_travel): the engine turns a
 	    client's level change into a request to the host, the host moves the whole group (coop_join), so only
 	    the time cost is handled here. A quick pin of a client's own map is no level: Fair Fast Travel takes it for one, what he creates
@@ -31,7 +41,8 @@
 	client counts it here: once a second, the fast travel points of his map (game_fast_travel.tsmarts) within 50 m.
 
 	Events:
-		economy.tp     mover -> host -> others   { x, y, z, h (optional), ox, oy, oz, r, l = level, k = kind, n = nick }
+		economy.tp     mover -> host -> others   { x, y, z, h (optional), ox, oy, oz, r, l = level, k = kind, n = nick,
+		                                           q = 1: an offer (every player of the level is asked; r is 0) }
 		economy.route  any -> host -> others     { a, b }  (txr_routes short level names)
 --]]
 
@@ -46,11 +57,14 @@ local WATCH_JUMP = 25.0 -- m: a later move must be at least this long (walking i
 local MAX_RADIUS = 200
 local ARRIVE_EPS = 3.0 -- m: a player already this close to the destination stays put
 local SPREAD = 1.0 -- m: arrivals are spread a little so the group does not stack
+local OFFER = -1 -- in place of a radius: no radius, every other player of the level is asked whether he comes along
 
 local installed = false
 local watch = nil -- { kind, radius, heading, o = origin, l = level, until_ms }
 local applying_route = false
-local stats = { sent = 0, applied = 0, skipped = 0, relayed = 0, vetoed = 0, routes_out = 0, routes_in = 0 }
+local stats = { sent = 0, applied = 0, skipped = 0, relayed = 0, vetoed = 0, routes_out = 0, routes_in = 0, offered = 0,
+	accepted = 0, declined = 0 }
+local asked = nil -- this player: the open offer { box, until_ms }
 
 local function vec_of(v)
 	if not v then return nil end
@@ -66,9 +80,11 @@ end
 -- Group teleport
 -------------------------------------------------------------------------------
 local function make_payload(dest, heading, origin, radius, kind)
+	local offer = radius == OFFER
 	local t = { x = dest.x, y = dest.y, z = dest.z, ox = origin.x, oy = origin.y, oz = origin.z,
-		r = math.min(radius or 0, MAX_RADIUS), l = level_name(), k = kind or "travel", n = core.nick_of(core.self_id()) }
+		r = offer and 0 or math.min(radius or 0, MAX_RADIUS), l = level_name(), k = kind or "travel", n = core.nick_of(core.self_id()) }
 	if heading then t.h = heading end
+	if offer then t.q = 1 end
 	return t
 end
 
@@ -79,20 +95,30 @@ local function read_tp(t)
 		ox = core.num(t.ox, -1e5, 1e5), oy = core.num(t.oy, -1e5, 1e5), oz = core.num(t.oz, -1e5, 1e5),
 		r = core.num(t.r, 0, MAX_RADIUS), h = t.h ~= nil and core.num(t.h, -100, 100) or nil,
 		l = type(t.l) == "string" and t.l or nil, k = core.word(t.k, 16) or "travel",
+		q = t.q == 1 or t.q == true,
 	}
 	if not (p.x and p.y and p.z and p.ox and p.oy and p.oz and p.r and p.l) then return nil end
 	if t.h ~= nil and not p.h then return nil end
 	return p
 end
 
--- This machine's actor follows when it stood within the radius of the origin on the same level.
-local function apply_tp(p, by)
+-- The companions of this machine's player come after him (the authority of his level moves them; nothing without that script).
+local function bring_companions()
+	local nc = core.mod("coop_npc_companions")
+	if not (nc and type(nc.bring_mine) == "function") then return end
+	local ok, err = pcall(nc.bring_mine)
+	if not ok then core.log("! the companions were not called after the trip: %s", tostring(err)) end
+end
+
+-- This machine's actor follows when it stood within the radius of the origin on the same level; `agreed`: he said yes to an
+-- offer, wherever he stands on that level.
+local function apply_tp(p, by, agreed)
 	local actor = db.actor
 	if not actor or p.l ~= level_name() then return false end
 	local mine = core.position_of_id(0)
 	if not mine then return false end
 	local dest = { x = p.x, y = p.y, z = p.z }
-	if core.dist(mine, { x = p.ox, y = p.oy, z = p.oz }) > p.r or core.dist(mine, dest) <= ARRIVE_EPS then
+	if (not agreed and core.dist(mine, { x = p.ox, y = p.oy, z = p.oz }) > p.r) or core.dist(mine, dest) <= ARRIVE_EPS then
 		stats.skipped = stats.skipped + 1
 		return false
 	end
@@ -102,13 +128,68 @@ local function apply_tp(p, by)
 	pcall(level.add_pp_effector, "sleep_fade.ppe", 5528, false)
 	stats.applied = stats.applied + 1
 	core.log("followed %s (%s) to %.1f %.1f %.1f", tostring(by), p.k, p.x, p.y, p.z)
+	if agreed then bring_companions() end -- his yes to a trip is a trip of his own
 	return true
 end
 
+local function close_offer()
+	local a = asked
+	asked = nil
+	if a and a.box then pcall(function() a.box.message_box:HideDialog() end) end
+end
+
+-- A trip of another player of this level: this player is asked whether he comes along (a yes / no window; the traveller has
+-- paid, it costs this player nothing). Yes moves him to the destination; no, or no answer within the vote's time, leaves him.
+-- A dead or downed player, one who stands at the destination already, and a machine whose actor is nobody are not asked.
+local function offer_tp(p, by)
+	local actor = db.actor
+	if not actor or p.l ~= level_name() then return false end
+	local alive_ok, alive = pcall(function() return actor:alive() end)
+	if alive_ok and alive == false then return false end
+	local mine = core.position_of_id(0)
+	if not mine then return false end
+	local away = core.dist(mine, { x = p.x, y = p.y, z = p.z })
+	if away <= ARRIVE_EPS then return false end
+	close_offer()
+	local id = p.k == "guide" and "st_coop_eco_guide_offer" or "st_coop_eco_travel_offer"
+	local fallback = p.k == "guide" and "%s goes with a guide, %d m from you. Go with him? It costs you nothing."
+		or "%s fast travels, %d m from you. Go with him? It costs you nothing."
+	local text = core.fmt(id, fallback, tostring(by or "?"), math.floor(away + 0.5))
+	local mine_now = { until_ms = core.now() + (core.rule("vote_timeout") or 30) * 1000 }
+	-- ui_dyn_msg_box.msg_box_ui is a luabind class: calling it makes the window
+	local box = rawget(_G, "ui_dyn_msg_box") or core.mod("ui_dyn_msg_box")
+	local class = box and box.msg_box_ui
+	if class == nil then
+		core.log("! ui_dyn_msg_box.msg_box_ui is not here: the trip of %s is not offered", tostring(by))
+		return false
+	end
+	local ok, b = pcall(class, "message_box_yes_no", true, text, function()
+		if asked ~= mine_now then return end -- the offer closed meanwhile
+		asked = nil
+		stats.accepted = stats.accepted + 1
+		apply_tp(p, by, true)
+	end, function()
+		if asked ~= mine_now then return end
+		asked = nil
+		stats.declined = stats.declined + 1
+	end)
+	if not ok then
+		core.log("! the trip of %s could not be offered: %s", tostring(by), tostring(b))
+		return false
+	end
+	mine_now.box = b
+	asked = mine_now
+	stats.offered = stats.offered + 1
+	core.tip(text, 8000)
+	return true
+end
+
+-- radius OFFER: no radius, every other player of the level is asked (a trip); else the players within `radius` of the origin
+-- follow unasked (a story teleport).
 function group_teleport(dest, heading, origin, radius, kind)
 	dest, origin = vec_of(dest), vec_of(origin)
 	if not (core.live() and dest and origin and dest.x and origin.x) or core.others_count() == 0 then return false end
-	if (radius or 0) <= 0 then return false end
+	if radius ~= OFFER and (radius or 0) <= 0 then return false end
 	local t = make_payload(dest, heading, origin, radius, kind)
 	stats.sent = stats.sent + 1
 	if core.is_host() then
@@ -132,16 +213,23 @@ local function host_on_tp(t, from)
 		return
 	end
 	t.n = core.nick_of(from)
-	apply_tp(p, t.n)
+	if p.q then offer_tp(p, t.n) else apply_tp(p, t.n) end
 	stats.relayed = stats.relayed + core.send_clients("tp", t, from)
 end
 
--- Check whether the local actor moved since `origin` and broadcast the group teleport.
+-- The local actor went from w.o to `dest` by a trip: his companions come after him (not after a story teleport), and the others
+-- are told (group_teleport does nothing for a trip of one: radius 0).
+local function moved(w, dest)
+	if w.kind ~= "story" then bring_companions() end
+	group_teleport(dest, w.heading, w.o, w.radius, w.kind)
+end
+
+-- Check whether the local actor moved since `origin`: then the trip happened.
 local function moved_check(w, threshold)
 	if not db.actor or w.l ~= level_name() then return true end -- level change: the host moves the group
 	local now_pos = core.position_of_id(0)
 	if now_pos and core.dist(now_pos, w.o) >= threshold then
-		group_teleport(now_pos, w.heading, w.o, w.radius, w.kind)
+		moved(w, now_pos)
 		return true
 	end
 	return false
@@ -159,9 +247,9 @@ local function travel_call(kind, radius, heading, arm_time, dest, fn, ...)
 	else
 		res = pack_n(fn(...))
 	end
-	if w.o and radius > 0 then
+	if w.o then
 		if dest and w.l == level_name() then
-			if core.dist(dest, w.o) >= MOVE_EPS then group_teleport(dest, heading, w.o, radius, kind) end
+			if core.dist(dest, w.o) >= MOVE_EPS then moved(w, dest) end
 		elseif not moved_check(w, MOVE_EPS) then
 			w.until_ms = core.now() + WATCH_MS
 			watch = w
@@ -177,14 +265,15 @@ end
 -- travel, backpack travel and a hired guide. "\1" is no text of a language: an id without a string recognises nothing.
 local TRAVEL_ROWS = { "st_pda_fast_travel_to", "st_pda_backpack_travel_to", "st_fftd_mapspot_guideto" }
 
-local function is_travel_prop(prop)
-	if type(prop) ~= "string" or prop == "" then return false end
-	if prop == core.tr("bp_to", "\1") then return true end
+-- "travel" | "guide" (a guide hired through the map menu) for a row that is a trip, nil for any other row.
+local function travel_kind(prop)
+	if type(prop) ~= "string" or prop == "" then return nil end
+	if prop == core.tr("bp_to", "\1") then return "travel" end
 	for _, id in ipairs(TRAVEL_ROWS) do
 		local prefix = core.tr(id, "\1") .. " "
-		if prop:sub(1, #prefix) == prefix then return true end
+		if prop:sub(1, #prefix) == prefix then return id == "st_fftd_mapspot_guideto" and "guide" or "travel" end
 	end
-	return false
+	return nil
 end
 
 -- The text of the row picked in the map's property menu (nil: none, or the menu is gone).
@@ -230,15 +319,10 @@ local function patch_pda()
 	end
 	local orig = pda.property_box_clicked
 	pda.property_box_clicked = function(property_ui, ...)
-		if not (core.live() and db.actor) or core.others_count() == 0 or not is_travel_prop(selected_prop(property_ui)) then
-			return orig(property_ui, ...)
-		end
-		local party = group.travel_as_group()
-		if party and group.veto_if_ungathered() then
-			stats.vetoed = stats.vetoed + 1
-			return
-		end
-		return travel_call("travel", party and group.gather_radius() or 0, nil, true, nil, with_trip_on_map, orig, property_ui, ...)
+		local kind = core.live() and db.actor and core.others_count() > 0 and travel_kind(selected_prop(property_ui))
+		if not kind then return orig(property_ui, ...) end
+		-- a shared map: he goes, the others are asked; split levels or the rule off: he goes alone
+		return travel_call(kind, group.travel_as_group() and OFFER or 0, nil, true, nil, with_trip_on_map, orig, property_ui, ...)
 	end
 end
 
@@ -255,12 +339,7 @@ local function patch_guides()
 			if type(orig) == "function" then
 				m[fname] = function(...)
 					if not (core.live() and db.actor) or core.others_count() == 0 then return orig(...) end
-					local party = group.travel_as_group()
-					if party and group.veto_if_ungathered() then
-						stats.vetoed = stats.vetoed + 1
-						return
-					end
-					return travel_call("guide", party and group.gather_radius() or 0, nil, true, nil, orig, ...)
+					return travel_call("guide", group.travel_as_group() and OFFER or 0, nil, true, nil, orig, ...)
 				end
 			end
 		end
@@ -381,7 +460,11 @@ local function register_events()
 			if from > 0 then host_on_tp(t, from) end
 		elseif from == 0 then
 			local p = read_tp(t)
-			if p then apply_tp(p, t.n) end
+			if p and p.q then
+				offer_tp(p, t.n)
+			elseif p then
+				apply_tp(p, t.n)
+			end
 		end
 	end)
 	core.on("route", on_route)
@@ -458,6 +541,18 @@ local function visit_tick()
 end
 
 -------------------------------------------------------------------------------
+-- Fair Fast Travel: a trip without time
+-------------------------------------------------------------------------------
+-- game_fast_travel sends on_before_fast_travel(trip) right before it acts; with trip.notime it calls no advance_trip_time. A
+-- player alone on his own machine travels as in single player (the host with nobody else in the session).
+local function before_fast_travel(trip)
+	if type(trip) ~= "table" or not core.live() then return end
+	if not (core.is_client() or core.others_count() > 0) then return end
+	if group.travel_takes_time() then return end
+	trip.notime = true
+end
+
+-------------------------------------------------------------------------------
 -- Update, status, start
 -------------------------------------------------------------------------------
 local function actor_on_update()
@@ -466,14 +561,16 @@ local function actor_on_update()
 		visits.errors = visits.errors + 1
 		core.log("! smart visits: %s", tostring(err))
 	end
+	if asked and core.now() > asked.until_ms then close_offer() end -- nobody answered: he stays
 	local w = watch
 	if not w then return end
 	if moved_check(w, WATCH_JUMP) or core.now() > w.until_ms then watch = nil end
 end
 
 function print_status()
-	core.log("travel: teleports sent %d, followed %d, not followed %d, relayed %d, refused (not gathered) %d | routes out %d, in %d",
-		stats.sent, stats.applied, stats.skipped, stats.relayed, stats.vetoed, stats.routes_out, stats.routes_in)
+	core.log("travel: teleports sent %d, followed %d, not followed %d, relayed %d | trips offered here %d, yes %d, no %d | routes out %d, in %d",
+		stats.sent, stats.applied, stats.skipped, stats.relayed, stats.offered, stats.accepted, stats.declined, stats.routes_out,
+		stats.routes_in)
 end
 
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an
@@ -488,4 +585,10 @@ function on_game_start()
 	start_step("install", install)
 	register_events()
 	RegisterScriptCallback("actor_on_update", actor_on_update)
+	-- this script starts before game_fast_travel: a callback nobody has declared yet takes no listener (axr_main), so it is
+	-- declared here as well; without Fair Fast Travel nobody ever sends it
+	start_step("fair fast travel", function()
+		if type(AddScriptCallback) == "function" then AddScriptCallback("on_before_fast_travel") end
+		RegisterScriptCallback("on_before_fast_travel", before_fast_travel)
+	end)
 end

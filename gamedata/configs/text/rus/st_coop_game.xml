@@ -718,7 +718,7 @@
 	<string id="st_coop_game_trader_rep_mean_recent">
 		<text>Среднее за 72 игровых часа</text>
 	</string>
-	<string id="st_coop_game_travel_time">
+	<string id="st_coop_game_travel_takes_time">
 		<text>Путь занимает игровое время</text>
 	</string>
 	<string id="st_coop_game_vote_timeout">
@@ -750,5 +750,8 @@
 	</string>
 	<string id="st_coop_game_death_mode_rollback">
 		<text>Откат к сохранению</text>
+	</string>
+	<string id="st_coop_game_transition_fare">
+		<text>Плата за переход с группой издалека</text>
 	</string>
 </string_table>

@@ -41,6 +41,10 @@
 
 	Owner 2026-11-02: with somebody on another map his row says the map, nobody can say yes from afar (the hint says who and where, the
 	key does nothing), the group waits for him as long as it takes; the host's board is what decides, this only shows it.
+
+	Owner 2026-11-16: a yes from afar has a fare (scripts\coop_transition_fare.script, the world's rule transition_fare): the hint
+	of "go with the group" / "agree" names the price, a player without the money cannot send the key's command, and the fare is
+	taken at the go. This script asks that one for the hint's text, before the command and every frame; without it nothing changes.
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -96,6 +100,7 @@ local hold -- { kind, since, fired, hidden_at } the use key held (away from the 
 -- ended while it is still down: a new one only after it is let go)
 local key = { down = false, events_at = nil, seen = false, latched = false }
 local faded = false -- the screen darkened for the go that runs now
+local fare_failed = false -- the fare's step failed: logged once
 local feed_prev -- the board the feed lines were last made against
 local feed_rate = { at = {}, now = 0 }
 local players_at, players_map = nil, {}
@@ -265,6 +270,22 @@ local function levels_module()
 	return ok and type(v) == "table" and v or nil
 end
 
+-- The fare of a yes from afar (coop_transition_fare.script); nil on a build without it.
+local function fare_module()
+	local m = rawget(_G, "coop_transition_fare")
+	if type(m) == "table" then return m end
+	local ok, v = pcall(function() return coop_transition_fare end) -- loads the script
+	return ok and type(v) == "table" and v or nil
+end
+
+-- text: the hint of "consent" / "confirm"; with a fare it names the price, or what the player lacks.
+local function with_fare(kind, t, text)
+	local F = fare_module()
+	if not (F and F.hint) then return text end
+	local ok, s = pcall(F.hint, kind, t, text)
+	return ok and type(s) == "string" and s or text
+end
+
 -- The name of the map player `peer` stands on; nil if unknown.
 local function map_of(peer)
 	local L = levels_module()
@@ -374,9 +395,9 @@ function hint_text(kind, t)
 		local where = r and map_of(r.peer) or tr("st_coop_together_row_other", "on another map")
 		return string_format(tr("st_coop_transition_hint_blocked", "cannot agree yet: %s is on %s"), r and nick_of(r.peer) or "?", where)
 	end
-	if kind == "consent" then return tr("st_coop_transition_hint_consent", "hold [F] - go with the group") end
+	if kind == "consent" then return with_fare(kind, t, tr("st_coop_transition_hint_consent", "hold [F] - go with the group")) end
 	if kind == "cancel" then return tr("st_coop_transition_hint_cancel", "hold [F] - cancel") end
-	if kind == "confirm" then return tr("st_coop_transition_hint_confirm", "hold [F] - agree") end
+	if kind == "confirm" then return with_fare(kind, t, tr("st_coop_transition_hint_confirm", "hold [F] - agree")) end
 	return ""
 end
 
@@ -766,6 +787,17 @@ local function run_hold(tg, t)
 	if not hold.fired and tg - hold.since >= hold_ms(kind) then
 		hold.fired = true
 		stats.holds = stats.holds + 1
+		-- a yes from afar has a fare: without the money the command does not go (the player is told there); a cancel forgets it
+		local F = fare_module()
+		if F and (kind == "consent" or kind == "confirm") and F.agree then
+			local ok, go = pcall(F.agree, t)
+			if ok and go == false then
+				log("transition: the use key held %d ms: %s not sent, the fare is more than he has", tg - hold.since, COMMANDS[kind])
+				return
+			end
+		elseif F and kind == "cancel" and F.withdraw then
+			pcall(F.withdraw)
+		end
 		log("transition: the use key held %d ms: %s", tg - hold.since, COMMANDS[kind])
 		pcall(exec_console_cmd, COMMANDS[kind])
 	end
@@ -821,6 +853,16 @@ function UICoopTransition:Frame(tg)
 	feed_rate.now = tg
 	for _, line in ipairs(feed_events(feed_prev, raw, my_peer(), feed_rate)) do say(line) end
 	feed_prev = raw
+	-- the fare of a yes from afar is taken at the go (and forgotten when nobody waits any more)
+	local F = fare_module()
+	if F and F.step then
+		local ok, err = pcall(F.step, raw)
+		if not ok and not fare_failed then
+			fare_failed = true
+			stats.errors = stats.errors + 1
+			log("! transition: the fare's step failed: %s", tostring(err))
+		end
+	end
 	-- the go darkens the screen whatever is open on top of the HUD (once a go)
 	if raw and raw.state == "going" then
 		if not faded then

@@ -473,13 +473,13 @@
 		<text>Быстрое перемещение группой</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_party_fast_travel_desc">
-		<text>Для перемещения и проводников все игроки должны быть рядом; группа перемещается вместе.</text>
+		<text>Когда один игрок быстро перемещается или уходит с проводником, остальным на этой карте предлагают отправиться с ним бесплатно: платит только он. Выключено: каждый перемещается сам. На раздельных картах всегда перемещается один игрок.</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_gather_radius">
 		<text>Радиус сбора, м</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_gather_radius_desc">
-		<text>Насколько близко должны стоять игроки для перемещения группой.</text>
+		<text>Ближе этого расстояния к выходу с карты (или к тому, кто позвал в поездку на другую карту) идти с группой бесплатно; дальше — за плату, если она включена.</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_sleep_rule">
 		<text>Сон</text>
@@ -517,11 +517,11 @@
 	<string id="ui_mm_coop_coop_session_teleport_radius_desc">
 		<text>Игроки рядом с сюжетным телепортом перемещаются вместе.</text>
 	</string>
-	<string id="ui_mm_coop_coop_session_travel_time">
+	<string id="ui_mm_coop_coop_session_travel_takes_time">
 		<text>Перемещение занимает время</text>
 	</string>
-	<string id="ui_mm_coop_coop_session_travel_time_desc">
-		<text>Перемещение группы двигает часы один раз, у хоста.</text>
+	<string id="ui_mm_coop_coop_session_travel_takes_time_desc">
+		<text>Выключено: быстрое перемещение и проводники не двигают игровые часы, голод и усталость не растут. Включено: перемещение группы двигает часы один раз, у хоста.</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_max_skip_hours">
 		<text>Наибольший пропуск времени, ч</text>
@@ -810,5 +810,11 @@
 	</string>
 	<string id="st_coop_menu_op_refused">
 		<text>Автосохранения сервера недоступны: %s</text>
+	</string>
+	<string id="ui_mm_coop_coop_session_transition_fare">
+		<text>Плата за переход с группой издалека</text>
+	</string>
+	<string id="ui_mm_coop_coop_session_transition_fare_desc">
+		<text>Когда союзник ждёт у выхода с карты или зовёт в поездку на другую карту, игрок вдали от него платит за согласие идти вместе: по цене мода быстрых перемещений за это расстояние (без мода — 1,7 руб. за метр). Ближе радиуса сбора — бесплатно. Деньги списываются в момент перехода. Выключено: согласие из любой точки карты бесплатно.</text>
 	</string>
 </string_table>

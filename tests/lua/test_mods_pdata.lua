@@ -10,6 +10,23 @@ experience_core = { save_state = function(m)
 	m.experience_framework_savedata.XP = EF_LIVE.XP
 end }
 wd_core = {}
+-- New Player Experience keeps what it has shown in the save (npe_director.save_state: m.npe.npe_state[deck][set].played),
+-- Fair Fast Travel keeps the player's cooldowns beside the ids of the zones it spawned in the world (game_fast_travel.save_state)
+NPE_LIVE = { gamma = { gun = { played = false }, task = { played = false } } }
+NPE_SAVES = 0
+npe_director = {
+	get_state = function() return NPE_LIVE end,
+	save_state = function(m) -- the real one prints "$ NPE Save State" and the whole table every time
+		NPE_SAVES = NPE_SAVES + 1
+		m.npe = m.npe or {}
+		m.npe.npe_state = NPE_LIVE
+	end,
+}
+FFT_LIVE = { cooldowns = { ft = 0 }, locations_found = 0 }
+game_fast_travel = { save_state = function(m)
+	m.fast_travel_system = { spawned_travel_zones = { 11, 12 }, zone_spawn_version = 3, survival_paused = false, stored_satiety = 1,
+		locations_found = FFT_LIVE.locations_found, cooldowns = FFT_LIVE.cooldowns }
+end }
 haru_skills = { creature_on_before_hit = function() end }
 perk_based_artefacts = { process_artefacts = function() end }
 
@@ -22,11 +39,17 @@ if which == "client" then
 		and P.owns("perk_based_artefacts_cooldowns"), "mod keys registered (EF, skills, PBA)")
 	check(not P.owns("wd_bracer_worn"), "Wearable Devices is not adapted (clean room, 2026-10-29)")
 	check(not P.owns("sleep") and not P.owns("RF_freq"), "stock keys left to coop_economy_mdata")
+	-- Owner 2026-11-16: "the tutorial menu starts again and again, after a level change I am taught everything anew, as if the
+	-- state is not saved". It was not: a client loads the host's save at every level change, with the host's "nothing shown yet".
+	check(P.owns("npe"), "New Player Experience: what was shown is a player's own")
+	check(P.owns("fast_travel_system"), "Fair Fast Travel: the cooldowns and the found points are a player's own")
 
 	-- 1. first join: no record for this character -> the host's values are dropped
 	local save = {
 		experience_framework_savedata = { XP = 999, nls_storage = { npc = 3 } }, -- the host's XP
 		skills_levels = { strength = 9 },
+		npe = { npe_state = { gamma = { gun = { played = true } } } }, -- the host's (a world server's: nobody played anything)
+		fast_travel_system = { spawned_travel_zones = { 11, 12 }, zone_spawn_version = 3, locations_found = 7, cooldowns = { ft = 900 } },
 		coop_mods_pdata = { ["777"] = { t = "other", d = { skills_levels = { strength = 1 } } } },
 	}
 	local seen_at_load
@@ -38,6 +61,10 @@ if which == "client" then
 		"sub-keys: player part cleared, world part (nls_storage) kept")
 	check(seen_at_load and seen_at_load.xp == nil and seen_at_load.sk == nil, "load_state already saw the player's values")
 	check(m.coop_mods_pdata == nil, "other players' records dropped on the client")
+	check(m.npe == nil, "tutorials: a new player does not take the host's list of what was shown")
+	check(m.fast_travel_system.cooldowns == nil and m.fast_travel_system.locations_found == nil, "fast travel: the host's cooldowns are not his")
+	check(m.fast_travel_system.spawned_travel_zones[2] == 12 and m.fast_travel_system.zone_spawn_version == 3,
+		"fast travel: the zones spawned in the world stay the host's")
 
 	-- 2. report
 	EF_LIVE.XP = 42
@@ -50,6 +77,9 @@ if which == "client" then
 	local d = coop_mods_core.deser(piece.d)
 	check(d and d.experience_framework_savedata.XP == 42 and d.skills_levels.strength == 2, "report carries primed values")
 	check(d.experience_framework_savedata.nls_storage == nil, "report carries only the listed sub-keys")
+	check(d.npe and d.npe.npe_state.gamma.gun.played == false, "the report carries the tutorials' state as the mod saves it")
+	check(d.fast_travel_system and d.fast_travel_system.cooldowns.ft == 0 and d.fast_travel_system.spawned_travel_zones == nil,
+		"and the player's part of the fast travel state, without the world's zones")
 	check(STASH.coop_mods_pdata and STASH.coop_mods_pdata:sub(1, 1) == "|", "stash written (no token yet)")
 	SENT = {}
 	NOW = NOW + 20000
@@ -70,6 +100,29 @@ if which == "client" then
 	})
 	m = alife_storage_manager.get_state()
 	check(m.skills_levels.strength == 5 and m.experience_framework_savedata.XP == 43, "same lineage: the newer session data wins")
+
+	-- 3a. the owner's case: a tutorial was shown and a trip put fast travel on cooldown, then he changed level
+	NPE_LIVE.gamma.gun.played = true
+	FFT_LIVE.cooldowns, FFT_LIVE.locations_found = { ft = 5000 }, 3
+	SENT = {}
+	NOW = NOW + 20000
+	SendScriptCallback("actor_on_update")
+	local piece3 = sent("mods.pd")
+	local d3 = piece3 and coop_mods_core.deser(piece3.d)
+	check(d3 and d3.npe.npe_state.gamma.gun.played == true and d3.fast_travel_system.cooldowns.ft == 5000, "the change is reported")
+	check(NPE_SAVES == 0, "the tutorial mod's save_state is not run for a report (it writes to the log each time)")
+	local seen_npe
+	RegisterScriptCallback("load_state", function(mm) seen_npe = mm.npe and mm.npe.npe_state end)
+	alife_storage_manager.CALifeStorageManager_load({
+		npe = { npe_state = { gamma = { gun = { played = false }, task = { played = false } } } }, -- the server's save again
+		fast_travel_system = { spawned_travel_zones = { 11, 12, 13 }, zone_spawn_version = 4, locations_found = 0, cooldowns = { ft = 0 } },
+		coop_mods_pdata = { ["500"] = { t = "TOK1", d = {} } },
+	})
+	m = alife_storage_manager.get_state()
+	check(seen_npe and seen_npe.gamma.gun.played == true, "after the level change the tutorial mod loads HIS list: the shown one is not shown again")
+	check(seen_npe and seen_npe.gamma.task.played == false, "and one he has not seen yet is still to come")
+	check(m.fast_travel_system.cooldowns.ft == 5000 and m.fast_travel_system.locations_found == 3, "his cooldown and found points came with him")
+	check(m.fast_travel_system.spawned_travel_zones[3] == 13 and m.fast_travel_system.zone_spawn_version == 4, "the world's zones are the new save's")
 
 	-- 4. the host loaded an older save: its record has another token -> the save wins
 	alife_storage_manager.CALifeStorageManager_load({

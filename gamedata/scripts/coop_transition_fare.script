@@ -1,0 +1,291 @@
+--[[
+	Anomaly Coop - the fare of a level change from afar (gamedata\scripts\coop_transition_fare.script)
+
+	Owner 2026-11-16: "in an ordinary co-op, when somebody goes to another map and the vote starts, and the others are far away,
+	they are offered to pay a sum, by the logic of the fast travel mod, to go to the other location together with the one who
+	proposes; so that nobody abuses the transitions. Offered when a world is made, on by default; off, it is as it is now."
+
+	Before, a player anywhere on the map held the use key ("go with the group", coop_hud_transition) and left through the exit
+	his ally stood at, for nothing: a fast travel of any length without a fare. A trip (a guide, a fast travel to another map) was
+	the same: a yes from anywhere on the map.
+
+	The rule (the world's setting economy/transition_fare, on by default):
+	  - at the exit, or within the gather radius (rule gather_radius, 20 m) of it, the yes is free; for a trip the distance is
+	    the one to the player who asked for it;
+	  - farther, the yes costs what Fair Fast Travel takes for that distance: game_fast_travel.cost_to_travel with the mod's own
+	    coefficients, rank, map hazard and rounding; the fast travel's fare, or the guide's where the fast travel is free. Without
+	    the mod, or with every fare off in it: FARE_PER_M a metre, rounded to FARE_ROUND and that much at least;
+	  - not enough money: the key does nothing and the hint says what it takes;
+	  - the money is taken at the go and never before: a group that never goes costs nothing, taking the yes back costs nothing.
+	    At the go he pays for where he stands then, never more than he agreed to: nearer is cheaper, within the gather radius
+	    or at the exit itself is free.
+	The player's own machine decides and pays (db.actor:give_money, as the mod's own fare: a client's money is the host's journal
+	through the engine). Nothing goes over the wire, nothing here is the engine's board: that only tells who is ready.
+
+	For coop_hud_transition (t is coop.transition()):
+		coop_transition_fare.enabled() -> bool
+		coop_transition_fare.quote(t) -> nil (free) | { cost, dist, money, enough }
+		coop_transition_fare.hint(kind, t, text) -> the hint of "consent" / "confirm" with the price, or what is missing
+		coop_transition_fare.agree(t) -> false: the key's command must not go (not enough money; he was told)
+		coop_transition_fare.withdraw()    he took his yes back
+		coop_transition_fare.step(t)       every frame, with nil when nobody waits: pays at the go
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tostring, tonumber, type, ipairs, pcall = tostring, tonumber, type, ipairs, pcall
+local math_floor, math_max, math_min, math_sqrt = math.floor, math.max, math.min, math.sqrt
+local string_format = string.format
+
+FARE_PER_M = 1.7 -- RU a metre where Fair Fast Travel names no price
+FARE_ROUND = 100 -- that price is rounded to this and is this at least (the mod's own "nice round numbers")
+FREE_M = 20 -- the free distance when the rule gather_radius cannot be read
+QUOTE_MS = 400 -- a price is counted once in this time, not every frame of the hint
+LOST_MS = 5000 -- a yes outlives a board that is gone this long (the host was silent for a moment)
+TRIP_KINDS = { "ft", "gt" } -- Fair Fast Travel's fares asked in this order: fast travel, then a guide
+
+local agreed = nil -- { cost, key, lost_at }: what this player said yes to with the key
+local seen = nil -- { key, askers = { peer, ... } }: who had asked for the trip when this machine first saw it
+local cache = nil -- { at, key, dist, q }
+local stats = { agreed = 0, free = 0, refused = 0, paid = 0, paid_sum = 0, errors = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("[coop-eco] fare: %s", ok and line or tostring(fmt))
+end
+
+local function core()
+	local m = rawget(_G, "coop_economy_core")
+	if type(m) == "table" then return m end
+	local ok, v = pcall(function() return coop_economy_core end) -- loads the script
+	return ok and type(v) == "table" and v or nil
+end
+
+local function tr(id, fallback)
+	local g = rawget(_G, "game")
+	if g and g.translate_string then
+		local ok, s = pcall(g.translate_string, id)
+		if ok and type(s) == "string" and s ~= id then return s end
+	end
+	return fallback
+end
+
+local function say(text)
+	local c = core()
+	if not (c and c.tip and pcall(c.tip, text, 8000)) then log("%s", text) end
+end
+
+local function rule(key)
+	local c = core()
+	if not (c and c.rule) then return nil end
+	local ok, v = pcall(c.rule, key)
+	if ok then return v end
+	return nil
+end
+
+function enabled()
+	if not (api and api.is_active and api.is_active()) then return false end
+	return rule("transition_fare") ~= false
+end
+
+local function free_radius()
+	local r = tonumber(rule("gather_radius"))
+	return r and r > 0 and r or FREE_M
+end
+
+local function my_money()
+	local a = db and db.actor
+	if not a then return nil end
+	local ok, m = pcall(a.money, a)
+	return ok and tonumber(m) or nil
+end
+
+local function my_pos()
+	local a = db and db.actor
+	if not a then return nil end
+	local ok, p = pcall(a.position, a)
+	return ok and p or nil
+end
+
+local function pos_of_peer(peer)
+	local c = core()
+	if not (c and c.player) then return nil end
+	local ok, p = pcall(c.player, peer)
+	return ok and type(p) == "table" and p.pos or nil
+end
+
+local function key_of(t)
+	return tostring(t.kind) .. "|" .. tostring(t.level)
+end
+
+-- A trip is asked for by one player and the others answer: on this machine's first sight of it those who are ready are him
+-- (one, unless this machine came late). Who agrees afterwards is not him, however near he stands.
+local function note(t)
+	local key = key_of(t)
+	if seen and seen.key == key and #seen.askers > 0 then return end
+	seen = { key = key, askers = {} }
+	local mine = type(t.me) == "table" and tonumber(t.me.peer) or nil
+	for _, r in ipairs(type(t.rows) == "table" and t.rows or {}) do
+		if type(r) == "table" and r.mark == "ready" and tonumber(r.peer) and tonumber(r.peer) ~= mine then
+			seen.askers[#seen.askers + 1] = tonumber(r.peer)
+		end
+	end
+end
+
+-- Metres of the way this player would skip: to the exit (the engine's own figure), or to the one who asked for the trip. nil when
+-- this machine does not know it.
+local function distance(t)
+	if t.kind == "exit" then
+		local d = type(t.me) == "table" and tonumber(t.me.dist) or nil
+		if d and d == d and d >= 0 then return d end
+		return nil
+	end
+	local mine = my_pos()
+	if not (mine and seen and seen.key == key_of(t)) then return nil end
+	local best = nil
+	for _, peer in ipairs(seen.askers) do
+		local p = pos_of_peer(peer)
+		if p then
+			local dx, dy, dz = (p.x or 0) - (mine.x or 0), (p.y or 0) - (mine.y or 0), (p.z or 0) - (mine.z or 0)
+			local d = math_sqrt(dx * dx + dy * dy + dz * dz)
+			if not best or d < best then best = d end
+		end
+	end
+	return best
+end
+
+-- What Fair Fast Travel takes for `dist` metres towards map `to_level`; nil when the mod is not here or takes nothing.
+local function mod_price(dist, to_level)
+	local fft = rawget(_G, "game_fast_travel")
+	if type(fft) ~= "table" or type(fft.cost_to_travel) ~= "function" then return nil end
+	local hazard = 1
+	if type(fft.get_map_hazard_coef) == "function" then
+		local okh, h = pcall(function() return fft.get_map_hazard_coef(level.name(), to_level) end)
+		if okh and tonumber(h) then hazard = tonumber(h) end
+	end
+	for _, tt in ipairs(TRIP_KINDS) do
+		local coef = 1
+		if type(fft.travel_cost_coef) == "function" then
+			local okc, c = pcall(fft.travel_cost_coef, tt)
+			coef = okc and tonumber(c) or 0
+		end
+		if coef > 0 then
+			local ok, cost = pcall(fft.cost_to_travel, dist, tt, false, hazard)
+			if ok and (tonumber(cost) or 0) > 0 then return math_floor(tonumber(cost) + 0.5) end
+		end
+	end
+	return nil
+end
+
+local function price(dist, to_level)
+	return mod_price(dist, to_level) or math_max(FARE_ROUND, math_floor(dist * FARE_PER_M / FARE_ROUND + 0.5) * FARE_ROUND)
+end
+
+-- The price of `dist` metres on board `t`, nil within the free distance. Counted once in QUOTE_MS for the same board and distance.
+local function cost_of(t, dist)
+	if dist <= free_radius() then return nil end
+	local now, key = time_global(), key_of(t)
+	local whole = math_floor(dist + 0.5)
+	if cache and cache.key == key and cache.dist == whole and now - cache.at < QUOTE_MS and now >= cache.at then return cache.cost end
+	local cost = price(dist, t.level)
+	cache = { at = now, key = key, dist = whole, cost = cost }
+	return cost
+end
+
+function quote(t)
+	if type(t) ~= "table" or type(t.me) ~= "table" or not enabled() then return nil end
+	note(t)
+	local dist = distance(t)
+	if not dist then return nil end
+	local cost = cost_of(t, dist)
+	if not cost then return nil end
+	local money = my_money()
+	return { cost = cost, dist = dist, money = money, enough = money == nil or money >= cost }
+end
+
+function hint(kind, t, text)
+	if kind ~= "consent" and kind ~= "confirm" then return text end
+	local q = quote(t)
+	if not q then return text end
+	if not q.enough then
+		return string_format(tr("st_coop_transition_fare_poor", "to go with the group: %d RU, you have %d"), q.cost, q.money)
+	end
+	return string_format(tr("st_coop_transition_fare_hint", "%s . %d RU"), tostring(text), q.cost)
+end
+
+function agree(t)
+	local q = quote(t)
+	if not q then
+		agreed = nil
+		stats.free = stats.free + 1
+		return true
+	end
+	if not q.enough then
+		stats.refused = stats.refused + 1
+		say(string_format(tr("st_coop_transition_fare_poor_tip", "The way with the group costs %d RU, you have %d. Come closer: it gets cheaper, and by the exit it is free."),
+			q.cost, q.money))
+		return false
+	end
+	agreed = { cost = q.cost, key = key_of(t) }
+	stats.agreed = stats.agreed + 1
+	log("agreed: %d RU for %d m (%s to %s)", q.cost, math_floor(q.dist + 0.5), tostring(t.kind), tostring(t.level))
+	return true
+end
+
+function withdraw()
+	agreed = nil
+end
+
+local function pay(cost)
+	local a = db and db.actor
+	if not a then return end
+	local money = my_money()
+	local take = money and math_min(cost, math_max(0, money)) or cost
+	if take <= 0 then return end
+	local ok, err = pcall(a.give_money, a, -take)
+	if not ok then
+		stats.errors = stats.errors + 1
+		log("! %d RU could not be taken: %s", take, tostring(err))
+		return
+	end
+	stats.paid = stats.paid + 1
+	stats.paid_sum = stats.paid_sum + take
+	log("paid %d RU at the go", take)
+	say(string_format(tr("st_coop_transition_fare_paid", "The way with the group cost you %d RU."), take))
+end
+
+function step(t)
+	if type(t) ~= "table" or type(t.me) ~= "table" then
+		seen = nil
+		if agreed then
+			local now = time_global()
+			agreed.lost_at = agreed.lost_at or now
+			if now - agreed.lost_at > LOST_MS or now < agreed.lost_at then agreed = nil end
+		end
+		return
+	end
+	note(t)
+	local a = agreed
+	if not a then return end
+	if a.key ~= key_of(t) then
+		agreed = nil
+		return
+	end
+	a.lost_at = nil
+	if t.state ~= "going" then return end
+	agreed = nil
+	if not enabled() then return end
+	if t.kind == "exit" and t.me.consent ~= true then return end -- he walked to the exit himself
+	local dist = distance(t)
+	local cost = a.cost
+	if dist then
+		local here = cost_of(t, dist)
+		cost = here and math_min(a.cost, here) or 0
+	end
+	if cost > 0 then pay(cost) end
+end
+
+function print_status()
+	log("rule %s, free within %d m | yes with a fare %d, free %d, not enough money %d | paid %d time(s), %d RU, errors %d",
+		tostring(enabled()), free_radius(), stats.agreed, stats.free, stats.refused, stats.paid, stats.paid_sum, stats.errors)
+end

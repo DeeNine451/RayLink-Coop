@@ -201,6 +201,21 @@ local function machine(self_peer, opts)
 	env.key_bindings = { kUSE = BIND_USE }
 	env.dik_to_bind = function(dik) return dik == DIK_F and BIND_USE or BIND_OTHER end
 	env.db = { actor = { id = function() return 0 end } }
+	-- opts.fare: the fare of a yes from afar is here too (coop_transition_fare.script, the real one) with the player's money
+	M.money, M.paid, M.tips, M.rules = opts.money or 5000, {}, {}, opts.rules or {}
+	if opts.fare then
+		env.db.actor.money = function() return M.money end
+		env.db.actor.give_money = function(_, n)
+			M.money = M.money + n
+			M.paid[#M.paid + 1] = -n
+		end
+		env.db.actor.position = function() return { x = 0, y = 0, z = 0 } end
+		env.coop_economy_core = {
+			rule = function(key) return M.rules[key] end,
+			player = function() return nil end,
+			tip = function(text) M.tips[#M.tips + 1] = text end,
+		}
+	end
 	M.active = opts.active ~= false
 	if opts.coop ~= false then
 		env.coop = {
@@ -225,7 +240,7 @@ local function machine(self_peer, opts)
 	env.coop_hud_markers = {
 		add_source = function(name, fn, every) M.sources[name] = { fn = fn, every = every } return true end,
 	}
-	for _, name in ipairs({ "coop_allies", "coop_hud_transition" }) do
+	for _, name in ipairs(opts.fare and { "coop_allies", "coop_transition_fare", "coop_hud_transition" } or { "coop_allies", "coop_hud_transition" }) do
 		local src = readfile(ROOT .. "scripts/" .. name .. ".script")
 		local mod = setmetatable({}, { __index = env })
 		env[name] = mod
@@ -376,7 +391,8 @@ do
 	check(fonts_ok, "every text node names a font")
 end
 do
-	local script = readfile(ROOT .. "scripts/coop_hud_transition.script") or ""
+	-- the placard's script and the fare of a yes from afar it shows (coop_transition_fare.script)
+	local script = (readfile(ROOT .. "scripts/coop_hud_transition.script") or "") .. (readfile(ROOT .. "scripts/coop_transition_fare.script") or "")
 	local ids = {}
 	for id in script:gmatch('"(st_coop_transition_[%w_]+)"') do ids[id] = true end
 	local miss_e, miss_r = {}, {}
@@ -384,10 +400,10 @@ do
 		if not STR_ENG[id] then miss_e[#miss_e + 1] = id end
 		if not STR_RUS[id] then miss_r[#miss_r + 1] = id end
 	end
-	check(next(ids) ~= nil and #miss_e == 0 and #miss_r == 0, "every st_coop_transition_* id of the script is in eng and rus (" .. table.concat(miss_e, ",") .. "|" .. table.concat(miss_r, ",") .. ")")
+	check(next(ids) ~= nil and #miss_e == 0 and #miss_r == 0, "every st_coop_transition_* id of the two scripts is in eng and rus (" .. table.concat(miss_e, ",") .. "|" .. table.concat(miss_r, ",") .. ")")
 	local unused = {}
 	for id in pairs(STR_ENG) do if not ids[id] then unused[#unused + 1] = id end end
-	check(#unused == 0, "and the tables hold nothing the script does not use (" .. table.concat(unused, ",") .. ")")
+	check(#unused == 0, "and the tables hold nothing the scripts do not use (" .. table.concat(unused, ",") .. ")")
 	local keys_ok = true
 	for _, id in ipairs({ "st_coop_transition_hint_cancel", "st_coop_transition_hint_consent", "st_coop_transition_hint_confirm" }) do
 		keys_ok = keys_ok and (STR_ENG[id] or ""):find("$$ACTION_USE$$", 1, true) ~= nil and (STR_RUS[id] or ""):find("$$ACTION_USE$$", 1, true) ~= nil
@@ -858,6 +874,85 @@ do
 	check(#MW.pp == 1 and win(MW).g_board.visible, "a downed one goes with the group: his screen darkens too, the board says so")
 end
 
+-- ================================================================ 6a. a yes from afar has a fare
+-- Owner 2026-11-16: "when somebody goes to another map and the vote starts, the others who are far are offered to pay, by the
+-- logic of the fast travel mod, to go with him; so that nobody abuses the transitions". 118 m without that mod: 1.7 RU a metre,
+-- rounded to 100 = 200 RU.
+print("== the fare of a yes from afar")
+do
+	local MF = machine(1, { fare = true, money = 5000 })
+	MF.t = away
+	run(MF, 400)
+	local hint_seen
+	for text in pairs(texts(MF)) do if text:find("200", 1, true) and text:find("go with the group", 1, true) then hint_seen = text end end
+	check(hint_seen ~= nil, "away from the exit: the hint of the key names the price (" .. tostring(hint_seen) .. ")")
+	fire(MF, "on_key_press", DIK_F)
+	run(MF, 1100)
+	check(#MF.console == 1 and MF.console[1] == "coop_transition_consent", "he has the money: the key sends coop_transition_consent")
+	check(#MF.paid == 0, "nothing is taken while the group waits")
+	fire(MF, "on_key_release", DIK_F)
+	local coming = { me = me({ in_zone = false, ready = true, consent = true, dist = 118 }),
+		rows = { { peer = 0, mark = "away" }, { peer = 1, mark = "ready", consent = true }, { peer = 2, mark = "ready", dist = 3 } } }
+	MF.t = board(MF, coming)
+	run(MF, 3000)
+	check(#MF.paid == 0, "he comes along and the group still waits for the third: still nothing")
+	coming.state, coming.rows[1].mark = "going", "ready"
+	MF.t = board(MF, coming)
+	run(MF, 1000)
+	check(#MF.paid == 1 and MF.paid[1] == 200 and MF.money == 4800, "the group goes: 200 RU are taken, once (" .. tostring(MF.paid[1]) .. ")")
+	check(#MF.pp == 1, "and the screen darkens as before")
+end
+do
+	local MP = machine(1, { fare = true, money = 50 })
+	MP.t = away
+	run(MP, 400)
+	local poor
+	for text in pairs(texts(MP)) do if text:find("200", 1, true) and text:find("50", 1, true) then poor = text end end
+	check(poor ~= nil and not poor:find("hold", 1, true), "not enough money: the hint says what it takes and what he has (" .. tostring(poor) .. ")")
+	fire(MP, "on_key_press", DIK_F)
+	run(MP, 1100)
+	check(#MP.console == 0, "the key held to the end sends nothing")
+	check(#MP.tips == 1, "and he is told why, once")
+	run(MP, 1500)
+	check(#MP.console == 0 and #MP.tips == 1, "still held: nothing more")
+	fire(MP, "on_key_release", DIK_F)
+end
+do
+	-- he agreed and took it back
+	local MC = machine(1, { fare = true })
+	MC.t = away
+	run(MC, 400)
+	fire(MC, "on_key_press", DIK_F)
+	run(MC, 1100)
+	fire(MC, "on_key_release", DIK_F)
+	local coming = { me = me({ in_zone = false, ready = true, consent = true, dist = 118 }),
+		rows = { { peer = 0, mark = "away" }, { peer = 1, mark = "ready", consent = true }, { peer = 2, mark = "ready", dist = 3 } } }
+	MC.t = board(MC, coming)
+	run(MC, 400)
+	fire(MC, "on_key_press", DIK_F)
+	run(MC, 1100)
+	fire(MC, "on_key_release", DIK_F)
+	check(MC.console[2] == "coop_transition_cancel", "(he cancels)")
+	MC.t = board(MC, { state = "going", ready = 2, total = 2, me = me({ in_zone = false, ready = false, dist = 118 }),
+		rows = { { peer = 0, mark = "ready" }, { peer = 1, mark = "down" }, { peer = 2, mark = "ready" } } })
+	run(MC, 600)
+	check(#MC.paid == 0, "a yes taken back costs nothing, whatever happens next")
+end
+do
+	-- the world's rule off: everything as before
+	local MO = machine(1, { fare = true, rules = { transition_fare = false } })
+	MO.t = away
+	run(MO, 400)
+	check(texts(MO)[STR_ENG.st_coop_transition_hint_consent] ~= nil, "the rule off: the hint as it was")
+	fire(MO, "on_key_press", DIK_F)
+	run(MO, 1100)
+	fire(MO, "on_key_release", DIK_F)
+	MO.t = board(MO, { state = "going", ready = 3, total = 3, me = me({ in_zone = false, ready = true, consent = true, dist = 118 }),
+		rows = { { peer = 0, mark = "ready" }, { peer = 1, mark = "ready", consent = true }, { peer = 2, mark = "ready" } } })
+	run(MO, 600)
+	check(#MO.console == 1 and #MO.paid == 0, "the key goes and the go is free")
+end
+
 -- ================================================================ 7. the feed, live
 print("== feed")
 local MF = machine(1)
@@ -982,7 +1077,8 @@ check(per_frame < 0.5, "the Lua side of a frame is well under half a millisecond
 local unk = {}
 for k in pairs(UNKNOWN or {}) do unk[#unk + 1] = tostring(k) end
 table.sort(unk)
-local allowed = { profile_timer = true, system_ini = true, coop_core_player = true, coop_hud_ping = true }
+-- coop_transition_fare: a machine without that script (the HUD asks for it and goes on without)
+local allowed = { profile_timer = true, system_ini = true, coop_core_player = true, coop_hud_ping = true, coop_transition_fare = true }
 local bad = {}
 for _, k in ipairs(unk) do if not allowed[k] then bad[#bad + 1] = k end end
 check(#bad == 0, "no reads of undefined globals (" .. table.concat(bad, ", ") .. ")")

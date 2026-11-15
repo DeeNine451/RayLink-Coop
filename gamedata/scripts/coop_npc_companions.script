@@ -76,6 +76,14 @@
 	  npc.comp_go    client -> host  { x, y, z }: his companions go there
 	  npc.comp_item  client -> host  { i = npc, o = item, g = true: gave, false: took }
 	  npc.comp_items host -> client  { i = npc, s = "id,id,...": what the group may take back }
+	  npc.comp_bring client -> the authority of his level  {}: he just moved on his map by a trip, his following squads come to him
+	A trip on one's own map (Fair Fast Travel, backpack travel, a guide, a "yes" to another player's trip; coop_economy_travel calls
+	  bring_mine): the squads the traveller leads that may follow (may_follow: not told to wait, not a hostage), less a member that waits,
+	  come to him, as FFT's bring_companions_to_actor does in single player, and only while FFT's switch (companions_travel_with_actor) is
+	  on. The authority moves them: the host's own at once; a client's from his word, which carries nothing it trusts: the squads are those
+	  the sender's character leads, the place is that character as the authority sees it, once its view of him moved (it lags a snapshot)
+	  or after BRING_WAIT_MS. FFT's own walk over the stock table runs on the host for the squads he leads only (wrap_fft), on a client for
+	  none (his table is no truth).
 	Stock functions wrapped: dialogs_axr_companion.<the actions below>, is_not_actor_companion,
 	dm_init_is_actor_companion, dialogs_lostzone and dialogs_agr_u companion setters (if present),
 	axr_beh.action_beh.execute, sim_squad_scripted:get_current_task, axr_companions.cycle_state, move_to_point,
@@ -99,6 +107,9 @@ local EV_FOLLOW, EV_ADOPT, EV_TALK, EV_DROP = "npc.comp_follow", "npc.comp_adopt
 -- world server -> map server: a squad it let go is held online there by a friend: take it offline now (on_recall). RECALLED: `leaving` of
 -- such a squad on the map server; RECALL_AGAIN_MS: the world server asks again after this long if it still did not come home
 local EV_RECALL, RECALLED, RECALL_AGAIN_MS = "npc.comp_recall", "recalled", 20000
+-- a trip on one's own map (bring_mine). AGAIN: one word per sender this often; WAIT: the authority's view of him lags a snapshot, it waits
+-- for it this long at most; JUMP_SQR: a move of his character this long is the trip (walking is not); NEAR_SQR: a member this close stays
+local EV_BRING, BRING_AGAIN_MS, BRING_WAIT_MS, BRING_JUMP_SQR, BRING_NEAR_SQR = "npc.comp_bring", 3000, 1500, 625, 100
 
 -- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order.
 local ACTIONS = {
@@ -152,7 +163,7 @@ local visible = {} -- client: NPC id -> { item id = true }: what the leader may 
 local asked = false -- client: this Lua state asked the host for everything (npc.comp_req)
 local every_companion = 0 -- host: > 0 while Useful Idiots' surge code runs: it needs every companion, whoever leads
 local stats = { cmd_out = 0, cmd_in = 0, refused = 0, refused_talk = 0, info_out = 0, info_in = 0, follow = 0, task_squads = 0,
-	lead = 0, lead_refused = 0, go = 0, recall = 0 }
+	lead = 0, lead_refused = 0, go = 0, recall = 0, bring = 0 }
 local RECRUIT_TALK_MS = 5000 -- Ruling F2-34: a recruit within this long after a talk with the squad
 local FACE_TO_FACE_SQR = 225 -- 15 m: the dialog was face to face
 local OTHER_PLAYERS = 7 -- lines of the choice of player: a full session less the asker (peers 0..7)
@@ -167,6 +178,8 @@ local claimed_far -- world server: a squad just claimed on a map server's level 
 local mark_far -- world server: the stock's marks of a task's squad on a map server's level (set below, it needs map_server_of)
 local note_let_go, give_back -- a story's dismissal and its next recruit (set below, they need control_peer, squad_ids)
 local teleport_rule -- axr_companions.companion_squad_can_teleport as this script wrapped it
+local bring_wait = {} -- authority: sender's peer -> { at, who = his character, x, y, z = where it stood when his word came }
+local bring_last = {} -- authority: sender's peer -> time_global() of his last word served
 
 local function resolve(full)
 	local mod, fn = full:match("^([%w_]+)%.([%w_]+)$")
@@ -876,15 +889,49 @@ local function run_as_leader(cls, name)
 	end
 end
 
+-- The squads of the stock table the player of this process leads (false: loaded, no update yet).
+local function own_of(all)
+	local own = {}
+	for id, squad in pairs(all) do
+		if not squad or (control_peer(squad) == P.self_peer() and not far_leader(id)) then own[id] = squad end
+	end
+	return own
+end
+
 -- Stock code over every companion squad, for the host's own keys, wheel and squad list: it sees the squads he leads.
 local function own_squads_only(ac, name)
 	local f = ac[name]
 	if type(f) ~= "function" then return end
 	ac[name] = function(...)
 		if not (host_on and (next(leaders) ~= nil or next(far) ~= nil)) then return f(...) end
-		local all, own = ac.companion_squads, {}
-		for id, squad in pairs(all) do
-			if not squad or (control_peer(squad) == P.self_peer() and not far_leader(id)) then own[id] = squad end
+		local all, own = ac.companion_squads, own_of(ac.companion_squads)
+		ac.companion_squads = own
+		local res = { pcall(f, ...) }
+		ac.companion_squads = all
+		if not res[1] then error(res[2], 0) end
+		return unpack(res, 2)
+	end
+end
+
+-- Fair Fast Travel's bring_companions_to_actor (its time event after a trip on the same map) walks the stock table: on the host that holds
+-- the squads of every player, and a client's would be dragged to the host. It sees the host's own; a client's machine none (its table is
+-- no truth, bring_mine asks the authority). Read through the module at call time (game_fast_travel.bring_companions_to_actor), so the
+-- wrapper goes on in the update too, over a later patch.
+local function wrap_fft()
+	local fft = rawget(_G, "game_fast_travel")
+	local f = type(fft) == "table" and fft.bring_companions_to_actor
+	if type(f) ~= "function" or f == orig.fft_wrapped then return end
+	local function wrapped(...)
+		local ac = axr_companions
+		local all = ac and ac.companion_squads
+		if type(all) ~= "table" then return f(...) end
+		local own
+		if P.client_live() then
+			own = {}
+		elseif host_on and (next(leaders) ~= nil or next(far) ~= nil) then
+			own = own_of(all)
+		else
+			return f(...)
 		end
 		ac.companion_squads = own
 		local res = { pcall(f, ...) }
@@ -892,6 +939,8 @@ local function own_squads_only(ac, name)
 		if not res[1] then error(res[2], 0) end
 		return unpack(res, 2)
 	end
+	orig.fft_wrapped = wrapped
+	fft.bring_companions_to_actor = wrapped
 end
 
 -- Is this companion led by the player the code runs for: the one under with_identity, else the host?
@@ -1410,6 +1459,127 @@ local function on_recall(t, from)
 	end
 end
 
+-------------------------------------------------------------------------------
+-- A trip on one's own map: the squads he leads come to him (bring_mine, npc.comp_bring)
+-------------------------------------------------------------------------------
+-- FFT's switch on this machine (squad_local_travel, a trip's nosquad): its own answer, falsy is "no" as in bring_companions_to_actor.
+-- Without FFT the companions come along.
+local function fft_allows()
+	local fft = rawget(_G, "game_fast_travel")
+	local f = type(fft) == "table" and fft.companions_travel_with_actor
+	if type(f) ~= "function" then return true end
+	local ok, v = pcall(f)
+	if not ok then return true end
+	return v and true or false
+end
+
+-- The squads character `who` leads here; nil who: the squads of this process's player (own_of: no client leads them).
+local function squads_led_by(who)
+	local list = {}
+	local cs = axr_companions and axr_companions.companion_squads
+	if type(cs) ~= "table" then return list end
+	for id, squad in pairs(who == nil and own_of(cs) or cs) do
+		if squad and (who == nil or (leaders[id] == who and not far_leader(id))) then list[#list + 1] = squad end
+	end
+	return list
+end
+
+-- Puts the squad at `at` (an AI node's point by the leader `pos`), as the stock's sim_squad_scripted:set_squad_position and FFT do: an
+-- online member by game_object:set_npc_position, so the NPC itself stands there. Not TeleportSquad: alife():teleport_object takes an online
+-- object offline first (alife_update_manager.cpp, CALifeUpdateManager::teleport_object) and the NPC would vanish until it switched back
+-- online. An offline squad: force_change_position, as FFT. A squad that may not follow, a hostage, another level's: it stays; a member
+-- told to wait or already within BRING_NEAR_SQR of him stays. -> members moved
+local function bring_squad(squad, pos, at, lvid)
+	if not may_follow(squad) then return 0 end
+	local tm = rawget(_G, "axr_task_manager")
+	if tm and type(tm.hostages_by_id) == "table" and tm.hostages_by_id[squad:commander_id()] then return 0 end
+	local _, there = level_of_squad(squad)
+	if there and there ~= level.name() then return 0 end
+	if squad.online == false then
+		if squad.force_change_position then squad:force_change_position(at) end
+		return 1
+	end
+	local ssq = rawget(_G, "sim_squad_scripted")
+	local reset = ssq and ssq.reset_animation
+	local off = db.offline_objects
+	local n = 0
+	for k in squad:squad_members() do
+		local st = db.storage[k.id]
+		local o = st and st.object or level.object_by_id(k.id)
+		if o then
+			if not o:has_info("npcx_beh_wait") and o:position():distance_to_sqr(pos) > BRING_NEAR_SQR then
+				if type(off) == "table" then
+					off[k.id] = off[k.id] or {}
+					off[k.id].level_vertex_id = lvid
+				end
+				if type(reset) == "function" then pcall(reset, o) end
+				o:set_npc_position(at)
+				n = n + 1
+			end
+		elseif k.object then
+			k.object.position = at
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- Brings the squads to character `body` where this process sees it.
+local function bring_to(body, list)
+	local pos = body:position()
+	local lvid = body:level_vertex_id()
+	local at = level.vertex_position(lvid) or pos
+	for _, squad in ipairs(list) do
+		stats.bring = stats.bring + bring_squad(squad, pos, at, lvid)
+	end
+end
+
+-- The authority: a player's word. Nothing of it is read: the sender comes from the transport, his squads and his place from this process.
+local function host_on_bring(_, from)
+	local who = P.avatar_of_peer(from)
+	if not who or #squads_led_by(who) == 0 then return end -- he leads nothing: no cost, no line
+	local now = time_global()
+	if bring_last[from] and now - bring_last[from] < BRING_AGAIN_MS then
+		stats.refused = stats.refused + 1
+		return
+	end
+	local body = level.object_by_id(who)
+	if not body then return end
+	bring_last[from] = now
+	local p = body:position()
+	bring_wait[from] = { at = now, who = who, x = p.x, y = p.y, z = p.z }
+end
+
+-- The authority: its view of a sender's character lags his teleport by a snapshot. A word waits until that view moved, or BRING_WAIT_MS.
+local function bring_tick()
+	local now = time_global()
+	for peer, w in pairs(bring_wait) do
+		local body = level.object_by_id(w.who)
+		if not body or P.peer_of(w.who) ~= peer then
+			bring_wait[peer] = nil
+		else
+			local p = body:position()
+			local dx, dy, dz = p.x - w.x, p.y - w.y, p.z - w.z
+			if dx * dx + dy * dy + dz * dz >= BRING_JUMP_SQR or now - w.at >= BRING_WAIT_MS then
+				bring_wait[peer] = nil
+				bring_to(body, squads_led_by(w.who))
+			end
+		end
+	end
+end
+
+-- For coop_economy_travel: the player of this process just moved on his map by a trip; his following squads come to him. Any machine, in
+-- or out of a session: the authority of his level (the host) moves them at once, a client asks it (npc.comp_bring); a map server's and a
+-- dedicated host's actor is nobody, single player is FFT's own.
+function bring_mine()
+	if not (installed and P and P.active()) or P.actor_is_nobody() or not fft_allows() then return end
+	if P.client_live() then
+		P.send(EV_BRING, {}, 0)
+	elseif P.is_world_server() and db.actor then
+		bring_to(db.actor, squads_led_by(nil))
+	end
+end
+
 local function patch_dismiss()
 	local ac = axr_companions
 	local f = ac and ac.dismiss_special_squad
@@ -1624,6 +1794,14 @@ local function actor_on_update()
 	next_tick = now + 250
 	host_on = installed and P.host_with_clients()
 	wrap_teleport()
+	wrap_fft()
+	if next(bring_wait) ~= nil then
+		local ok, err = pcall(bring_tick)
+		if not ok then
+			bring_wait = {}
+			report("bring", err)
+		end
+	end
 	-- a map server goes on with nobody left: a leader who just went is off its list of players, and his squad has to go after him
 	if (host_on or (installed and P.is_map_server() and split_levels() ~= nil)) and now >= next_refresh then
 		next_refresh = now + 2000
@@ -1680,9 +1858,9 @@ end
 function print_status()
 	local n = 0
 	for _ in pairs(leaders) do n = n + 1 end
-	log("installed %s | squads led by clients %d | orders out %d in %d refused %d, recruits without a talk %d | flags out %d in %d | follow ticks %d, recalls %d | control changed %d refused %d | go-to %d | errors %d",
+	log("installed %s | squads led by clients %d | orders out %d in %d refused %d, recruits without a talk %d | flags out %d in %d | follow ticks %d, recalls %d | control changed %d refused %d | go-to %d | brought after a trip %d | errors %d",
 		tostring(installed), n, stats.cmd_out, stats.cmd_in, stats.refused, stats.refused_talk, stats.info_out, stats.info_in,
-		stats.follow, stats.recall, stats.lead, stats.lead_refused, stats.go, P.error_count(TAG))
+		stats.follow, stats.recall, stats.lead, stats.lead_refused, stats.go, stats.bring, P.error_count(TAG))
 end
 
 function on_game_start()
@@ -1710,6 +1888,8 @@ function on_game_start()
 	P.on(EV_ADOPT, on_adopt, nil, TAG)
 	P.on(EV_DROP, on_drop, nil, TAG)
 	P.on(EV_RECALL, on_recall, nil, TAG)
+	P.on(EV_BRING, host_on_bring, "host", TAG) -- with split levels the world server passes it to the map server of his level
+	pcall(wrap_fft)
 	local share = rawget(_G, "coop_levels_share") or coop_levels_share
 	if share then
 		share.up("comp_leaders", leaders_here, leaders_heard)
@@ -1726,3 +1906,4 @@ function _set_host_on(v) host_on = v end
 function _follow_tick() follow_tick() end
 function _leaders() return leaders end
 function _stats() return stats end
+function _bring_wait() return bring_wait end

@@ -718,7 +718,7 @@
 	<string id="st_coop_game_trader_rep_mean_recent">
 		<text>Mean of the last 72 game hours</text>
 	</string>
-	<string id="st_coop_game_travel_time">
+	<string id="st_coop_game_travel_takes_time">
 		<text>Travel takes game time</text>
 	</string>
 	<string id="st_coop_game_vote_timeout">
@@ -750,5 +750,8 @@
 	</string>
 	<string id="st_coop_game_death_mode_rollback">
 		<text>Back to the last save</text>
+	</string>
+	<string id="st_coop_game_transition_fare">
+		<text>Fare for going with the group from afar</text>
 	</string>
 </string_table>

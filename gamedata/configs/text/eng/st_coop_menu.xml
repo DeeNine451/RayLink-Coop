@@ -473,13 +473,13 @@
 		<text>Fast travel as a group</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_party_fast_travel_desc">
-		<text>Fast travel and guides need every player nearby; the whole group moves together.</text>
+		<text>When a player fast travels or goes with a guide, the others on that map are offered to go with him for nothing: only he pays. Off: everybody travels by himself. With split levels one player always travels alone.</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_gather_radius">
 		<text>Gathering radius, m</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_gather_radius_desc">
-		<text>How close the players must stand for a group fast travel.</text>
+		<text>Within this distance of an exit (or of the one who called for a trip to another map) going with the group is free; farther it has a fare, when the fare is on.</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_sleep_rule">
 		<text>Sleeping</text>
@@ -517,11 +517,11 @@
 	<string id="ui_mm_coop_coop_session_teleport_radius_desc">
 		<text>Players this close to a story teleport go along.</text>
 	</string>
-	<string id="ui_mm_coop_coop_session_travel_time">
+	<string id="ui_mm_coop_coop_session_travel_takes_time">
 		<text>Travel takes time</text>
 	</string>
-	<string id="ui_mm_coop_coop_session_travel_time_desc">
-		<text>A group travel moves the clock once, on the host.</text>
+	<string id="ui_mm_coop_coop_session_travel_takes_time_desc">
+		<text>Off: fast travel and guides do not move the game clock, hunger and tiredness do not grow. On: a group travel moves the clock once, on the host.</text>
 	</string>
 	<string id="ui_mm_coop_coop_session_max_skip_hours">
 		<text>Longest time skip, h</text>
@@ -810,5 +810,11 @@
 	</string>
 	<string id="st_coop_menu_op_refused">
 		<text>The server's autosaves are not available: %s</text>
+	</string>
+	<string id="ui_mm_coop_coop_session_transition_fare">
+		<text>Fare for going with the group from afar</text>
+	</string>
+	<string id="ui_mm_coop_coop_session_transition_fare_desc">
+		<text>When an ally waits at an exit or calls for a trip to another map, a player far from him pays for his yes: the fast travel mod's price for that distance (1.7 RU a metre without the mod). Within the gather radius it is free. The money is taken when the group goes. Off: a yes from anywhere on the map is free.</text>
 	</string>
 </string_table>

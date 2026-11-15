@@ -47,6 +47,8 @@ local function stubs(W)
 	}
 	W.dialogs_mlr = { marsh_post_guid = function() W.db.actor:set_actor_position(vec(-294, 0, 21)) W.GUIDED = (W.GUIDED or 0) + 1 end }
 	W.ka_travel = { travel_to_zaton = function() W.level.change_game_time(0, 3, 10) W.KA = true end }
+	-- the companions' script: its word for "the player of this machine just moved by a trip" (test_companion_trip.lua has the rest)
+	W.coop_npc_companions = { bring_mine = function() W.BROUGHT = (W.BROUGHT or 0) + 1 end }
 end
 
 local function setup(nclients)
@@ -90,6 +92,9 @@ do
 	check(POS[0].x == hx and POS[2].x == 300, "nobody follows (the others are on their own maps)")
 	check(H.CLOCK == 0, "a solo travel does not move the shared clock")
 	for _, s in ipairs(A.SENT) do check(s.name ~= "economy.tp", "no group teleport is sent") end
+	-- owner 2026-11-16, over the mod's line "your companions travel with you unless you asked them to wait": "check that it works"
+	check(A.BROUGHT == 1, "the traveller's companions are called after him, on split levels too (" .. tostring(A.BROUGHT) .. ")")
+	check(H.BROUGHT == nil and B.BROUGHT == nil, "nobody else's are")
 
 	A.TRAVELLED = nil
 	A.pda.property_box_clicked(row("Backpack travel to Stash (80 m)"))
@@ -116,35 +121,47 @@ do
 end
 
 -------------------------------------------------------------------------------
-section("no split levels: the group rule holds for backpack and guide rows as for fast travel")
+-- Owner 2026-11-16: on a shared map every other player is offered the trip for the traveller's fare; nobody has to stand near.
+section("no split levels: every row of Fair Fast Travel is a trip the others are offered")
 do
 	SPLIT = false
 	local H, A, B = setup(2)
 	check(A.coop_economy_group.travel_as_group() == true, "a travel is a group travel")
 	POS[2] = { x = 300, y = 0, z = 0 }
 	for _, text in ipairs({ "Fast travel to Bar (1 km)", "Backpack travel to Stash (80 m)", "Hire guide to Bar (1.2 km)" }) do
-		A.TRAVELLED, A.TIPS = nil, {}
+		A.TRAVELLED, A.TIPS, H.BOX, B.BOX = nil, {}, nil, nil
+		A.db.actor:set_actor_position(vec(0, 0, 0))
+		POS[0] = { x = 3, y = 0, z = 0 }
+		H.NOW = H.NOW + 20000
+		for _, W in pairs(WORLDS) do W.NOW = H.NOW end
 		A.pda.property_box_clicked(row(text))
-		check(A.TRAVELLED == nil and has(A.TIPS, "boris"), text .. ": not gathered, refused, the far player named")
+		check(A.TRAVELLED == 1 and POS[1].x == 500 and not has(A.TIPS, "boris"), text .. ": he goes, nobody has to be near")
+		deliver_all()
+		check(POS[0].x == 3 and POS[2].x == 300, text .. ": nobody is moved unasked")
+		check(H.BOX ~= nil and B.BOX ~= nil, text .. ": the host and the far player are offered the trip")
 	end
-	POS[2] = { x = 6, y = 0, z = 0 }
+	check(A.BROUGHT == 3, "each of the three trips called the traveller's companions after him (" .. tostring(A.BROUGHT) .. ")")
+	check(H.BROUGHT == nil and B.BROUGHT == nil, "an offer alone moves nobody's companions")
+	check(tostring(B.BOX.txt):find("guide") ~= nil, "a hired guide's offer says so (" .. tostring(B.BOX.txt) .. ")")
+	check(H.CLOCK == 0, "a trip takes no game time by default (" .. H.CLOCK .. ")")
+	for _, W in pairs(WORLDS) do W.coop_economy_core.RULES.travel_takes_time = true end -- a world where it does
 	H.CLOCK = 0
-	A.pda.property_box_clicked(row("Hire guide to Bar (1.2 km)"))
-	check(A.TRAVELLED == 1 and POS[1].x == 500, "gathered: the guide takes the traveller")
-	check(A.REFUSED_CGT == 0, "the clock call goes to the host instead of the engine")
-	deliver_all()
-	check(H.CLOCK == TRAVEL_MIN and math.abs(POS[0].x - 500) < 1 and math.abs(POS[2].x - 500) < 1,
-		"the host moved the clock once and the group followed (" .. H.CLOCK .. ")")
 	H.NOW = H.NOW + 20000
 	for _, W in pairs(WORLDS) do W.NOW = H.NOW end
-	POS[0], POS[2] = { x = 3, y = 0, z = 0 }, { x = 6, y = 0, z = 0 }
 	A.db.actor:set_actor_position(vec(0, 0, 0))
-	A.pda.property_box_clicked(row("Backpack travel to Stash (80 m)"))
+	H.BOX, B.BOX = nil, nil
+	A.pda.property_box_clicked(row("Hire guide to Bar (1.2 km)"))
+	check(A.REFUSED_CGT == 0, "the clock call goes to the host instead of the engine")
 	deliver_all()
-	check(math.abs(POS[0].x - 500) < 1 and math.abs(POS[2].x - 500) < 1, "the group follows a backpack travel")
+	H.BOX.ok() B.BOX.ok() deliver_all()
+	check(H.CLOCK == TRAVEL_MIN and math.abs(POS[0].x - 500) < 1 and math.abs(POS[2].x - 500) < 1,
+		"the host moved the clock once, and both who said yes are there (" .. H.CLOCK .. ")")
+	check(H.BROUGHT == 1 and B.BROUGHT == 1, "who said yes to another's trip takes his own companions along")
+	local brought = A.BROUGHT
 	A.TRAVELLED = nil
 	A.pda.property_box_clicked(row("Open"))
 	check(A.TRAVELLED == nil, "an entry that is no travel passes through")
+	check(A.BROUGHT == brought, "and calls no companions")
 end
 
 -------------------------------------------------------------------------------
@@ -171,7 +188,9 @@ for _, split in ipairs({ true, false }) do
 	if split then
 		check(H.CLOCK == 0, "with split levels a solo travel moves no shared clock")
 	else
-		check(H.CLOCK == TRAVEL_MIN and math.abs(POS[0].x - 120) < 1, "with one level the group follows, the clock moved once")
+		check(H.CLOCK == 0 and H.BOX ~= nil, "with one level the host is offered the trip; the clock stays (a trip takes no time by default)")
+		H.BOX.ok() deliver_all()
+		check(math.abs(POS[0].x - 120) < 1, "he said yes: he stands on the pin too")
 	end
 	A.NOW = A.NOW + 20000
 	POS[0], POS[1] = { x = 3, y = 0, z = 0 }, { x = 2, y = 0, z = 0 }

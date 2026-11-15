@@ -82,4 +82,16 @@
 	<string id="st_coop_transition_feed_consent">
 		<text>%s goes with the group to %s</text>
 	</string>
+	<string id="st_coop_transition_fare_hint">
+		<text>%s . %d RU</text>
+	</string>
+	<string id="st_coop_transition_fare_poor">
+		<text>to go with the group: %d RU, you have %d</text>
+	</string>
+	<string id="st_coop_transition_fare_poor_tip">
+		<text>Going with the group from here costs %d RU, you have %d. Come closer: it gets cheaper, and by the exit it is free.</text>
+	</string>
+	<string id="st_coop_transition_fare_paid">
+		<text>The way with the group cost you %d RU.</text>
+	</string>
 </string_table>

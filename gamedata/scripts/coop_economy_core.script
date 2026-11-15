@@ -25,13 +25,19 @@ local math_floor, math_huge = math.floor, math.huge
 -- Session rules. Defaults; the host sets them through coop_settings.rule(key) when that exists.
 -------------------------------------------------------------------------------
 RULES = {
-	party_fast_travel = true, -- fast travel / guides need everyone within gather_radius; the group moves together
-	gather_radius = 20, -- m
+	party_fast_travel = true, -- a trip on a shared map is offered to the other players of that map (coop_economy_travel)
+	gather_radius = 20, -- m: within this of an exit (or of the one who asked for a trip) going with the group is free
+	-- a yes to a level change from farther than gather_radius has a fare, Fair Fast Travel's own for that distance
+	-- (coop_transition_fare; owner 2026-11-16: "so that nobody abuses the transitions"); off: a yes from anywhere is free
+	transition_fare = true,
 	sleep_rule = "vote", -- host | gather | vote | safe_or_vote (R-10.2)
 	sleep_radius = 6, -- m, sleep_rule = gather
 	vote_timeout = 30, -- s, an unanswered vote is a "no"
 	teleport_radius = 50, -- m, a scripted teleport takes the players around its trigger along (R-4.4)
-	travel_time = true, -- a group travel moves the clock once, on the host
+	-- A trip (fast travel, backpack travel, a guide) takes game time: a group travel moves the clock once, on the host. Off, a trip
+	-- in a session takes none (owner 2026-11-16). The rule was travel_time and on by default: under the new name a world made
+	-- before, and a machine that kept the old option, start with it off as well.
+	travel_takes_time = false,
 	max_skip_hours = 48, -- largest time skip the host accepts from a player
 	money_transfer = true, -- players may give each other money (R-6.7)
 	max_money_transfer = 1000000,

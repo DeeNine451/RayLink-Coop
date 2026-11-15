@@ -163,7 +163,7 @@ for _, with_mcm in ipairs({ false, true }) do
 	local n_world = #vw.rows.world
 	check(n_world == (with_mcm and 18 or 15), "world: " .. n_world .. " rows" .. (with_mcm and " (the 3 of the dynamic anomalies addon among them)" or ""))
 end
-check(#expected("death") == 13 and #expected("party") == 21 and #expected("saves") == 2, "13 / 21 / 2 rows in death / party / saves")
+check(#expected("death") == 13 and #expected("party") == 22 and #expected("saves") == 2, "13 / 22 / 2 rows in death / party / saves")
 
 print("== a row: caption, combo, entries")
 v, dlg = build()
@@ -178,7 +178,7 @@ check(texts(v:row("c|coop_death_drop").list) == "st_coop_game_death_drop_drop|st
 	"loss: four entries, keep last")
 check(texts(v:row("c|coop_friendly_fire").list) == "st_coop_game_on|st_coop_game_off" and v:row("c|coop_friendly_fire").list.text == "st_coop_game_on",
 	"a check is a combo of on / off, on by default")
-check(v:row("o|coop/coop_session/travel_time").list.text == "st_coop_game_on", "a rule of the party tab starts at its default")
+check(v:row("o|coop/coop_session/travel_takes_time").list.text == "st_coop_game_off", "a rule of the party tab starts at its default (a trip takes no time)")
 check(v:row("o|alife/event/emission_frequency") and v:row("o|alife/event/emission_frequency").list.text == "st_coop_game_emission_frequency_24",
 	"emission frequency starts at 24 h")
 check(v:row("faction") == nil and v:row("w|story") == nil and v:row("w|routes") == nil, "the stock controls of the screen have no row")
@@ -189,7 +189,7 @@ print("== values of the machine")
 v, dlg = build({ values = {
 	["c|coop_death_mode"] = "hardcore", ["c|coop_death_drop"] = "corpse", ["c|coop_autosave_interval"] = "15",
 	["c|coop_death_share"] = "75.00000", ["c|coop_respawn_delay"] = "45", ["c|coop_bleedout"] = "abc",
-	["o|alife/event/emission_frequency"] = "48", ["c|coop_friendly_fire"] = "0", ["o|coop/coop_session/travel_time"] = "false",
+	["o|alife/event/emission_frequency"] = "48", ["c|coop_friendly_fire"] = "0", ["o|coop/coop_session/travel_takes_time"] = "false",
 	["c|coop_revive_health"] = "0.500000",
 } })
 check(v:row("c|coop_death_mode").list.text == "st_coop_game_death_mode_hardcore", "hardcore is shown")
@@ -204,7 +204,7 @@ check(texts(rd.list) == "st_coop_game_respawn_delay_0|st_coop_game_respawn_delay
 	and rd.list.text == "45 s", "45 s: an extra entry with its unit: " .. texts(rd.list))
 check(v:row("c|coop_bleedout").list.text == "st_coop_game_bleedout_60", "a value that is no number shows the default")
 check(v:row("o|alife/event/emission_frequency").list.text == "st_coop_game_emission_frequency_48", "48 h is a list entry")
-check(v:row("c|coop_friendly_fire").list.text == "st_coop_game_off" and v:row("o|coop/coop_session/travel_time").list.text == "st_coop_game_off",
+check(v:row("c|coop_friendly_fire").list.text == "st_coop_game_off" and v:row("o|coop/coop_session/travel_takes_time").list.text == "st_coop_game_off",
 	"checks: 0 and false both read as off")
 check(v:row("c|coop_revive_health").list.text == "st_coop_game_revive_health_0_5", "0.500000 is the 0.5 entry")
 check(sc.item("c|coop_autosave_interval").values[#sc.item("c|coop_autosave_interval").values][1] == 0, "the catalog keeps 'off' last")
@@ -222,10 +222,10 @@ pick(v, dlg, "c|coop_autosave_interval", 7)
 check(v.values["c|coop_autosave_interval"] == "0", "autosave: off -> '0'")
 pick(v, dlg, "c|coop_friendly_fire", 2)
 check(v.values["c|coop_friendly_fire"] == "0", "a console check -> '0'")
-pick(v, dlg, "o|coop/coop_session/travel_time", 2)
-check(v.values["o|coop/coop_session/travel_time"] == "false", "an axr check -> 'false'")
-pick(v, dlg, "o|coop/coop_session/travel_time", 1)
-check(v.values["o|coop/coop_session/travel_time"] == "true", "and back -> 'true'")
+pick(v, dlg, "o|coop/coop_session/travel_takes_time", 2)
+check(v.values["o|coop/coop_session/travel_takes_time"] == "false", "an axr check -> 'false'")
+pick(v, dlg, "o|coop/coop_session/travel_takes_time", 1)
+check(v.values["o|coop/coop_session/travel_takes_time"] == "true", "and back -> 'true'")
 pick(v, dlg, "c|coop_bleedout", 1)
 check(v.values["c|coop_bleedout"] == "30", "a number: 30")
 pick(v, dlg, "c|coop_revive_health", index_of(sc.item("c|coop_revive_health"), 0.5))
@@ -348,7 +348,7 @@ for _, name in ipairs(sc.CVARS) do if out["c|" .. name] == nil then missing[#mis
 check(#missing == 0, "all 20 console variables are in (" .. table.concat(missing, ",") .. ")")
 local rules = 0
 for key, raw in pairs(out) do if key:find("^o|coop/coop_session/") then rules = rules + 1; check(type(raw) == "string", key .. " is a string") end end
-check(rules == 15, "all 15 session rules are in (" .. rules .. ")")
+check(rules == 16, "all 16 session rules are in (" .. rules .. ")")
 check(out["o|coop/coop_session/party_fast_travel"] == "true" and out["o|coop/coop_session/gather_radius"] == "20"
 	and out["c|coop_hardcore_new_kit"] == "0" and out["c|coop_death_share"] == "100", "defaults fill the rest, booleans as 1/0 and true/false")
 check(out["o|alife/general/alife_stalker_pop"] == "0.5" and out["o|alife/event/emission_state"] == "true", "world options too")

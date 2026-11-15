@@ -58,6 +58,8 @@ local function stock_stubs(W)
 	W.txr_routes = { open_route = function(a, b, no_msg) W.ROUTES[a .. "-" .. b] = no_msg and "silent" or "msg" end }
 	W.dialogs_mlr = { marsh_post_guid = function() W.db.actor:set_actor_position(vec(-294, 0, 21)) end }
 	W.ka_travel = { travel_to_zaton = function() W.level.change_game_time(0, 3, 10) W.KA = true end, other = 1 }
+	-- the companions' script: "the player of this machine just moved by a trip" (the rest is test_companion_trip.lua)
+	W.coop_npc_companions = { bring_mine = function() W.BROUGHT = (W.BROUGHT or 0) + 1 end }
 	-- warfare
 	W.warfare = { distance_to_xz_sqr = function(a, b) return (b.x - a.x) ^ 2 + (b.z - a.z) ^ 2 end }
 	local stw = { manual_point = nil }
@@ -348,46 +350,154 @@ do
 end
 
 -------------------------------------------------------------------------------
-section("travel: fast travel as a group")
+-- Owner 2026-11-16: "in an ordinary co-op without split maps every player is offered to travel for the fare of the one who
+-- travels; with split maps and a server one player travels; the same with guides". Before that a trip was refused until the
+-- whole group stood within the gather radius, and those who stood there were moved without being asked.
+section("travel: fast travel in a shared world: everybody is offered the trip")
 do
 	local H, A, B = setup(2)
+	-- the world of this section is one where a trip takes game time (the rule is off by default, the section below)
+	for _, W in pairs(WORLDS) do W.coop_economy_core.RULES.travel_takes_time = true end
 	local ui = { GetSelectedItem = function() return { GetTextItem = function() return { GetText = function() return "Travel to Bar" end } end } end }
+	POS[0] = { x = 6, y = 0, z = 0 }
 	POS[2] = { x = 300, y = 0, z = 0 }
 	A.pda.property_box_clicked(ui)
-	check(A.TRAVELLED == nil and has(A.TIPS, "boris"), "not gathered: travel refused, far player named")
-	POS[2] = { x = 6, y = 0, z = 0 }
-	A.pda.property_box_clicked(ui)
-	check(A.TRAVELLED == 1 and POS[1].x == 500, "gathered: the traveller moves")
+	check(A.TRAVELLED == 1 and POS[1].x == 500, "the traveller goes at once, wherever the others stand")
 	check(A.REFUSED_CGT == 0, "the traveller's clock call goes to the host instead of the engine")
 	deliver_all()
 	check(H.CLOCK == 150, "the host applied the travel time once (" .. H.CLOCK .. ")")
-	check(math.abs(POS[0].x - 500) < 1 and math.abs(POS[2].x - 500) < 1, "host and boris followed")
+	check(POS[0].x == 6 and POS[2].x == 300, "nobody is moved without his yes, not even the one who stood next to him")
+	check(H.BOX ~= nil and tostring(H.BOX.txt):find("anna") ~= nil, "the host is offered the trip (" .. tostring(H.BOX and H.BOX.txt) .. ")")
+	check(B.BOX ~= nil and tostring(B.BOX.txt):find("anna") ~= nil, "boris, 300 m away, is offered it too")
+	check(A.BOX == nil, "the traveller himself is asked nothing")
+	H.BOX.ok() deliver_all()
+	check(math.abs(POS[0].x - 500) < 1, "the host said yes: he is at the destination")
+	B.BOX.cancel() deliver_all()
+	check(POS[2].x == 300, "boris said no: he stays")
+	-- an offer nobody answers goes away with the vote's time; a yes after that moves nobody
+	POS[0], POS[1] = { x = 6, y = 0, z = 0 }, { x = 0, y = 0, z = 0 }
+	H.BOX, B.BOX, H.BOX_HIDDEN = nil, nil, nil
+	H.NOW = H.NOW + 10000
+	A.pda.property_box_clicked(ui)
+	deliver_all()
+	local late = H.BOX
+	check(late ~= nil, "a second trip: a second offer")
+	for _ = 1, 70 do tick(H, 600) end
+	check(H.BOX_HIDDEN == true, "no answer within the vote's time: the offer closes")
+	late.ok() deliver_all()
+	check(POS[0].x == 6, "a yes after the offer closed moves nobody")
+	-- the destination is where he already stands: no window
+	POS[0], POS[1] = { x = 500, y = 0, z = 500 }, { x = 0, y = 0, z = 0 }
+	H.BOX = nil
+	H.NOW = H.NOW + 10000
+	A.pda.property_box_clicked(ui)
+	deliver_all()
+	check(H.BOX == nil, "a player who stands at the destination is not asked")
+	POS[0], POS[1], POS[2] = { x = 6, y = 0, z = 0 }, { x = 0, y = 0, z = 0 }, { x = 6, y = 0, z = 0 }
+	B.BOX = nil
+	local clock = H.CLOCK
+	H.NOW = H.NOW + 10000
+	A.pda.property_box_clicked(ui)
 	deliver_all()
 	A.pda.property_box_clicked(ui)
 	deliver_all()
-	check(H.CLOCK == 150, "a second travel within 8 s does not move the clock again")
+	check(H.CLOCK == clock + 150, "a second travel within 8 s does not move the clock again")
 	-- party rule off: solo travel, no clock
 	for _, W in pairs(WORLDS) do W.coop_economy_core.RULES.party_fast_travel = false end
 	POS[2] = { x = 900, y = 0, z = 0 }
 	H.NOW = H.NOW + 10000
 	local hx = POS[0].x
+	local trips, clock_off = A.TRAVELLED, H.CLOCK
+	H.BOX, B.BOX = nil, nil
 	A.db.actor:set_actor_position(vec(0, 0, 0))
 	A.pda.property_box_clicked(ui)
 	deliver_all()
-	check(A.TRAVELLED == 3 and POS[0].x == hx and H.CLOCK == 150, "party rule off: nobody follows, the shared clock stays")
+	check(A.TRAVELLED == trips + 1 and POS[0].x == hx and H.CLOCK == clock_off, "party rule off: he goes alone, the shared clock stays")
+	check(H.BOX == nil and B.BOX == nil, "party rule off: nobody is asked")
 	for _, W in pairs(WORLDS) do W.coop_economy_core.RULES.party_fast_travel = true end
 	-- not a travel entry: untouched
 	local other = { GetSelectedItem = function() return { GetTextItem = function() return { GetText = function() return "Open" end } end } end }
 	A.pda.property_box_clicked(other)
-	check(A.TRAVELLED == 3, "other map menu entries pass through")
-	-- guides
+	check(A.TRAVELLED == trips + 1, "other map menu entries pass through")
+	-- guides: the same offer
 	POS = { [0] = { x = 0, y = 0, z = 0 }, [1] = { x = 3, y = 0, z = 0 }, [2] = { x = 5, y = 0, z = 0 } }
+	A.BOX, B.BOX = nil, nil
 	H.dialogs_mlr.marsh_post_guid()
 	deliver_all()
-	check(POS[0].x == -294 and math.abs(POS[1].x + 294) < 1 and math.abs(POS[2].x + 294) < 1, "marsh guide of the host moves the group")
+	check(POS[0].x == -294 and POS[1].x == 3 and POS[2].x == 5, "the host's marsh guide takes the host; the others are asked")
+	check(A.BOX ~= nil and B.BOX ~= nil, "both clients are offered the guide's trip")
+	A.BOX.ok() deliver_all()
+	check(math.abs(POS[1].x + 294) < 1 and POS[2].x == 5, "anna said yes and is there, boris is where he was")
+	local clock_ka = H.CLOCK
 	A.ka_travel.travel_to_zaton()
 	deliver_all()
-	check(A.KA and H.CLOCK == 150 + 190 and A.REFUSED_CGT == 0, "guide to another level: time cost on the host")
+	check(A.KA and H.CLOCK == clock_ka + 190 and A.REFUSED_CGT == 0, "guide to another level: time cost on the host")
+end
+
+-- Owner 2026-11-16, over Fair Fast Travel's tutorial line "time passes while you travel, you may end up hungry or tired": "time
+-- must not run ahead on a travel, let only the move work, and hunger and the rest with it". The rule travel_takes_time is off
+-- unless the world's settings switch it on; it had another name (travel_time) and was on by default.
+section("travel: a trip takes no game time unless the world says so")
+do
+	local H, A, B = setup(2)
+	local ui = { GetSelectedItem = function() return { GetTextItem = function() return { GetText = function() return "Travel to Bar" end } end } end }
+	check(A.coop_economy_core.rule("travel_takes_time") == false, "the rule is off by default")
+	check(A.coop_economy_group.travel_takes_time() == false and H.coop_economy_group.travel_takes_time() == false, "for other scripts: travel_takes_time()")
+	-- a client's trip
+	A.pda.property_box_clicked(ui)
+	deliver_all()
+	check(A.TRAVELLED == 1 and POS[1].x == 500, "the client travels")
+	check(H.CLOCK == 0 and A.REFUSED_CGT == 0, "his trip moved no clock: not the host's, and the engine was not asked (" .. H.CLOCK .. ")")
+	for _, s in ipairs(A.SENT) do check(s.name ~= "economy.skip", "no time skip is sent for a trip") end
+	check(not has(H.TIPS, "passed") and not has(B.TIPS, "passed"), "nobody is told that time passed")
+	-- the host's own trip
+	H.NOW = H.NOW + 20000
+	for _, W in pairs(WORLDS) do W.NOW = H.NOW end
+	H.pda.property_box_clicked(ui)
+	deliver_all()
+	check(H.TRAVELLED == 1 and H.CLOCK == 0, "the host's own trip moves no clock either (" .. H.CLOCK .. ")")
+	check(not has(A.TIPS, "passed"), "and the clients are told nothing about time")
+	-- a guide to another level, by a client and by the host
+	A.ka_travel.travel_to_zaton()
+	deliver_all()
+	check(A.KA and H.CLOCK == 0 and A.REFUSED_CGT == 0, "a client's guide to another level: no time")
+	H.ka_travel.travel_to_zaton()
+	deliver_all()
+	check(H.KA and H.CLOCK == 0, "the host's guide to another level: no time")
+	-- a wait is no trip: it still moves the clock after the vote
+	wait_item(A, 2)
+	deliver_all()
+	H.BOX.ok() deliver_all()
+	B.BOX.ok() deliver_all()
+	check(H.CLOCK == 120, "a wait the group agreed to still moves the clock (" .. H.CLOCK .. ")")
+
+	-- Fair Fast Travel asks every script before a trip (on_before_fast_travel): with trip.notime it calls no advance_trip_time
+	-- at all: no clock, no paused hunger, no "time was forwarded" for the surges, no forced weather
+	check(A.CB_ADDED and A.CB_ADDED.on_before_fast_travel == true, "the callback of Fair Fast Travel is declared (this script starts before that one)")
+	local function ask(W)
+		local trip = { tt = "ft", ret_value = true }
+		for _, f in ipairs(W.CB.on_before_fast_travel or {}) do f(trip) end
+		return trip
+	end
+	check(ask(A).notime == true and ask(H).notime == true, "in a session a trip of Fair Fast Travel is one without time")
+	check(ask(A).ret_value == true, "and the trip itself is not refused")
+	for _, W in pairs(WORLDS) do W.coop_economy_core.RULES.travel_takes_time = true end
+	check(ask(A).notime == nil and ask(H).notime == nil, "the rule on: the mod's own time of a trip")
+	for _, W in pairs(WORLDS) do W.coop_economy_core.RULES.travel_takes_time = false end
+	H.ACTIVE, A.ACTIVE = false, false
+	check(ask(H).notime == nil and ask(A).notime == nil, "no session: single player, the mod decides")
+	H.ACTIVE, A.ACTIVE = true, true
+end
+
+section("travel: alone on his own machine a host travels as in single player")
+do
+	local H = setup(0)
+	local ui = { GetSelectedItem = function() return { GetTextItem = function() return { GetText = function() return "Travel to Bar" end } end } end }
+	H.pda.property_box_clicked(ui)
+	check(H.TRAVELLED == 1 and H.CLOCK == 150, "nobody else in the session: the stock trip with its time (" .. H.CLOCK .. ")")
+	local trip = { tt = "ft", ret_value = true }
+	for _, f in ipairs(H.CB.on_before_fast_travel or {}) do f(trip) end
+	check(trip.notime == nil, "and Fair Fast Travel keeps its time")
 end
 
 section("travel: stock backpack menu")
@@ -396,11 +506,11 @@ do
 	local ui = { GetSelectedItem = function() return { GetTextItem = function() return { GetText = function() return "Backpack travel" end } end } end }
 	POS[0] = { x = 300, y = 0, z = 0 }
 	A.pda.property_box_clicked(ui)
-	check(A.TRAVELLED == nil, "stock backpack travel waits for a gathered party")
-	POS[0] = { x = 3, y = 0, z = 0 }
-	A.pda.property_box_clicked(ui)
 	deliver_all()
-	check(A.TRAVELLED == 1 and math.abs(POS[0].x - 500) < 1, "translated backpack action moves the group")
+	check(A.TRAVELLED == 1 and POS[0].x == 300, "stock backpack travel: he goes, the far host is not moved")
+	check(H.BOX ~= nil, "the translated backpack action is a trip too: the host is offered it")
+	H.BOX.ok() deliver_all()
+	check(math.abs(POS[0].x - 500) < 1, "yes: the host is at the backpack")
 end
 
 section("travel: story teleport")
@@ -412,6 +522,7 @@ do
 	check(H.STORY_TP == 1 and POS[0].x == 100, "host teleported")
 	check(math.abs(POS[1].x - 100) < 1 and math.abs(POS[1].z - 100) < 1 and A.HEADING ~= nil, "anna (near) followed with the heading")
 	check(POS[2].x == 500, "boris (far) stayed")
+	check(H.BROUGHT == nil and A.BROUGHT == nil, "a story teleport calls nobody's companions (the stock does not either)")
 	-- npc group routes replicated restrictors: no second broadcast
 	H.coop_npc_logic = { deliver = function() return true end, is_replicated = function(id) return id == 77 end }
 	local npc = { id = function() return 77 end }
