@@ -584,6 +584,99 @@ local function send(name, payload, target)
 	return ok and sent == true
 end
 
+-------------------------------------------------------------------------------
+-- Host: a task's audience in a split-levels world (coop_task_audience.script, docs\plans\2026-11-16-task-audience.md C). A task
+-- without a record - every task outside a split-levels world or on an exe without the engine's filter - goes to everybody as
+-- before. The helpers live in `host` and as module functions: the chunk is at Lua's limit of 200 locals (test_engine_header).
+-------------------------------------------------------------------------------
+function task_audience()
+	local m = _G.coop_task_audience
+	return type(m) == "table" and m or nil
+end
+
+-- The record of task `id` ({ k, t = taker character, inn = { [character] = true }, ... }), or nil: everybody sees it.
+function host.aud_rec(id)
+	-- a reward handed out later (a delayed payout) keeps the record of its task's end: the task may be gone from the table
+	if ctx and ctx.task == id and ctx.aud then return ctx.aud end
+	local m = task_audience()
+	return m and type(m.record) == "function" and m.record(id) or nil
+end
+
+-- May `peer` see task `id`? A map server's bridge (peer >= 0x100) always; peer 0 of a dedicated world server is nobody.
+function host.aud_sees(id, peer)
+	local rec = host.aud_rec(id)
+	if not rec then return true end
+	if type(peer) ~= "number" then return false end
+	if peer >= 0x100 then return true end
+	if peer == 0 and api.is_dedicated and api.is_dedicated() == true then return false end
+	local c = character_of(peer)
+	return c ~= nil and rec.inn[c] == true
+end
+
+-- The bridges of the map servers of this world server (coop.levels.map_servers), {} elsewhere.
+function host.bridges()
+	local l = api.levels
+	local ok, list = pcall(function() return l and l.map_servers and l.map_servers() end)
+	local out = {}
+	for _, ms in ipairs(ok and type(list) == "table" and list or {}) do
+		if type(ms) == "table" and type(ms.bridge) == "number" then out[#out + 1] = ms.bridge end
+	end
+	return out
+end
+
+-- Every peer a message of this world goes to one by one: the other players and the bridges.
+function host.aud_peers()
+	local out = {}
+	for _, p in ipairs(players()) do
+		if not p.is_self and type(p.id) == "number" then out[#out + 1] = p.id end
+	end
+	for _, b in ipairs(host.bridges()) do out[#out + 1] = b end
+	return out
+end
+
+-- A message about task `id`: to everybody (-1) without a record, else to each player who may see it and to every bridge.
+function host.send_task(name, payload, id)
+	if not host.aud_rec(id) then return send(name, payload, -1) end
+	for _, p in ipairs(host.aud_peers()) do
+		if host.aud_sees(id, p) then send(name, payload, p) end
+	end
+	return true
+end
+
+-- Characters `ids` of task `id` cut to its audience; none left: its taker. No record: `ids` as it is.
+function host.aud_cut(id, ids)
+	local rec = host.aud_rec(id)
+	if not rec or ids == nil then return ids end
+	local out = {}
+	for _, c in ipairs(ids) do
+		if rec.inn[c] then out[#out + 1] = c end
+	end
+	if #out == 0 and rec.t ~= nil then out[1] = rec.t end
+	return out
+end
+
+-- The reward group (coop_reward_group.list) cut to the audience of task `id`; none left: the taker's member.
+function host.aud_group(id, group)
+	local rec = host.aud_rec(id)
+	if not rec or group == nil then return group end
+	local out = {}
+	for _, m in ipairs(group) do
+		if rec.inn[m.id] then out[#out + 1] = m end
+	end
+	if #out == 0 and rec.t ~= nil then
+		local peer = peer_for_character(rec.t)
+		out[1] = { id = rec.t, peer = peer, in_world = peer ~= nil }
+	end
+	return #out > 0 and out or group
+end
+
+-- The peer of the taker of task `id` (a recipient who is out is replaced by him).
+function host.aud_taker_peer(id)
+	local rec = host.aud_rec(id)
+	local peer = rec and rec.t ~= nil and peer_for_character(rec.t) or nil
+	return peer or host.taker[id] or 0
+end
+
 -- One walk of the pstor for a whole scan: the vars of every task of `info` (task id -> table of vars, see is_task_key; an id
 -- may hold "_" itself, so every cut at a "_" is looked up) and the group's shared vars. With thousands of keys and dozens of
 -- tasks a walk per task every 0.5 s is hundreds of thousands of string operations a second on the host.
@@ -717,25 +810,36 @@ local function host_scan(force)
 			local s = task_record(id, tsk, by_task[id] or {})
 			if force or host.sent[id] ~= s then
 				host.sent[id] = s
-				send(EV_STATE, s, -1)
+				host.send_task(EV_STATE, s, id) -- a task with an audience: only to it and the bridges
 				stats.state_out = stats.state_out + 1
 			end
 		end
 	end
+	local m = task_audience()
 	for id in pairs(host.sent) do
 		if not seen[id] then
 			host.sent[id] = nil
-			send(EV_STATE, pack({ i = id, d = true }), -1)
+			host.send_task(EV_STATE, pack({ i = id, d = true }), id)
 			stats.state_out = stats.state_out + 1
+			if m and m.drop then m.drop(id) end -- the record goes with its task
 		end
 	end
+	if m and m.prune then m.prune(tm.task_info) end
 	host_shared_delta(shared)
 end
 
 -- The digest list in parts: "<list>/<part>/<parts>|id:digest,id:digest...". A client acts on a list that came whole.
 local function host_list(target)
+	local m = task_audience()
+	if target == -1 and m and m.any and m.any() then
+		-- tasks with an audience: a list per player without what he may not see, the bridges get them all
+		for _, p in ipairs(host.aud_peers()) do host_list(p) end
+		return
+	end
 	local list = {}
-	for id, s in pairs(host.sent) do list[#list + 1] = esc(id) .. ":" .. digest(s) end
+	for id, s in pairs(host.sent) do
+		if target == -1 or host.aud_sees(id, target) then list[#list + 1] = esc(id) .. ":" .. digest(s) end
+	end
 	table_sort(list)
 	local parts = math_max(1, math.ceil(#list / LIST_IDS))
 	host.list_gen = host.list_gen + 1
@@ -751,7 +855,8 @@ end
 local function host_send_state(id, peer)
 	local tm = tmgr()
 	local tsk = tm and tm.task_info and tm.task_info[id]
-	local s = tsk ~= nil and task_record(id, tsk) or pack({ i = id, d = true })
+	-- a player out of the task's audience learns nothing of it: for him it is not there
+	local s = tsk ~= nil and host.aud_sees(id, peer) and task_record(id, tsk) or pack({ i = id, d = true })
 	send(EV_STATE, s, peer)
 	stats.state_out = stats.state_out + 1
 end
@@ -761,12 +866,24 @@ local function host_full_sync(peer)
 	local tm = tmgr()
 	if not tm then return end
 	for id in pairs(host.sent) do
-		send(EV_STATE, host.sent[id], peer)
-		stats.state_out = stats.state_out + 1
+		if host.aud_sees(id, peer) then
+			send(EV_STATE, host.sent[id], peer)
+			stats.state_out = stats.state_out + 1
+		end
 	end
 	host_shared_full(peer)
-	host_list(peer)
+	host_list(peer) -- his list drops on his machine what he may no longer see
 	stats.syncs = stats.syncs + 1
+end
+
+-- Host: the audience of some task changed for player `peer` (coop_task_audience: a faction change): his Lua tasks and the
+-- engine's task list again, as he may see them now.
+function audience_resync(peer)
+	if not is_host() or type(peer) ~= "number" or peer <= 0 or peer >= 0x100 then return false end
+	host_full_sync(peer)
+	local resend = api.story_resend_tasks
+	if type(resend) == "function" then pcall(resend, peer) end
+	return true
 end
 
 -- A client's dialog changed a shared bookkeeping var: counters as a delta (several players may count
@@ -1014,6 +1131,15 @@ local function host_on_request(payload, from)
 	end
 	local tm = tmgr()
 	if not tm then return end
+	-- a player out of the task's audience can neither take, turn in, cancel nor stage it; for him it is not there. A map server's
+	-- logic is no player: not gated (what it causes is cut at the rewards).
+	if from < 0x100 and not host.aud_sees(id, from) then
+		stats.refused = stats.refused + 1
+		log("#%s: %s '%s' refused: not his task", tostring(from), tostring(op), id)
+		send(EV_STATE, pack(op == "give" and { i = id, d = true, r = 1 } or { i = id, d = true }), from)
+		stats.state_out = stats.state_out + 1
+		return
+	end
 	local who = player_of_request(from, id)
 	host.exec_peer = who
 	local qc = rawget(_G, "coop_quests_core")
@@ -1189,7 +1315,14 @@ local function split_money(n, give)
 		end
 		return
 	end
-	local list = ctx.share and online_peers() or { ctx.rcpt }
+	local list = { ctx.rcpt }
+	if ctx.share then
+		list = {}
+		for _, peer in ipairs(online_peers()) do -- a task with an audience: only those who see it
+			if host.aud_sees(ctx.task, peer) then list[#list + 1] = peer end
+		end
+		if #list == 0 then list[1] = ctx.rcpt end
+	end
 	local part = math_floor(n / #list)
 	local rest = n - part * #list
 	local rest_to = 0
@@ -1293,6 +1426,8 @@ local function host_task_callback(orig, tsk, state)
 		return orig(tsk, state)
 	end
 	local rcpt = recipient(id)
+	local swapped = not host.aud_sees(id, rcpt) -- a recipient out of the task's audience: its taker instead
+	if swapped then rcpt = host.aud_taker_peer(id) end
 	local owner = rcpt -- statistics, rank and reputation: his, also when he has left (they wait for him)
 	-- messages: the player who asked for this result (nil: a script, a timer), and whether it was a cancel
 	local by = host.finisher[id]
@@ -1307,7 +1442,8 @@ local function host_task_callback(orig, tsk, state)
 	-- (coop_quests_story) took its on_complete rewards for a story condlist and paid every client too
 	local prev = ctx
 	ctx = { task = id, rcpt = rcpt, share = share, by = by, cancelled = cancelled, owner = owner }
-	ctx.character = by == nil and host.taker_char[id] or character_of(rcpt)
+	ctx.aud = host.aud_rec(id)
+	ctx.character = (swapped or by == nil) and host.taker_char[id] or character_of(rcpt)
 	if not cancelled then
 		if state == task.fail then
 			ctx.personal = host.failure_participants[id]
@@ -1325,9 +1461,10 @@ local function host_task_callback(orig, tsk, state)
 			ctx.personal = #ids > 0 and ids or nil
 		end
 		if ctx.personal == nil and host.taker_char[id] ~= nil then ctx.personal = { host.taker_char[id] } end
+		ctx.personal = host.aud_cut(id, ctx.personal) -- a task with an audience: only those who see it
 	end
 	if everyone then
-		ctx.group, ctx.full = reward_group().list(), mode == EVERYONE_FULL
+		ctx.group, ctx.full = host.aud_group(id, reward_group().list()), mode == EVERYONE_FULL
 		ctx.given, ctx.counted = {}, {}
 	end
 	local this = ctx
@@ -1445,7 +1582,7 @@ function with_task_owner(id, fn, ...)
 	local t = host.taker[id]
 	if t == nil then return fn(...) end
 	ctx = { task = id, rcpt = t, owner = t, character = host.taker_char[id] or character_of(t), share = false, status = true,
-		personal = host.participants[id] }
+		personal = host.aud_cut(id, host.participants[id]) }
 	-- a functor can make a companion by writing the stock table itself (tasks_agent_rescue): what it added is the taker's
 	local comp = rawget(_G, "coop_npc_companions")
 	local before = comp and comp.squads_now and comp.squads_now()
@@ -1760,7 +1897,7 @@ local function patch_rewards()
 					-- the group may have changed since the task was turned in; a return stays one a second later
 					local prev_returns = c.returns
 					c.returns = returns
-					if c.group then c.group = reward_group().list() end
+					if c.group then c.group = host.aud_group(c.task, reward_group().list()) end
 					local res = { pcall(f0, ...) }
 					c.returns = prev_returns
 					ctx = prev
@@ -2726,7 +2863,7 @@ local function news_out(kind, id, title, icon, by, cancelled, story)
 	end
 	if cancelled then rec.c = true end
 	if story then rec.sl = true end
-	send(EV_NEWS, pack(rec), -1)
+	host.send_task(EV_NEWS, pack(rec), id) -- a task with an audience: only to it
 	stats.news_out = stats.news_out + 1
 	return true
 end
@@ -2739,6 +2876,7 @@ local function host_news(kind, tsk)
 	local by, cancelled = event_actor(kind, id)
 	local title, icon = task_text(tsk)
 	news_out(kind, id, title, icon, by, cancelled, kind == "new" and task_is_story(id))
+	if not host.aud_sees(id, 0) then return true end -- the host player is out of the task's audience: no line here
 	if by ~= nil and by ~= 0 and NEWS_NICK_KINDS[kind] then
 		local n = news_mod()
 		if n and n.show_task then return n.show_task(kind, title, icon, nick_of(by), cancelled) == true end
@@ -2767,6 +2905,8 @@ local function wrap_send_task(orig)
 				elseif shown then
 					return true
 				end
+			elseif is_host() and not host.aud_sees(task_id_of(tsk), 0) then
+				return true -- alone in the game and out of the task's audience: no line
 			end
 		end
 		return orig(actor, kind, tsk, ...)
@@ -2934,6 +3074,12 @@ local function patch_task_manager()
 				host.participants[id] = reward_mode() >= EVERYONE_SHARED and participant_ids() or nil
 				host.failure_participants[id] = participant_ids()
 				host.rep_party[id] = participant_ids()
+				-- split levels: who sees the task, decided now, before the stock give, so its first message already goes by it
+				local aud = task_audience()
+				if aud and aud.on_give then
+					local ok, err = pcall(aud.on_give, id, giver, host.taker_char[id])
+					if not ok then report("task audience " .. id, err) end
+				end
 				-- the engine makes every new task the active one: a task another player took leaves the host's alone
 				local keep = nil
 				if host.taker[id] ~= 0 then keep = select(2, active_task(self)) end
@@ -3165,7 +3311,13 @@ local function actor_on_update()
 			host.healed = true
 			_heal_once()
 		end
-		if not has_clients() then return end
+		if not has_clients() then
+			-- nobody to send to: host_scan does not run, the audiences of tasks that ended go here
+			local aud = task_audience()
+			local tm = aud and aud.prune and tmgr()
+			if tm and type(tm.task_info) == "table" then aud.prune(tm.task_info) end
+			return
+		end
 		if t >= host.next_scan then
 			host.next_scan = t + SCAN_MS
 			host_scan(false)
@@ -3227,7 +3379,11 @@ local function register_events()
 	cm.add_event_handler(EV_REQ, guarded("task request", host_on_request))
 	cm.add_event_handler(EV_SYNC, guarded("task sync", function(_, from)
 		if is_host() and type(from) == "number" and from ~= 0 then
+			-- split levels: a character the tasks of now have not judged yet (a late joiner) is judged once, here
+			local aud = task_audience()
+			local gained = from < 0x100 and aud and aud.judge_new and aud.judge_new(character_of(from)) == true
 			host_full_sync(from)
+			if gained and type(api.story_resend_tasks) == "function" then pcall(api.story_resend_tasks, from) end
 			local rg = reward_group()
 			local id = rg and rg.id_of(from)
 			if id then host.char_of[from] = id end

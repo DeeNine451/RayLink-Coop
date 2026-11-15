@@ -1,0 +1,405 @@
+--[[
+	Anomaly Coop - who sees a task in a world with split levels (gamedata\scripts\coop_task_audience.script).
+	Plan docs\plans\2026-11-16-task-audience.md, section A. Test: tests\lua\test_task_audience.lua. Host (world server) only.
+
+	In a split-levels world players may be in different factions. When a task is given it gets an AUDIENCE: the characters
+	who see it. Decided once, per character, kept for the task's life:
+	  - side task: a character X is out when the giver's faction is X's enemy by the game's own sum,
+	    relation_registry.community_relation(giver faction, true faction of X) + community_goodwill(giver faction, X)
+	    <= game_relations.ENEMIES (-1000, stock game_relations.script:34-36, 603). The taker is always in. A task with no giver,
+	    or a giver whose faction cannot be told (no object, a monster, an unknown community), gets NO record.
+	  - storyline task (drx_sl_*, lttz_*): in iff the character's true faction is the task's (coop_storyline.owner_of_task, else
+	    the taker's). The taker is in.
+	  - change-faction task (drx_sl_*_cf_task_*): the taker alone.
+	A character who joins later is judged at his first sync for the tasks that exist then; a faction change re-judges only
+	the storyline tasks for that character. A later change of goodwill re-judges nothing.
+	The record is pushed to the engine (coop.story_task_audience), which then sends the task's engine messages only to the
+	audience; coop_tasks sends its own Lua messages, takes requests and shares rewards by it.
+
+	Off (no record ever, every function says "everybody") when: the world has no split levels (coop_faction.split_mode()),
+	the engine has no coop.story_task_audience (an older exe: one log line), this is not the authority (a client, a map server).
+
+	For coop_tasks (host):
+		on() -> bool                             records are made and used now
+		classify(id) -> "side" | "story" | "cf"
+		giver_faction(giver_id) -> faction | nil
+		on_give(id, giver, taker_character)      a task is being given: (re)computes its record and pushes it
+		record(id) -> record | nil               { k, gf, sf, t = taker character, inn = { [c] = true }, out = { [c] = true } }
+		sees_character(id, c) -> bool            no record: true
+		judge_new(c) -> changed (bool)           a character's first look at the tasks of now (late joiner)
+		drop(id) / prune(task_info)              the record goes with its task
+		any() -> bool                            at least one record is in use
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace (nil on an exe without co-op)
+
+local tostring, tonumber, type, pairs, ipairs, pcall, next = tostring, tonumber, type, pairs, ipairs, pcall, next
+local string_format, table_sort = string.format, table.sort
+
+local TAG = "[coop-audience]"
+local STORE = "coop_task_audience" -- m_data key
+local CHANGED = "coop_faction_changed" -- coop_faction's script callback (peer, character_id, old, new)
+local ENEMIES_DEFAULT = -1000 -- game_relations.ENEMIES (stock game_relations.script:34-36)
+-- gameplay_disguise.possible_factions (temp/gamma_ref/scripts/gameplay_disguise.script:166-179), as coop_faction FACTIONS
+local FACTIONS = {
+	army = true, bandit = true, csky = true, dolg = true, ecolog = true, freedom = true, killer = true, monolith = true,
+	stalker = true, renegade = true, greh = true, isg = true,
+}
+
+local aud = {} -- task id -> record
+local need_push = false -- records came from a save: the engine's table is empty (story::reset), push on the first tick
+local said_off = false
+local listening = false
+local stats = { made = 0, none = 0, dropped = 0, pushed = 0, refused = 0, late = 0, moved = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("%s %s", TAG, ok and line or tostring(fmt))
+end
+
+-- Script module by name, or nil (loaded by _G.__index on the first use).
+local function mod(name)
+	local m = rawget(_G, name)
+	if m == nil then
+		local ok, r = pcall(function() return _G[name] end)
+		m = ok and r or nil
+	end
+	return type(m) == "table" and m or nil
+end
+
+local function call(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, ...)
+	return ok and v or nil
+end
+
+local function engine_ok()
+	return api ~= nil and type(api.story_task_audience) == "function"
+end
+
+-- The authority of a split-levels world with an engine that filters.
+function on()
+	if not (api and call(api.is_active) == true and call(api.is_host) == true) then return false end
+	if call(api.is_map_server) == true then return false end
+	local cf = mod("coop_faction")
+	if not (cf and call(cf.split_mode) == true) then return false end
+	if not engine_ok() then
+		if not said_off then
+			said_off = true
+			log("the engine has no coop.story_task_audience: every task is shown to everybody")
+		end
+		return false
+	end
+	return true
+end
+
+-------------------------------------------------------------------------------
+-- The decision
+-------------------------------------------------------------------------------
+function classify(id)
+	if type(id) ~= "string" then return "side" end
+	if id:find("^drx_sl_") then
+		if id:find("^drx_sl_.+_cf_task_") then return "cf" end
+		return "story"
+	end
+	if id:find("^lttz_") then return "story" end
+	return "side"
+end
+
+local function field(se, name)
+	local ok, v = pcall(function() return se[name] end)
+	return ok and v or nil
+end
+
+local function community_of(se)
+	local ok, c = pcall(function() return se:community() end)
+	return ok and type(c) == "string" and c ~= "" and c or nil
+end
+
+-- The giver's faction from his server object (offline-safe). A squad (DRX gives pass the squad): its player_id, else its
+-- commander's community. "trader" is mapped as the stock does it (dialogs.script:105-112: the squad's player_id, then
+-- "trader" -> "stalker").
+function giver_faction(giver)
+	if type(giver) ~= "number" then return nil end
+	local ao = rawget(_G, "alife_object") or alife_object
+	local se = call(ao, giver)
+	if not se then return nil end
+	local comm
+	local cmd = field(se, "commander_id")
+	if cmd ~= nil then -- a squad
+		local pid = field(se, "player_id")
+		comm = type(pid) == "string" and pid ~= "" and pid or nil
+		if comm == nil then
+			local okc, cid = pcall(function() return se:commander_id() end)
+			local leader = okc and type(cid) == "number" and call(ao, cid) or nil
+			comm = leader and community_of(leader) or nil
+		end
+	else
+		comm = community_of(se)
+		if comm == "trader" then
+			local gid = field(se, "group_id")
+			local squad = type(gid) == "number" and gid ~= 65535 and call(ao, gid) or nil
+			local pid = squad and field(squad, "player_id")
+			if type(pid) == "string" and pid ~= "" then comm = pid end
+		end
+	end
+	if comm == "trader" then comm = "stalker" end
+	return FACTIONS[comm] and comm or nil
+end
+
+local function true_faction(c)
+	local cf = mod("coop_faction")
+	local f = cf and call(cf.faction_of_character, c)
+	return type(f) == "string" and f or nil
+end
+
+local function enemies()
+	local gr = mod("game_relations")
+	local v = gr and tonumber(gr.ENEMIES)
+	return v or ENEMIES_DEFAULT
+end
+
+-- Side task: is character c an enemy of the giver's faction gf? The game's own sum, the stock threshold (<= ENEMIES).
+local function hostile(gf, c)
+	local f = true_faction(c)
+	if not f then return false end -- nothing to judge by: shown, as today
+	local rr = rawget(_G, "relation_registry") or relation_registry
+	if not rr then return false end
+	local ok, sum = pcall(function()
+		return (tonumber(rr.community_relation(gf, f)) or 0) + (tonumber(rr.community_goodwill(gf, c)) or 0)
+	end)
+	return ok and type(sum) == "number" and sum <= enemies()
+end
+
+local function sees(rec, c)
+	if c == rec.t then return true end
+	if rec.k == "cf" then return false end
+	if rec.k == "story" then return true_faction(c) == rec.sf end
+	return not hostile(rec.gf, c)
+end
+
+local function judge(rec, c)
+	if type(c) ~= "number" then return end
+	if sees(rec, c) then
+		rec.inn[c], rec.out[c] = true, nil
+	else
+		rec.inn[c], rec.out[c] = nil, true
+	end
+end
+
+-- The characters of the world now: in the game (coop_tasks.participant_ids) and the reward group's members (also away).
+local function characters()
+	local ids, seen = {}, {}
+	local function put(c)
+		if type(c) == "number" and not seen[c] then ids[#ids + 1], seen[c] = c, true end
+	end
+	local ct = mod("coop_tasks")
+	for _, c in ipairs(ct and call(ct.participant_ids) or {}) do put(c) end
+	local rg = mod("coop_reward_group")
+	for _, m in ipairs(rg and call(rg.list) or {}) do put(type(m) == "table" and m.id or nil) end
+	return ids
+end
+
+local function members(rec)
+	local list = {}
+	for c in pairs(rec.inn) do list[#list + 1] = c end
+	table_sort(list)
+	return list
+end
+
+local function push(id)
+	local rec = aud[id]
+	local ok, res
+	if rec then
+		ok, res = pcall(api.story_task_audience, id, members(rec))
+	else
+		ok, res = pcall(api.story_task_audience, id, nil)
+	end
+	if ok and res == true then
+		stats.pushed = stats.pushed + 1
+		return true
+	end
+	stats.refused = stats.refused + 1
+	log("! the engine did not take the audience of '%s' (%s)", tostring(id), tostring(ok and res or "error"))
+	return false
+end
+
+-- Host, inside the give (before the stock give runs): the record of task `id` is made anew.
+function on_give(id, giver, taker)
+	if type(id) ~= "string" then return end
+	local had = aud[id] ~= nil
+	aud[id] = nil
+	if not on() then return end
+	local kind = classify(id)
+	local rec = { k = kind, t = type(taker) == "number" and taker or nil, inn = {}, out = {} }
+	if kind == "side" then
+		rec.gf = giver_faction(giver)
+		if not rec.gf then
+			stats.none = stats.none + 1
+			log("'%s': giver %s has no faction to judge by: shown to everybody", id, tostring(giver))
+			if had then push(id) end
+			return
+		end
+	elseif kind == "story" then
+		local sl = mod("coop_storyline")
+		local f = sl and call(sl.owner_of_task, id)
+		rec.sf = type(f) == "string" and f ~= "" and f or (rec.t and true_faction(rec.t)) or nil
+		if not rec.sf then
+			stats.none = stats.none + 1
+			log("'%s': no faction for the storyline task: shown to everybody", id)
+			if had then push(id) end
+			return
+		end
+	elseif not rec.t then -- cf with nobody to give it to
+		stats.none = stats.none + 1
+		log("'%s': the taker has no character: shown to everybody", id)
+		if had then push(id) end
+		return
+	end
+	if rec.t then judge(rec, rec.t) end
+	for _, c in ipairs(characters()) do judge(rec, c) end
+	aud[id] = rec
+	stats.made = stats.made + 1
+	push(id)
+end
+
+function record(id)
+	if not on() then return nil end
+	return aud[id]
+end
+
+function any()
+	return next(aud) ~= nil and on()
+end
+
+function sees_character(id, c)
+	local rec = record(id)
+	if not rec then return true end
+	return type(c) == "number" and rec.inn[c] == true
+end
+
+-- A character seen for the first time by the tasks of now (a late joiner): judged once, kept (a reconnect keeps him).
+function judge_new(c)
+	if type(c) ~= "number" or not on() then return false end
+	local changed = false
+	for id, rec in pairs(aud) do
+		if not rec.inn[c] and not rec.out[c] then
+			judge(rec, c)
+			stats.late = stats.late + 1
+			if rec.inn[c] then
+				changed = true
+				push(id)
+			end
+		end
+	end
+	return changed
+end
+
+function drop(id)
+	if aud[id] == nil then return end
+	aud[id] = nil
+	stats.dropped = stats.dropped + 1
+	if engine_ok() then push(id) end
+end
+
+function prune(task_info)
+	if type(task_info) ~= "table" or next(aud) == nil then return end
+	local gone = {}
+	for id in pairs(aud) do
+		if task_info[id] == nil then gone[#gone + 1] = id end
+	end
+	for _, id in ipairs(gone) do drop(id) end
+end
+
+-- coop_faction_changed: only the storyline tasks are judged again for that character.
+local function on_faction_changed(peer, c, old, new)
+	if type(c) ~= "number" or not on() then return end
+	local changed = false
+	for id, rec in pairs(aud) do
+		if rec.k == "story" then
+			local was = rec.inn[c] == true
+			judge(rec, c)
+			if was ~= (rec.inn[c] == true) then
+				changed = true
+				stats.moved = stats.moved + 1
+				push(id)
+			end
+		end
+	end
+	if changed and type(peer) == "number" and peer > 0 then
+		local ct = mod("coop_tasks")
+		if ct and type(ct.audience_resync) == "function" then
+			local ok, err = pcall(ct.audience_resync, peer)
+			if not ok then log("! resync of #%s: %s", tostring(peer), tostring(err)) end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Save, load, the engine after a load
+-------------------------------------------------------------------------------
+local function keys(set)
+	local list = {}
+	for c in pairs(set) do list[#list + 1] = c end
+	table_sort(list)
+	return list
+end
+
+local function save_state(m_data)
+	if not (api and call(api.is_host) == true) or call(api.is_map_server) == true then return end
+	local kept = {}
+	for id, rec in pairs(aud) do
+		kept[id] = { k = rec.k, gf = rec.gf, sf = rec.sf, t = rec.t, i = keys(rec.inn), o = keys(rec.out) }
+	end
+	m_data[STORE] = next(kept) and kept or nil
+end
+
+local function load_state(m_data)
+	aud = {}
+	local s = m_data[STORE]
+	if type(s) ~= "table" then return end
+	for id, e in pairs(s) do
+		if type(id) == "string" and type(e) == "table" and (e.k == "side" or e.k == "story" or e.k == "cf") then
+			local rec = { k = e.k, gf = e.gf, sf = e.sf, t = tonumber(e.t), inn = {}, out = {} }
+			for _, c in ipairs(type(e.i) == "table" and e.i or {}) do if type(c) == "number" then rec.inn[c] = true end end
+			for _, c in ipairs(type(e.o) == "table" and e.o or {}) do if type(c) == "number" then rec.out[c] = true end end
+			aud[id] = rec
+		end
+	end
+	need_push = next(aud) ~= nil
+end
+
+local function listen()
+	if listening then return end
+	listening = true
+	local add = rawget(_G, "AddScriptCallback") or AddScriptCallback
+	if type(add) == "function" then pcall(add, CHANGED) end
+	RegisterScriptCallback(CHANGED, on_faction_changed)
+end
+
+local function actor_on_update()
+	if not need_push or not on() then return end
+	need_push = false
+	for id in pairs(aud) do push(id) end
+	log("%d task audiences given to the engine again after the load", stats.pushed)
+end
+
+function print_status()
+	local n = 0
+	for _ in pairs(aud) do n = n + 1 end
+	log("%s | %d records; made %d, none %d, dropped %d, pushed %d, refused %d, late judged %d, moved %d",
+		on() and "on" or "off", n, stats.made, stats.none, stats.dropped, stats.pushed, stats.refused, stats.late, stats.moved)
+end
+
+function on_game_start()
+	if not api then return end
+	RegisterScriptCallback("save_state", save_state)
+	RegisterScriptCallback("load_state", load_state)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	-- coop_faction declares its callback in its own on_game_start: listen once the game runs, whatever the order of scripts
+	RegisterScriptCallback("actor_on_first_update", listen)
+	if not engine_ok() then
+		said_off = true
+		log("the engine has no coop.story_task_audience: every task is shown to everybody")
+	end
+end
