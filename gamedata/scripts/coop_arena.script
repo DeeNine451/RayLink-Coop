@@ -970,8 +970,8 @@ gather_tick = function(force)
 end
 
 -- The authority: the button of the player whose character is `id`. Alone at Arnie: he starts; with others: a vote of those at
--- Arnie (coop_economy_group.propose), whose yes starts it with whoever is at Arnie then. Not the host (a map server of the
--- Bar has no vote): it starts.
+-- Arnie (coop_economy_group.propose), whose yes starts it with whoever is at Arnie then. On the map server of the Bar the
+-- vote is run by the world server for it (propose_for / verdict_for there). No vote module at all: it starts.
 local function start_ask(id)
 	if not (fight and fight.hold) then return end
 	local at = gathered(fight.id)
@@ -1055,14 +1055,24 @@ PLAY.gather = function(a, t)
 		and fmt("st_coop_arena_solo", "Arena fight %s: the others on the Bar are invited. Start alone?", n)
 		or fmt("st_coop_arena_without", "Arena fight %s: %s of %s players at Arnie. Start without the others?", n, tostring(t.c or "?"),
 			tostring(t.t or "?"))
+	-- ui_dyn_msg_box.msg_box_ui is a luabind class, not a function (stock: `class "msg_box_ui" (CUIScriptWnd)`): calling it makes
+	-- the window. Looked up as a function it was never found, and nobody ever got this button: with other players on the Bar
+	-- a fight waited for everybody at Arnie and could not be started without them (owner, live 2026-11-15: "no vote window").
 	local box = C().mod("ui_dyn_msg_box")
-	local f = box and C().fn(box, "msg_box_ui")
-	if not f then return end
-	local ok, b = pcall(f, "message_box_yes_no", true, text, function()
+	local class = box and box.msg_box_ui
+	if class == nil then
+		log("! ui_dyn_msg_box.msg_box_ui is not here: no button for the arena's group entry (%s)", tostring(a))
+		return
+	end
+	local ok, b = pcall(class, "message_box_yes_no", true, text, function()
 		gather_box = nil
 		ask_start()
 	end, function() gather_box = nil end)
-	if ok then gather_box = b end
+	if ok then
+		gather_box = b
+	else
+		report("the group entry's button", b)
+	end
 end
 
 -- The group's start: this player's UI off, as the trigger's sr_idle@wait_N does in stock.

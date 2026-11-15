@@ -359,8 +359,46 @@ host_open = function(from, ticket, kind, minutes)
 	end
 end
 
+-- Split levels: the authority of a level is its map server, and the ballots are the world server's (every player answers his
+-- host). A map server's proposal goes to the world server (propose_for), which runs the vote as its own and tells the map
+-- server its end (verdict_for). Owner, live 2026-11-15: "no vote window at the arena when I played with the guys" - propose
+-- answered nil there and the arena started with no vote.
+local remote = {} -- map server: ticket -> { cb = on_result, until_ms = when the world server's silence is a no }
+local remote_seq = 0
+
+local function propose_remote(name, from, voters, on_result, arg)
+	local list = {}
+	for peer in pairs(type(voters) == "table" and voters or {}) do
+		if type(peer) == "number" then list[#list + 1] = tostring(peer) end
+	end
+	remote_seq = remote_seq + 1
+	local k = remote_seq
+	local sent = core.send("propose_for", { k = k, g = tostring(name), f = tonumber(from) or -1, v = table.concat(list, ","),
+		a = arg ~= nil and tostring(arg) or "" }, 0)
+	if not sent then return nil end
+	-- the vote's own time at the world server, and as much again for the way there and back
+	remote[k] = { cb = on_result, subject = tostring(name), until_ms = core.now() + ((core.rule("vote_timeout") or 30) + 30) * 1000 }
+	stats.proposals = stats.proposals + 1
+	return true
+end
+
+local function remote_end(k, ok, reason, nick)
+	local r = remote[k]
+	if not r then return end
+	remote[k] = nil
+	local okc, err = pcall(r.cb, ok == true, reason, nick)
+	if not okc then
+		stats.errors = stats.errors + 1
+		core.log("! vote '%s': its result failed: %s", tostring(r.subject), tostring(err))
+	end
+	core.log("vote '%s' asked of the world server: %s%s", tostring(r.subject), ok and "yes" or "no",
+		ok and "" or (" (" .. tostring(reason) .. ")"))
+end
+
 function propose(name, from, voters, on_result, arg)
-	if not (core.live() and core.is_host() and type(on_result) == "function") then return nil end
+	if not (core.live() and type(on_result) == "function") then return nil end
+	if core.is_map_server() then return propose_remote(name, from, voters, on_result, arg) end
+	if not core.is_host() then return nil end
 	local here = {}
 	for _, p in ipairs(core.players()) do
 		if p.avatar_id then here[p.id] = true end -- a player still loading the world has no say yet
@@ -561,6 +599,25 @@ local function register_events()
 		if not core.is_host() or from <= 0 then return end
 		host_skip(from, t)
 	end)
+	-- A map server (a peer from 0x100 up: the authority of its level) asks for a vote among players: it runs here as the
+	-- world server's own, and its end goes back. A player's machine cannot ask this way.
+	core.on("propose_for", function(t, from)
+		if not core.is_host() or from < 0x100 then return end
+		local k = core.int(t.k, 1)
+		local asker = core.int(t.f, 0)
+		if not (k and asker and type(t.g) == "string" and SUBJECTS[t.g]) then return end
+		local voters = {}
+		for v in tostring(t.v or ""):gmatch("%d+") do voters[tonumber(v)] = true end
+		local function tell(ok, reason, nick)
+			core.send("verdict_for", { k = k, ok = ok == true, r = reason or "", n = nick or "" }, from)
+		end
+		if not propose(t.g, asker, voters, tell, t.a) then tell(false, "bad") end
+	end)
+	core.on("verdict_for", function(t, from)
+		if from ~= 0 or not core.is_map_server() then return end
+		local k = core.int(t.k, 1)
+		if k then remote_end(k, t.ok == true, type(t.r) == "string" and t.r ~= "" and t.r or nil, type(t.n) == "string" and t.n ~= "" and t.n or nil) end
+	end)
 	core.on("vote", function(t, from)
 		if from ~= 0 or core.is_host() then return end
 		show_ballot(t)
@@ -596,6 +653,9 @@ local function actor_on_update()
 	if t < next_tick then return end
 	next_tick = t + 500
 	if core.is_host() then host_tick() end
+	for k, r in pairs(remote) do -- a map server: the world server never answered
+		if t > r.until_ms then remote_end(k, false, "timeout") end
+	end
 	for ticket, p in pairs(st.pending) do -- the host never answered (left, dropped)
 		if t - p.at > ((core.rule("vote_timeout") or 30) + 30) * 1000 then st.pending[ticket] = nil end
 	end

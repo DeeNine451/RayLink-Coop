@@ -289,15 +289,19 @@ local function env(M, level_name)
 	E.coop_npc_logic = { add_audience_rule = function(f) M.rule = f end, audience_of = function() return M.logic_aud end }
 	E.coop_npc_players = load_script(M, "coop_npc_players")
 	E.coop_mods_core = load_script(M, "coop_mods_core")
-	-- ui_dyn_msg_box.msg_box_ui: the box (yes = ok, no = cancel)
-	E.ui_dyn_msg_box = { msg_box_ui = function(typ, show, text, ok, cancel)
+	-- ui_dyn_msg_box.msg_box_ui: the box (yes = ok, no = cancel). In the game it is a luabind class (stock ui_dyn_msg_box.script:3
+	-- `class "msg_box_ui" (CUIScriptWnd)`): type() answers "userdata", calling it makes the window. Modelled as a plain function
+	-- it hid that the arena looked it up as a function and showed no button to anybody (owner, live 2026-11-15: "no vote window").
+	local box_class = newproxy(true)
+	getmetatable(box_class).__call = function(_, typ, show, text, ok, cancel)
 		local b = { txt = text, typ = typ }
 		b.ok = function() ok(b) end
 		b.cancel = function() if cancel then cancel(b) end end
 		b.message_box = { HideDialog = function() if M.BOX == b then M.BOX = nil end end }
 		M.BOX = b
 		return b
-	end }
+	end
+	E.ui_dyn_msg_box = { msg_box_ui = box_class }
 	E.level.map_add_object_spot = function(id, typ, hint) M.spot = { id = id, typ = typ, hint = hint } end
 	E.level.map_remove_object_spot = function(id, typ) if M.spot and M.spot.id == id then M.spot = nil end end
 	stock(M)
