@@ -552,6 +552,89 @@ do
 	check(same(owned(0), host_gear) and at(H.env.db.actor, DOOR), "respawned: his gear back, at the door")
 end
 
+print("== live 2026-11-15 (G.A.M.M.A., split levels): a fighter who falls keeps nothing of the arena's")
+do
+	local STASH = 778
+	setup()
+	local client_gear = owned(PROXY)
+	W.talked[1] = NOW
+	start(3)
+	H.objects[PROXY]._pos = vec(IN_ARENA.x, IN_ARENA.y, IN_ARENA.z) -- the authority sees his character in the pit
+	-- in the fight the kit's weapon gets its scope: the game makes another weapon of it, an id the kit's list never held;
+	-- and he takes an opponent's rifle
+	for _, id in ipairs(owned(PROXY)) do
+		if W.items[id]._section == "wpn_bm16" then W.items[id]._parent = nil end
+	end
+	new_item("wpn_bm16_scope", PROXY, "world")
+	new_item("wpn_ak74_of_an_opponent", PROXY, "world")
+	tick(H)
+	check(#owned(BOX2) == 0 and #owned(PROXY) == 5, "alive in the pit: nothing is taken from him")
+	H.env.coop.life_of = function(id) return id == PROXY and "wounded" or "alive" end
+	tick(H)
+	check(#owned(PROXY) == 5, "down, not dead: he keeps what he holds (a teammate may raise him)")
+	-- he dies. The death's rule (drop) put the two boxes of his backpack into a stash at the body; what he wears stays on him
+	holder(H, H.add(make_obj(STASH, IN_ARENA.x, IN_ARENA.y, IN_ARENA.z, { _section = "coop_death_stash" })), STASH)
+	for _, id in ipairs(owned(PROXY)) do
+		if W.items[id]._section == "ammo_12x70_buck" then W.items[id]._parent = STASH end
+	end
+	H.env.coop.life_of = function(id) return id == PROXY and "dead" or "alive" end
+	H.fire("coop_death_marker", PROXY, STASH, "drop")
+	tick(H)
+	check(#owned(PROXY) == 0, "dead in the pit: everything he held there is the arena's, at once")
+	check(#owned(STASH) == 0, "the stash his death left in the pit is emptied too")
+	check(sections_of(BOX2) == "ammo_12x70_buck,ammo_12x70_buck,stalker_outfit,wpn_ak74_of_an_opponent,wpn_bm16_scope",
+		"the kit, the weapon the kit became and the opponent's rifle are in box 2")
+	check(same(owned(BOX1), client_gear), "his own gear still waits in box 1")
+	-- he respawns at his camp on the Bar and asks for his gear
+	H.env.coop.life_of = function() return "alive" end
+	H.objects[PROXY]._pos = vec(150, 0, 72)
+	Cm.fire("coop_respawned", "camp")
+	pump()
+	check(same(owned(PROXY), client_gear), "respawned: exactly his own gear, nothing of the arena's")
+	check(#owned(BOX1) == 0 and #owned(BOX2) == 5, "box 1 is empty, the arena's things stay in box 2")
+	local moves = W.moves
+	tick(H)
+	tick(H)
+	check(W.moves == moves, "nothing moves after that")
+
+	-- the host player falls in his own fight: the same
+	setup()
+	local host_gear = owned(0)
+	W.talked[0] = NOW
+	start(1)
+	H.env.db.actor._pos = vec(IN_ARENA.x, IN_ARENA.y, IN_ARENA.z)
+	new_item("wpn_knife_of_an_opponent", 0, "world")
+	tick(H)
+	H.env.coop.life_of = function(id) return id == 0 and "dead" or "alive" end
+	tick(H)
+	check(#owned(0) == 0 and #owned(BOX2) == 5, "the host player dead in the pit: the kit and the knife are the arena's")
+	H.env.coop.life_of = function() return "alive" end
+	H.env.db.actor._pos = vec(150, 0, 72)
+	H.fire("coop_respawned", "camp")
+	check(same(owned(0), host_gear), "respawned: his own gear alone")
+
+	-- a record whose player walks free (seen alive outside the arena after the pit: a rejoin somewhere else) is no custody:
+	-- a death there takes nothing for the arena, the late give back takes the kit by its ids as before
+	setup()
+	W.talked[1] = NOW
+	start(3)
+	H.objects[PROXY]._pos = vec(IN_ARENA.x, IN_ARENA.y, IN_ARENA.z)
+	tick(H)
+	H.objects[PROXY]._pos = vec(0, 0, 0)
+	tick(H)
+	local found = new_item("bread", PROXY, "world")
+	H.env.coop.life_of = function(id) return id == PROXY and "dead" or "alive" end
+	H.fire("coop_death_marker", PROXY, STASH, "drop")
+	tick(H)
+	check(#owned(PROXY) == 5 and #owned(BOX2) == 0, "dead far from the arena with an open record: nothing is taken there")
+	H.env.coop.life_of = function() return "alive" end
+	Cm.fire("coop_respawned", "camp")
+	pump()
+	local kept = false
+	for _, id in ipairs(owned(PROXY)) do kept = kept or id == found._id end
+	check(kept and #owned(BOX2) == 4, "his late give back: the kit by its ids, what he found stays his")
+end
+
 print("== a client leaves in the fight; it is won without him; he rejoins")
 do
 	setup()

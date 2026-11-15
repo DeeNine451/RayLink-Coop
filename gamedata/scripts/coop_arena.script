@@ -38,7 +38,9 @@
 	  - A bet at the totalizator is the same: in from the dialog (the bettor asks, arena.bet; refused while his gear is in a box
 	    already), out from the totalizator's restrictor, for every bettor of the ledger. Stock moves the bettor inside its box
 	    branch: that move is made here.
-	  - A fighter who falls gets his gear back when he respawns (coop_respawned), or when he is back on the Bar after a rejoin
+	  - A fighter who dies in the arena loses what he holds there at once, where he fell (fall_tick: the kit, what the game
+	    made of it, what he took from an opponent, the stash his death left in the pit): a death never takes the arena's
+	    things out. His own gear comes back when he respawns (coop_respawned), or when he is back on the Bar after a rejoin
 	    and no fight runs (actor_on_first_update): he asks (arena.out), the authority gives it back and answers with the way out.
 	    An ask that never came (sent before his game was live, lost with a crash): the authority gives back by itself a ledger
 	    older than HEAL_GRACE_MS whose player stands on the Bar with nothing of his running (his fight, a totalizator battle).
@@ -119,7 +121,7 @@ local got_down = false -- the map server of the Bar: the world server's copy of 
 local world_copy = nil -- the world server: the ledger of the Bar's map server, kept in its save (split levels)
 local OURS = {} -- our wrapper functions
 local stats = { stowed = 0, returned = 0, to_box2 = 0, missing = 0, players_kept = 0, still_cuts = 0, rewrapped = 0, errors = 0,
-	tips = 0, tip_wraps = 0, prizes = 0, prize_asks = 0, rep_lines = 0 }
+	tips = 0, tip_wraps = 0, prizes = 0, prize_asks = 0, rep_lines = 0, fell = 0 }
 
 local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err)
@@ -354,11 +356,13 @@ local function give_back(id, all)
 	local kit = {}
 	for _, k in ipairs(rec.kit or {}) do kit[k] = true end
 	local box2 = get_story_object(BOX_OUT)
+	local taken, back = 0, 0
 	if box2 then
 		for _, item in ipairs(items_of(o)) do
 			if all or kit[id_of(item)] then
 				o:transfer_item(item, box2)
 				stats.to_box2 = stats.to_box2 + 1
+				taken = taken + 1
 			end
 		end
 	end
@@ -370,11 +374,16 @@ local function give_back(id, all)
 		if item and box_id and at == box_id then
 			box:transfer_item(item, o)
 			stats.returned = stats.returned + 1
+			back = back + 1
 		elseif not (item and at == id) then
 			stats.missing = stats.missing + 1
 			log("! item %s of %s is not in %s: not given back", tostring(iid), tostring(o:name()), BOX_IN)
 		end
 	end
+	-- one line a give back: what stayed with a player after the arena is read from the log (live 2026-11-15)
+	log("%s: %d of his own given back, %d of the arena's into %s (%s)%s", tostring(o:name()), back, taken, BOX_OUT,
+		all and "everything he held" or (rec.fell and "the rest was taken where he fell" or "the kit by its ids, " .. #(rec.kit or {}) .. " known"),
+		box2 and "" or ": ! that box is not here, nothing was taken")
 	ledger[id] = nil
 	return true
 end
@@ -572,6 +581,7 @@ add_kit = function(id, made)
 	if not (rec and type(made) == "table") then return end
 	rec.kit = rec.kit or {}
 	for _, k in ipairs(made) do rec.kit[#rec.kit + 1] = k end
+	log("the arena's kit of character %s: %d thing(s) told, %d known", tostring(id), #made, #rec.kit)
 end
 
 -- The authority, every tick: a ledger whose player stands here and has nothing of his running (his fight, a totalizator
@@ -1363,7 +1373,7 @@ local function patch_cutscene()
 	local zone_enter, update, callback = cls.zone_enter, cls.update, cls.cutscene_callback
 	if type(zone_enter) ~= "function" or OURS[zone_enter] or type(update) ~= "function" or type(callback) ~= "function" then return end
 	local function enter(self, ...)
-		self.coop_still, self.coop_tell = nil, nil
+		self.coop_still, self.coop_tell, self.coop_said = nil, nil, nil
 		if session() and is_trigger(self.object) then
 			if authority() then current(self.object) end
 			local me = fighting
@@ -1384,6 +1394,11 @@ local function patch_cutscene()
 	local function upd(self, ...)
 		if self.coop_still then
 			if authority() and (cut_done or time_global() - self.coop_still >= CUT_WAIT_MS) then
+				if not self.coop_said then -- when the opponents are let go, and by what (live 2026-11-15: "they do not shoot")
+					self.coop_said = true
+					log("fight %s: it begins %d ms after its cutscene began here (%s)", tostring(fight and fight.n),
+						time_global() - self.coop_still, cut_done and "the fighters' cutscenes ended" or "no word of their end: waited")
+				end
 				self.st.signals = self.st.signals or {}
 				self.st.signals["cameff_end"] = true
 			end
@@ -1435,6 +1450,107 @@ local function patch_zone()
 	end
 	OURS[w] = true
 	cls.purge_items = w
+end
+
+-------------------------------------------------------------------------------
+-- A fighter's death in the arena (authority)
+-------------------------------------------------------------------------------
+-- Stock: a death in the arena ends the game, nothing of the arena's leaves it. In a session he respawns at his camp, and
+-- the give back there takes the kit by its ids alone (what he found since is his). Live 2026-11-15 (G.A.M.M.A., split
+-- levels): that left him the kit's rifle and an opponent's weapon. A weapon whose scope is put on is another object, a
+-- magazine or an unloaded round too: no list of ids holds them. So what he holds is taken where he fell, the moment he is
+-- dead: from the way in until then his character never left the arena, all of it is the arena's. Down is not dead (a
+-- teammate may raise him). The stash the death's rule left at his body (named by coop_death_marker) holds the arena's
+-- things as well: it is emptied, and the engine releases an empty death stash by itself (coop_death.cpp).
+local STASH_WATCH_MS = 20000
+local stashes = {} -- death stash id -> the time it was told
+
+-- His record is the arena's custody until his character was seen alive outside the arena after it had been inside (a
+-- rejoin somewhere else): then he walks free with what he has, and a later death is not the arena's.
+local function fall_tick(now)
+	local box2 = get_story_object(BOX_OUT)
+	for id, rec in pairs(ledger) do
+		local o = rec.kind == "fight" and not rec.fell and not rec.loose and obj_of(id)
+		if o then
+			local inside = in_arena(o)
+			if fighting_life(id) then
+				if inside then rec.inside = true elseif rec.inside and inside == false then rec.loose = true end
+			elseif box2 and (rec.inside or is_fighter(id)) then
+				local n = 0
+				for _, item in ipairs(items_of(o)) do
+					o:transfer_item(item, box2)
+					n = n + 1
+				end
+				rec.fell = true
+				stats.fell, stats.to_box2 = stats.fell + 1, stats.to_box2 + n
+				log("%s fell in the arena: %d thing(s) he held there go into %s", tostring(o:name()), n, BOX_OUT)
+			end
+		end
+	end
+	for sid, at in pairs(stashes) do
+		local box = level.object_by_id(sid)
+		if box and box2 then
+			local list = {}
+			local ok, err = pcall(function()
+				box:iterate_inventory_box(function(_, item) list[#list + 1] = item end, box)
+				for _, item in ipairs(list) do box:transfer_item(item, box2) end
+			end)
+			if not ok then report("the stash of a death in the arena", err) end
+			if ok and #list > 0 then
+				stats.to_box2 = stats.to_box2 + #list
+				log("the stash %s of a death in the arena: %d thing(s) go into %s", tostring(sid), #list, BOX_OUT)
+			end
+		end
+		if now - at >= STASH_WATCH_MS then stashes[sid] = nil end
+	end
+end
+
+-- coop_death_marker(player, stash, "drop" | "corpse"), fired by the engine on every machine: the stash of a fighter who
+-- died in the arena.
+local function on_death_marker(player, stash)
+	if not (session() and authority()) or type(stash) ~= "number" then return end
+	local rec = ledger[player]
+	if rec and rec.kind == "fight" and not rec.loose and (rec.inside or rec.fell or is_fighter(player)) then
+		stashes[stash] = time_global()
+	end
+end
+
+-- Diagnostics (live 2026-11-15: "they behave dumb, they do not shoot"): the opponents turned on the fighter only once he
+-- shot. While a fight runs, every WATCH_MS each living opponent says in one line what it knows of the taker; at most
+-- WATCH_LINES a fight. Reads only.
+local WATCH_MS, WATCH_LINES = 3000, 60
+
+local function watch_tick(now)
+	if not (fight and fight.ids and fight.n) then return end
+	local w = fight.watch or { at = 0, n = 0 }
+	fight.watch = w
+	if now < w.at or w.n >= WATCH_LINES then return end
+	w.at = now + WATCH_MS
+	local who = obj_of(fight.id)
+	if not who then return end
+	local function v(f)
+		local ok, r = pcall(f)
+		return ok and tostring(r) or "?"
+	end
+	for k = 0, 6 do
+		local sid = "bar_arena_stalker_" .. fight.n .. (k > 0 and ("_" .. k) or "")
+		local npc = get_story_object(sid)
+		if npc and w.n < WATCH_LINES and v(function() return npc:alive() end) == "true" then
+			w.n = w.n + 1
+			local st = db.storage[id_of(npc)]
+			-- his light: what a script's who:get_luminocity() answers here (G.A.M.M.A.'s Stealth Overhaul judges vision by it; on a
+			-- map server it was 0 for a character nobody draws, until the engine answered with its estimate)
+			log("watch %s: logic %s, sees him %s (his light here %s), knew of him %s ms ago, %s m away, best enemy %s, relation %s, fight begun %s",
+				sid, tostring(st and st.active_section), v(function() return npc:see(who) end),
+				v(function() return string.format("%.3f", who:get_luminocity()) end),
+				v(function() return time_global() - npc:memory_time(who) end),
+				v(function() return math.floor(npc:position():distance_to(who:position())) end),
+				v(function()
+					local e = npc:best_enemy()
+					return e and e:name() or "none"
+				end), v(function() return npc:relation(who) end), tostring(has_alife_info("bar_arena_fight_begin")))
+		end
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -1572,12 +1688,18 @@ local function share_ledger()
 end
 
 local next_tick = 0
+local death_cb = false
 
 local function actor_on_update()
 	if waiting_in then wait_tick() end
 	local now = time_global()
 	if now < next_tick then return end
 	next_tick = now + TICK_MS
+	if not death_cb then
+		death_cb = true
+		-- here, after every on_game_start: coop_death adds the callback in its own on_game_start
+		RegisterScriptCallback("coop_death_marker", on_death_marker)
+	end
 	ensure_outer()
 	rep_tick()
 	if fighting and not fight_running() then fighting = false end
@@ -1586,6 +1708,11 @@ local function actor_on_update()
 			local okg, errg = pcall(gather_tick)
 			if not okg then report("gather", errg) end
 		end
+		-- before the heal: a fighter who is dead is no "player standing here with nothing running"
+		local okf, errf = pcall(fall_tick, now)
+		if not okf then report("a fighter's fall", errf) end
+		okf, errf = pcall(watch_tick, now)
+		if not okf then report("watch", errf) end
 		local ok, err = pcall(heal_tick, now)
 		if not ok then report("heal", err) end
 		ok, err = pcall(pit_reset_tick)
@@ -1602,8 +1729,8 @@ end
 function print_status()
 	local n = 0
 	for _ in pairs(ledger) do n = n + 1 end
-	return string.format("ledger %d, fight %s, stowed %d, returned %d, to box 2 %d, missing %d, players kept %d, still cutscenes %d, rewrapped %d, lines to a fighter %d, prizes %d (asked %d), reputation lines %d, errors %d",
-		n, fight and tostring(fight.n) or "-", stats.stowed, stats.returned, stats.to_box2, stats.missing, stats.players_kept,
+	return string.format("ledger %d, fight %s, stowed %d, returned %d, to box 2 %d (fighters fell %d), missing %d, players kept %d, still cutscenes %d, rewrapped %d, lines to a fighter %d, prizes %d (asked %d), reputation lines %d, errors %d",
+		n, fight and tostring(fight.n) or "-", stats.stowed, stats.returned, stats.to_box2, stats.fell, stats.missing, stats.players_kept,
 		stats.still_cuts, stats.rewrapped, stats.tips, stats.prizes, stats.prize_asks, stats.rep_lines, stats.errors)
 end
 
