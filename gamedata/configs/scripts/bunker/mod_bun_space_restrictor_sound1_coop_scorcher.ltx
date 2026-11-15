@@ -1,0 +1,6 @@
+;; Anomaly Coop - the Brain Scorcher for two sides (gamedata\scripts\coop_scorcher.script), DLTX beside the stock bun_space_restrictor_sound1.ltx.
+;; Outside a co-op world with split levels the first branch of every changed line is the stock outcome (and a missing
+;; coop_* condition is skipped by xr_logic, which lands on that first branch too).
+
+![sr_idle@nil]
+on_info = {-bar_deactivate_radar_done !coop_split_mode}, {-bar_deactivate_radar_done} sr_idle@on

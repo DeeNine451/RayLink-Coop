@@ -1,0 +1,21 @@
+; Anomaly Coop - the Brain Scorcher for two sides (gamedata\scripts\coop_scorcher.script, plan 2026-11-16 section 4).
+; Included by task_manager.ltx (#include "tm_*.ltx"). The id has no "<character>_task_" pattern on purpose: the task manager
+; must not hand it out in the common job dialog; only Charon's dialog (modxml_coop_scorcher.script) gives it.
+
+; Monolith: switch the Brain Scorcher back on. Complete when the switch in X10 drops the flag; fails when the switch locks.
+[coop_scorcher_on_task]
+icon = ui_iconsTotal_bar_radar_deactivate
+storyline = true
+prior = 11
+title = st_coop_scorcher_on_name
+descr = st_coop_scorcher_on_text
+target = rad_space_restrictor_to_bunker
+on_init = %=coop_scorcher_task_taken%
+on_complete = %=coop_scorcher_task_done =complete_task_inc_goodwill(100:monolith)%
+condlist_0 = {-bar_deactivate_radar_done} complete
+condlist_1 = {!coop_scorcher_locked}, fail
+
+; The stock "off" task (tm_radar.ltx:27-38) fails as well when the switch locks. Outside split mode coop_scorcher_locked is
+; false, and a missing function is skipped, so the first branch (no section) is taken: the stock task.
+![turn_off_brain_scorcher]
+condlist_1 = {!coop_scorcher_locked}, fail

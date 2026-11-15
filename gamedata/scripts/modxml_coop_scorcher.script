@@ -1,0 +1,76 @@
+--[[
+	Anomaly Coop - the Brain Scorcher for two sides: the dialogs (gamedata\scripts\modxml_coop_scorcher.script).
+	The modxml_ prefix makes dxml_core load this script and call on_xml_read() at script start-up, before the engine reads the
+	dialog files and the first character.
+	  - A new dialog at Charon (lider_monolith_haron): he gives coop_scorcher_on_task. Its precondition
+	    (coop_scorcher.dlg_can_offer_on) opens it only for a Monolith player in a world with split levels while the Scorcher is off,
+	    not locked and the cooldown is over. Everywhere else it is never shown.
+	  - The stock "off" offer: Sakharov's helmet dialogs (gameplay\dialogs_yantar.xml) give turn_off_brain_scorcher in their
+	    actions; they get one more precondition, coop_scorcher.dlg_off_offer_ok, true outside split mode.
+	The XML is built once per process, so both exist on every co-op exe; their preconditions decide at the time of the talk.
+	Nothing happens on an exe without co-op.
+--]]
+
+local DIALOGS = [[gameplay\dialogs.xml]]
+local YANTAR = [[gameplay\dialogs_yantar.xml]]
+local ID = "coop_scorcher_on_dialog"
+CHARON = "lider_monolith_haron"
+OFF_OFFERS = { "yan_stalker_sakharov_bad_psi_helmet", "yan_stalker_sakharov_good_psi_helmet" }
+OFF_PRECONDITION = "coop_scorcher.dlg_off_offer_ok"
+
+DIALOG = [[
+<dialog id="coop_scorcher_on_dialog">
+	<precondition>coop_scorcher.dlg_can_offer_on</precondition>
+	<phrase_list>
+		<phrase id="0">
+			<text>st_coop_scorcher_dlg_0</text>
+			<next>1</next>
+		</phrase>
+		<phrase id="1">
+			<text>st_coop_scorcher_dlg_1</text>
+			<next>2</next>
+			<next>3</next>
+		</phrase>
+		<phrase id="2">
+			<text>st_coop_scorcher_dlg_2</text>
+			<action>coop_scorcher.dlg_give_on</action>
+			<next>4</next>
+		</phrase>
+		<phrase id="3">
+			<text>st_coop_scorcher_dlg_3</text>
+		</phrase>
+		<phrase id="4">
+			<text>st_coop_scorcher_dlg_4</text>
+		</phrase>
+	</phrase_list>
+</dialog>
+]]
+
+function on_read(xml_file_name, xml_obj)
+	if xml_file_name == DIALOGS then
+		if #xml_obj:query("dialog[id=" .. ID .. "]") == 0 then xml_obj:insertFromXMLString(DIALOG) end
+	elseif xml_file_name == YANTAR then
+		for _, id in ipairs(OFF_OFFERS) do
+			local found = xml_obj:query("dialog[id=" .. id .. "]")
+			local d = found and found[1]
+			if d then
+				local has = false
+				for _, p in ipairs(xml_obj:query("dialog[id=" .. id .. "] > precondition")) do
+					local t = xml_obj:getText(p)
+					if type(t) == "string" and t:match("^%s*(.-)%s*$") == OFF_PRECONDITION then has = true end
+				end
+				if not has then xml_obj:insertFromXMLString("<precondition>" .. OFF_PRECONDITION .. "</precondition>", d, 0) end
+			end
+		end
+	end
+end
+
+function on_dialog_list(character_id, dialog_list)
+	if character_id == CHARON and not dialog_list:has(ID) then dialog_list:add_first(ID) end
+end
+
+function on_xml_read()
+	if not rawget(_G, "coop") then return end
+	RegisterScriptCallback("on_xml_read", on_read)
+	RegisterScriptCallback("on_specific_character_dialog_list", on_dialog_list)
+end

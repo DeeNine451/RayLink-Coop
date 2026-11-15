@@ -1,0 +1,439 @@
+--[[
+	Anomaly Coop - the Brain Scorcher for two sides (gamedata\scripts\coop_scorcher.script)
+	Plan docs\plans\2026-11-16-storylines-per-faction.md section 4 (stage 5). Owner 2026-11-16: in a world with split levels one side
+	switches the Brain Scorcher off (the stock task, Sakharov), Monolith switches it back on (a task from Charon, the leader of
+	Monolith). A world without split levels, a sandbox and single player stay the stock game: every condition below answers what
+	keeps the stock behaviour there, and every logic file the mod edits (DLTX mod_*_coop_scorcher.ltx beside the stock ones) puts
+	the stock outcome in the FIRST branch under a negated condition, so a missing function (xr_logic.pick_section_from_condlist
+	skips an unknown condition, it does not fail it) also lands on the stock outcome.
+
+	State (the world's): on (the Scorcher works), flips (how many times a switch was turned in this world), last (game seconds of
+	the last flip), locked (after MAX_FLIPS the switch stays as it is for good; both tasks fail by their own condlists).
+	  - The world server (coop.is_host() and not a map server) keeps it in its save (m_data.coop_scorcher) and is the only place it
+	    changes. It changes when the world server's own switch logic flips it, or when the map server that leads the X10 level
+	    (SWITCH_LEVEL) reports a flip it made (coop_levels_share "scorcher" up). The world checks the report: the reporting map
+	    server's level must be SWITCH_LEVEL (the level comes from the bridge, not from the payload), it must be made on top of the
+	    world's current flip count, it must change the state, and the cooldown and the lock must allow it. Anything else is refused
+	    and the next "down" puts the reporting map server back to the world's state.
+	  - Map servers get the state down (coop_levels_share "scorcher" down), set their own actor's bar_deactivate_radar_done to it
+	    (the condlists of their level read it) and re-arm the objects that were saved dead (rearm()).
+	  - Players' machines get the state from peer 0 only (event EV, read-only); it feeds the dialog preconditions. A player's
+	    message never changes the state: there is no verb for it.
+
+	For other scripts:
+		coop_scorcher.ending_ok(faction) -> bool   the Scorcher is in the state that faction wants (Monolith ON, others OFF);
+		                                           outside split mode the stock rule (OFF)
+		coop_scorcher.state() -> { on, flips, last, locked }   a copy of what this machine knows
+		coop_scorcher.print_status()
+	The condlist functions (installed into xr_conditions / xr_effects at script start, in every mode):
+		=coop_split_mode  =coop_scorcher_can_on  =coop_scorcher_can_off  =coop_scorcher_ready  =coop_scorcher_locked
+		=coop_actor_monolith   %=coop_scorcher_flipped(on|off)%  %=coop_scorcher_refused%  %=coop_scorcher_task_taken%
+		%=coop_scorcher_task_done%
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, tostring, tonumber, pairs, ipairs, pcall = type, tostring, tonumber, pairs, ipairs, pcall
+local floor = math.floor
+
+-------------------------------------------------------------------------------
+-- Rules
+-------------------------------------------------------------------------------
+COOLDOWN_SEC = 3 * 24 * 60 * 60 -- game seconds after each flip: no task offered, the switch refuses
+MAX_FLIPS = 4                    -- after this flip the switch locks in its state for good
+SWITCH_LEVEL = "l10u_bunker"     -- the level of the X10 switch: the only map server whose flips count
+FLAG = "bar_deactivate_radar_done"
+ON_TASK = "coop_scorcher_on_task"
+OFF_TASK = "turn_off_brain_scorcher"
+EV = "coop_scorch"
+SHARE = "scorcher"
+TELL_EVERY_MS = 30000
+
+-- The logic files the mod edits whose objects can sit in a dead section of a save. file -> { dead section -> section to go to }.
+-- "nil" is the state without an active section (xr_logic.activate_by_section "nil"): nothing ever reads the ini again for it.
+local PSY = { ["nil"] = "sr_psy_antenna@no_helmet" }
+local PARTICLE = { ["nil"] = "sr_idle@check_switch", ["sr_idle@nil"] = "sr_idle@check_switch" }
+local SOUND = { ["nil"] = "sr_idle@on", ["sr_idle@off"] = "sr_idle@on" }
+local BUN_SOUND = { ["nil"] = "sr_idle@on", ["sr_idle@nil"] = "sr_idle@on", ["sr_idle@off"] = "sr_idle@on" }
+REARM = {
+	["scripts\\radar\\rad_psy_zone_1.ltx"] = PSY,
+	["scripts\\radar\\rad_psy_zone_2.ltx"] = PSY,
+	["scripts\\radar\\rad_psy_zone_3.ltx"] = PSY,
+	["scripts\\radar\\rad_psy_zone_8.ltx"] = PSY,
+	["scripts\\pripyat\\pri_psy_zone_1.ltx"] = PSY,
+	["scripts\\stancia_1\\aes1_psy_zone_1.ltx"] = PSY,
+	["scripts\\stancia_2\\aes2_psy_zone_1.ltx"] = PSY,
+	["scripts\\bunker\\bun_psi_radiotion_75.ltx"] = { ["nil"] = "sr_psy_antenna@no_helmet", ["sr_idle@nil"] = "sr_psy_antenna@no_helmet" },
+	["scripts\\radar\\rad_antenna_particle_01.ltx"] = PARTICLE,
+	["scripts\\radar\\rad_antenna_particle_02.ltx"] = PARTICLE,
+	["scripts\\radar\\rad_antenna_particle_03.ltx"] = PARTICLE,
+	["scripts\\radar\\rad_antenna_particle_04.ltx"] = PARTICLE,
+	["scripts\\radar\\rad_sound_drone.ltx"] = SOUND,
+	["scripts\\radar\\rad_sound_thunder.ltx"] = SOUND,
+	["scripts\\bunker\\bun_space_restrictor_sound1.ltx"] = BUN_SOUND,
+	["scripts\\bunker\\bun_space_restrictor_sound1_0000.ltx"] = BUN_SOUND,
+	["scripts\\bunker\\bun_space_restrictor_sound1_0001.ltx"] = BUN_SOUND,
+	["scripts\\bunker\\bun_space_restrictor_sound1_0002.ltx"] = BUN_SOUND,
+	["scripts\\bunker\\bun_space_restrictor_sound1_0003.ltx"] = BUN_SOUND,
+	["scripts\\bunker\\bun_space_restrictor_sound1_0004.ltx"] = BUN_SOUND,
+}
+SWITCH_FILE = "scripts\\bunker\\bunker_primary_switcher.ltx"
+
+-------------------------------------------------------------------------------
+-- Who we are
+-------------------------------------------------------------------------------
+local function call(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, ...)
+	if ok then return v end
+	return nil
+end
+
+local function active() return api ~= nil and call(api.is_active) == true end
+local function is_host() return active() and call(api.is_host) == true end
+local function is_map_server() return active() and call(api.is_map_server) == true end
+local function is_dedicated() return active() and call(api.is_dedicated) == true end
+local function authority() return is_host() and not is_map_server() end
+
+local function split()
+	local f = rawget(_G, "coop_faction")
+	if type(f) == "table" and type(f.split_mode) == "function" then return call(f.split_mode) == true end
+	if not active() then return false end
+	local l = api.levels
+	return type(l) == "table" and call(l.split) == true
+end
+
+local stats = { flips = 0, refused = 0, forged = 0, mirrored = 0, rearmed = 0, told = 0, errors = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("[coop_scorcher] %s", ok and line or fmt)
+end
+
+-------------------------------------------------------------------------------
+-- Game time in seconds (the Gregorian day number, so a month's end does not stretch the cooldown)
+-------------------------------------------------------------------------------
+local function days_from_civil(y, m, d)
+	if m <= 2 then y = y - 1 end
+	local era = floor(y / 400)
+	local yoe = y - era * 400
+	local mp = (m + 9) % 12
+	local doy = floor((153 * mp + 2) / 5) + d - 1
+	local doe = yoe * 365 + floor(yoe / 4) - floor(yoe / 100) + doy
+	return era * 146097 + doe - 719468
+end
+
+function game_seconds()
+	local t = game.get_game_time()
+	local Y, M, D, h, mi, s = t:get(0, 0, 0, 0, 0, 0, 0)
+	return days_from_civil(Y, M, D) * 86400 + h * 3600 + mi * 60 + s
+end
+
+-------------------------------------------------------------------------------
+-- State
+-------------------------------------------------------------------------------
+local S = { on = nil, flips = 0, last = nil, locked = false }
+local pending = { n = 0, on = nil, base = nil } -- a map server's own flip, reported up until the world answers
+
+local function actor() return db and db.actor end
+
+local function flag_here()
+	local a = actor()
+	if not a then return nil end
+	return a:has_info(FLAG) == true
+end
+
+-- on: the world's word; before any word the flag of this machine's actor (stock truth)
+local function is_on()
+	if S.on ~= nil then return S.on end
+	local f = flag_here()
+	if f == nil then return false end
+	return not f
+end
+
+local function cooldown_over()
+	if S.last == nil then return true end
+	local ok, now = pcall(game_seconds)
+	if not ok then return false end
+	return now - S.last >= COOLDOWN_SEC
+end
+
+local function ready() return S.locked ~= true and cooldown_over() end
+
+function state() return { on = is_on(), flips = S.flips, last = S.last, locked = S.locked == true } end
+
+local function set_flag(off)
+	local a = actor()
+	if not a then return end
+	local has = a:has_info(FLAG) == true
+	if off and not has then a:give_info_portion(FLAG)
+	elseif not off and has then a:disable_info_portion(FLAG) end
+end
+
+-- A row from the wire or the save: only known fields of known types.
+local function clean(t)
+	if type(t) ~= "table" then return nil end
+	local flips, last = tonumber(t.flips), tonumber(t.last)
+	if type(t.on) ~= "boolean" or not flips or flips < 0 or flips > MAX_FLIPS or flips ~= floor(flips) then return nil end
+	return { on = t.on, flips = flips, last = last, locked = t.locked == true or flips >= MAX_FLIPS }
+end
+
+-------------------------------------------------------------------------------
+-- Re-arm: objects of the edited files sitting in a dead section go back to their working section (split mode, Scorcher ON)
+-------------------------------------------------------------------------------
+function rearm()
+	if not (split() and is_on()) then return 0 end
+	local xl = rawget(_G, "xr_logic") or xr_logic
+	local n = 0
+	for id, st in pairs(db.storage or {}) do
+		if type(st) == "table" and type(st.ini_filename) == "string" then
+			local map = REARM[st.ini_filename]
+			local to = map and map[st.active_section or "nil"]
+			if to and st.ini and st.ini:section_exist(to) then
+				local obj = level.object_by_id(id)
+				if obj then
+					local ok, err = pcall(xl.switch_to_section, obj, st.ini, to)
+					if ok then n = n + 1 else stats.errors = stats.errors + 1; log("! re-arm %s: %s", tostring(id), tostring(err)) end
+				end
+			elseif st.ini_filename == SWITCH_FILE and st.ini then
+				-- the switch shows the world's state (a refused report, or a save from before the mod)
+				local want = is_on() and "ph_button@rad_on" or "ph_button@rad_off"
+				if st.active_section ~= want and st.ini:section_exist(want) then
+					local obj = level.object_by_id(id)
+					if obj and pcall(xl.switch_to_section, obj, st.ini, want) then n = n + 1 end
+				end
+			end
+		end
+	end
+	stats.rearmed = stats.rearmed + n
+	return n
+end
+
+-------------------------------------------------------------------------------
+-- The world's side
+-------------------------------------------------------------------------------
+local function tell_players()
+	if not (authority() and split()) then return end
+	local cm = rawget(_G, "coop_main")
+	if not (cm and cm.encode) then return end
+	local ok = pcall(api.send_event, EV, cm.encode(state()), -1)
+	if ok then stats.told = stats.told + 1 end
+end
+
+-- Only here does the state change. Returns true when the flip counts.
+function apply_flip(on)
+	if not (authority() and split()) or type(on) ~= "boolean" then return false end
+	if on == is_on() or not ready() then
+		stats.refused = stats.refused + 1
+		return false
+	end
+	local ok, now = pcall(game_seconds)
+	S.on, S.flips, S.last = on, S.flips + 1, ok and now or S.last
+	if S.flips >= MAX_FLIPS then S.locked = true end
+	stats.flips = stats.flips + 1
+	set_flag(not on)
+	log("the Scorcher is %s (flip %d of %d%s)", on and "ON" or "OFF", S.flips, MAX_FLIPS, S.locked and ", locked" or "")
+	tell_players()
+	return true
+end
+
+-- coop_levels_share "scorcher" up, on the world server: a map server's flip. `lvl` is the level of the bridge it came over.
+function on_report(v, lvl)
+	if not (authority() and split()) then return end
+	if lvl ~= SWITCH_LEVEL or type(v) ~= "table" or type(v.on) ~= "boolean" or tonumber(v.base) ~= S.flips then
+		stats.forged = stats.forged + 1
+		return
+	end
+	apply_flip(v.on)
+end
+
+local function down_get()
+	if not split() then return nil end
+	return state()
+end
+
+-- coop_levels_share "scorcher" down, on a map server
+function on_down(v)
+	if not is_map_server() then return end
+	local t = clean(v)
+	if not t then return end
+	S.on, S.flips, S.last, S.locked = t.on, t.flips, t.last, t.locked
+	if pending.base ~= nil and t.flips > pending.base then pending.base, pending.on = nil, nil end
+	stats.mirrored = stats.mirrored + 1
+	set_flag(not t.on)
+	rearm()
+end
+
+local function up_get()
+	if pending.base == nil then return nil end
+	return { n = pending.n, on = pending.on, base = pending.base }
+end
+
+-- event EV on a player's machine: the world's state, from peer 0 only
+function on_word(payload, from)
+	if from ~= 0 or authority() or is_map_server() then return end
+	local cm = rawget(_G, "coop_main")
+	local t = clean(cm and type(payload) == "string" and cm.decode(payload) or nil)
+	if not t then return end
+	S.on, S.flips, S.last, S.locked = t.on, t.flips, t.last, t.locked
+	stats.mirrored = stats.mirrored + 1
+end
+
+-------------------------------------------------------------------------------
+-- Condlist functions
+-------------------------------------------------------------------------------
+function c_split_mode() return split() end
+function c_ready() if not split() then return true end return ready() end
+function c_can_off() if not split() then return true end return is_on() and ready() end
+function c_can_on() if not split() then return false end return not is_on() and ready() end
+function c_locked() return split() and S.locked == true end
+
+-- this machine's actor is a player of Monolith (a map server's or a dedicated world server's actor is nobody)
+function c_actor_monolith()
+	if not split() or is_map_server() or (is_host() and is_dedicated()) then return false end
+	local f = rawget(_G, "get_actor_true_community")
+	return call(f) == "monolith"
+end
+
+-- %=coop_scorcher_flipped(on|off)%: the switch's own condlist, after it chose the branch (only reached in split mode)
+function e_flipped(p)
+	if not split() then return end
+	local on = type(p) == "table" and p[1] == "on"
+	-- the condlist set or dropped the flag a moment ago (its infos run before this effect): the state before is the other one
+	if S.on == nil then S.on = not on end
+	if authority() then
+		if not apply_flip(on) then set_flag(not is_on()) end -- refused: the flag goes back to the world's state
+	elseif is_map_server() then
+		pending.n, pending.on, pending.base = pending.n + 1, on, S.flips
+		-- this level acts on its own flip until the world answers (a refused one is put back by the next down)
+		local ok, now = pcall(game_seconds)
+		S.on, S.flips, S.last = on, S.flips + 1, ok and now or S.last
+		if S.flips >= MAX_FLIPS then S.locked = true end
+	end
+end
+
+function e_refused()
+	if not split() then return end
+	local am = rawget(_G, "actor_menu")
+	local id = S.locked and "st_coop_scorcher_locked" or "st_coop_scorcher_refused"
+	if am and am.set_msg then pcall(am.set_msg, 1, game.translate_string(id), 4) end
+end
+
+function e_task_taken() if authority() then log("task %s taken", ON_TASK) end end
+function e_task_done() if authority() then log("task %s done", ON_TASK) end end
+
+local function install()
+	local xc = rawget(_G, "xr_conditions") or xr_conditions
+	local xe = rawget(_G, "xr_effects") or xr_effects
+	xc.coop_split_mode = function() return c_split_mode() end
+	xc.coop_scorcher_ready = function() return c_ready() end
+	xc.coop_scorcher_can_on = function() return c_can_on() end
+	xc.coop_scorcher_can_off = function() return c_can_off() end
+	xc.coop_scorcher_locked = function() return c_locked() end
+	xc.coop_actor_monolith = function() return c_actor_monolith() end
+	xe.coop_scorcher_flipped = function(a, n, p) e_flipped(p) end
+	xe.coop_scorcher_refused = function() e_refused() end
+	xe.coop_scorcher_task_taken = function() e_task_taken() end
+	xe.coop_scorcher_task_done = function() e_task_done() end
+end
+
+-------------------------------------------------------------------------------
+-- What the other scripts and the dialogs ask
+-------------------------------------------------------------------------------
+function ending_ok(faction)
+	if not split() then return not is_on() end
+	if faction == "monolith" then return is_on() end
+	return not is_on()
+end
+
+-- Charon's offer: a Monolith player, split world, the Scorcher off, not locked, cooldown over, the task not held already
+function dlg_can_offer_on(a, b)
+	if not (c_actor_monolith() and c_can_on()) then return false end
+	local ac = actor()
+	return not (ac and ac.get_task and ac:get_task(ON_TASK, true))
+end
+
+function dlg_give_on(a, b)
+	if not dlg_can_offer_on() then return end
+	local npc = (type(a) == "userdata" or type(a) == "table") and a or nil
+	local giver = npc and npc.id and npc:id() or nil
+	if giver == (actor() and actor():id()) then giver = (type(b) == "userdata" or type(b) == "table") and b.id and b:id() or nil end
+	task_manager.get_task_manager():give_task(ON_TASK, giver)
+end
+
+-- the stock "off" offer (Sakharov's helmet dialogs give turn_off_brain_scorcher): in split mode only when the switch would work
+function dlg_off_offer_ok(a, b)
+	if not split() then return true end
+	return ready()
+end
+
+-------------------------------------------------------------------------------
+-- Save, ticks, start
+-------------------------------------------------------------------------------
+local function save_state(m_data)
+	if not authority() then return end
+	if S.on == nil and S.flips == 0 then m_data.coop_scorcher = nil return end
+	m_data.coop_scorcher = state()
+end
+
+local function load_state(m_data)
+	S.on, S.flips, S.last, S.locked = nil, 0, nil, false
+	if not authority() then return end
+	local t = clean(m_data.coop_scorcher)
+	if t then S.on, S.flips, S.last, S.locked = t.on, t.flips, t.last, t.locked end
+end
+
+local next_tell = 0
+local function on_update()
+	if not (authority() and split()) then return end
+	local now = time_global()
+	if now < next_tell then return end
+	next_tell = now + TELL_EVERY_MS
+	if S.on == nil then
+		local f = flag_here()
+		if f ~= nil then S.on = not f end
+	elseif flag_here() == S.on then
+		S.on = not flag_here() -- something else changed the flag (stock MS on_fail): the record follows it, it is no flip
+	end
+	tell_players()
+end
+
+function print_status()
+	local s = state()
+	log("split %s, on %s, flips %d/%d, last %s, locked %s, cooldown over %s | flips %d, refused %d, forged %d, mirrored %d, re-armed %d, told %d, errors %d",
+		tostring(split()), tostring(s.on), s.flips, MAX_FLIPS, tostring(s.last), tostring(s.locked), tostring(cooldown_over()),
+		stats.flips, stats.refused, stats.forged, stats.mirrored, stats.rearmed, stats.told, stats.errors)
+end
+
+function _stats() return stats end
+function _reset() S.on, S.flips, S.last, S.locked = nil, 0, nil, false; pending.n, pending.on, pending.base = 0, nil, nil end
+
+local function step(what, f)
+	local ok, err = pcall(f)
+	if not ok then printf("! [coop_scorcher] %s failed: %s", what, tostring(err)) end
+end
+
+function on_game_start()
+	step("condlist functions", install) -- every mode: their answers keep the stock outside split mode
+	step("save", function()
+		RegisterScriptCallback("save_state", save_state)
+		RegisterScriptCallback("load_state", load_state)
+	end)
+	if not api then return end
+	step("share", function()
+		local share = rawget(_G, "coop_levels_share") or coop_levels_share
+		share.up(SHARE, up_get, on_report, 2000)
+		share.down(SHARE, down_get, on_down, 5000)
+	end)
+	step("events", function()
+		local cm = rawget(_G, "coop_main") or coop_main
+		cm.add_event_handler(EV, function(payload, from)
+			local ok, err = pcall(on_word, payload, from)
+			if not ok then stats.errors = stats.errors + 1 end
+		end)
+	end)
+	step("callbacks", function()
+		RegisterScriptCallback("actor_on_update", on_update)
+		RegisterScriptCallback("actor_on_first_update", function() step("re-arm", rearm) end)
+	end)
+end

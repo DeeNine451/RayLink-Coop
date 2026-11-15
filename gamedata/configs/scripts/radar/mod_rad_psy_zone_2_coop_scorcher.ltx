@@ -1,0 +1,22 @@
+;; Anomaly Coop - the Brain Scorcher for two sides (gamedata\scripts\coop_scorcher.script), DLTX beside the stock rad_psy_zone_2.ltx.
+;; Outside a co-op world with split levels the first branch of every changed line is the stock outcome (and a missing
+;; coop_* condition is skipped by xr_logic, which lands on that first branch too).
+
+![sr_psy_antenna@no_helmet]
+on_info2 = {+bar_deactivate_radar_done !coop_split_mode} nil, {+bar_deactivate_radar_done} sr_idle@coop_scorcher_off
+on_info3 = {!coop_actor_monolith}, sr_idle@coop_monolith
+
+![sr_psy_antenna@bad_helmet]
+on_info2 = {+bar_deactivate_radar_done !coop_split_mode} nil, {+bar_deactivate_radar_done} sr_idle@coop_scorcher_off
+on_info3 = {!coop_actor_monolith}, sr_idle@coop_monolith
+
+![sr_psy_antenna@good_helmet]
+on_info2 = {+bar_deactivate_radar_done !coop_split_mode} nil, {+bar_deactivate_radar_done} sr_idle@coop_scorcher_off
+on_info3 = {!coop_actor_monolith}, sr_idle@coop_monolith
+
+[sr_idle@coop_scorcher_off]
+on_info = {-bar_deactivate_radar_done} sr_psy_antenna@no_helmet
+
+[sr_idle@coop_monolith]
+on_info = {!coop_actor_monolith} sr_psy_antenna@no_helmet
+on_info2 = {+bar_deactivate_radar_done !coop_split_mode} nil, {+bar_deactivate_radar_done} sr_idle@coop_scorcher_off
