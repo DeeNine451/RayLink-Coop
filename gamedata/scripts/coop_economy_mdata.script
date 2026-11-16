@@ -622,6 +622,20 @@ local KEEP_UNTIL_TOLD = { bolts = "bolts", bolt_slot = "bolts" }
 -- Sections whose take or drop is told soon (a second), not at the next 15 s look: a level change may come first.
 local TOLD_SOON = { bolt = true, bolt_bullet = true }
 
+-- Owner's client log 2026-11-16 (b51): the stock makes the bolts of m_data at the first update (itms_manager
+-- actor_on_first_update), while a client is still loading; the engine drops a create into its actor before it is live
+-- (coop_requests.cpp lua_create -> take_lease: no leased id before live -> client_forward_spawn: "not live", nothing sent,
+-- nil to Lua: "!ERROR [bolt] is not spawned by ItemProcessor"), and nothing asked again. So a client's own told bolts are
+-- taken out of m_data before load_state (the stock makes none of them) and made here once it is live, a few a frame, in
+-- its own actor (the leased create; the host checks it as any). Bolt sections only, a section at most at the stock's limit.
+local BOLT_DELAY_MS = 1000 -- after live: the host's IdLease of the new world comes first
+local BOLT_BATCH = 10 -- creates a frame (the engine's own pace sends 20 in a row)
+local BOLT_QUIET_MS = 5000 -- after the last create: his hands are not told while the new items come online
+local BOLT_MAX_DEFAULT = 99 -- itms_manager.ltx [settings] bolt_max_num (ish_fixed_bolt_manager), 99 in Anomaly and GAMMA
+local BOLT_MAX_CEIL = 500
+local bolts_hold = nil -- { bolts = {sec = n}, slot = sec | nil, at = ms, queue = {sec, ...} } a client's own bolts to make
+local bolts_quiet_until = 0
+
 function register_player_key(key, provider)
 	if type(key) == "string" then MANIFEST[key] = type(provider) == "function" and provider or false end
 end
@@ -653,8 +667,10 @@ end
 local function pmd_poll()
 	local m = m_data()
 	if not m then return end
+	local bolts_busy = bolts_hold ~= nil or core.now() < bolts_quiet_until
 	for key in pairs(MANIFEST) do
-		local packed = not owned_elsewhere(key) and core.pack(pmd_current(m, key)) or nil
+		local packed = not owned_elsewhere(key) and not (bolts_busy and KEEP_UNTIL_TOLD[key] == "bolts")
+			and core.pack(pmd_current(m, key)) or nil
 		if packed and pmd_sig[key] ~= packed then
 			if #packed > MAX_VALUE then
 				stats.oversize = stats.oversize + 1
@@ -715,6 +731,7 @@ end
 local function apply_surrogate(m)
 	if type(m) ~= "table" or pmd_loaded_for == m then return end
 	pmd_loaded_for = m
+	bolts_hold, bolts_quiet_until = nil, 0 -- a new world: what the last one had to make is void
 	local my = core.host_id(0)
 	local root = m[PEER_STORE]
 	local e = type(root) == "table" and root[my] or nil
@@ -732,6 +749,11 @@ local function apply_surrogate(m)
 		end
 	end
 	stats.pmd_applied = n
+	if keys.bolts ~= nil and not owned_elsewhere("bolts") then
+		-- his own bolts: made once he is live (bolts_make), not by the stock's first update while loading
+		bolts_hold = { bolts = m.bolts, slot = m.bolt_slot }
+		m.bolts, m.bolt_slot = nil, nil
+	end
 	core.log("own player data applied before load_state: %d key(s)%s", n, e and "" or " (first visit: defaults)")
 end
 
@@ -1079,10 +1101,63 @@ local function server_entity_on_unregister(se_obj)
 	if type(id) == "number" then item_base[id] = nil end
 end
 
+local function bolt_max()
+	local im = core.mod("itms_manager")
+	local ok, v = pcall(function() return im.ini_manager:r_float_ex("settings", "bolt_max_num") end)
+	v = ok and tonumber(v) or BOLT_MAX_DEFAULT
+	return math.max(0, math.min(math.floor(v), BOLT_MAX_CEIL))
+end
+
+-- Client, live: the own bolts taken out before load_state, as the stock's first update makes them (the slot's, then the
+-- counts), a batch a frame. Only bolt sections (TOLD_SOON), a section at most at bolt_max().
+local function bolts_make(t)
+	local h = bolts_hold
+	if not h.at then h.at = t + BOLT_DELAY_MS end
+	if t < h.at then return end
+	if not h.queue then
+		local q, cap = {}, bolt_max()
+		if type(h.slot) == "string" and TOLD_SOON[h.slot] then q[#q + 1] = h.slot end
+		if type(h.bolts) == "table" then
+			for sec, cnt in pairs(h.bolts) do
+				if type(sec) == "string" and TOLD_SOON[sec] and type(cnt) == "number" then
+					for _ = 1, math.min(math.floor(cnt), cap) do q[#q + 1] = sec end
+				end
+			end
+		end
+		h.queue, h.made = q, 0
+	end
+	local create = _G.alife_create_item -- at the call: the wrappers of other mods (3DSS) as the stock gets them
+	if type(create) ~= "function" then
+		core.log("! own bolts: no alife_create_item, %d not made", #h.queue)
+		bolts_hold = nil
+		return
+	end
+	local actor = db.actor
+	if not actor then return end
+	for _ = 1, BOLT_BATCH do
+		local sec = table.remove(h.queue)
+		if not sec then break end
+		local ok, err = pcall(create, sec, actor)
+		if ok then h.made = h.made + 1 else core.log("! own bolt [%s]: %s", sec, tostring(err)) end
+	end
+	if #h.queue == 0 then
+		core.log("own bolts made again after the join: %d", h.made)
+		bolts_hold = nil
+		bolts_quiet_until = t + BOLT_QUIET_MS
+	end
+end
+
 local function actor_on_update()
 	if not core.live() then return end
 	if clone_storage ~= m_data() then clone_reset() end
 	local t = core.now()
+	if bolts_hold and core.is_client() then
+		local ok, err = pcall(bolts_make, t)
+		if not ok then
+			core.log("! own bolts: %s", tostring(err))
+			bolts_hold = nil
+		end
+	end
 	if t >= se_next_flush then
 		se_next_flush = t + FLUSH_MS
 		local ok, err = pcall(se_flush)
@@ -1107,6 +1182,12 @@ local function actor_on_update()
 		pmd_next_poll = t + PLAYER_POLL_MS
 		local ok, err = pcall(pmd_poll)
 		if not ok then core.log("! player data: %s", tostring(err)) end
+		-- his bolts were left out of this look: they are looked at again right when they may be
+		if bolts_hold then
+			pmd_next_poll = math.min(pmd_next_poll, t + 1000)
+		elseif t < bolts_quiet_until then
+			pmd_next_poll = math.min(pmd_next_poll, bolts_quiet_until)
+		end
 	end
 	if core.is_host() and t >= wmd_next_poll then
 		wmd_next_poll = t + WORLD_POLL_MS

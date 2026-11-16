@@ -1007,7 +1007,8 @@ do
 	local save = { se_object = {}, bolts = {}, coop_peer_mdata = H.MDATA.coop_peer_mdata }
 	A.MDATA = save
 	A.alife_storage_manager.on_before_load_state()
-	check(save.bolts and save.bolts.bolt == 7 and save.bolt_slot == "bolt", "after the change he has his own bolts, not the host's none")
+	-- his own are made once he is live (next section), never by the stock while he loads: the host's are out of m_data too
+	check(save.bolts == nil and save.bolt_slot == nil, "after the change the stock makes no bolt while he loads, the host's none neither")
 	-- a player whose character never told its bolts (a world of an older build): the host's count stands, as it did
 	local old = { se_object = {}, bolts = { bolt = 3 }, bolt_slot = "bolt",
 		coop_peer_mdata = { [501] = { name = "coop_player_avatar501", keys = { sleep = { last_sleep = 1 } } } } }
@@ -1024,11 +1025,12 @@ do
 	local none = { se_object = {}, bolts = { bolt = 40 }, bolt_slot = "bolt", coop_peer_mdata = H.MDATA.coop_peer_mdata }
 	A.MDATA = none
 	A.alife_storage_manager.on_before_load_state()
-	check(next(none.bolts) == nil and none.bolt_slot == nil, "a player with no bolt left does not get the host's forty")
+	check(none.bolts == nil and none.bolt_slot == nil, "a player with no bolt left does not get the host's forty")
 	-- a bolt picked up is told at once, not at the next 15 s look: a level change may come first
 	mine = { bolt = 2 }
 	A.itms_manager = { save_state = function(m) m.bolts, m.bolt_slot = mine, "bolt" end }
 	A.MDATA = { se_object = {} }
+	for _ = 1, 8 do tick(A, 1000) end -- past the join (his bolts are made again then: next section)
 	tick(A, 400) deliver_all()
 	fire(A, "actor_on_item_take", { section = function() return "bolt" end, id = function() return 990 end })
 	tick(A, 1200)
@@ -1036,6 +1038,128 @@ do
 	local soon = H.coop_economy_mdata.player_value(501, "bolts")
 	check(soon and soon.bolt == 2, "a bolt taken is told within a second")
 	A.itms_manager = nil
+end
+
+section("mdata: a player's bolts come back after the join")
+-- Owner, 2026-11-16 (client log b51): at every join 19 "!ERROR [bolt] is not spawned by ItemProcessor" BEFORE "phase
+-- loading-world -> live", and no bolt afterwards. The stock (itms_manager.actor_on_first_update) makes the bolts of
+-- m_data at the first update; a client is not live yet then, and the engine drops a create into its actor
+-- (coop_requests.cpp lua_create -> take_lease: no lease before live -> client_forward_spawn: not live, dropped; nil to Lua).
+-- Nothing asked again once the client was live.
+do
+	-- the stock's first update (GAMMA itms_manager.script 222-242), word for word in what it reads and calls
+	local function stock_first_update(W)
+		local m = W.alife_storage_manager.get_state()
+		if m.bolt_first then W.alife_create_item(m.bolt_first, W.db.actor) m.bolt_first = nil end
+		if m.bolt_slot then W.alife_create_item(m.bolt_slot, W.db.actor) end
+		if m.bolts then
+			for sec, cnt in pairs(m.bolts) do
+				for _ = 1, cnt do W.alife_create_item(sec, W.db.actor) end
+			end
+		end
+	end
+	-- the engine's create on a client: dropped (nil) before live, made into the actor once live
+	local function engine_creates(W)
+		W.MADE, W.LOST = {}, {}
+		W.alife_create_item = function(sec, to)
+			if to ~= W.db.actor then return nil end
+			if not W.LIVE then
+				W.LOST[sec] = (W.LOST[sec] or 0) + 1
+				return nil
+			end
+			W.MADE[sec] = (W.MADE[sec] or 0) + 1
+			return { id = 900 + W.MADE[sec] }
+		end
+		W.coop.is_live = function() return W.ACTIVE and W.LIVE == true end
+	end
+	local function made(W, sec) return W.MADE[sec] or 0 end
+	local function lost(W)
+		local n = 0
+		for _, c in pairs(W.LOST) do n = n + c end
+		return n
+	end
+	local function told(H, A, bolts, slot)
+		A.itms_manager = { save_state = function(m) m.bolts, m.bolt_slot = bolts, slot end }
+		A.LIVE = true
+		tick(A, 16000)
+		deliver_all()
+		-- from now on his hands: what the engine made here, one of them in the bolt slot (a persistent slot, not counted:
+		-- CInventory::AddAvailableItems); none while a new world loads
+		A.itms_manager = { save_state = function(m)
+			local n = A.MADE and A.MADE.bolt or 0
+			m.bolts, m.bolt_slot = {}, nil
+			if n > 0 then m.bolts.bolt, m.bolt_slot = n - 1, "bolt" end
+		end }
+	end
+	-- a join: the host's save is read, load_state, then the first update while loading, then live
+	local function join(H, A, host_bolts, host_slot)
+		A.LIVE = false
+		A.MDATA = { se_object = {}, bolts = host_bolts, bolt_slot = host_slot, coop_peer_mdata = H.MDATA.coop_peer_mdata }
+		A.alife_storage_manager.on_before_load_state()
+		stock_first_update(A)
+		A.LIVE = true
+		for _ = 1, 20 do tick(A, 300) end
+	end
+
+	local H, A = setup(1)
+	engine_creates(A)
+	told(H, A, { bolt = 18 }, "bolt")
+	join(H, A, {}, nil)
+	check(made(A, "bolt") == 19, "after a join the client has his 18 bolts and the one in the slot again (got " .. made(A, "bolt") .. ")")
+	check(lost(A) == 0, "no create of his bolts is made while loading, where the engine drops it (" .. lost(A) .. " lost)")
+	local kept = H.coop_economy_mdata.player_value(501, "bolts")
+	check(kept and kept.bolt == 18, "the host's record of his bolts is not overwritten with the empty hands of the loading")
+
+	-- the next level change: exactly as many again, not twice
+	engine_creates(A)
+	join(H, A, { bolt = 3 }, nil)
+	check(made(A, "bolt") == 19 and lost(A) == 0, "every join gives them once, the host's three are not his")
+	for _ = 1, 20 do tick(A, 1000) end
+	check(made(A, "bolt") == 19, "nothing is made again later")
+	deliver_all()
+	kept = H.coop_economy_mdata.player_value(501, "bolts")
+	check(kept and kept.bolt == 18 and H.coop_economy_mdata.player_value(501, "bolt_slot") == "bolt",
+		"his record stays 18 and the slot once he holds them again")
+
+	-- a first update that comes when the client is already live: the bolts come once, not twice
+	engine_creates(A)
+	A.LIVE = true
+	A.MDATA = { se_object = {}, bolts = {}, coop_peer_mdata = H.MDATA.coop_peer_mdata }
+	A.alife_storage_manager.on_before_load_state()
+	stock_first_update(A)
+	for _ = 1, 20 do tick(A, 300) end
+	check(made(A, "bolt") == 19, "a first update after live does not double them (got " .. made(A, "bolt") .. ")")
+
+	-- only bolt sections, and no more than the stock's limit of a section (bolt_max_num, 99)
+	engine_creates(A)
+	told(H, A, { bolt = 5000, bolt_bullet = 2, wpn_ak74 = 3, af_medusa = 1 }, "wpn_pm")
+	join(H, A, {}, nil)
+	check(made(A, "bolt") == 99 and made(A, "bolt_bullet") == 2, "his bolts come, a section at most at the stock's limit (99)")
+	check(made(A, "wpn_ak74") == 0 and made(A, "af_medusa") == 0 and made(A, "wpn_pm") == 0,
+		"anything but a bolt in the record is not made")
+
+	-- a character that never told its bolts (a world of an older build): today's behaviour, the stock's own creates
+	local H2, B = setup(1)
+	engine_creates(B)
+	B.LIVE = false
+	B.MDATA = { se_object = {}, bolts = { bolt = 3 }, bolt_slot = "bolt",
+		coop_peer_mdata = { [501] = { name = "coop_player_avatar501", keys = { sleep = { last_sleep = 1 } } } } }
+	B.alife_storage_manager.on_before_load_state()
+	check(B.MDATA.bolts and B.MDATA.bolts.bolt == 3 and B.MDATA.bolt_slot == "bolt", "never told: the host's values stay for the stock")
+	stock_first_update(B)
+	B.LIVE = true
+	for _ = 1, 20 do tick(B, 300) end
+	check(lost(B) == 4 and made(B, "bolt") == 0, "never told: nothing of ours is made (the stock's own creates, as before)")
+
+	-- the host's own bolts are the stock's business, untouched
+	engine_creates(H2)
+	H2.LIVE = true
+	H2.MDATA = { se_object = {}, bolts = { bolt = 4 }, bolt_slot = "bolt" }
+	H2.alife_storage_manager.on_before_load_state()
+	stock_first_update(H2)
+	for _ = 1, 20 do tick(H2, 300) end
+	check(made(H2, "bolt") == 5 and H2.MDATA.bolts.bolt == 4, "the host makes its own bolts as the stock does, once")
+	A.itms_manager, B.itms_manager = nil, nil
 end
 
 section("mdata: world keys")
