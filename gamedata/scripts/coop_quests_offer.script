@@ -57,6 +57,15 @@ local stats = {
 
 local function now() return time_global() end
 
+-- An NPC who talks and gives tasks: a stalker, or a trader (Sidorovich is m_trader, class AI_TRD_S = clsid.script_trader, and the
+-- stock IsStalker says no for him: the host refused his offer, "npc", owner's log 2026-11-16).
+local function talker(o)
+	if not o then return false end
+	if IsStalker(o) then return true end
+	local is_trader = rawget(_G, "IsTrader") or IsTrader
+	return type(is_trader) == "function" and is_trader(o) == true
+end
+
 local function ini() return task_manager and task_manager.task_ini end
 
 local function r_str(sec, key)
@@ -231,7 +240,7 @@ local function offer_here(t, from)
 		stats.refused = stats.refused + 1
 		qc.send("offer", { n = npc_id or 0, q = seq, k = kind, e = why, l = "" }, from)
 	end
-	if not (npc and IsStalker(npc) and npc:alive()) then return refuse("npc") end
+	if not (npc and talker(npc) and npc:alive()) then return refuse("npc") end
 	local key = tostring(from) .. ":" .. npc_id
 	if last_req[key] and now() - last_req[key] < REQ_GAP then return refuse("rate") end -- W5: answer, or a board batch waits
 	last_req[key] = now()
@@ -406,7 +415,7 @@ end
 local function on_gui_show(name)
 	if name ~= "Dialog" or not qc.client_live() then return end
 	local npc = talking_npc()
-	if npc and IsStalker(npc) then request_offer(npc) end
+	if npc and talker(npc) then request_offer(npc) end
 end
 
 -- Offer lines on the client, one frame later (the talk window must be settled).
@@ -636,7 +645,7 @@ end
 local function giver_npc(giver)
 	if type(giver) ~= "number" then return nil end
 	local o = level.object_by_id(giver)
-	if o and IsStalker(o) then return o end
+	if o and talker(o) then return o end
 	local se = alife_object(giver)
 	local ok, cid = pcall(function() return se and se.commander_id and se:commander_id() end)
 	o = ok and cid and level.object_by_id(cid)

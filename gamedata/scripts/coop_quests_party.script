@@ -513,7 +513,10 @@ local function patch_task_types()
 		end
 	end
 
-	-- Delivery: the package may be in another player's character
+	-- Delivery: the package may be in another player's character. The stock takes "the actor's" first item of the section, and
+	-- quest_package_1..8 are also A-Life Quests courier parcels and other deliveries: THIS task's parcel (var.item_1_id) is taken
+	-- from the player who holds it (owner 2026-11-16, build 51). The host's own parcel in the host's own dialog goes to the NPC it
+	-- talks to, as in the stock.
 	local xe = qc.mod("xr_effects")
 	if xe and type(xe.remove_delivery_item) == "function" then
 		local orig = xe.remove_delivery_item
@@ -521,6 +524,22 @@ local function patch_task_types()
 			if party_on() and type(p) == "table" and p[1] then
 				local var = load_var(db.actor, p[1])
 				local sec = type(var) == "table" and var.item_1_sec
+				local parcel = type(sec) == "string" and type(var.item_1_id) == "number" and level.object_by_id(var.item_1_id)
+				local by = parcel and parcel:section() == sec and parcel:parent()
+				if by and qc.is_character_id(by:id()) then
+					local mt = rawget(_G, "mob_trade") or mob_trade
+					local talker = by:id() == db.actor:id() and mt and mt.GetTalkingNpc and mt.GetTalkingNpc()
+					if talker then
+						local first = db.actor:object(sec)
+						if first and first:id() == var.item_1_id then return orig(actor, npc, p, ...) end
+						db.actor:transfer_item(parcel, talker)
+					else
+						alife_release_id(var.item_1_id)
+					end
+					news_manager.relocate_item(db.actor, "out", sec, 1)
+					stats.takes = stats.takes + 1
+					return
+				end
 				if type(sec) == "string" and not db.actor:object(sec) and other_holds(sec) then
 					stats.takes = stats.takes + ct().party_take(sec, 1)
 					return

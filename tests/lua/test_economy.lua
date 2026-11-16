@@ -1535,5 +1535,28 @@ do
 	check(not H.coop_economy_money.give_money(1, 10) and #H.MONEY_CALLS == 0, "no money transfer outside a session")
 end
 
+-------------------------------------------------------------------------------
+-- (quests hand-over, 2026-11-16) A gift arrives when the item is really in the inventory: the server entity's parent changes when
+-- the host processes the transfer, the game object joins the inventory a frame later (GE_OWNERSHIP_TAKE). The owner's and the
+-- host's logs said "gift: item 16228 [quest_package_4] ... arrived ...; 0 of quest_package_4 here: none".
+section("a gift arrives with the game object, not with the server record alone")
+do
+	local H = setup(1)
+	add_item(H, 900, "quest_package_4", nil)
+	H.SE[900].parent_id = 0 -- the record says: the host's actor
+	H.coop_economy_money.expect_gift(900, 1, nil)
+	tick(H, 250)
+	local function arrived_line()
+		for _, l in ipairs(H.LOG) do if l:find("gift: item 900", 1, true) then return l end end
+	end
+	check(arrived_line() == nil, "record moved, game object not yet in the inventory: not arrived")
+	H.OBJ[900]._parent = 0
+	H.INV[#H.INV + 1] = 900
+	tick(H, 250)
+	local line = arrived_line()
+	check(line ~= nil and line:find("1 of quest_package_4 here: 900", 1, true) ~= nil,
+		"in the inventory: arrived, and the line counts it (" .. tostring(line) .. ")")
+end
+
 print(string.format("%d passed, %d failed", CHECKS - FAILS, FAILS))
 if FAILS > 0 then os.exit(1) end

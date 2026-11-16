@@ -294,10 +294,16 @@ function items_pending()
 end
 
 -- The game object of item `id` when it is in this actor's inventory, else nil. Id 0 is the actor himself.
+-- Both records must say so: the server entity's parent changes when the transfer is processed (xrServer ownership event) and
+-- the game object joins the inventory only when that event reaches the level (Actor_Events GE_OWNERSHIP_TAKE: H_SetParent, then
+-- inventory().Take). Going by the record alone the gift "arrived" a frame early, with "0 of <section> here: none" in the log
+-- (owner and host logs 2026-11-16, item 16228 quest_package_4).
 local function own_item(id)
 	if id == 0 or not (db and db.actor) then return nil end
 	local obj = level.object_by_id(id)
 	if not obj or core.root_of(id) ~= 0 then return nil end
+	local ok, p = pcall(obj.parent, obj)
+	if not (ok and p and p:id() == db.actor:id()) then return nil end
 	return obj
 end
 

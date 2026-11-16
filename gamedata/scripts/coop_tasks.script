@@ -1002,6 +1002,40 @@ local function money_short(tm, id, peer)
 	return have ~= nil and have < (tonumber(load_var(db.actor, id .. "_fetch", 0)) or 0)
 end
 
+-- Units of a fetch task's item the group holds (R-7.5: every player's character; an artefact asked for without a minimal
+-- condition also counts in its containers), and how many the task asks for. nil when the task has no fetch item.
+function host.fetch_units(task_id)
+	local sec = load_var(db.actor, task_id .. "_fetch")
+	if type(sec) ~= "string" then return nil end
+	local need = tonumber(load_var(db.actor, task_id .. "_fetch_count")) or 1
+	local min_cond = FETCH_MIN_COND[task_id]
+	local n = party_count(sec, min_cond)
+	if not min_cond and sec:find("af_", 1, true) then
+		for _, cont in ipairs(CONTAINERS) do n = n + party_count(sec .. "_" .. cont) end
+	end
+	return n, need
+end
+
+-- Why a client's turn-in of a task he hands something over for cannot go through, or nil. Whatever his dialog said, the host looks at
+-- its own view of the group's characters (owner 2026-11-16: the parcel was with a player, the rest of the group went by word):
+--   delivery_task (stock tasks_delivery): THIS task's parcel (var.item_1_id, of var.item_1_sec) is in a player's character;
+--   actor_has_fetch_item (stock tasks_fetch): the group holds as many as the task asks for.
+-- Money tasks: money_short. The take itself is the on_complete's (coop_quests_party: the parcel by its id).
+function host.item_short(tm, id)
+	local tsk = tm.task_info[id]
+	if not is_task(tsk) then return nil end
+	local sf = tsk.status_functor
+	if sf == "delivery_task" then
+		local var = load_var(db.actor, id)
+		if type(var) ~= "table" or type(var.item_1_id) ~= "number" then return "the task has no parcel" end
+		if not party_holds_id(var.item_1_id, var.item_1_sec) then return "nobody of the group holds its parcel" end
+	elseif sf == "actor_has_fetch_item" then
+		local n, need = host.fetch_units(id)
+		if n and n < need then return string_format("the group holds %d of %d", n, need) end
+	end
+	return nil
+end
+
 -- The wait of a "check_if_enough_time_passed" task is counted from the give. Its giving dialog saves the time right after
 -- give_task, in the pstor of the machine that talks: a client's, where the host never sees it (a CTime cannot travel) and
 -- the wait would end at once. The host stamps the give itself (over a time an earlier give of the client left in the vars).
@@ -1107,6 +1141,11 @@ local function finish(method)
 		if tm.task_info[id] == nil or not engine_task_running(id) then return false end
 		if method == "set_task_completed" and money_short(tm, id, from) then
 			log("#%s cannot turn in '%s': not enough money", tostring(from), id)
+			return false
+		end
+		local short = method == "set_task_completed" and host.item_short(tm, id) or nil
+		if short then
+			log("#%s cannot turn in '%s': %s", tostring(from), id, short)
 			return false
 		end
 		if host.finisher[id] == nil then host.finisher[id] = from end
@@ -2233,15 +2272,8 @@ local function patch_party_items()
 		end
 	end
 	wrap_status("actor_has_fetch_item", function(tsk, task_id)
-		local sec = load_var(db.actor, task_id .. "_fetch")
-		if type(sec) ~= "string" then return end
-		local need = tonumber(load_var(db.actor, task_id .. "_fetch_count")) or 1
-		local min_cond = FETCH_MIN_COND[task_id]
-		local n = party_count(sec, min_cond)
-		if not min_cond and sec:find("af_", 1, true) then
-			for _, cont in ipairs(CONTAINERS) do n = n + party_count(sec .. "_" .. cont) end
-		end
-		if n >= need then
+		local n, need = host.fetch_units(task_id)
+		if n and n >= need then
 			tsk.stage = 1
 			stats.stage_by_party = stats.stage_by_party + 1
 		end
