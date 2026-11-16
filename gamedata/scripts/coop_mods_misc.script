@@ -638,6 +638,39 @@ local function players_life()
 	return #out > 0 and table.concat(out, ", ") or "-"
 end
 
+-- What he wears changes his health every second with nothing on the screen: CActor::UpdateArtefactsOnBeltAndOutfit gives
+-- health_restore_speed * condition of every artefact of the belt, and health_restore_speed of the outfit and of the helmet.
+-- Owner 2026-11-16 (build 51): "my health goes somewhere by itself, no effects"; the engine's ledger said "condition", no hit, no
+-- script, no radiation, no bleeding. The line names every worn item with its value and what they add up to in the window.
+local function worn_text()
+	local a = db.actor
+	local sum = 0
+	local function one(o, by_condition)
+		local ok, sec = pcall(function() return o:section() end)
+		if not (ok and type(sec) == "string") then return nil end
+		local okc, cond = pcall(function() return o:condition() end)
+		cond = okc and tonumber(cond) or 1
+		local okv, v = pcall(function() return ini_sys:r_float_ex(sec, "health_restore_speed") end)
+		v = okv and tonumber(v) or 0
+		sum = sum + v * (by_condition and cond or 1)
+		return string.format("%s %s x%.2f", sec, v == 0 and "0" or string.format("%.5f", v), cond)
+	end
+	local belt = {}
+	pcall(function()
+		a:iterate_belt(function(_, o)
+			local s = one(o, true)
+			if s then belt[#belt + 1] = s end
+		end, a)
+	end)
+	local function slot(n)
+		local ok, o = pcall(function() return a:item_in_slot(n) end)
+		return ok and o and one(o, false) or "-"
+	end
+	local outfit, helmet = slot(7), slot(12)
+	return string.format("belt %s, outfit %s, helmet %s; worn items give %.3f in %d s", #belt > 0 and table.concat(belt, ", ") or "-",
+		outfit, helmet, sum * DRAIN_MS / 1000, DRAIN_MS / 1000)
+end
+
 local function drain_line(fell)
 	local a = db.actor
 	local function num(v)
@@ -678,10 +711,10 @@ local function drain_line(fell)
 	local ok_psy, psy = pcall(function() return ap and ap.get_psy_health and ap.get_psy_health() end)
 	drain.lines = drain.lines + 1
 	log("drain", "health %s fell %.3f in %d s with no hit: psy %s (arszi %s), BHS hp/timed %s, sprint %s, satiety %s, thirst %s, "
-		.. "sleepiness %s, radiation %s, bleeding %s; players: %s; last co-op apply: %s%s", field("health"), fell, DRAIN_MS / 1000,
+		.. "sleepiness %s, radiation %s, bleeding %s; %s; players: %s; last co-op apply: %s%s", field("health"), fell, DRAIN_MS / 1000,
 		field("psy_health"), ok_psy and type(psy) == "number" and string.format("%.3f", psy) or "-", parts, sprint, satiety,
 		call("actor_status_thirst", "get_last_drink"), call("actor_status_sleep", "get_last_sleep"), field("radiation"),
-		field("bleeding"), players_life(), drain.apply, drain.apply_at and string.format(" %d s ago", math.floor((time_global() - drain.apply_at) / 1000)) or "")
+		field("bleeding"), worn_text(), players_life(), drain.apply, drain.apply_at and string.format(" %d s ago", math.floor((time_global() - drain.apply_at) / 1000)) or "")
 end
 
 local function drain_on_hit()

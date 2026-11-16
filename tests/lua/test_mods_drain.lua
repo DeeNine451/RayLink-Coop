@@ -86,6 +86,41 @@ local _, line_s = drain_lines()
 check(line_s and line_s:find("satiety 0.611", 1, true) ~= nil, "the actor condition's satiety (" .. tostring(line_s) .. ")")
 actor.cast_Actor = nil
 
+-- 1c. Owner, live 2026-11-16 (build 51): "my health goes somewhere by itself, no effects". The engine's ledger said: no hit, no
+-- script, the loss is inside the actor's condition update, 0.0175 every 15 s with no radiation and no bleeding. What the engine
+-- changes health by there with no effect on the screen is what he wears: every artefact of the belt, the outfit and the helmet
+-- give health_restore_speed * condition every second (CActor::UpdateArtefactsOnBeltAndOutfit). The line names them.
+if which == "client" then
+	LOGS = {}
+	INI.af_ice = { health_restore_speed = -0.0006 }
+	INI.af_medusa = { health_restore_speed = 0 }
+	INI.dolg_heavy_outfit = { health_restore_speed = 0.0001 }
+	INI.helm_tactic = {}
+	local function item(sec, cond) return { section = function() return sec end, condition = function() return cond end } end
+	local belt = { item("af_ice", 1), item("af_ice", 0.5), item("af_medusa", 1) }
+	actor.iterate_belt = function(self, f, who)
+		for _, o in ipairs(belt) do f(who, o) end
+	end
+	actor.item_in_slot = function(self, slot)
+		if slot == 7 then return item("dolg_heavy_outfit", 0.8) end
+		if slot == 12 then return item("helm_tactic", 1) end
+		return nil
+	end
+	for _ = 1, 15 do tick(1000, 0.002) end -- 15: the next cases keep their place in the 15 s windows
+	local _, line_w = drain_lines()
+	check(line_w and line_w:find("belt af_ice -0.00060 x1.00, af_ice -0.00060 x0.50, af_medusa 0 x1.00", 1, true) ~= nil,
+		"the line names every artefact of the belt with what it gives health a second and its condition (" .. tostring(line_w) .. ")")
+	check(line_w and line_w:find("outfit dolg_heavy_outfit 0.00010 x0.80", 1, true) and line_w:find("helmet helm_tactic 0 x1.00", 1, true),
+		"and the outfit and the helmet")
+	-- 15 s * (-0.0006 - 0.0003 + 0.0001 * 0.8) = -0.0123
+	check(line_w and line_w:find("worn items give -0.012 in 15 s", 1, true) ~= nil, "and what they add up to in the window")
+	actor.iterate_belt, actor.item_in_slot = nil, nil
+	LOGS = {}
+	for _ = 1, 15 do tick(1000, 0.002) end -- 15: the next cases keep their place in the 15 s windows
+	local _, line_n = drain_lines()
+	check(line_n and line_n:find("belt -, outfit -, helmet -", 1, true) ~= nil, "nothing worn (or an old exe): said so, no error")
+end
+
 -- 2. the same drop with a hit in the window: that is damage, not a drain
 LOGS = {}
 for i = 1, 15 do
