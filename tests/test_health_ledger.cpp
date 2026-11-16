@@ -72,7 +72,8 @@ TEST(health_ledger_reports_a_drop_of_0_02_after_15_s)
 	CHECK_EQ(line,
 	    std::string("health 0.709 -> 0.439 in 15 s: scripts -0.270 (perk_based_artefacts.script:1087 -0.250 x14, "
 	                "grok_actor_damage_balancer.script:751 -0.020 x1), hits 0 applied (power 0.000, health 0.000), coop applies "
-	                "0.000, condition 0.000 (bleeding 0.0000, radiation 0.000, satiety 0.611, psy 1.000, boosters: none), other 0.000"));
+	                "0.000, condition 0.000 (worn: none; radiation 0.000; bleeding 0.000; satiety 0.000; restore 0.000; "
+	                "unnamed 0.000) (bleeding 0.0000, radiation 0.000, satiety 0.611, psy 1.000, boosters: none), other 0.000"));
 	CHECK_EQ(l.lines(), 1u);
 }
 
@@ -263,6 +264,257 @@ TEST(health_ledger_stop_ends_the_window_without_a_line)
 	CHECK(line.empty());
 	CHECK(!l.frame(32000, kActor, std::nanf(""), line, calm)); // not a number: no line, the window starts over
 	CHECK(!l.frame(47000, kActor, 0.3f, line, calm));
+}
+
+// Build 51 live: a client's health fell 0.017-0.018 every 15 s for minutes and no line was written (each window under
+// kReportDrop). The condition update is broken down by what it applied: worn items by section, radiation, bleeding,
+// satiety, the restore, and an "unnamed" remainder (clamps, the last-chance health, C++ ChangeHealth of no named source).
+TEST(health_ledger_condition_is_broken_down_by_what_the_update_applied)
+{
+	Ledger l;
+	uint64_t now = 1000;
+	const std::string line = window(l, now, 0.9f, 0.86f, [&] {
+		l.worn("af_ice", -0.006f);
+		l.worn("af_baloon", -0.009f);
+		l.worn("af_ice", -0.006f);
+		l.worn("helm_x", 0.004f);
+		l.worn("outfit_y", -0.001f);
+		l.worn("af_z", -0.002f);
+		l.condition_part(health_ledger::Part::Radiation, -0.02f);
+		l.condition_part(health_ledger::Part::Bleeding, -0.001f);
+		l.condition_part(health_ledger::Part::Satiety, 0.002f);
+		l.condition_part(health_ledger::Part::Restore, 0.003f);
+		l.condition(-0.04f, true); // the update applied all of it but 0.004 (a clamp, a C++ ChangeHealth)
+	});
+	CHECK(contains(line, "condition -0.040 (worn: af_ice -0.012, af_baloon -0.009, helm_x 0.004, others -0.003; radiation "
+	                     "-0.020; bleeding -0.001; satiety 0.002; restore 0.003; unnamed -0.004) (bleeding 0.0000,"));
+	CHECK(contains(line, "other 0.000"));
+}
+
+// The parts are what the update queued; an update that did not run (health <= 0) leaves them for the one that does, an
+// update inside a hit takes them into the hit's health.
+TEST(health_ledger_condition_parts_follow_the_update_that_applied_them)
+{
+	Ledger l;
+	uint64_t now = 1000;
+	const std::string line = window(l, now, 0.9f, 0.85f, [&] {
+		l.worn("af_ice", -0.01f);
+		l.condition(0.f, false); // did not run: the worn part waits
+		l.hit_begin(0.3f);
+		l.condition_part(health_ledger::Part::Bleeding, -0.002f); // inside the hit
+		l.condition(-0.03f, true); // the hit's: its parts go with it, af_ice too
+		l.hit_end();
+		l.worn("af_ice", -0.02f);
+		l.condition(-0.02f, true);
+	});
+	CHECK(contains(line, "hits 1 applied (power 0.300, health -0.030)"));
+	CHECK(contains(line, "condition -0.020 (worn: af_ice -0.020; radiation 0.000; bleeding 0.000; satiety 0.000; restore "
+	                     "0.000; unnamed 0.000)"));
+}
+
+// A slow drain (each window under kReportDrop, at least kSlowFloor) gets a line after kSlowRun windows in a row, then after
+// twice as many, four times as many ..., with the breakdown summed over the whole run.
+TEST(health_ledger_reports_a_slow_steady_drain)
+{
+	Ledger l;
+	uint64_t now = 1000;
+	float h = 1.f;
+	std::string line;
+	l.frame(now, kActor, h, line, calm);
+	unsigned written = 0;
+	std::string last;
+	for (unsigned w = 1; w <= 3 * health_ledger::kSlowRun; ++w)
+	{
+		l.worn("af_ice", -0.009f);
+		l.condition_part(health_ledger::Part::Radiation, -0.008f);
+		l.condition(-0.017f, true);
+		h -= 0.017f;
+		now += health_ledger::kWindowMs;
+		line.clear();
+		const bool wrote = l.frame(now, kActor, h, line, calm);
+		CHECK_EQ(wrote, w == health_ledger::kSlowRun || w == 3 * health_ledger::kSlowRun);
+		if (wrote)
+		{
+			++written;
+			last = line;
+			if (w == health_ledger::kSlowRun)
+			{
+				CHECK(contains(line, "slow drain: health 1.000 -> 0.932 in 60 s (4 windows): scripts 0.000"));
+				CHECK(contains(line, "condition -0.068 (worn: af_ice -0.036; radiation -0.032;"));
+				CHECK(contains(line, "unnamed 0.000)"));
+				CHECK(contains(line, "other 0.000"));
+			}
+		}
+	}
+	CHECK_EQ(written, 2u);
+	CHECK(contains(last, "slow drain: health 1.000 -> 0.796 in 180 s (12 windows):"));
+	CHECK(contains(last, "worn: af_ice -0.108"));
+	CHECK_EQ(l.slow_lines(), 2u);
+	CHECK_EQ(l.lines(), 0u); // the ordinary budget is untouched
+}
+
+// Review of build 51: hunger alone is a slow drain for hours. A run is reported after kSlowRun windows, then after twice
+// as many more, four times ... (windows 4, 12, 28, 60); a run that ends starts the backoff over.
+TEST(health_ledger_a_slow_drain_backs_off)
+{
+	Ledger l;
+	uint64_t now = 1000;
+	float h = 1.f;
+	std::string line;
+	l.frame(now, kActor, h, line, calm);
+	auto step = [&](float drop) {
+		h -= drop;
+		now += health_ledger::kWindowMs;
+		line.clear();
+		return l.frame(now, kActor, h, line, calm);
+	};
+	std::string at;
+	for (unsigned w = 1; w <= 64; ++w)
+		if (step(0.006f))
+			at += std::to_string(w) + " ";
+	CHECK_EQ(at, std::string("4 12 28 60 "));
+	CHECK(!step(-0.01f)); // a rise ends the run
+	at.clear();
+	for (unsigned w = 1; w <= 12; ++w)
+		if (step(0.006f))
+			at += std::to_string(w) + " ";
+	CHECK_EQ(at, std::string("4 12 "));
+	CHECK_EQ(l.slow_lines(), 6u);
+}
+
+// The slow drain lines have their own budget: a full one never silences a big drop, and a full ordinary budget never
+// silences a slow drain.
+TEST(health_ledger_slow_drain_lines_have_their_own_budget)
+{
+	{
+		Ledger l;
+		uint64_t now = 1000;
+		float h = 1.f;
+		std::string line, last;
+		l.frame(now, kActor, h, line, calm);
+		auto step = [&](float drop) {
+			h -= drop;
+			now += health_ledger::kWindowMs;
+			line.clear();
+			return l.frame(now, kActor, h, line, calm);
+		};
+		unsigned written = 0;
+		for (unsigned run = 0; run < health_ledger::kMaxSlowLines + 50; ++run)
+		{
+			for (unsigned w = 0; w < health_ledger::kSlowRun; ++w)
+				if (step(0.006f))
+				{
+					++written;
+					last = line;
+				}
+			CHECK(!step(-0.024f)); // a rise: the run ends, the health is back
+		}
+		CHECK_EQ(written, health_ledger::kMaxSlowLines);
+		CHECK_EQ(l.slow_lines(), health_ledger::kMaxSlowLines);
+		CHECK(contains(last, "; the last slow drain line of this process"));
+		CHECK(step(0.05f)); // a big drop still has its line
+		CHECK(contains(line, "health 1.000 -> 0.950 in 15 s"));
+		CHECK_EQ(l.lines(), 1u);
+	}
+	{
+		Ledger l;
+		uint64_t now = 1000;
+		float h = 1.f;
+		std::string line;
+		l.frame(now, kActor, h, line, calm);
+		for (unsigned i = 0; i < 400 && l.lines() < health_ledger::kMaxLines; ++i) // about 10 drops in 11 windows
+		{
+			now += health_ledger::kWindowMs;
+			h = h > 0.5f ? h - 0.05f : 1.f;
+			line.clear();
+			l.frame(now, kActor, h, line, calm);
+		}
+		CHECK_EQ(l.lines(), health_ledger::kMaxLines);
+		bool wrote = false;
+		for (unsigned w = 0; w < health_ledger::kSlowRun; ++w)
+		{
+			h -= 0.006f;
+			now += health_ledger::kWindowMs;
+			line.clear();
+			wrote = l.frame(now, kActor, h, line, calm);
+		}
+		CHECK(wrote); // the slow drain still has its line
+		CHECK(contains(line, "slow drain: "));
+		CHECK_EQ(l.slow_lines(), 1u);
+	}
+}
+
+// Review of build 51: when the update applied less than its named parts because the health was clamped at full (the
+// update ended at the maximum), or applied nothing (its delta was 0 with parts queued), the line says so instead of a
+// bare "unnamed".
+TEST(health_ledger_unnamed_says_why_the_update_applied_less)
+{
+	{
+		Ledger l;
+		uint64_t now = 1000;
+		const std::string line = window(l, now, 1.f, 0.97f, [&] {
+			l.condition_part(health_ledger::Part::Restore, 0.004f);
+			l.condition(0.f, true, true); // at 1.0 already: SetHealth clamped the restore away
+			l.script("a.script:1", -0.03f);
+		});
+		CHECK(contains(line, "restore 0.004; unnamed -0.004 (clamped at full health))"));
+		CHECK(contains(line, "other 0.000"));
+	}
+	{
+		Ledger l;
+		uint64_t now = 1000;
+		const std::string line = window(l, now, 0.9f, 0.87f, [&] {
+			l.condition_part(health_ledger::Part::Bleeding, -0.01f);
+			l.condition(0.f, true, false); // ran, but its change was not applied
+			l.script("a.script:1", -0.03f);
+		});
+		CHECK(contains(line, "bleeding -0.010; satiety 0.000; restore 0.000; unnamed 0.010 (an update did not apply))"));
+	}
+	{
+		Ledger l;
+		uint64_t now = 1000;
+		const std::string line = window(l, now, 0.9f, 0.86f, [&] {
+			l.condition_part(health_ledger::Part::Radiation, -0.02f);
+			l.condition(-0.04f, true, false); // an ordinary remainder: no note
+		});
+		CHECK(contains(line, "unnamed -0.020) ("));
+	}
+}
+
+// A rise, a window under kSlowFloor or a window of kReportDrop or more ends the run; the big window has its own line.
+TEST(health_ledger_a_slow_drain_ends_with_a_rise_a_still_window_or_a_big_drop)
+{
+	Ledger l;
+	uint64_t now = 1000;
+	float h = 1.f;
+	std::string line;
+	l.frame(now, kActor, h, line, calm);
+	auto step = [&](float drop) {
+		h -= drop;
+		now += health_ledger::kWindowMs;
+		line.clear();
+		return l.frame(now, kActor, h, line, calm);
+	};
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(!step(-0.005f)); // a rise
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(!step(0.004f)); // under the floor: not a drain
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(step(0.03f)); // a big drop: its own line, the run ends
+	CHECK(contains(line, "health 0.911 -> 0.881 in 15 s"));
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(!step(0.01f));
+	CHECK(step(0.01f)); // four in a row again
+	CHECK(contains(line, "slow drain: health 0.881 -> 0.841 in 60 s (4 windows)"));
+	CHECK_EQ(l.lines(), 1u);
+	CHECK_EQ(l.slow_lines(), 1u);
 }
 
 TEST(health_ledger_writes_at_most_300_lines_per_process)

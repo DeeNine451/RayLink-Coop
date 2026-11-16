@@ -44,6 +44,37 @@ TEST(mirror_free_entity_follows_the_host)
 	}
 }
 
+// Build 51 live: psy phantoms hit a client but never showed up there. level.spawn_item gives a phantom no game vertex, so
+// it is in no level registry here; the local switch manager walks that registry only and never brought it online.
+// A free entity online on the host and in no level registry comes online at once; offline on the host it stays offline.
+TEST(mirror_free_entity_outside_the_level_registry_comes_online_now)
+{
+	for (int holder = 0; holder < 4; ++holder)
+	{
+		const bool online = (holder & 1) != 0, on_server = (holder & 2) != 0;
+		CHECK_EQ(placement(false, true, online, on_server, false), Placement::OnlineNow);
+		CHECK_EQ(placement(false, false, online, on_server, false), Placement::Offline);
+		CHECK_EQ(placement(false, true, online, on_server, true), Placement::SwitchVote);
+		CHECK_EQ(placement(false, false, online, on_server, true), Placement::Offline);
+		// the host's flag is no word on this level (a map server, a player on another level): the vote, as before
+		CHECK_EQ(placement(false, true, online, on_server, false, false), Placement::SwitchVote);
+		CHECK_EQ(placement(false, true, online, on_server, true, false), Placement::SwitchVote);
+		CHECK_EQ(placement(false, false, online, on_server, false, false), Placement::Offline);
+	}
+}
+
+// A child follows its holder here whatever the registry and level flags say.
+TEST(mirror_child_ignores_the_registry_flag)
+{
+	for (int bits = 0; bits < 64; ++bits)
+	{
+		const bool host_online = (bits & 1) != 0, holder_online = (bits & 2) != 0, on_server = (bits & 4) != 0;
+		const bool in_registry = (bits & 8) != 0, this_level = (bits & 16) != 0;
+		CHECK_EQ(placement(true, host_online, holder_online, on_server, in_registry, this_level),
+		    placement(true, host_online, holder_online, on_server));
+	}
+}
+
 // Single player and the host keep the stock assert: there a lost child is a real corruption of the world.
 TEST(mirror_lost_child_fatal_outside_a_mirror)
 {

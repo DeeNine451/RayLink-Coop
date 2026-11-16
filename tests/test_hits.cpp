@@ -137,3 +137,36 @@ TEST(hits_journal_first_hits_then_one_summary_per_window)
 	CHECK(q.single);
 	CHECK(std::string(coop::hits::source_name(coop::hits::Source::Creature)) == "a creature");
 }
+
+// Build 51 (P2): a client learns of a zone's Blowout a little late (the host's frame, the wire, its own frame). The stock
+// fires the blast only when the state clock crosses m_dwBlowoutExplosionTime (0 for the Electra), so a Blowout applied
+// with any elapsed time never hurt anybody. A blowout that is not long over starts at its blast.
+TEST(hits_zone_blowout_late_starts_at_its_blast)
+{
+	using coop::hits::kZoneBlastLateMs;
+	using coop::hits::zone_blowout_start;
+	// on time or before the blast: as the host says
+	CHECK_EQ(zone_blowout_start(0, 0), 0u);
+	CHECK_EQ(zone_blowout_start(100, 300), 100u);
+	CHECK_EQ(zone_blowout_start(300, 300), 300u);
+	// past the blast, within the window: at the blast
+	CHECK_EQ(zone_blowout_start(1, 0), 0u);
+	CHECK_EQ(zone_blowout_start(16, 0), 0u);
+	CHECK_EQ(zone_blowout_start(kZoneBlastLateMs, 0), 0u);
+	CHECK_EQ(zone_blowout_start(300 + kZoneBlastLateMs, 300), 300u);
+	// long over: no blast out of nowhere
+	CHECK_EQ(zone_blowout_start(kZoneBlastLateMs + 1, 0), kZoneBlastLateMs + 1);
+	CHECK_EQ(zone_blowout_start(60000, 300), 60000u);
+	CHECK_EQ(zone_blowout_start(0xffffffffu, 0), 0xffffffffu);
+}
+
+// Build 51 (P4): two states of one zone in one frame (a 100 ms Blowout, then Accumulate) collapsed to the last one and the
+// blast was lost. A Blowout not yet applied is kept, the state after it waits a frame.
+TEST(hits_zone_blowout_is_not_overwritten_in_one_frame)
+{
+	using coop::hits::zone_state_waits;
+	CHECK(zone_state_waits(true, false));   // a Blowout pending, Accumulate / Idle / Disabled comes: it waits
+	CHECK(!zone_state_waits(true, true));   // a Blowout again: the newer one (same blast)
+	CHECK(!zone_state_waits(false, false)); // anything else: the latest wins, as before
+	CHECK(!zone_state_waits(false, true));
+}
