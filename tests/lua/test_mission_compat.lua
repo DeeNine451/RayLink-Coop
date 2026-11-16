@@ -490,7 +490,39 @@ if have_file(gamma(GBO)) and have_file(gamma(MOMO)) then
 		"a client's hit (his proxy, his weapon) goes through the ballistics: health " .. npc.health .. ", power left " .. h.power)
 	local after_one = npc.health
 	fire(H, "npc_on_before_hit", npc, proxy, 501)
-	check(npc.writes == 2 and npc.health < after_one, "his next hit on the same NPC counts too: the multihit check is the client's")
+	check(npc.writes == 2 and npc.health < after_one, "his next hit on the same NPC counts too: no bullet of the host's judges it")
+	-- One bullet of a client that hits two bones of one NPC counted twice (the multihit fix does not run on his machine, and its
+	-- "last bullet of this machine" means nothing for his hit on the host). His hit carries the bullet's own number from his
+	-- machine (shit.bullet_id, SHit::BulletID on the wire): the host drops the second hit of one bullet on one target.
+	local clock, real_clock = 1000, H.env.time_global
+	H.env.time_global = function() return clock end
+	local function shot(target, bullet_id, flags, kind)
+		local hh = { draftsman = proxy, weapon_id = 501, power = 0.3, type = kind or 6, direction = vec(1, 0, 0), bullet_id = bullet_id }
+		H.fire("npc_on_before_hit", target, hh, 11, flags or {})
+		return hh
+	end
+	local npc4, npc5 = victim(H, 703), victim(H, 704)
+	shot(npc4, 9001)
+	check(npc4.writes == 1, "a client's bullet: its first hit counts")
+	local fl = {}
+	h = shot(npc4, 9001, fl)
+	check(npc4.writes == 1 and h.power == 0 and fl.ret_value == false,
+		"the same bullet on the same NPC again: dropped, no health written, the engine told to ignore the hit")
+	shot(npc5, 9001)
+	check(npc5.writes == 1, "the same bullet through another NPC counts there")
+	shot(npc4, 9002)
+	check(npc4.writes == 2, "his next bullet counts")
+	shot(npc4, 4294967295)
+	shot(npc4, 4294967295)
+	check(npc4.writes == 4, "hits without a bullet (no number) are never dropped")
+	shot(npc4, 9003, nil, 8)
+	shot(npc4, 9003, nil, 8)
+	check(npc4.writes == 6, "a hit that is no bullet wound is not this rule's: the same number twice, both go on to grok")
+	shot(npc4, 9004)
+	clock = clock + 5000
+	shot(npc4, 9004)
+	check(npc4.writes == 8, "the same number seconds later is another bullet (his game started again and counts from 0)")
+	H.env.time_global = real_clock
 	H.env.PBA = {}
 	fire(H, "npc_on_before_hit", npc, proxy, 501)
 	local pba_hit = false

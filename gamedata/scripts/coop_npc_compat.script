@@ -396,9 +396,9 @@ function _method_rewrites() return METHOD_REWRITES end
 -- and an NPC whose job logic says invulnerable (traders, base commanders, guards) took nothing. Now the machine that applies
 -- hits (the host or a map server) counts every player's hit the way it counts its own actor's. The multihit fix judges a hit by
 -- the last bullet of THIS machine, and a client's bullets do not fly on the host: his next shot at the same target would look
--- like a second hit of one bullet and be cancelled, so a remote player's hit goes past that wrapper. Open: one bullet of a
--- client that hits two bones of one target counts twice (the host's counts once). The host's own on-hit artefact perks are for
--- the host's hits (its before-hit and death perks are skipped by coop_mods_perks).
+-- like a second hit of one bullet and be cancelled, so a remote player's hit goes past that wrapper; the fix's rule is kept for
+-- it by the bullet's own number that comes with the hit (bullet_again). The host's own on-hit artefact perks are for the
+-- host's hits (its before-hit and death perks are skipped by coop_mods_perks).
 local FUNCTION_REWRITES = {
 	{ module = "grok_bo", name = "npc_on_before_hit", header = "function npc_on_before_hit(npc,shit,bone_id)", past = "momo_multihit_fix",
 		{ "if shit.draftsman:id() ~= db.actor:id() then",
@@ -443,6 +443,37 @@ local function remote_player_hit(h)
 	if P.is_client() then return false end
 	local ok, id = pcall(function() return h.draftsman:id() end)
 	return ok and type(id) == "number" and id ~= 0 and P.is_player_id(id)
+end
+
+-- The multihit fix's rule for a remote player's hit, by the hit's own bullet. That fix drops a second bullet wound of one bullet
+-- on one target, judged by the last bullet that hit something on THIS machine: a client's bullets do not fly here and the fix
+-- does not run on his machine, so one bullet of his through two bones of an NPC took health twice (the host's once). His hit
+-- carries the bullet's number from his machine (shit.bullet_id: SHit::BulletID, on the wire with every hit; every pellet of a
+-- shell has its own, so shot needs no exception). The same number on the same target within BULLET_AGAIN_MS is that bullet
+-- again; later it is another bullet (his game started again and counts from 0).
+local BULLET_AGAIN_MS, NO_BULLET, BULLET_TARGETS = 1000, 4294967295, 64
+local last_bullet = {} -- [the player's character id] = { n = targets kept, [target id] = { bullet id, time } }
+
+local function bullet_again(obj, h, flags)
+	local ok, again = pcall(function()
+		local id = h.bullet_id
+		if type(id) ~= "number" or id < 0 or id >= NO_BULLET or h.type ~= hit.fire_wound then return false end
+		local who, target, now = h.draftsman:id(), obj:id(), time_global()
+		local t = last_bullet[who]
+		if not t or t.n >= BULLET_TARGETS then
+			t = { n = 0 }
+			last_bullet[who] = t
+		end
+		local e = t[target]
+		if e and e[1] == id and now - e[2] <= BULLET_AGAIN_MS then return true end
+		if not e then t.n = t.n + 1 end
+		t[target] = { id, now }
+		return false
+	end)
+	if not (ok and again) then return false end
+	if type(flags) == "table" then flags.ret_value = false end -- the engine ignores the hit, as the fix asks it to
+	pcall(function() h.power = 0 end)
+	return true
 end
 
 local function apply_function_rewrite(r)
@@ -506,7 +537,11 @@ local function apply_function_rewrite(r)
 		if places > 0 and r.past and defined_in(current, r.past .. ".script") then
 			local wrapper = current
 			m[r.name] = function(obj, h, ...)
-				if remote_player_hit(h) then return fixed(obj, h, ...) end
+				if remote_player_hit(h) then
+					local _, flags = ...
+					if bullet_again(obj, h, flags) then return end
+					return fixed(obj, h, ...)
+				end
 				return wrapper(obj, h, ...)
 			end
 			past = r.past
