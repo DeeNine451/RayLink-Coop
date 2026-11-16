@@ -782,6 +782,57 @@ local function fire_option_change()
 	if not ok then log("! on_option_change after the late switch-on: %s", tostring(err)) end
 end
 
+-- A new world. The stock game_difficulties builds its factors in its own on_game_load from the save's tables and keeps them. The
+-- stock new game code (ui_mm_faction_select's on_game_load) puts the chosen difficulty and economy into the save's tables AFTER
+-- that: the callbacks run in the order the scripts registered them, by name. Single player never sees it, a new game changes the
+-- level at once and everything loads again. A world server stays on its level: the whole first session of a new world ran on
+-- preset 1 ("Easy", "Tourist") whatever its creator chose, every joining player was told so (coop_menu_char.host_eco), the
+-- clients got those factors and the record mirrored them. Owner, live 2026-11-16, build 51: "economy Tourist gets set, as if no
+-- setting of the launcher works at creation".
+-- true when a factor in force is not what the save's own table holds for it
+local function factors_stale(st, gd)
+	for _, pair in ipairs({ { st.diff_game, gd.get_game_factor }, { st.diff_eco, gd.get_eco_factor } }) do
+		local stored, get = pair[1], pair[2]
+		if type(stored) == "table" and type(get) == "function" then
+			for k, v in pairs(stored) do
+				local ok, now = pcall(get, k)
+				if ok and now ~= v then return true end
+			end
+		end
+	end
+	return false
+end
+
+-- The stock handler is run once more, as a level change would run it: it reads the save's tables again and rebuilds every
+-- factor, the ones the choice does not list too. If it cannot be found or dies, the save's own values go in through the setters.
+local function sync_new_world_difficulty()
+	local gd, st = mod("game_difficulties"), save_table()
+	if not gd or not factors_stale(st, gd) then return end
+	local route = mod("coop_route")
+	local ran = 0
+	if route and type(route.handlers_from) == "function" then
+		local ok, list = pcall(route.handlers_from, "on_game_load", "game_difficulties")
+		for _, f in ipairs(ok and type(list) == "table" and list or {}) do
+			local okf, err = pcall(f)
+			if okf then ran = ran + 1 else log("! a new world: game_difficulties' own load failed: %s", tostring(err)) end
+		end
+	end
+	if ran > 0 and not factors_stale(st, gd) then
+		log("a new world: the difficulty and the economy chosen for it are in force (game_difficulties loaded again)")
+		return
+	end
+	local cs = mod("coop_settings")
+	if not (cs and cs.read_factors and cs.apply_factor_table) then
+		log("! a new world: the chosen difficulty and economy are not in force until the world is loaded again")
+		return
+	end
+	local t = cs.read_factors(true, st)
+	t.s = nil
+	local n = cs.apply_factor_table(t, "the new world's own choice")
+	log("a new world: the difficulty and the economy chosen for it are set by hand, %d factor(s)%s", n,
+		factors_stale(st, gd) and "; ! some are still not the save's" or "")
+end
+
 local function first_update_impl()
 	if client_now() then return end
 	if S.first_done then return end
@@ -795,6 +846,7 @@ local function first_update_impl()
 	S.first_done = true
 	fill_identity()
 	push_faction()
+	if S.fresh_new then sync_new_world_difficulty() end
 	if S.origin == "card" then apply_record_factors() end
 	mirror_factors()
 	if S.fire_pending then fire_option_change() end

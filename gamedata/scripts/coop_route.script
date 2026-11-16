@@ -388,6 +388,33 @@ function handlers_of(callback, script)
 	return out
 end
 
+-- The handlers of a callback that were written in the script `script`, told by the function's own source: a handler no rule
+-- routes is found too. In the order axr_main calls them, and as their script registered them (never the wrapper).
+-- coop_game_settings runs game_difficulties' on_game_load once more on a new world with it.
+function handlers_from(callback, script)
+	local out = {}
+	local t = intercepts()
+	local list = t and t[callback]
+	if type(list) ~= "table" or type(script) ~= "string" or script == "" then return out end
+	local tail = script:lower() .. ".script"
+	local found = {}
+	for k, v in pairs(list) do
+		local o = origin[k]
+		local fn = o and o.fn or k
+		if type(fn) == "function" then
+			local ok, info = pcall(debug.getinfo, fn, "S")
+			local src = ok and type(info) == "table" and type(info.source) == "string" and info.source:lower() or ""
+			local before = #src - #tail
+			if before >= 0 and src:sub(before + 1) == tail and (before == 0 or src:sub(before, before):find("[\\/@]") ~= nil) then
+				found[#found + 1] = { fn = fn, v = tonumber(v) or 0 }
+			end
+		end
+	end
+	table.sort(found, function(a, b) return a.v < b.v end)
+	for i, e in ipairs(found) do out[i] = e.fn end
+	return out
+end
+
 -- What runs for a callback in that domain, as plain functions: a handler object is called as axr_main calls it. The death relay
 -- (coop_quests_far) tells these by hand: on the world server they did not hear the death of a map server's level.
 function domain_handlers(callback, domain)

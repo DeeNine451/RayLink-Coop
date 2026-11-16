@@ -1208,5 +1208,92 @@ gs.actor_on_first_update()
 check(gs.active() and gs.active().id == early_record.id and OPTION_CHANGES == 0,
 	"a readable sidecar activates early and never sends the late option-change callback")
 
+-------------------------------------------------------------------------------
+section("new_world_presets_in_force")
+-- Live 2026-11-16 (owner, build 51): "economy Tourist gets set, as if no setting of the launcher works at creation". The stock
+-- game_difficulties builds its factors in its own on_game_load from the save's tables and keeps them. The stock new game code
+-- (ui_mm_faction_select's on_game_load) puts the chosen difficulty and economy into the save's tables AFTER that: the callbacks
+-- run in the order the scripts registered them, by name. Single player loads everything again at once (a new game changes the
+-- level); a world server stays on its level, so the whole first session of a new world ran on preset 1.
+do
+	-- The stand-in of game_difficulties above reads and writes FACTORS: here FACTORS are the factors in force (the stock module's
+	-- own copies) and M_DATA the save's tables, two things as in the game.
+	local keep_g, keep_e, keep_route, keep_m = FACTORS.g, FACTORS.e, rawget(_G, "coop_route"), M_DATA
+	local PRESET = { e = { [1] = { buy = 1.25, arty_chance = 0.6 }, [3] = { buy = 0.75, arty_chance = 0.2 } },
+		g = { [1] = { hit_power = 1 }, [3] = { hit_power = 1.6 } } }
+	local loads
+	-- a model of the stock module: the factors in force are copies made at on_game_load, by the preset of that moment
+	local function build(src, stored)
+		local t = { type = stored.type or 1 }
+		for k, v in pairs(PRESET[src][t.type]) do
+			if stored[k] ~= nil then t[k] = stored[k] else t[k] = v end
+		end
+		FACTORS[src] = t
+	end
+	local function gd_on_game_load()
+		loads = loads + 1
+		if type(M_DATA.diff_eco) ~= "table" then M_DATA.diff_eco = { type = 1 } end
+		if type(M_DATA.diff_game) ~= "table" then M_DATA.diff_game = { type = 1 } end
+		build("e", M_DATA.diff_eco)
+		build("g", M_DATA.diff_game)
+	end
+	local asked = {}
+	local ROUTE = { handlers_from = function(cb, script)
+		asked[#asked + 1] = cb .. "/" .. script
+		return (cb == "on_game_load" and script == "game_difficulties") and { gd_on_game_load } or {}
+	end }
+	-- a new world whose creator chose economy 3 and difficulty 3: the stock writes them after game_difficulties has loaded
+	local function new_world(stock_writes_late)
+		FACTORS.g, FACTORS.e, loads = {}, {}, 0
+		M_DATA = {}
+		reset_disk()
+		check(gs.stage_new(make_record({})) == true, "a new world is staged")
+		gs.before_world_start("new", "")
+		if not stock_writes_late then
+			M_DATA.diff_eco, M_DATA.diff_game = { type = 3, buy = 0.75 }, { type = 3, hit_power = 1.6 }
+		end
+		gd_on_game_load()
+		if stock_writes_late then
+			-- ui_mm_faction_select: NEW tables, holding what its own list of factors has
+			M_DATA.diff_eco, M_DATA.diff_game = { type = 3, buy = 0.75 }, { type = 3, hit_power = 1.6 }
+		end
+	end
+	local E, G = function(k) return game_difficulties.get_eco_factor(k) end, function(k) return game_difficulties.get_game_factor(k) end
+
+	coop_route = ROUTE
+	new_world(true)
+	check(E("type") == 1 and E("buy") == 1.25 and G("hit_power") == 1, "the model: after the stock order of loading preset 1 is in force")
+	gs.actor_on_first_update()
+	check(E("type") == 3 and E("buy") == 0.75, "after the first update the chosen economy is in force")
+	check(E("arty_chance") == 0.2, "a factor the choice does not list comes from the chosen preset too")
+	check(G("type") == 3 and G("hit_power") == 1.6, "and the chosen difficulty")
+	check(loads == 2 and asked[1] == "on_game_load/game_difficulties", "the stock handler ran once more, as a level change runs it")
+	do
+		local A = gs.active()
+		check(A and A.values["e|buy"] == 0.75 and A.values["g|hit_power"] == 1.6, "the record mirrors the chosen factors, not preset 1's")
+	end
+	check(cs.read_factors(true).e.type == 3, "what the clients are sent names the chosen preset")
+
+	-- the stock wrote first (another order of the callbacks, or a game that loads again): nothing is stale, nothing is run again
+	new_world(false)
+	gs.actor_on_first_update()
+	check(loads == 1 and E("type") == 3 and E("buy") == 0.75, "factors that are the save's already are left alone")
+
+	-- the handler cannot be found (no router, a replaced script): the setters bring what the save's tables hold
+	coop_route = nil
+	new_world(true)
+	gs.actor_on_first_update()
+	check(loads == 1 and E("type") == 3 and E("buy") == 0.75 and G("type") == 3 and G("hit_power") == 1.6,
+		"without the handler the save's own values are set through the setters")
+	coop_route = { handlers_from = function() error("broken") end }
+	new_world(true)
+	check(pcall(gs.actor_on_first_update) and E("type") == 3 and E("buy") == 0.75, "a failing lookup is not an error: the setters do it")
+	coop_route = { handlers_from = function() return { function() error("stock died") end } end }
+	new_world(true)
+	check(pcall(gs.actor_on_first_update) and E("type") == 3, "a stock handler that dies is not an error either")
+
+	FACTORS.g, FACTORS.e, coop_route, M_DATA = keep_g, keep_e, keep_route, keep_m
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

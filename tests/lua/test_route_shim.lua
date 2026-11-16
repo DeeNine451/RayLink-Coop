@@ -141,6 +141,24 @@ UnregisterScriptCallback("on_key_press", obj)
 check(axr_main.count("on_key_press") == 1, "unregister of an object callback")
 check(#coop_route.handlers_of("on_key_press", "ui_b") == 1 and coop_route.handlers_of("on_key_press", "ui_b")[1] == b,
 	"handlers_of gives the script's own function back")
+do
+	-- handlers_from: by the function's own source, so a handler no rule routes is found too (2026-11-16: coop_game_settings runs
+	-- game_difficulties' on_game_load once more on a new world)
+	local gd1 = from_script("game_difficulties", "return function() ORDER[#ORDER + 1] = 'gd1' end")
+	local gd2 = from_script("game_difficulties", "return function() ORDER[#ORDER + 1] = 'gd2' end")
+	local other = from_script("my_game_difficulties", "return function() ORDER[#ORDER + 1] = 'other' end")
+	RegisterScriptCallback("on_key_press", gd1)
+	RegisterScriptCallback("on_key_press", other)
+	RegisterScriptCallback("on_key_press", gd2)
+	local got = coop_route.handlers_from("on_key_press", "Game_Difficulties")
+	check(#got == 2 and got[1] == gd1 and got[2] == gd2, "handlers_from: the script's own functions, in the order they run")
+	check(#coop_route.handlers_from("on_key_press", "difficulties") == 0, "a script whose name only ends the same is another script")
+	local from_ui = coop_route.handlers_from("on_key_press", "ui_b")
+	check(#from_ui == 1 and from_ui[1] == b, "a handler that is registered through a wrapper comes back as its own function")
+	check(#coop_route.handlers_from("no_such_callback", "game_difficulties") == 0 and #coop_route.handlers_from("on_key_press", nil) == 0
+		and #coop_route.handlers_from("on_key_press", "") == 0, "an unknown callback or no script: nothing")
+	for _, f in ipairs({ gd1, gd2, other }) do UnregisterScriptCallback("on_key_press", f) end
+end
 
 print("== route_shim_late_install")
 local PRE, before = {}, {}
