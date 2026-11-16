@@ -192,6 +192,7 @@ if have_file(gamma(INV)) then
 			db = { actor = E.db.actor },
 			coop_npc_is_player_id = E.coop_npc_is_player_id,
 			coop_npc_player_community = E.coop_npc_player_community,
+			coop_npc_applies_hits = function() return E.INV_CLIENT ~= true end,
 			get_actor_true_community = function() return "stalker" end,
 			character_community = function(o) return o:character_community() end,
 			game_relations = { is_factions_enemies = function(a, b)
@@ -213,6 +214,42 @@ if have_file(gamma(INV)) then
 		check(math.abs(hit_by(proxy) - 0.01) < 1e-6, "a client of a friendly faction does 1 %, like the host would")
 		proxy._comm = nil
 		check(hit_by(stalker(604)) == 0, "an NPC still does nothing")
+		-- the scaling counts once, on the machine that applies the hit: were the script given to the owner (client_hit_perks runs
+		-- the owner's handlers on a client before his hit is sent), the client's machine leaves it to the host
+		E.INV_CLIENT = true
+		check(hit_by(E.db.actor) == 1, "a client's machine leaves his hit to the host: the power goes out unscaled")
+		E.INV_CLIENT = nil
+	end
+end
+
+-- hxf_tough_important_npcs: the same, a player's hit is scaled once, on the host
+local HXF = "hxf_tough_important_npcs"
+if have_file(gamma(HXF)) then
+	local src, why = K.rewrite_text(read_all(gamma(HXF)), K._rewrites()[HXF] or {})
+	check(src ~= nil, HXF .. ": every pair is found in the real file (" .. tostring(why) .. ")")
+	local f = src and loadstring(src, "@" .. HXF)
+	check(f ~= nil and not src:find("== AC_ID", 1, true), HXF .. ": compiles, no AC_ID comparison is left")
+	if f then
+		local env = setmetatable({
+			coop_npc_is_player_id = E.coop_npc_is_player_id,
+			coop_npc_applies_hits = function() return E.INV_CLIENT ~= true end,
+			IsMonster = function(o) return o._monster == true end,
+			RegisterScriptCallback = function() end,
+		}, { __index = _G })
+		setfenv(f, env)
+		f()
+		local trapper = H.add(make_obj(19067, 60, 0, 0, { _name = "trapper", _section = "jup_b220_trapper" }))
+		local function hit_by(who)
+			local s = { power = 1, draftsman = who }
+			env.npc_on_before_hit(trapper, s, 11, {})
+			return s.power
+		end
+		check(math.abs(hit_by(proxy) - 0.75) < 1e-6 and math.abs(hit_by(E.db.actor) - 0.75) < 1e-6,
+			"an important NPC: a client's hit and the host's both take the player's share (75 %)")
+		check(math.abs(hit_by(stalker(605)) - 0.05) < 1e-6, "an NPC's hit: 5 %, as before")
+		E.INV_CLIENT = true
+		check(hit_by(E.db.actor) == 1, "a client's machine leaves his hit to the host: unscaled")
+		E.INV_CLIENT = nil
 	end
 end
 
@@ -307,6 +344,210 @@ check(math.abs(aim_at(mon) - 0.5) <= 0.011, "a monster: stock, 0.5 m")
 check(math.abs(aim_at(host_actor) - 1) <= 0.011, "the host's actor: stock, 1 m")
 K2._set_host_on(false)
 check(math.abs(aim_at(proxy) - 0.1) <= 0.001, "no clients: the stock aim")
+
+-- Live 2026-11-16 (build 51): stalkers, a base commander and sergeant Loshkin did not die from clients' fire. G.A.M.M.A.'s ballistics
+-- (grok_bo) computes a hit of db.actor itself and writes the health (past invulnerable); every other hit returns at its first line.
+-- By the route rules grok runs on the host only. There a client's hit comes from his proxy, not from db.actor: grok returned at
+-- once, the hit went the engine's stock way and an NPC whose job logic says invulnerable took nothing. Now the machine that
+-- applies hits (the host) counts a player's hit; a client's machine, were grok given to it, leaves the hit to the host.
+print("== G.A.M.M.A.'s ballistics (grok_bo): a client's hit is counted on the host like the host's")
+local GBO, MOMO = "grok_bo", "momo_multihit_fix"
+if have_file(gamma(GBO)) and have_file(gamma(MOMO)) then
+	local gbo_src = read_all(gamma(GBO))
+	local K0 = load_script(pair(), "coop_npc_compat")
+	local frs = K0._function_rewrites and K0._function_rewrites() or {}
+	check(#frs == 2, "two function rewrites of grok_bo: the stalker and the mutant handler")
+	local rewritten_src = gbo_src
+	for _, r in ipairs(frs) do
+		local text, line = K0.method_text(gbo_src, r.header)
+		local out, why = text and K0.rewrite_text(text, r)
+		check(out ~= nil, r.name .. ": every pair is found in the real function (" .. tostring(why or line) .. ")")
+		check(out ~= nil and loadstring(out) ~= nil, r.name .. ": the rewritten function compiles")
+		check(out ~= nil and not out:find("~= db.actor:id()", 1, true), r.name .. ": no db.actor guard is left")
+		local i, j = rewritten_src:find(text or "\0", 1, true)
+		if out and i then rewritten_src = rewritten_src:sub(1, i - 1) .. out .. rewritten_src:sub(j + 1) end
+	end
+	check(not rewritten_src:find("~= db.actor:id()", 1, true) and loadstring(rewritten_src) ~= nil,
+		"the whole file with both functions rewritten compiles, no db.actor guard is left in it")
+
+	-- the world grok reads (the stock and G.A.M.M.A. globals it calls), per machine
+	local function world(M, source)
+		local W = M.env
+		W.getFS = function() return { update_path = function(_, _, file) return GAMMA_DIR .. string.char(92) .. file end } end
+		if source then
+			W.io = setmetatable({ open = function(path, mode)
+				if path:find(GBO .. ".script", 1, true) then
+					return { read = function() return source end, close = function() end }
+				end
+				return io.open(path, mode)
+			end }, { __index = io })
+		end
+		W.PBA = {}
+		W.perk_based_artefacts = {
+			artefact_on_npc_before_hit_functions = { "before" }, artefact_on_npc_hit_functions = { "hit" },
+			artefact_on_npc_death_functions = { "death" },
+			process_artefacts = function(tbl) W.PBA[#W.PBA + 1] = tbl[1] end,
+		}
+		local stub = {}
+		function stub:section_exist() return true end
+		function stub:r_string(_, key)
+			local t = { model_path = "npc.ltx", bones_protection_sect = "prot", bone_profile = "body", head_profile = "head",
+				hit_fraction_npc = "0.5", ap_scale = "1" }
+			return t[key] or "1,0" -- damages.ltx: <bone> = <mult>,<armor>
+		end
+		W.ini_file = function() return stub end
+		W.ini_sys = {
+			r_float_ex = function(_, _, key) return ({ k_ap = 0.3, k_hit = 1, k_air_resistance = 0.05, wm_size = 0.05 })[key] end,
+			r_string_ex = function() return nil end,
+		}
+		W.IsGrenade = function() return false end
+		W.IsWeapon = function(o) return o._weapon == true end
+		W.IsItem = function() return false end
+		W.utils_item = { get_ammo = function() return { "ammo_5.45x39_fmj" } end }
+		W.ui_wpn_params = { read_float = function() return 0.5 end }
+		W.se_load_var = function() return nil end
+		W.str_explode = function(s, sep)
+			local t = {}
+			for p in (s .. sep):gmatch("(.-)" .. sep) do t[#t + 1] = p end
+			return t
+		end
+		W.alife_object = function() return { community = function() return "stalker" end } end
+		W.alife_storage_manager = { get_state = function() return { diff_game = { type = 2 } } end }
+		W.hit = setmetatable({ fire_wound = 6 }, { __call = function(_, s)
+			local c = {}
+			for k, v in pairs(s) do c[k] = v end
+			return c
+		end })
+		W.grok_actor_damage_balancer = { actor_on_before_hit = function() end }
+		W.coop_npc_players = W.coop_npc_players or load_script(M, "coop_npc_players")
+	end
+	local function load_from(M, name, source)
+		local f = assert(loadstring(source or read_all(gamma(name)), "@" .. gamma(name)))
+		local m = setmetatable({}, { __index = M.env })
+		M.env[name] = m
+		setfenv(f, m)
+		f()
+		return m
+	end
+	local function weapon(M, id, owner)
+		local w = M.add(make_obj(id, 0, 0, 0, { _name = "wpn" .. id, _section = "wpn_ak74", _parent = owner }))
+		w._weapon = true
+		function w:get_ammo_type() return 0 end
+		function w:weapon_is_silencer() return false end
+		return w
+	end
+	local function victim(M, id, monster_)
+		local o = M.add(make_obj(id, 20, 0, 0, { _name = monster_ and ("bloodsucker" .. id) or ("npc" .. id), _monster = monster_ }))
+		o.health = 1
+		o.writes = 0
+		function o:set_health_ex(v) self.health = v; self.writes = self.writes + 1 end
+		function o:get_visual_name() return "actors\\stalker_neutral\\stalker_neutral_1" end
+		function o:bone_position() return vec(20, 1, 0) end
+		return o
+	end
+	-- a machine with grok, the multihit fix wrapped round it at load (as in G.A.M.M.A.), an addon's entry in the invincible list (as
+	-- z_nta_compatibility makes at load) and the compat's start; then grok's own on_game_start registers its handlers
+	local function boot(M, source)
+		world(M, source)
+		local g = load_from(M, GBO, source)
+		local mm = load_from(M, MOMO)
+		g.invincible_npcs_sections.the_living_fire_prometheus = true
+		local K = load_script(M, "coop_npc_compat")
+		K.on_game_start()
+		g.on_game_start()
+		mm.on_game_start()
+		return g, mm, K
+	end
+	-- a new bullet of this machine hits something: the multihit fix judges the next hit by it
+	local bullet = 100
+	local function fresh(mm_)
+		bullet = bullet + 1
+		mm_.bullet_on_impact({ bullet_id = bullet, section = "ammo_5.45x39_fmj" })
+	end
+	local function logged(M, s)
+		local n = 0
+		for _, l in ipairs(M.log) do if l:find(s, 1, true) then n = n + 1 end end
+		return n
+	end
+	local function fire(M, name, target, who, wpn_id, bone, power)
+		local h = { draftsman = who, weapon_id = wpn_id, power = power or 0.3, type = 6, direction = vec(1, 0, 0) }
+		M.fire(name, target, h, bone or 11, {})
+		return h
+	end
+
+	H, C, proxy = pair()
+	local g, mm = boot(H)
+	check(logged(H, "rewrite grok_bo.npc_on_before_hit applied") == 1 and logged(H, "rewrite grok_bo.monster_on_before_hit applied") == 1,
+		"host: both handlers rewritten, logged once each")
+	check(g.invincible_npcs_sections.the_living_fire_prometheus == true, "the module is not run again: an addon's entry in grok's tables stays")
+	check(#(H.callbacks.npc_on_before_hit or {}) == 1 and #(H.callbacks.monster_on_before_hit or {}) == 1,
+		"grok registers one handler of each kind, as before")
+	local pw = weapon(H, 501, proxy)
+	local aw = weapon(H, 2, H.env.db.actor)
+	local npc = victim(H, 700)
+	local h = fire(H, "npc_on_before_hit", npc, proxy, 501)
+	check(npc.writes == 1 and npc.health < 1 and math.abs(h.power - 0.0001) < 1e-9,
+		"a client's hit (his proxy, his weapon) goes through the ballistics: health " .. npc.health .. ", power left " .. h.power)
+	local after_one = npc.health
+	fire(H, "npc_on_before_hit", npc, proxy, 501)
+	check(npc.writes == 2 and npc.health < after_one, "his next hit on the same NPC counts too: the multihit check is the client's")
+	H.env.PBA = {}
+	fire(H, "npc_on_before_hit", npc, proxy, 501)
+	local pba_hit = false
+	for _, t in ipairs(H.env.PBA) do if t == "hit" then pba_hit = true end end
+	check(not pba_hit, "the host's own on-hit artefact perks do not run for a client's hit")
+	local npc2 = victim(H, 701)
+	H.env.PBA = {}
+	mm.bullet_on_impact({ bullet_id = 77, section = "ammo_5.45x39_fmj" })
+	fire(H, "npc_on_before_hit", npc2, H.env.db.actor, 2)
+	pba_hit = false
+	for _, t in ipairs(H.env.PBA) do if t == "hit" then pba_hit = true end end
+	check(npc2.writes == 1 and pba_hit, "the host's hit: the ballistics and his on-hit perks, as before")
+	h = fire(H, "npc_on_before_hit", npc2, H.env.db.actor, 2)
+	check(npc2.writes == 1 and h.power == 0, "the host's bullet hitting the same NPC twice: the multihit fix still drops the second")
+	local npc3 = victim(H, 702)
+	fresh(mm)
+	h = fire(H, "npc_on_before_hit", npc3, stalker(603), 2)
+	check(npc3.writes == 0 and h.power == 0.3, "an NPC's hit returns at once")
+	h = fire(H, "npc_on_before_hit", npc3, proxy, 500)
+	check(npc3.writes == 0 and h.power == 0.3, "a client's hit without a weapon (the host names his proxy) returns at once")
+	local mon = victim(H, 710, true)
+	h = fire(H, "monster_on_before_hit", mon, proxy, 501)
+	check(h.power ~= 0.3 and h.power > 0, "a client's hit on a mutant gets grok's multipliers: " .. h.power)
+	fresh(mm)
+	h = fire(H, "monster_on_before_hit", mon, stalker(604), 2)
+	check(h.power == 0.3, "an NPC's hit on a mutant is left alone")
+	h = fire(H, "monster_on_before_hit", mon, proxy, 500)
+	check(h.power == 0.3, "a client's hit on a mutant without a weapon is left alone")
+
+	-- the client's machine: his before-hit chain runs before the hit is sent; grok must leave the hit to the host
+	local Cg = boot(C)
+	check(logged(C, "rewrite grok_bo.npc_on_before_hit applied") == 1, "client: rewritten too")
+	weapon(C, 3, C.env.db.actor)
+	local cnpc = victim(C, 700)
+	h = fire(C, "npc_on_before_hit", cnpc, C.env.db.actor, 3)
+	check(cnpc.writes == 0 and h.power == 0.3, "client: his own hit leaves his machine with its power, no health written here")
+	local cmon = victim(C, 710, true)
+	h = fire(C, "monster_on_before_hit", cmon, C.env.db.actor, 3)
+	check(h.power == 0.3, "client: no mutant multiplier here (the host applies it once)")
+	check(Cg.invincible_npcs_sections.the_living_fire_prometheus == true, "client: the tables stay")
+
+	-- another version of grok: the rewrite is refused, logged once, the game goes on as today (same ids)
+	H, C, proxy = pair()
+	local changed = gbo_src:gsub("if shit.draftsman:id%(%) ~= db.actor:id%(%) then", "if shit.draftsman:id() ~= AC_ID then")
+	local _, mm2 = boot(H, changed)
+	check(logged(H, "rewrite grok_bo.npc_on_before_hit skipped (another version of the script)") == 1
+		and logged(H, "rewrite grok_bo.monster_on_before_hit skipped (another version of the script)") == 1
+		and logged(H, "rewrite grok_bo.npc_on_before_hit applied") == 0, "another version: both refused, logged once each")
+	weapon(H, 501, proxy)
+	weapon(H, 2, H.env.db.actor)
+	npc = victim(H, 700)
+	h = fire(H, "npc_on_before_hit", npc, proxy, 501)
+	check(npc.writes == 0 and h.power == 0.3, "refused: a client's hit returns at grok's first line, as today")
+	fresh(mm2)
+	h = fire(H, "npc_on_before_hit", npc, H.env.db.actor, 2)
+	check(npc.writes == 1 and math.abs(h.power - 0.0001) < 1e-9, "refused: the host's hit on the same NPC still goes through the ballistics")
+end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

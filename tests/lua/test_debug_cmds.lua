@@ -179,6 +179,8 @@ do
 		function o:best_weapon() return t.best end
 		function o:critically_wounded() return t.crit or false end
 		function o:wounded() return t.wounded or false end
+		if t.invul ~= nil then function o:invulnerable() return t.invul end end
+		o.health = t.health
 		return o
 	end
 	local run = R.get("obj_info").run
@@ -201,6 +203,26 @@ do
 		and has(r.msg, "critically wounded") and has(r.msg, "1_10"), "the line says it: " .. tostring(r.msg))
 	check(has(r.msg, "body motion"), "the line says the body motion is not readable from Lua")
 
+	-- Live 2026-11-16 (build 51): a base commander did not die from a client's fire. The line says whether the engine skips his hits
+	-- (invulnerable, set by his logic), his health and the logic section that is active now.
+	M.env.db.storage[19600] = { active_section = "walker@esc_base_commander" }
+	se_of(19600, "esc_m_base_commander", "esc_m_base_commander", true)
+	o = npc({ id = 19600, section = "esc_m_base_commander", name = "esc_m_base_commander", alive = true, community = "stalker",
+		invul = true, health = 0.8567 })
+	ok, r = run({ a = { t = 19600 }, obj = o })
+	r = type(r) == "table" and r or {}
+	check(ok == true and r.invulnerable == true and r.logic == "walker@esc_base_commander", "invulnerable and the active logic section")
+	check(type(r.health) == "number" and math.abs(r.health - 0.8567) < 1e-9, "the health as the game object has it")
+	check(has(r.msg, "invulnerable yes") and has(r.msg, "health 0.86") and has(r.msg, "logic walker@esc_base_commander"),
+		"the line says it: " .. tostring(r.msg))
+	o = npc({ id = 19601, section = "sim_default_stalker_1", name = "loshkin", alive = true, community = "army", invul = false,
+		health = 1 })
+	se_of(19601, "sim_default_stalker_1", "loshkin", true)
+	ok, r = run({ a = { t = 19601 }, obj = o })
+	r = type(r) == "table" and r or {}
+	check(r.invulnerable == false and has(r.msg, "invulnerable no") and has(r.msg, "health 1.00") and has(r.msg, "logic none"),
+		"a stalker without logic storage: not invulnerable, full health, no logic section: " .. tostring(r.msg))
+
 	se_of(21366, "sim_default_bandit_2", "sim_default_bandit_221366", false)
 	ok, r = run({ a = { t = 21366 }, obj = nil })
 	r = type(r) == "table" and r or {}
@@ -214,6 +236,8 @@ do
 	r = type(r) == "table" and r or {}
 	check(ok == true and r.avatar == true and has(r.msg, "player's character"), "a player's character is named so: " .. tostring(r.msg))
 	check(r.script_anims == nil and r.active == nil, "a method that throws or an empty hand leaves its field out")
+	check(r.invulnerable == nil and r.health == nil and not has(r.msg, "invulnerable") and not has(r.msg, "health"),
+		"no invulnerable() and no health: left out of the line: " .. tostring(r.msg))
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

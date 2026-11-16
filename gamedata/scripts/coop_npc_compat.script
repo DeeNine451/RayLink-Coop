@@ -26,6 +26,7 @@
 	Their private early-return branches have no safe identity-only hook; preserve their complete
 	mod bodies and reject changed versions rather than replacing their policies. Useful Idiots
 	is handled separately by coop_npc_idiots, with token-aware checks derived from the original mod.
+	Function rewrites (FUNCTION_REWRITES): G.A.M.M.A.'s ballistics (grok_bo) counts every player's hit where hits are applied.
 
 	Events: npc.stat host -> client { k = statistic id }
 --]]
@@ -56,8 +57,12 @@ end
 local REWRITES = {
 	-- audit D2 (2026-10-24): a client counted as an NPC attacker (no companion / important-NPC damage scaling, no
 	-- friendly-kill goodwill loss, civil-war kills ignored)
+	-- 2026-11-16: the scaling counts once, on the machine that applies the hit (coop_npc_applies_hits). By the route rules this
+	-- script runs on the host only; the check keeps it once if a pack's rule gives it to the owner (client_hit_perks runs the
+	-- owner's handlers on his machine before the hit is sent).
 	hxf_tough_important_npcs = {
 		{ "if shit.draftsman:id() == AC_ID then", "if coop_npc_is_player_id(shit.draftsman:id()) then", all = true },
+		{ "\tif not npc then", "\tif not npc or not coop_npc_applies_hits() then" },
 	},
 	-- live 2026-11-09 (Agroprom underground): Reefer (agr_u_bandit_boss) died only to the host. G.A.M.M.A.'s story NPCs take 10 %
 	-- (enemy faction) / 1 % of a hit from db.actor and nothing from anyone else; on the host a client's hit comes from his proxy.
@@ -66,6 +71,8 @@ local REWRITES = {
 		{ "if shit.draftsman:id() == db.actor:id() and game_relations.is_factions_enemies(get_actor_true_community(), character_community(npc)) then",
 		"if coop_npc_is_player_id(shit.draftsman:id()) and game_relations.is_factions_enemies(coop_npc_player_community(shit.draftsman), character_community(npc)) then" },
 		{ "elseif shit.draftsman:id() == db.actor:id() then", "elseif coop_npc_is_player_id(shit.draftsman:id()) then" },
+		-- once, where the hit is applied (see hxf above)
+		{ "\tif ads_npcs[sec] == 1 then", "\tif ads_npcs[sec] == 1 and coop_npc_applies_hits() then" },
 	},
 	grok_killing_friends_reduces_goodwill = {
 		{ "shit.draftsman:id() == 0 or", "coop_npc_is_player_id(shit.draftsman:id()) or" },
@@ -373,6 +380,147 @@ local function apply_method_rewrite(r)
 end
 
 function _method_rewrites() return METHOD_REWRITES end
+
+-- A function rewrite: one module-level function of a script whose load-time state belongs to other mods too, so the script must
+-- not run again (G.A.M.M.A.: momo_multihit_fix wraps grok_bo's handlers at load and keeps the originals in upvalues,
+-- z_nta_compatibility adds Prometheus to grok_bo.invincible_npcs_sections at load). The function is compiled alone at its own
+-- line numbers with the original's upvalues (the file's locals: tables, never reassigned) and put in the original's place: in the
+-- module, or in every wrapper that kept it. Like the rewrites above it applies in and outside a session; outside one the
+-- rewritten line answers exactly what the original did.
+--
+-- Live 2026-11-16 (build 51): an ordinary stalker, a base commander and sergeant Loshkin did not die from clients' fire.
+-- G.A.M.M.A.'s ballistics (grok_bo) computes a hit of db.actor itself (ammo, bone armour, distance, barrel), writes the health
+-- directly (past the engine's invulnerable) and leaves the engine a power of 0.0001; any other hit returns at its first line. By
+-- the route rules (checked with the pack's own route files) that chain runs on the host only, never on a client's machine. On
+-- the host a client's hit comes from his proxy, not from db.actor: grok returned at once, the hit went the engine's stock way
+-- and an NPC whose job logic says invulnerable (traders, base commanders, guards) took nothing. Now the machine that applies
+-- hits (the host or a map server) counts every player's hit the way it counts its own actor's. The multihit fix judges a hit by
+-- the last bullet of THIS machine, and a client's bullets do not fly on the host: his next shot at the same target would look
+-- like a second hit of one bullet and be cancelled, so a remote player's hit goes past that wrapper. Open: one bullet of a
+-- client that hits two bones of one target counts twice (the host's counts once). The host's own on-hit artefact perks are for
+-- the host's hits (its before-hit and death perks are skipped by coop_mods_perks).
+local FUNCTION_REWRITES = {
+	{ module = "grok_bo", name = "npc_on_before_hit", header = "function npc_on_before_hit(npc,shit,bone_id)", past = "momo_multihit_fix",
+		{ "if shit.draftsman:id() ~= db.actor:id() then",
+		"if not (coop_npc_applies_hits() and coop_npc_is_player_id(shit.draftsman:id())) then" },
+		-- a hit without a weapon: the host names the proxy as its weapon (coop_requests.cpp host_hit)
+		{ "if wpn == nil then", "if wpn == nil or wpn:id() == shit.draftsman:id() then" },
+		{ "\tPBA_ohc(npc, shit.power, shit.direction, shit.draftsman, bone_id)",
+		"\tif shit.draftsman:id() == db.actor:id() then PBA_ohc(npc, shit.power, shit.direction, shit.draftsman, bone_id) end" },
+	},
+	{ module = "grok_bo", name = "monster_on_before_hit", header = "function monster_on_before_hit(monster,shit,bone_id)",
+		past = "momo_multihit_fix",
+		{ "if shit.draftsman:id() ~= db.actor:id() then",
+		"if not (coop_npc_applies_hits() and coop_npc_is_player_id(shit.draftsman:id())) then" },
+		{ "if wpn == nil then", "if wpn == nil or wpn:id() == shit.draftsman:id() then" },
+	},
+}
+
+-- The original reachable from f: f itself or a function f keeps in an upvalue (a wrapper of a wrapper ...).
+local function find_original(f, file, line, seen, depth)
+	if type(f) ~= "function" or seen[f] or depth > 4 then return nil end
+	seen[f] = true
+	if is_original(f, file, line) then return f end
+	for i = 1, 255 do
+		local name, v = debug.getupvalue(f, i)
+		if not name then break end
+		local found = find_original(v, file, line, seen, depth + 1)
+		if found then return found end
+	end
+	return nil
+end
+
+local function defined_in(f, file)
+	local info = type(f) == "function" and debug.getinfo(f, "S")
+	if not (info and type(info.source) == "string") then return false end
+	local s = info.source:lower():gsub("/", "\\")
+	file = file:lower()
+	return s == "@" .. file or s:sub(-(#file + 1)) == "\\" .. file
+end
+
+-- A hit this machine applies for another player (his proxy is the draftsman): the host or a map server, never a client.
+local function remote_player_hit(h)
+	if P.is_client() then return false end
+	local ok, id = pcall(function() return h.draftsman:id() end)
+	return ok and type(id) == "number" and id ~= 0 and P.is_player_id(id)
+end
+
+local function apply_function_rewrite(r)
+	local tag = r.module .. "." .. r.name
+	local m = mod(r.module)
+	if not m then return end -- mod absent
+	local src, path = read_script(r.module)
+	if not src then
+		log("rewrite %s skipped: not a loose file", tag)
+		return
+	end
+	local text, line = method_text(src, r.header)
+	local out, why = text and rewrite_text(text, r)
+	if not out then
+		log("rewrite %s skipped (another version of the script): %s", tag, why or line)
+		return
+	end
+	local file, head = r.module .. ".script", "function " .. r.name
+	local current = rawget(m, r.name)
+	local original = find_original(current, file, line, {}, 0)
+	if not original or out:sub(1, #head) ~= head then
+		log("rewrite %s skipped: the original function is not reachable from the module", tag)
+		return
+	end
+	-- the original's upvalues are the file's locals it uses: the same names, local here, then the same values
+	local names, values = {}, {}
+	for i = 1, 255 do
+		local name, v = debug.getupvalue(original, i)
+		if not name then break end
+		names[#names + 1] = name
+		values[name] = { v }
+	end
+	local decl = #names > 0 and ("local " .. table.concat(names, ", ") .. "; ") or ""
+	local chunk, err = loadstring(string.rep("\n", line - 1) .. "local __rewritten = {} " .. decl .. "function __rewritten." ..
+		out:sub(#"function " + 1) .. "\nreturn __rewritten." .. r.name, "@" .. path)
+	if not chunk then
+		report("rewrite " .. tag, err)
+		return
+	end
+	setfenv(chunk, m)
+	local ok, fixed = pcall(chunk)
+	if not (ok and type(fixed) == "function") then
+		report("rewrite " .. tag, fixed)
+		return
+	end
+	for i = 1, 255 do
+		local name = debug.getupvalue(fixed, i)
+		if not name then break end
+		if not values[name] then
+			log("rewrite %s skipped: the rewritten function needs %s, the original has no such upvalue", tag, name)
+			return
+		end
+		debug.setupvalue(fixed, i, values[name][1])
+	end
+	local places, past = 0, nil
+	if current == original then
+		m[r.name] = fixed
+		places = 1
+	else
+		places = swap_upvalues(current, file, line, fixed, {}, 0)
+		if places > 0 and r.past and defined_in(current, r.past .. ".script") then
+			local wrapper = current
+			m[r.name] = function(obj, h, ...)
+				if remote_player_hit(h) then return fixed(obj, h, ...) end
+				return wrapper(obj, h, ...)
+			end
+			past = r.past
+		end
+	end
+	if places == 0 then
+		log("rewrite %s skipped: the original function is not reachable from the module", tag)
+		return
+	end
+	applied[#applied + 1] = "rewrite:" .. tag
+	log("rewrite %s applied (%d change(s), %d place(s)%s)", tag, #r, places, past and (", a remote player's hit goes past " .. past) or "")
+end
+
+function _function_rewrites() return FUNCTION_REWRITES end
 
 -------------------------------------------------------------------------------
 -- Wrappers
@@ -799,6 +947,10 @@ function on_game_start()
 		installed = true
 		-- for rewritten mod code: this machine is a client (its monster puppets have no AI, so no enemy)
 		_G.coop_npc_on_client = function() return P.client_live() end
+		-- for rewritten damage code: this machine applies hits (single player, the host, a map server). The scripts that ask run
+		-- on the host by the route rules; were one given to the owner (coop_requests.cpp client_hit_perks runs the owner's
+		-- handlers on a client before his hit is sent), the client's machine leaves the hit to the host.
+		_G.coop_npc_applies_hits = function() return not P.is_client() end
 		local _ = coop_quests_core -- the far view is in place before a rewrite loads a task script (tasks_chimera_scan keeps it in a local)
 		for name, list in pairs(REWRITES) do
 			local ok, err = pcall(apply_rewrite, name, list)
@@ -807,6 +959,10 @@ function on_game_start()
 		for _, r in ipairs(METHOD_REWRITES) do
 			local ok, err = pcall(apply_method_rewrite, r)
 			if not ok then report("rewrite " .. r.module .. "." .. r.method, err) end
+		end
+		for _, r in ipairs(FUNCTION_REWRITES) do
+			local ok, err = pcall(apply_function_rewrite, r)
+			if not ok then report("rewrite " .. r.module .. "." .. r.name, err) end
 		end
 		local adapters = mod("coop_npc_adapters")
 		if adapters then adapters.install(P, function() return host_on and P.host_with_clients() end, applied) end

@@ -273,6 +273,9 @@ local function figure_line(r)
 	add(r.online_host and "online on the host" or "OFFLINE on the host (no game object there)")
 	if r.online_host then
 		add(r.alive and "alive" or "dead")
+		if r.invulnerable ~= nil then add("invulnerable " .. (r.invulnerable and "yes" or "no")) end
+		if r.health then add(fmt("health %.2f", r.health)) end
+		add("logic " .. tostring(r.logic or "none"))
 		if r.community then add("community " .. tostring(r.community)) end
 		if r.state then add("state " .. tostring(r.state)) end
 		if r.script_anims then add(fmt("script animations %s", r.script_anims)) end
@@ -288,7 +291,7 @@ end
 
 cmds.obj_info = {
 	class = "view", where = "ws", args = T(), stock = "S/ui_debug_launcher.script 115-155 get_info",
-	help = "t=<id>: what the server knows of an object (T1): online there, state_mgr state, hands, visual",
+	help = "t=<id>: what the server knows of an object (T1): online there, invulnerable, health, logic section, state_mgr state, hands, visual",
 	run = function(ctx)
 		local id, o = ctx.a.t, ctx.obj
 		local se = alife_object(id)
@@ -305,6 +308,13 @@ cmds.obj_info = {
 			r.section = r.section or o:section()
 			r.name = r.name or o:name()
 			r.alive = o.alive and o:alive() or false
+			-- the engine skips every hit of an invulnerable creature (CCustomMonster::Hit); G.A.M.M.A.'s ballistics writes the health past it
+			local inv = call(o, "invulnerable")
+			if type(inv) == "boolean" then r.invulnerable = inv end
+			local okh, hp = pcall(function() return o.health end)
+			if okh and type(hp) == "number" then r.health = hp end
+			local st = db and db.storage and db.storage[id]
+			r.logic = st and st.active_section or nil
 			if stalker_ok(o) then
 				r.community = o:character_community()
 				r.rank = o.character_rank and o:character_rank() or nil
