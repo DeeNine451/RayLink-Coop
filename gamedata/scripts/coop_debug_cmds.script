@@ -252,9 +252,43 @@ local function with_point(t)
 end
 
 ---------------------------------------------------------------- view
+-- A method of a game object, guarded: nil when the object has none or it throws (a mutant has no state_mgr, an item no slot).
+local function call(o, m, ...)
+	local f = o and o[m]
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, o, ...)
+	if ok then return v end
+	return nil
+end
+
+-- Live 2026-11-16 (build 51, a stalker in a T-pose on a client): what the host's game knows of the figure, in one line. The host
+-- drives every creature the clients draw (coop_entities.cpp capture_anims -> drive_mirror), so its state is the one to read: online
+-- there or not, the state_mgr state (ALQ's probe_*/scaner_* hold a detector), the script animations queued, the item in hands and
+-- the best weapon with their animation_slot (the stalker's torso tables are indexed by it), a critical wound (the global animation
+-- of slots 1-3), the visual. The body motion itself is not readable from Lua (no game_object method gives a blend).
+local function figure_line(r)
+	local parts = { fmt("%s [%s] (%s)", tostring(r.name), tostring(r.section), tostring(r.id)) }
+	local function add(s) parts[#parts + 1] = s end
+	if r.avatar then add("a player's character") end
+	add(r.online_host and "online on the host" or "OFFLINE on the host (no game object there)")
+	if r.online_host then
+		add(r.alive and "alive" or "dead")
+		if r.community then add("community " .. tostring(r.community)) end
+		if r.state then add("state " .. tostring(r.state)) end
+		if r.script_anims then add(fmt("script animations %s", r.script_anims)) end
+		if r.active then add(fmt("in hands %s (slot %s)", r.active, tostring(r.active_slot))) else add("hands empty") end
+		if r.best then add(fmt("best weapon %s (slot %s)", r.best, tostring(r.best_slot))) end
+		if r.crit then add("critically wounded") end
+		if r.wounded then add("wounded") end
+		if r.visual then add("visual " .. tostring(r.visual)) end
+		add("body motion: not readable from Lua")
+	end
+	return table.concat(parts, " | ")
+end
+
 cmds.obj_info = {
 	class = "view", where = "ws", args = T(), stock = "S/ui_debug_launcher.script 115-155 get_info",
-	help = "t=<id>: what the server knows of an object (T1)",
+	help = "t=<id>: what the server knows of an object (T1): online there, state_mgr state, hands, visual",
 	run = function(ctx)
 		local id, o = ctx.a.t, ctx.obj
 		local se = alife_object(id)
@@ -266,6 +300,7 @@ cmds.obj_info = {
 			if se.parent_id and se.parent_id ~= 65535 then r.parent = se.parent_id end
 			if se.group_id and se.group_id ~= 65535 then r.squad = se.group_id end
 		end
+		r.online_host = o ~= nil
 		if o then
 			r.section = r.section or o:section()
 			r.name = r.name or o:name()
@@ -277,9 +312,22 @@ cmds.obj_info = {
 				local me = ctx.pl and ctx.pl.object and ctx.pl.object()
 				if me and o.general_goodwill then r.goodwill = o:general_goodwill(me) end
 				if me and o.relation then r.relation = o:relation(me) end
+				local sm = rawget(_G, "state_mgr") or state_mgr
+				if sm and type(sm.get_state) == "function" then
+					local ok, st = pcall(sm.get_state, o)
+					if ok and st ~= nil then r.state = tostring(st) end
+				end
+				r.script_anims = call(o, "animation_count")
+				local active, best = call(o, "active_item"), call(o, "best_weapon")
+				if active then r.active, r.active_slot = call(active, "section"), call(active, "animation_slot") end
+				if best then r.best, r.best_slot = call(best, "section"), call(best, "animation_slot") end
+				r.crit = call(o, "critically_wounded") and true or false
+				r.wounded = call(o, "wounded") and true or false
+				r.visual = call(o, "get_visual_name")
 			end
 		end
-		r.msg = fmt("%s [%s] (%s)", tostring(r.name), tostring(r.section), id)
+		r.avatar = r.section == "coop_player_avatar"
+		r.msg = figure_line(r)
 		return true, r
 	end,
 }

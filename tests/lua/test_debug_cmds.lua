@@ -149,5 +149,72 @@ do
 	check(refused("no_such_command", {}, "unknown_cmd"), "an unknown command is unknown_cmd")
 end
 
+print("== obj_info: what the host knows of a figure (T-pose report, build 51)")
+do
+	-- The host runs obj_info (where = ws): its game object is online there, its state_mgr and inventory are the host's.
+	local SE, STATES = {}, {}
+	M.env.IsStalker = function(o) return type(o) == "table" and o._stalker == true end
+	M.env.IsMonster = function() return false end
+	M.env.alife_object = function(id) return SE[id] end
+	M.env.state_mgr = { get_state = function(o) return STATES[o:id()] end }
+	local function se_of(id, sec, name, online)
+		SE[id] = { online = online, section_name = function() return sec end, name = function() return name end }
+	end
+	local function item(sec, slot)
+		local i = {}
+		function i:section() return sec end
+		function i:animation_slot() return slot end
+		return i
+	end
+	local function npc(t)
+		local o = { _stalker = true }
+		function o:id() return t.id end
+		function o:section() return t.section end
+		function o:name() return t.name end
+		function o:alive() return t.alive end
+		function o:character_community() return t.community end
+		function o:get_visual_name() return t.visual end
+		function o:animation_count() if t.count_throws then error("no stalker") end return t.anims or 0 end
+		function o:active_item() return t.active end
+		function o:best_weapon() return t.best end
+		function o:critically_wounded() return t.crit or false end
+		function o:wounded() return t.wounded or false end
+		return o
+	end
+	local run = R.get("obj_info").run
+	local function has(s, part) return type(s) == "string" and s:find(part, 1, true) ~= nil end
+
+	se_of(19545, "sim_default_stalker_0", "sim_default_stalker_019545", true)
+	STATES[19545] = "probe_stand"
+	local o = npc({ id = 19545, section = "sim_default_stalker_0", name = "sim_default_stalker_019545", alive = true,
+		community = "stalker", visual = "actors\\stalker_neutral\\1_10", anims = 2,
+		active = item("wpn_eft_mts_255", 5), best = item("wpn_eft_mts_255", 5), crit = true })
+	local ok, r = run({ a = { t = 19545 }, obj = o })
+	check(ok == true and type(r) == "table", "obj_info answers for a stalker online on the host")
+	r = type(r) == "table" and r or {}
+	check(r.online_host == true and r.avatar == false and r.alive == true, "online on the host, alive, not a player's character")
+	check(r.state == "probe_stand" and r.script_anims == 2, "the state_mgr state and the queued script animations")
+	check(r.active == "wpn_eft_mts_255" and r.active_slot == 5 and r.best == "wpn_eft_mts_255" and r.best_slot == 5,
+		"the item in hands and the best weapon with their animation_slot")
+	check(r.visual == "actors\\stalker_neutral\\1_10" and r.crit == true, "the visual and the critical wound")
+	check(has(r.msg, "online on the host") and has(r.msg, "state probe_stand") and has(r.msg, "slot 5")
+		and has(r.msg, "critically wounded") and has(r.msg, "1_10"), "the line says it: " .. tostring(r.msg))
+	check(has(r.msg, "body motion"), "the line says the body motion is not readable from Lua")
+
+	se_of(21366, "sim_default_bandit_2", "sim_default_bandit_221366", false)
+	ok, r = run({ a = { t = 21366 }, obj = nil })
+	r = type(r) == "table" and r or {}
+	check(ok == true and r.online_host == false and has(r.msg, "OFFLINE on the host"),
+		"a server entity with no game object here is offline on the host: " .. tostring(r.msg))
+
+	se_of(30720, "coop_player_avatar", "coop_player_avatar30720", true)
+	o = npc({ id = 30720, section = "coop_player_avatar", name = "slave", alive = true, community = "actor_dolg",
+		visual = "actors\\stalker_bandit\\stalker_bandit_3", count_throws = true })
+	ok, r = run({ a = { t = 30720 }, obj = o })
+	r = type(r) == "table" and r or {}
+	check(ok == true and r.avatar == true and has(r.msg, "player's character"), "a player's character is named so: " .. tostring(r.msg))
+	check(r.script_anims == nil and r.active == nil, "a method that throws or an empty hand leaves its field out")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)
