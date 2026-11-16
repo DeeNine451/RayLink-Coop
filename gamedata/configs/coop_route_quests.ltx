@@ -31,5 +31,8 @@ npc_on_item_take@drx_da_main      = level
 on_game_load@drx_da_main          = level
 on_option_change@drx_da_main      = level
 time_event@drx_da_main            = level
+; Build 52: an anomaly hurts a client through the client's own copy of the zone, so the modifiers of that hit (the flash mine
+; and the like) run on the machine of the player who is hit; coop_quests_story wraps the flash mine's time jump for a client.
+actor_on_before_hit@drx_da_main  = owner
 on_enemy_eval@guards_spawner      = level
 actor_on_interaction@coop_levels_tables = host ; drx_da_main's handler in a wrapper of ours: the roll after an emission stays one

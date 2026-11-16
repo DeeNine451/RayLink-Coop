@@ -57,6 +57,10 @@ check(runs_on_map_server("time_event", "xcv_phantoms_fix"), "phantoms: the relea
 
 print("== a wrapper of a world handler keeps its domain")
 check(coop_native.route("actor_on_interaction", "coop_levels_tables") == "host", "drx_da_main's handler in a wrapper: world server only, one roll")
+-- Build 52: a zone now hurts a client through the client's own copy of it (the host's zone feels his character and its states
+-- reach him), so Dynamic Anomalies' modifiers of an anomaly's hit (drx_da_main.actor_on_before_hit: the flash mine and the
+-- like) must run on the machine of the player who is hit; coop_quests_story's client branch of the flash mine waits for it.
+check(coop_native.route("actor_on_before_hit", "drx_da_main") == "owner", "Dynamic Anomalies' hit modifiers run for each player's own anomaly hit")
 check(domain_on_map_server("actor_on_interaction", "coop_levels_tables") == "host", "and not on a map server")
 -- what a player's search starts runs where the body or the box is: the timers of these two stay at the authority of the level
 check(domain_on_map_server("time_event", "guaranteed_loot") == "level", "the check of guaranteed_loot's search on a map server")
