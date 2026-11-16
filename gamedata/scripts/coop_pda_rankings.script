@@ -1,0 +1,152 @@
+--[[
+	Anomaly Coop - the ranking list of the PDA "Statistics" tab on a client (gamedata\scripts\coop_pda_rankings.script)
+	Plan: docs\plans\2026-11-16-pda-per-player.md (tab "Statistics", fix R1).
+
+	Owner 2026-11-16 (build 51, a client of a host who plays): the list on the right of the tab appeared on his machine only
+	after the HOST opened its PDA. Two causes, both on the client:
+	  1. The list was asked of the host only from the info callback "ui_pda" (coop_world_compat.actor_on_info_callback). The
+	     engine fires it only when the actor gets "ui_pda" anew (inventory_owner_info.cpp OnReceiveInfo), and on a client
+	     nothing takes "ui_pda" away again: the stock does it from the callback of "ui_pda_hide" (info_portions.script 18,
+	     host-only; item_device.script 175-180), and "ui_pda_hide" is group story (xrCoop\coop_rules.h is_machine_info lists
+	     "ui_pda" only), so the client's copy has it already and its callback does not fire there. After one open (or with
+	     "ui_pda" in the join save) the client never asked again.
+	  2. The stock rows hide while the actor has "ui_pda_hide" (pda.script 510, coop_quests_pda's cached rows the same). On a
+	     client that info is the host's: it goes away only while the HOST's PDA is open (info_portions.script 17 on the host,
+	     coop_story pushes it). So the rows showed exactly while the host had its PDA up.
+	Here, on a live client only (the host and single player run the stock code untouched):
+	  - the ranking window itself asks for the list: the engine calls pda.coc_rankings_can_show(1..size+1) when the tab is
+	    shown and every 3 s while it stays shown (UIRankingWnd.cpp Show / Update); the first call of a pass after a pause
+	    (the tab was closed) asks the host at once, an open tab asks again every REFRESH_MS;
+	  - "ui_pda_hide" (the host's PDA state) is not this machine's: the rows are asked without it;
+	  - no stock rows from the client's frozen ALife copy (its own row there is the join save's server object: an old
+	    faction, rank and reputation; the rest are the NPC ranks of the join): until the host's answer the list is empty,
+	    then coop_quests_pda draws the host's list with the player's own row from his own character;
+	  - the engine writes a row's text only when it adds the row (UIRankingsCoC.cpp Update), so a newer answer is shown by one
+	    pass with every row hidden, after which the rows come back with the new text.
+	The request is coop_quests_pda's own (quests.rank_req, answered by host_on_rank_req to the sender's peer only). A client
+	can only ask for the list: it names nothing but its own rank, which the host only compares (the place in the list).
+--]]
+
+local qc = coop_quests_core
+local tostring, tonumber, type, pcall = tostring, tonumber, type, pcall
+
+local TAG = "pda-rank"
+local GAP_MS = 4500 -- longer than the window's 3 s pass: the tab was closed meanwhile, ask again
+local REFRESH_MS = 30000 -- an open tab asks again this often (the host walks all of its ALife for one answer)
+local Q_BASE = 1000000 -- our request numbers, apart from coop_quests_pda's own (1, 2, ...)
+
+local state = {
+	installed = false,
+	answered = false, -- the host's list is in (coop_quests_pda keeps it)
+	clear_pass = false, -- one pass with every row hidden: the next one writes the new answer's text
+	last_call = -1e9, -- the last can_show call of the window
+	last_req = -1e9,
+	seq = 0,
+	parts = nil, -- q -> { got = n, m = parts } of the answer being received
+}
+local stats = { asked = 0, answers = 0, clears = 0, errors = 0 }
+
+local function report(what, err)
+	stats.errors = stats.errors + 1
+	qc.report(TAG, what, err)
+end
+
+local function live_client() return qc.client_live() end
+
+local function request()
+	if not db.actor then return end
+	local ok, rank = pcall(function() return db.actor:character_rank() end)
+	state.seq = state.seq + 1
+	state.last_req = time_global()
+	if qc.send("rank_req", { r = ok and tonumber(rank) or 0, q = Q_BASE + state.seq }, 0) then
+		stats.asked = stats.asked + 1
+	end
+end
+
+-- Every answer to this client (ours or coop_quests_pda's): the list is complete when all its parts are in. Only the host
+-- answers (from == 0); the payload is read for its part numbers only, coop_quests_pda takes the list itself.
+local function on_rank(t, from)
+	if from ~= 0 or not qc.is_client() then return end
+	local q, k, m = tonumber(t.q), tonumber(t.k), tonumber(t.m)
+	if not (q and k and m and m >= 1 and m <= 20 and k >= 1 and k <= m) then return end
+	if not state.parts or state.parts.q ~= q then state.parts = { q = q, got = 0, m = m } end
+	state.parts.got = state.parts.got + 1
+	if state.parts.got < m then return end
+	state.parts = nil
+	stats.answers = stats.answers + 1
+	if state.answered then
+		-- rows on screen carry the older answer's text: one hidden pass, then they are written again
+		state.clear_pass = true
+		stats.clears = stats.clears + 1
+	end
+	state.answered = true
+end
+
+-- fn(...) with "ui_pda_hide" unknown to has_alife_info: the host's PDA state is not this machine's
+local function without_hide(fn, ...)
+	local g = _G
+	local orig = g.has_alife_info
+	if type(orig) ~= "function" then return pcall(fn, ...) end
+	g.has_alife_info = function(info, ...)
+		if info == "ui_pda_hide" then return false end
+		return orig(info, ...)
+	end
+	local ok, r = pcall(fn, ...)
+	g.has_alife_info = orig
+	return ok, r
+end
+
+local function install()
+	if state.installed then return end
+	state.installed = true
+	local p = qc.mod("pda")
+	if not (p and type(p.coc_rankings_can_show) == "function") then
+		qc.log(TAG, "! pda.coc_rankings_can_show not found: the ranking list of a client is not asked for")
+		return
+	end
+	local size_of = function()
+		local ok, n = pcall(function() return p.get_rankings_array_size and p.get_rankings_array_size() end)
+		return ok and tonumber(n) or 100
+	end
+	local inner = p.coc_rankings_can_show
+	p.coc_rankings_can_show = function(index, ...)
+		if not live_client() then return inner(index, ...) end
+		local now = time_global()
+		if index == 1 and (now - state.last_call > GAP_MS or now - state.last_req >= REFRESH_MS) then
+			request()
+		end
+		state.last_call = now
+		local own = index == size_of() + 1
+		if state.clear_pass then
+			without_hide(inner, index, ...) -- the inner wrapper's own bookkeeping (its own row's refresh) goes on
+			if own then state.clear_pass = false end
+			return false
+		end
+		if not state.answered then return false end
+		local ok, r = without_hide(inner, index, ...)
+		-- coop_quests_pda hides its own row for one call after each answer, to have it written again; here the rows are
+		-- hidden until the first answer and for one whole pass after a newer one, so that call is spent and asked again
+		if ok and own and r ~= true then ok, r = without_hide(inner, index, ...) end
+		if not ok then
+			report("can_show", r)
+			return false
+		end
+		return r == true
+	end
+end
+
+local function on_update()
+	if not state.installed then install() end
+end
+
+function print_status()
+	qc.log(TAG, "asked %d, answers %d, refreshes %d, list %s | errors %d", stats.asked, stats.answers, stats.clears,
+		state.answered and "in" or "not yet", stats.errors)
+end
+
+function on_game_start()
+	if not (qc and qc.engine()) then return end
+	qc.on("rank", on_rank, TAG)
+	-- after coop_quests_pda's own wrappers (actor_on_first_update): ours is the outer one
+	RegisterScriptCallback("actor_on_update", on_update)
+end
