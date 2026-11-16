@@ -30,7 +30,17 @@ do
 		local x = plain_xml()
 		for _, fn in ipairs({ "InitFrame", "InitStatic", "InitTextWnd", "Init3tButton", "InitEditBox", "InitScrollView" }) do
 			local f = x[fn]
-			x[fn] = function(self, path, parent) USED_PATHS[path] = true; return f(self, path, parent) end
+			x[fn] = function(self, path, parent)
+				USED_PATHS[path] = true
+				local w = f(self, path, parent)
+				-- what the engine keeps of a window for a click: its kind, its parent, and its place among the parent's children
+				w.kind, w.parent = fn, parent
+				if type(parent) == "table" then
+					parent.kids = parent.kids or {}
+					parent.kids[#parent.kids + 1] = w
+				end
+				return w
+			end
 		end
 		return x
 	end
@@ -614,6 +624,66 @@ check(dlg.modal == "new" and dlg.modal_root.shown and dlg.edit_title.enabled and
 check(dlg.modal_title.text == "New game" and #MENU.calls == 0, "nothing starts yet")
 click(dlg, "btn_modal_no")
 check(not dlg.modal and not dlg.modal_root.shown and dlg.edit_title.enabled == false, "Cancel closes it; the hidden field takes nothing")
+do
+	-- Live 2026-11-16 (owner, build 51): "a click on this window and it is gone at once". The engine gives a click to the children
+	-- from the last made to the first, to an enabled one under the cursor (UIWindow.cpp CUIWindow::OnMouseAction; Show(false) disables).
+	-- A button takes it (UIButton.cpp); an edit box and a static pass it on (UICustomEdit.cpp OnMouseAction returns false). So a
+	-- click on the field or on the dialog's own body fell through to the whole-screen button under the dialog, which closes it.
+	local function taker(wnd, x, y)
+		local kids = wnd.kids or {}
+		for i = #kids, 1, -1 do
+			local c = kids[i]
+			if c.enabled ~= false and c.shown ~= false and x >= c.pos.x and y >= c.pos.y and x < c.pos.x + c.w and y < c.pos.y + c.h then
+				local got = taker(c, x - c.pos.x, y - c.pos.y)
+				if got then return got end
+				if c.kind == "Init3tButton" then return c end
+			end
+		end
+		return nil
+	end
+	local function name_of(w)
+		for n, r in pairs(dlg.registered) do
+			if r == w then return n end
+		end
+		return nil
+	end
+	local function centre(w)
+		local x, y = w.pos.x + w.w / 2, w.pos.y + w.h / 2
+		local p = w.parent
+		while type(p) == "table" and p.pos and p ~= dlg do
+			x, y = x + p.pos.x, y + p.pos.y
+			p = p.parent
+		end
+		return x, y
+	end
+	local function who(x, y) return name_of(taker(dlg, x, y) or {}) end
+	local function press(x, y)
+		local n = who(x, y)
+		local cb = n and dlg.callbacks[n .. "#" .. ui_events.BUTTON_CLICKED]
+		if cb then cb.f(cb.obj) end
+		return n
+	end
+	click(dlg, "btn_add")
+	check(dlg.modal == "new", "the dialog is open")
+	press(centre(dlg.edit_title))
+	check(dlg.modal == "new" and dlg.modal_root.shown, "a click into the field leaves the dialog open")
+	press(centre(dlg.modal_title))
+	check(dlg.modal == "new" and dlg.modal_root.shown, "a click on the dialog's title leaves it open")
+	press(centre(dlg.modal_text))
+	check(dlg.modal == "new" and dlg.modal_root.shown, "a click on the dialog's text leaves it open")
+	do
+		local px, py = centre(dlg.modal_panel)
+		press(dlg.modal_panel.pos.x + 3, dlg.modal_panel.pos.y + 3)
+		check(dlg.modal == "new", "a click on the dialog's corner leaves it open")
+		check(px > 0 and py > 0 and dlg.modal_panel.w > 100, "the dialog has its place on the screen")
+	end
+	check(who(centre(dlg.btn_modal_ok)) == "btn_modal_ok", "the click on Next is the Next button's")
+	check(who(centre(dlg.btn_modal_no)) == "btn_modal_no", "the click on Cancel is the Cancel button's")
+	check(who(2, 2) == "btn_modal_back", "a click beside the dialog is the whole-screen button's")
+	press(2, 2)
+	check(not dlg.modal and not dlg.modal_root.shown, "and that one closes the dialog, as before")
+	check(who(centre(dlg.modal_panel)) ~= "btn_modal_panel" and who(2, 2) ~= "btn_modal_back", "a closed dialog takes no click")
+end
 click(dlg, "btn_add")
 do
 	-- live 2026-10-30: the edit box of the dialog takes the keys when it has the focus; the dialog comes first

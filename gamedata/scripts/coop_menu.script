@@ -893,7 +893,12 @@ function UICoopMenu:BuildModal()
 	self.modal_panel = p
 	self.ui:box(p, 0, 0, B.w, B.h, "panel")
 	self.ui:outline(p, 0, 0, B.w, B.h, "line")
-	self.modal_title = self.ui:label(p, B.pad, B.pad, B.w - 2 * B.pad, B.title_h, "modal_title", "l")
+	-- A click on the dialog itself is the dialog's. The engine's edit box and statics pass a click on (UICustomEdit.cpp OnMouseAction
+	-- returns false), so a click into the field or on the dialog's body fell through to the whole-screen button under the dialog,
+	-- which closes it (owner, live 2026-11-16: "a click on this window and it is gone at once"). This button has no callback; made
+	-- before the field and the two buttons, it lies under them.
+	self.ui:hit(p, 0, 0, B.w, B.h, "btn_modal_panel", false)
+	self.modal_title =self.ui:label(p, B.pad, B.pad, B.w - 2 * B.pad, B.title_h, "modal_title", "l")
 	self.modal_text = self.ui:label(p, B.pad, B.text_y, B.w - 2 * B.pad, B.text_h, "modal_text", "m")
 
 	local field = self.ui:box(p, B.pad, B.edit_y, B.w - 2 * B.pad, B.edit_h, "field")
