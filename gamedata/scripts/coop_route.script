@@ -388,6 +388,20 @@ function handlers_of(callback, script)
 	return out
 end
 
+-- Declares a script callback unless somebody has declared it already. axr_main's callback_add prints a warning with a stack
+-- traceback for a second declaration, and which script comes first is not ours to say: game_fast_travel declares
+-- on_before_fast_travel in its file body, two of our scripts declare coop_faction_changed (owner's logs of build 51, at every
+-- load). true when it was declared here.
+function declare(name)
+	if type(name) ~= "string" or name == "" then return false end
+	local t = intercepts()
+	if type(t) == "table" and t[name] ~= nil then return false end
+	local add = rawget(_G, "AddScriptCallback")
+	if type(add) ~= "function" then return false end
+	add(name)
+	return true
+end
+
 -- The handlers of a callback that were written in the script `script`, told by the function's own source: a handler no rule
 -- routes is found too. In the order axr_main calls them, and as their script registered them (never the wrapper).
 -- coop_game_settings runs game_difficulties' on_game_load once more on a new world with it.

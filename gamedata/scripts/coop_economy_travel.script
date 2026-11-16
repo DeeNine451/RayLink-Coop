@@ -588,7 +588,11 @@ function on_game_start()
 	-- this script starts before game_fast_travel: a callback nobody has declared yet takes no listener (axr_main), so it is
 	-- declared here as well; without Fair Fast Travel nobody ever sends it
 	start_step("fair fast travel", function()
-		if type(AddScriptCallback) == "function" then AddScriptCallback("on_before_fast_travel") end
+		-- when game_fast_travel was loaded first it is declared already: no second declaration (coop_route.declare)
+		local okr, route = pcall(function() return coop_route end)
+		if not (okr and type(route) == "table" and type(route.declare) == "function" and pcall(route.declare, "on_before_fast_travel")) then
+			if type(AddScriptCallback) == "function" then AddScriptCallback("on_before_fast_travel") end
+		end
 		RegisterScriptCallback("on_before_fast_travel", before_fast_travel)
 	end)
 end

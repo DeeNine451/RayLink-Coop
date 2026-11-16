@@ -418,8 +418,12 @@ end
 local function listen()
 	if listening then return end
 	listening = true
-	local add = rawget(_G, "AddScriptCallback") or AddScriptCallback
-	if type(add) == "function" then pcall(add, CHANGED) end
+	-- coop_faction declares it too: the second declaration is a warning with a stack traceback in every log (coop_route.declare)
+	local okr, route = pcall(function() return coop_route end)
+	if not (okr and type(route) == "table" and type(route.declare) == "function" and pcall(route.declare, CHANGED)) then
+		local add = rawget(_G, "AddScriptCallback") or AddScriptCallback
+		if type(add) == "function" then pcall(add, CHANGED) end
+	end
 	RegisterScriptCallback(CHANGED, on_faction_changed)
 end
 

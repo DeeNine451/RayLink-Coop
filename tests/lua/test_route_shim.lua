@@ -159,6 +159,18 @@ do
 		and #coop_route.handlers_from("on_key_press", "") == 0, "an unknown callback or no script: nothing")
 	for _, f in ipairs({ gd1, gd2, other }) do UnregisterScriptCallback("on_key_press", f) end
 end
+do
+	-- declare: axr_main's callback_add prints a warning with a stack traceback for a second declaration (owner's logs of build 51:
+	-- "callback on_before_fast_travel already exists", "callback coop_faction_changed already exists" at every load)
+	local added, keep = {}, AddScriptCallback
+	AddScriptCallback = function(name) added[#added + 1] = name; return keep(name) end
+	check(coop_route.declare("coop_test_declared") == true and #added == 1 and intercepts().coop_test_declared ~= nil,
+		"declare: a callback nobody has declared is declared")
+	check(coop_route.declare("coop_test_declared") == false and #added == 1, "declare: a callback that exists is not declared again")
+	check(coop_route.declare("on_key_press") == false and #added == 1, "declare: a stock callback is left alone")
+	check(coop_route.declare("") == false and coop_route.declare(nil) == false and #added == 1, "declare: no name, nothing")
+	AddScriptCallback = keep
+end
 
 print("== route_shim_late_install")
 local PRE, before = {}, {}
