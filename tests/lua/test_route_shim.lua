@@ -62,6 +62,33 @@ for _, mode in ipairs({ "client", "host" }) do
 	end
 end
 
+print("== route_shim_client_after_the_session")
+-- Owner, live 2026-11-16 (build 51): the host's game died; on his client the engine then had no session and let every domain
+-- run (coop_router.cpp runs_now: !active), so the host-side scripts ran on the host's MIRROR world, which has no simulation of
+-- its own: squads_filler's daily pass called squad:update() there -> "Busy Hands" in sim_squad_scripted.script:561
+-- (add_location_type). A client's Lua state stays a client's until it is gone.
+do
+	boot("client")
+	RegisterScriptCallback("actor_on_update", from_script("treasure_manager", "return function() RAN.tm = (RAN.tm or 0) + 1 end"))
+	RegisterScriptCallback("actor_on_update", from_script("some_unknown_mod", "return function() RAN.own = (RAN.own or 0) + 1 end"))
+	SendScriptCallback("actor_on_update")
+	check(RAN.tm == nil and RAN.own == 1, "in the session: the host's script is skipped, the player's own runs")
+	coop.is_active = function() return false end -- the host is lost
+	check(coop.route.runs("host") == true, "the model: without a session the engine lets every domain run")
+	SendScriptCallback("actor_on_update")
+	check(RAN.tm == nil, "after the session a client's state still runs no host-side handler: its world is the host's mirror")
+	check(RAN.own == 2, "the player's own handlers go on")
+	local fired = false
+	CreateTimeEvent("treasure_manager_test", "late", 0, from_script("treasure_manager", "return function() RAN.te = true; return true end"))
+	check(RAN.te == nil, "a host-side time event made after the session is not made on a client's state either")
+
+	boot("host")
+	RegisterScriptCallback("actor_on_update", from_script("treasure_manager", "return function() RAN.tm = (RAN.tm or 0) + 1 end"))
+	coop.is_active = function() return false end -- the players left: a host's world is its own
+	SendScriptCallback("actor_on_update")
+	check(RAN.tm == 1, "a host's state after its session runs everything, as single player")
+end
+
 print("== route_shim_unknown_script_runs_owner")
 for _, mode in ipairs({ "client", "host" }) do
 	boot(mode)

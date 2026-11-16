@@ -138,9 +138,21 @@ end
 
 function _rotate_turn(script) return turn[script] end
 
+-- A client's Lua state outlives its session. When the host is lost the engine has no session and says that every domain runs
+-- (coop_router.cpp runs_now: single player). But the world of this state is still the host's MIRROR, with no simulation of its
+-- own, and the host-side scripts died on it: owner 2026-11-16, build 51, the host's game crashed, squads_filler's daily pass
+-- called squad:update() on his client -> "Busy Hands" in sim_squad_scripted.script:561 (add_location_type). What runs only on
+-- the host, or nowhere, in a session stays off in a client's state until that state is gone.
+local ORPHAN_OFF = { host = true, level = true, none = true }
+local function orphaned(d)
+	if not (client and ORPHAN_OFF[d]) then return false end
+	local ok, on = pcall(api.is_active)
+	return not (ok and on == true)
+end
+
 local function guard(f, d, script, what, skip_ret, err_ret)
 	local w = function(...)
-		if not runs(d) then
+		if not runs(d) or orphaned(d) then
 			note(d, "skipped", script, what) -- per (callback, script): review M2
 			return skip_ret
 		end
