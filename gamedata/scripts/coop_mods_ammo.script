@@ -1,0 +1,371 @@
+--[[
+	Anomaly Coop - a client merges its own ammo packs the way the host does (gamedata\scripts\coop_mods_ammo.script).
+
+	Complaint 5 (build 54): at the workbench a client saw bullets "22/20" in red and the Create button did nothing. G.A.M.M.A.'s
+	game_setup.actor_on_item_take ends with item_weapon.ammo_aggregation(obj): in single player and on the host every
+	ammo pack taken is merged into full boxes (a damaged pack becomes the regular section first). game_setup is routed
+	host-only (coop_route.ltx), so on a client nothing merged: every ammo_maker breakdown, loot and craft added small packs,
+	and the workbench (zzzzzz_ui_workshop_nearby_stashes UpdateItem) counts full boxes only.
+
+	Here a live client with its own character merges the packs in its own bag with the same result as the stock function,
+	but only through paths the host confirms. The stock function is not called on a client because:
+	  - it raises the counts of the kept packs first and releases the emptied ones after. On a client a release is a
+	    request (lua_release -> client_destroy): the pack stays here until the host's destroy, and the host can refuse it.
+	    A refused or late release with the rounds already moved would count them twice; a second merge before the answer
+	    would collect the pack still standing here again;
+	  - for a pack whose create the host has not answered (coop.lease_waiting) client_destroy sends nothing at all, the
+	    stock function would still have moved its rounds;
+	  - drop_item before the release is a move request of its own (GE_OWNERSHIP_REJECT), racing the release;
+	  - the _bad / _verybad / buck_self branch releases and creates at once: a refused release keeps both packs.
+	So the order here is: release first, put the rounds back after the host has taken the pack.
+	  1. A pack taken (actor_on_item_take) waits SETTLE_MS: a world-loot count the host sends late (coop_economy_world
+	     loot_roll) is written first, as game_setup writes it before it merges. A pack still in coop_economy_world's
+	     taken_rolls, waiting for the host (coop.lease_waiting), being released by us or by another action (a craft
+	     ingredient, seen through _G.alife_release) is not touched; a pack taken stays queued until it is free.
+	  2. One section at a time, from its free partial packs plus the rounds owed to it: ceil(total / box) packs are
+	     needed. Fewer packs than there are: the smallest are released (their rounds are owed once the host took them).
+	     Otherwise the counts are set: full boxes, the rest in the last pack (ammo_set_count of an own pack: owner class,
+	     runs here, the item state sync carries it); owed rounds with no room go into a new pack in the own bag.
+	     Nothing else of the section is touched while one of its releases waits.
+	  3. A release the host never answers (KEEP_MS) is dropped: the pack still holds its rounds, nothing was added.
+	The workbench (GUI_on_show "UIWorkshop") runs a catch-up once per open: packs taken before this fix or loaded from a
+	save are merged too.
+	The host, single player, a map server and the world server do nothing here (game_setup merges on the host and in
+	single player; a server has no player's bag).
+--]]
+
+local api = rawget(_G, "coop")
+
+local tostring, type, pairs, ipairs, pcall, rawget, rawset = tostring, type, pairs, ipairs, pcall, rawget, rawset
+local math_ceil, math_min, table_sort = math.ceil, math.min, table.sort
+
+local function C() return coop_mods_core end
+local function log(fmt, ...) C().log("ammo", fmt, ...) end
+
+local SETTLE_MS = 2000 -- a pack just taken: the host's late world-loot count (a round trip) comes first
+local KEEP_MS = 60000  -- a release the host has not answered / a pack that stays busy this long is left as it is
+local TICK_MS = 250
+local RETRY_MS = 5000 -- owed rounds a create could not take are tried again after this
+
+stats = { merged = 0, released = 0, set = 0, created = 0, replaced = 0, catchups = 0, dropped = 0, errors = 0 }
+
+local queue = {}   -- id -> { due, giveup }: packs taken, merged once they are free
+local leaving = {} -- id -> { s = section credited, from = its own section, n = rounds, box, giveup }: our releases
+local owed = {}    -- section -> { n, box }: rounds of packs the host has taken, not put back yet
+local others = {}  -- id -> ms: a pack another action asked to release (it goes; its rounds are not ours to move)
+local dirty = {}   -- section -> true: merge it on the next tick
+local bench_open = false
+local next_tick = 0
+
+-------------------------------------------------------------------------------
+-- Role and item state
+-------------------------------------------------------------------------------
+-- A live client with its own character: not single player, not the host, not a map server (is_client is false there)
+-- and not the world server.
+local function active()
+	local c = C()
+	return api ~= nil and c.live_client() and not c.is_host() and not c.actor_is_nobody() and db.actor ~= nil
+end
+
+local function id_of(x)
+	local ok, id = pcall(function()
+		if type(x.id) == "number" then return x.id end
+		return x:id()
+	end)
+	return ok and type(id) == "number" and id or nil
+end
+
+local function is_ammo(obj)
+	local f = rawget(_G, "IsAmmo")
+	if type(f) == "function" then return f(obj) == true end
+	return IsItem("ammo", obj:section()) == true
+end
+
+-- its create (leased id) or a clone of it is not answered by the host yet
+local function host_waiting(id)
+	local f = api and api.lease_waiting
+	if type(f) ~= "function" then return false end
+	local ok, w = pcall(f, id)
+	return ok and w == true
+end
+
+-- coop_economy_world still has to write its world-loot count (loot_roll)
+local function roll_waiting(id)
+	local ew = C().mod("coop_economy_world")
+	local f = ew and ew.roll_waiting
+	return type(f) == "function" and f(id) == true
+end
+
+local function free(id, now)
+	if leaving[id] or (others[id] and others[id] > now) then return false end
+	local q = queue[id]
+	if q and q.due > now then return false end
+	return not host_waiting(id) and not roll_waiting(id)
+end
+
+local function in_bag(obj)
+	local p = obj:parent()
+	return p ~= nil and p:id() == db.actor:id()
+end
+
+local function gone(id, section)
+	if level.object_by_id(id) ~= nil then return false end
+	local se = alife_object(id)
+	if se == nil then return true end
+	local ok, s = pcall(function() return se:section_name() end)
+	return ok and s ~= section -- the id was given to something else
+end
+
+local function box_of(sec, fallback)
+	local ok, n = pcall(function() return ini_sys:r_float_ex(sec, "box_size", fallback or 0) end)
+	return ok and type(n) == "number" and n > 0 and n or fallback
+end
+
+-- the regular section that stock ammo_aggregation turns this damaged / home-made one into
+local function replacement(sec)
+	local new = nil
+	local no_damaged = rawget(_G, "_NO_DAMAGED_AMMO") == true
+	if no_damaged and sec:find("_verybad", 1, true) then
+		new = (sec:gsub("_verybad", ""))
+	elseif no_damaged and sec:find("_bad", 1, true) then
+		new = (sec:gsub("_bad", ""))
+	elseif sec == "ammo_12x70_buck_self" then
+		new = "ammo_12x70_buck"
+	end
+	if new and ini_sys:section_exist(new) then return new end
+	return nil
+end
+
+-------------------------------------------------------------------------------
+-- Releases of other actions (a craft ingredient, a pack used up): seen through the global stock calls
+-------------------------------------------------------------------------------
+local mine = false
+local watched = false
+
+local function watch_releases()
+	if watched then return end
+	local rel = rawget(_G, "alife_release")
+	if type(rel) ~= "function" then return end
+	watched = true -- once: a later wrapper around ours must not get ours again
+	rawset(_G, "alife_release", function(x, ...)
+		if not mine and x ~= nil then
+			local id = id_of(x)
+			if id then others[id] = time_global() + KEEP_MS end
+		end
+		return rel(x, ...)
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- Merging
+-------------------------------------------------------------------------------
+local function release(id, entry)
+	leaving[id] = entry
+	stats.released = stats.released + 1
+	mine = true
+	local ok, e = pcall(alife_release_id, id) -- a request to the host on a client
+	mine = false
+	if not ok then
+		leaving[id] = nil
+		C().report("ammo", "release a pack", e)
+	end
+end
+
+local function set_count(obj, n)
+	local ok, e = pcall(function() obj:ammo_set_count(n) end)
+	if ok then
+		stats.set = stats.set + 1
+	else
+		C().report("ammo", "set a pack's count", e)
+	end
+	return ok
+end
+
+local function create(sec, n)
+	local ok, r = pcall(alife_create_item, sec, db.actor, { ammo = n })
+	local made = ok and r ~= nil and (type(r) ~= "table" or rawget(r, 1) ~= nil or rawget(r, "id") ~= nil)
+	if made then
+		stats.created = stats.created + 1
+	else
+		C().report("ammo", "create a pack", ok and "refused" or r)
+	end
+	return made
+end
+
+local function busy(sec)
+	for _, l in pairs(leaving) do
+		if l.s == sec or l.from == sec then return true end
+	end
+	return false
+end
+
+-- Sets the partial packs to their targets (full boxes first) and puts the rest into new packs. Counts go down first:
+-- what they free (and the owed rounds) is all the rest may add, so a setter that fails loses or adds nothing.
+local function fill(sec, packs, total, box, now)
+	local pool, left = owed[sec] and owed[sec].n or 0, total
+	local targets = {}
+	for i, p in ipairs(packs) do
+		targets[i] = math_min(box, left)
+		left = left - targets[i]
+	end
+	for i, p in ipairs(packs) do
+		if targets[i] < p.n and set_count(p.obj, targets[i]) then pool = pool + p.n - targets[i] end
+	end
+	for i, p in ipairs(packs) do
+		local add = math_min(targets[i] - p.n, pool)
+		if add > 0 and set_count(p.obj, p.n + add) then pool = pool - add end
+	end
+	while pool > 0 do
+		local n = math_min(box, pool)
+		if not create(sec, n) then break end
+		pool = pool - n
+	end
+	-- a refused create (no leased id yet): the rounds stay owed and are tried again later, not on every tick
+	owed[sec] = pool > 0 and { n = pool, box = box, after = now + RETRY_MS } or nil
+end
+
+local function settle(sec, now)
+	if busy(sec) then return end -- one of its releases waits for the host: its rounds are not known yet
+	local a = db.actor
+	local new = replacement(sec)
+	local packs, box = {}, owed[sec] and owed[sec].box or nil
+	a:iterate_inventory(function(_, item)
+		if item:section() ~= sec or not is_ammo(item) then return end
+		local id = item:id()
+		if not free(id, now) then return end
+		local n, size = item:ammo_get_count(), item:ammo_box_size()
+		box = box or size
+		if new or (n > 0 and n < size) then packs[#packs + 1] = { obj = item, id = id, n = n, size = size } end
+	end, a)
+	if new then
+		-- every damaged pack goes (full ones too, as the stock); its rounds come back as the regular section
+		for _, p in ipairs(packs) do
+			stats.replaced = stats.replaced + 1
+			release(p.id, { s = new, from = sec, n = p.n, box = box_of(new, p.size), giveup = now + KEEP_MS })
+		end
+		return
+	end
+	if not box or box <= 0 then return end
+	local due = owed[sec] and owed[sec].n or 0
+	if due == 0 and #packs < 2 then return end
+	local total = due
+	for _, p in ipairs(packs) do total = total + p.n end
+	table_sort(packs, function(x, y)
+		if x.n ~= y.n then return x.n > y.n end
+		return x.id < y.id
+	end)
+	local need = math_ceil(total / box)
+	if need < #packs then
+		-- too many packs: the smallest go first, their rounds come back once the host has taken them
+		for i = need + 1, #packs do
+			local p = packs[i]
+			release(p.id, { s = sec, from = sec, n = p.n, box = box, giveup = now + KEEP_MS })
+		end
+		return
+	end
+	stats.merged = stats.merged + 1
+	fill(sec, packs, total, box, now)
+end
+
+local function tick(now)
+	for id, l in pairs(leaving) do
+		if gone(id, l.from) then
+			leaving[id] = nil
+			local o = owed[l.s] or { n = 0, box = l.box }
+			o.n = o.n + l.n
+			owed[l.s] = o
+			dirty[l.s] = true
+		elseif now > l.giveup then
+			leaving[id] = nil -- the host kept it: it still holds its rounds, nothing was added for them
+			stats.dropped = stats.dropped + 1
+			log("a pack [%s] (%s) the host did not take in %d s keeps its rounds", tostring(l.from), tostring(id), KEEP_MS / 1000)
+		else
+			local obj = level.object_by_id(id)
+			if obj then
+				local ok, n = pcall(function() return obj:ammo_get_count() end)
+				if ok and type(n) == "number" then l.n = n end -- what goes with it, if the player used some meanwhile
+			end
+		end
+	end
+	for id, t in pairs(others) do
+		if t <= now or level.object_by_id(id) == nil then others[id] = nil end
+	end
+	for id, q in pairs(queue) do
+		local obj = level.object_by_id(id)
+		if not obj or not in_bag(obj) or now > q.giveup then
+			queue[id] = nil
+		elseif q.due <= now and free(id, now) then
+			queue[id] = nil
+			dirty[obj:section()] = true
+		end
+	end
+	for sec, o in pairs(owed) do
+		if (o.after or 0) <= now then dirty[sec] = true end
+	end
+	local list = dirty
+	dirty = {}
+	for sec in pairs(list) do settle(sec, now) end
+end
+
+local function catch_up()
+	stats.catchups = stats.catchups + 1
+	local a = db.actor
+	a:iterate_inventory(function(_, item)
+		if is_ammo(item) then dirty[item:section()] = true end
+	end, a)
+	tick(time_global())
+end
+
+-------------------------------------------------------------------------------
+-- Callbacks, status, start
+-------------------------------------------------------------------------------
+local function actor_on_item_take(obj)
+	if not (obj and active()) or not is_ammo(obj) then return end
+	local now = time_global()
+	queue[obj:id()] = { due = now + SETTLE_MS, giveup = now + KEEP_MS }
+end
+
+local function actor_on_update()
+	if not active() then return end
+	watch_releases()
+	local now = time_global()
+	if now < next_tick then return end
+	next_tick = now + TICK_MS
+	local ok, e = pcall(tick, now) -- foreign objects (a pack gone half way): one bad tick must not stop the next
+	if not ok then C().report("ammo", "merge packs", e) end
+end
+
+local function on_gui_show(name)
+	if name ~= "UIWorkshop" or bench_open or not active() then return end
+	bench_open = true
+	watch_releases()
+	local ok, e = pcall(catch_up)
+	if not ok then C().report("ammo", "merge packs at the workbench", e) end
+end
+
+local function on_gui_hide(name)
+	if name == "UIWorkshop" then bench_open = false end
+end
+
+local function status()
+	local n_leaving, n_queue = 0, 0
+	for _ in pairs(leaving) do n_leaving = n_leaving + 1 end
+	for _ in pairs(queue) do n_queue = n_queue + 1 end
+	return string.format("ammo packs: merges %d (counts set %d, released %d, new packs %d, damaged replaced %d), "
+		.. "workbench catch-ups %d, releases the host kept %d | waiting: taken %d, releases %d",
+		stats.merged, stats.set, stats.released, stats.created, stats.replaced, stats.catchups, stats.dropped,
+		n_queue, n_leaving)
+end
+
+-- on_game_start must not throw (axr_main runs every script's on_game_start in one unprotected loop, W5)
+function on_game_start()
+	if not api then return end
+	local ok, e = pcall(function()
+		RegisterScriptCallback("actor_on_item_take", actor_on_item_take)
+		RegisterScriptCallback("actor_on_update", actor_on_update)
+		RegisterScriptCallback("GUI_on_show", on_gui_show)
+		RegisterScriptCallback("GUI_on_hide", on_gui_hide)
+		C().status_line("ammo", status)
+	end)
+	if not ok then printf("! [coop_mods_ammo] start failed: %s", tostring(e)) end
+end

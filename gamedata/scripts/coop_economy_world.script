@@ -136,6 +136,10 @@ end
 -- Taken items no longer have a world_itm_on entry; their retries belong to the item, not its reusable spot.
 local taken_rolls, roll_errors = {}, {}
 
+-- coop_mods_ammo: a taken pack whose world-loot count is not written yet. game_setup sets that count before it merges
+-- packs; merging such a pack first would let the late roll overwrite rounds moved into it.
+function roll_waiting(id) return taken_rolls[id] ~= nil end
+
 local function try_bake(gs, id, section, num)
 	local ok, done = pcall(bake, gs, id, section, num)
 	if not ok then
