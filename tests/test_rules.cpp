@@ -16,6 +16,14 @@ TEST(rules_machine_info)
 	CHECK(is_machine_info("ui_pda"));
 	CHECK(is_machine_info("actor_is_sleeping"));
 	CHECK(is_machine_info("sleep_active"));
+	// G.A.M.M.A.'s "no rest from this sleep" marks (actor_status_sleep, actor_status_thirst): given and taken away in one
+	// call on the tired player's machine. Shared, a client's mark stayed with the whole group and nobody's need for sleep
+	// went down after a sleep (live, build 54).
+	CHECK(is_machine_info("force_slp2"));
+	CHECK(is_machine_info("force_slp"));
+	CHECK(!is_machine_info("force_slp2_x"));
+	CHECK(!is_machine_info("force_slp3"));
+	CHECK(!is_machine_info("force_sl"));
 
 	// Prefix `ui_talk*`: the bare prefix and anything after it.
 	CHECK(is_machine_info("ui_talk"));

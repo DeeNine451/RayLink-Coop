@@ -63,6 +63,27 @@ TEST(mirror_free_entity_outside_the_level_registry_comes_online_now)
 	}
 }
 
+// Live, builds 52-54 (issue 1293, ten client crashes in one evening): a squad of the host often has no game vertex on a
+// client, so it took OnlineNow. But a squad comes online with its members (CSE_ALifeOnlineOfflineGroup::register_member,
+// inside register_object), and the second switch_online failed R_ASSERT(!m_bOnline). Only an entity that switches by
+// itself and is still offline after register_object comes online at its EntitySpawn; a squad stays on the vote, as in
+// build 51.
+TEST(mirror_only_an_entity_that_switches_alone_comes_online_now)
+{
+	for (int holder = 0; holder < 4; ++holder)
+	{
+		const bool online = (holder & 1) != 0, on_server = (holder & 2) != 0;
+		CHECK_EQ(placement(false, true, online, on_server, false, true, false), Placement::SwitchVote); // a squad
+		CHECK_EQ(placement(false, true, online, on_server, false, true, true), Placement::OnlineNow);   // a psy phantom
+		CHECK_EQ(placement(false, false, online, on_server, false, true, false), Placement::Offline);
+		CHECK_EQ(placement(false, true, online, on_server, true, true, false), Placement::SwitchVote);
+		CHECK_EQ(placement(false, true, online, on_server, false, false, false), Placement::SwitchVote);
+	}
+	// a child: its holder decides, the new flag changes nothing
+	CHECK_EQ(placement(true, true, true, true, false, true, false), Placement::WithHolder);
+	CHECK_EQ(placement(true, true, false, true, false, true, false), Placement::Offline);
+}
+
 // A child follows its holder here whatever the registry and level flags say.
 TEST(mirror_child_ignores_the_registry_flag)
 {

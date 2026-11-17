@@ -731,6 +731,12 @@ end
 
 -- A world is entered (a load, a level change): what was open belongs to the old one.
 local function on_first_update()
+	-- G.A.M.M.A.'s "no rest from this sleep" marks (actor_status_sleep, actor_status_thirst) are given and taken away in one
+	-- call. Until build 55 a client's mark went to the host and from it to everybody, and stayed there (in the saves too):
+	-- a sleep lowered nobody's need for sleep. One that is held when a world starts is such a left-over. The engine keeps
+	-- them on this machine now (coop_rules.h, is_machine_info), so this take-away is local, in a session and without one.
+	info_off("force_slp2")
+	info_off("force_slp")
 	if not rest_session() then return end
 	local w = win
 	win, win_open = nil, false

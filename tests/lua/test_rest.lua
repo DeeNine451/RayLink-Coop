@@ -1056,6 +1056,16 @@ case("invite_closes_when_rest_ends", function()
 	ally_rests(7, 8)
 	fire("actor_on_first_update")
 	check(inv() == nil and GUIREG.UICoopInvite == nil, "a new world: closed")
+	-- G.A.M.M.A.'s "no rest from this sleep" marks (actor_status_sleep force_slp2, actor_status_thirst force_slp) live for one
+	-- call. Until build 55 a client's mark went to the whole group and stayed, in the host's saves too, and a sleep lowered
+	-- nobody's need for sleep. A held one is a left-over: it goes at a world's start, in a session and without one.
+	for _, mode in ipairs({ "client", "host", "sp" }) do
+		fresh(mode == "sp" and "client" or mode)
+		if mode == "sp" then MODE = "sp" end
+		INFOS.force_slp2, INFOS.force_slp = true, true
+		fire("actor_on_first_update")
+		check(INFOS.force_slp2 == nil and INFOS.force_slp == nil, mode .. ": the left-over marks of a too tired player go at a world's start")
+	end
 end)
 
 -- Task 1 of 2026-11-07: every stock sleep entry of VANILLA Anomaly (the real ui_sleep_dialog.script of anomaly-ref) in a session
