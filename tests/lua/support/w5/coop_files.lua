@@ -29,6 +29,8 @@ COOP_FILES = {
 	"coop_mods_pdata",
 	"coop_mods_perks",
 	"coop_mods_radio",
+	"coop_mods_ammo", -- a client merges its own ammo packs as the host does (complaint 5, build 54)
+	"coop_mods_speed", -- movement speed diagnostic, one line per 30 s when it changed (complaint 4, build 54)
 	"coop_npc_combat", -- W11: combat_ignore / danger / wounded for every player
 	"coop_npc_companions",
 	"coop_npc_compat",

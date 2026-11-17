@@ -584,6 +584,27 @@ local function new_ids_text(ids)
 	return table.concat(out, ", ")
 end
 
+-- Live, build 54 (RL-BWXX-F77V): a silencer that fits a gun the player held never came into his bag (wpn_sil_vihr with
+-- wpn_vihr, wpn_sil_gemtech with wpn_fnp45), one that fits none of his guns came. Who takes it away is not known yet.
+-- For the log only: the guns here that take this section as their silencer, and whether one is on them now.
+local function fitting_guns(sec)
+	local out = {}
+	pcall(function()
+		db.actor:iterate_inventory(function(_, o)
+			if not o then return end
+			local s = o:section()
+			local ok, name = pcall(function() return ini_sys:r_string_ex(s, "silencer_name") end)
+			if ok and name == sec then
+				local on = "?"
+				pcall(function() on = tostring(o:weapon_is_silencer()) end)
+				out[#out + 1] = s .. " " .. tostring(o:id()) .. " (silencer on: " .. on .. ")"
+			end
+		end, db.actor)
+	end)
+	if #out == 0 then return "" end
+	return "; guns here that take it: " .. table.concat(out, ", ", 1, math.min(#out, 6))
+end
+
 local function watch_line(w, rid, when)
 	local now_ids = own_ids(w.sec)
 	local had = {}
@@ -593,8 +614,9 @@ local function watch_line(w, rid, when)
 		if not had[id] then fresh[#fresh + 1] = id end
 	end
 	local delta = #now_ids - #w.before
-	log("%sspawn_item %s rid %s%s: asked %d, had %d, have %d (%s%d); new ids %s", delta ~= w.n and "! " or "", w.sec,
-		tostring(rid or "-"), when or "", w.n, #w.before, #now_ids, delta >= 0 and "+" or "", delta, new_ids_text(fresh))
+	log("%sspawn_item %s rid %s%s: asked %d, had %d, have %d (%s%d); new ids %s%s", delta ~= w.n and "! " or "", w.sec,
+		tostring(rid or "-"), when or "", w.n, #w.before, #now_ids, delta >= 0 and "+" or "", delta, new_ids_text(fresh),
+		delta < w.n and fitting_guns(w.sec) or "")
 end
 
 local function watch_answered(w, rid)

@@ -632,6 +632,27 @@ do
 	REQUESTS[#REQUESTS].cb(true, "forwarded")
 	EVENT["coop.dbg.note"]("ok=1;msg=wpn_ak74 x3 (inv);cmd=spawn_item;rid=9", 0)
 	check(logged("spawn_item medkit rid 9") == nil, "a note of another section is not this one's")
+	-- Live, build 54 (RL-BWXX-F77V): a silencer that fits a gun the player holds never came (wpn_sil_vihr with wpn_vihr), one
+	-- that fits none came. The cause is not known: when the asked item is missing, the line names the guns here that take
+	-- this section as their silencer and whether it is on them now.
+	do
+		SECTIONS.wpn_sil_vihr = { class = "WP_SILEN", inv_weight = "0.3", inv_name = "st_sil_vihr" }
+		SECTIONS.wpn_vihr = { class = "WP_VAL", inv_weight = "2", inv_name = "st_vihr", silencer_name = "wpn_sil_vihr" }
+		local gun = item(1700, "wpn_vihr")
+		gun.weapon_is_silencer = function() return true end
+		INV[9] = gun
+		client.run("spawn_item", { sec = "wpn_sil_vihr", n = 1, at = "inv" })
+		REQUESTS[#REQUESTS].cb(true, { msg = "wpn_sil_vihr x1 (inv)", id = 1701 })
+		l = logged("spawn_item wpn_sil_vihr rid %-")
+		check(l ~= nil and l:find("have 0 %(%+0%)") ~= nil and l:find("guns here that take it: wpn_vihr 1700 %(silencer on: true%)") ~= nil,
+			"a silencer that did not come: the gun it fits and whether it carries one", tostring(l))
+		client.run("spawn_item", { sec = "wpn_ak74", n = 3, at = "inv" })
+		REQUESTS[#REQUESTS].cb(true, { msg = "wpn_ak74 x3 (inv)" })
+		l = logged("spawn_item wpn_ak74 rid %-: asked 3")
+		check(l ~= nil and l:find("guns here") == nil, "an item no gun takes as a silencer: the plain line", tostring(l))
+		INV[9] = nil
+		SECTIONS.wpn_sil_vihr, SECTIONS.wpn_vihr = nil, nil
+	end
 	-- near / point: nothing goes into the inventory, nothing is counted
 	local n_log = #LOG
 	client.run("spawn_item", { sec = "medkit", n = 1, at = "near" })
