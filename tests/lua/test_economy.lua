@@ -1138,6 +1138,23 @@ do
 	check(made(A, "wpn_ak74") == 0 and made(A, "af_medusa") == 0 and made(A, "wpn_pm") == 0,
 		"anything but a bolt in the record is not made")
 
+	-- the bolt of the slot is made first, as the stock makes it: the engine puts the first bolt it gets into the empty bolt
+	-- slot. Build 52 took the queue from its end: the slot's section came last and a counted bolt took the slot.
+	do
+		engine_creates(A)
+		told(H, A, { bolt = 3 }, "bolt_bullet")
+		local order = {}
+		local create = A.alife_create_item
+		A.alife_create_item = function(sec, to)
+			local res = create(sec, to)
+			if res then order[#order + 1] = sec end
+			return res
+		end
+		join(H, A, {}, nil)
+		check(#order == 4 and order[1] == "bolt_bullet",
+			"the slot's bolt is made first, then the counted ones (first " .. tostring(order[1]) .. " of " .. #order .. ")")
+	end
+
 	-- a character that never told its bolts (a world of an older build): today's behaviour, the stock's own creates
 	local H2, B = setup(1)
 	engine_creates(B)

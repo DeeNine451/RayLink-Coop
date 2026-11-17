@@ -1135,7 +1135,7 @@ local function bolts_make(t)
 	local actor = db.actor
 	if not actor then return end
 	for _ = 1, BOLT_BATCH do
-		local sec = table.remove(h.queue)
+		local sec = table.remove(h.queue, 1) -- from the front: the slot's bolt first, it takes the empty bolt slot as in the stock
 		if not sec then break end
 		local ok, err = pcall(create, sec, actor)
 		if ok then h.made = h.made + 1 else core.log("! own bolt [%s]: %s", sec, tostring(err)) end
