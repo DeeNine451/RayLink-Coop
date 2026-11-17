@@ -52,7 +52,7 @@ local SIM_OVERRIDES = {
 
 local stats = {
 	req_out = 0, req_in = 0, refused = 0, offers_in = 0, used = 0, local_gen = 0, shown = 0,
-	after_give = 0, pinned = 0, rerun = 0,
+	after_give = 0, pinned = 0, rerun = 0, far_empty = 0,
 }
 
 local function now() return time_global() end
@@ -231,6 +231,15 @@ end
 
 local last_req = {} -- "peer:npc" -> time
 
+-- Is this answer made over the far view: for a level this process does not lead (a world server for every level, the host
+-- of split levels for the others)? There the NPC is a stand-in of its ALife record, not a game object.
+local function over_far_view()
+	local far = qc.mod("coop_quests_far")
+	if not (far and type(far.in_scope) == "function") then return false end
+	local ok, scope = pcall(far.in_scope)
+	return ok and scope ~= nil
+end
+
 local function offer_here(t, from)
 	stats.req_in = stats.req_in + 1
 	local npc_id, seq = tonumber(t.n), tonumber(t.q) or 0
@@ -260,7 +269,7 @@ local function offer_here(t, from)
 		if d.bounty then msg.bt = d.bounty end
 		qc.send("offer_t", msg, from)
 	end
-	qc.send("offer", { n = npc_id, q = seq, k = kind, l = table_concat(list, ","), c = #list }, from)
+	qc.send("offer", { n = npc_id, q = seq, k = kind, l = table_concat(list, ","), c = #list, f = over_far_view() and 1 or nil }, from)
 end
 
 -------------------------------------------------------------------------------
@@ -384,6 +393,16 @@ local function client_on_offer(t, from)
 	end
 	local list = {}
 	for tid in tostring(t.l or ""):gmatch("[^,]+") do list[#list + 1] = tid end
+	-- A list with nothing in it that was made over the far view is no answer. A world server has no game objects of a
+	-- player's level: it makes the offers over stand-ins, standing on fake_start itself. Stand, 2026-11-18, build 54: 29
+	-- NPCs of the Bar asked, 29 answers with no task, no row on the client's board (live: "на раздельных нет квестов").
+	-- As after a refusal: the list of this NPC is made here, by the stock code over the real NPC; the give still asks the host.
+	if #list == 0 and t.f then
+		stats.far_empty = stats.far_empty + 1
+		offers[npc_id] = { tasks = {}, asked = offers[npc_id] and offers[npc_id].asked }
+		batch_note(npc_id)
+		return
+	end
 	offers[npc_id] = {
 		q = q, kind = t.k == "sim" and "sim" or "dyn", list = list, tasks = inc and inc.tasks or {},
 		at = now(), complete = true,
@@ -686,8 +705,8 @@ end
 function print_status()
 	local n = 0
 	for _ in pairs(offers) do n = n + 1 end
-	qc.log(TAG, "requests out %d in %d refused %d | offers in %d used %d, local lists %d, shown %d | %d NPC offers kept | after give %d, squads pinned %d, host on_job_descr %d",
-		stats.req_out, stats.req_in, stats.refused, stats.offers_in, stats.used, stats.local_gen, stats.shown, n,
+	qc.log(TAG, "requests out %d in %d refused %d | offers in %d (%d empty over the far view) used %d, local lists %d, shown %d | %d NPC offers kept | after give %d, squads pinned %d, host on_job_descr %d",
+		stats.req_out, stats.req_in, stats.refused, stats.offers_in, stats.far_empty, stats.used, stats.local_gen, stats.shown, n,
 		stats.after_give, stats.pinned, stats.rerun)
 end
 

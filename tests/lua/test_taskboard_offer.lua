@@ -118,5 +118,43 @@ Cm.active = false
 check(pt.get_details(fetch_row) == nil, "out of a session: the stock answer, nothing of ours")
 Cm.active = true
 
+-- Live, 2026-11-17, build 54: "на раздельных нет квестов". A world server has no game objects of a player's level; it makes the
+-- offers over the far view (stand-ins of ALife records, its own level is fake_start). Stand, 2026-11-18: 29 NPCs of the Bar
+-- asked, 29 answers with no task, 0 rows on the client's board. An empty list made over the far view is no answer: the client
+-- makes the list of that NPC itself, by the stock code over the real NPC, as it does after a refusal.
+print("== an empty answer made over the far view: the list is made here")
+do
+	local a = Cm.env.axr_task_manager
+	-- the far view of a world server, as much as the offer needs: the handler runs inside it while it is open
+	Hm.env.coop_quests_far = {
+		in_scope = function() return Hm.far_open end,
+		with_level_of = function(peer, fn, ...) return fn(...) end,
+	}
+	-- an answer with tasks made over the far view is used as before
+	Hm.far_open = { level = "l05_bar" }
+	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)
+	pump()
+	Cm.gen_calls = 0
+	a.generate_available_tasks(Cm.npc)
+	check(Cm.gen_calls == 0 and #a.available_tasks[700] == 3, "the far view gave tasks: the host's list is the board's")
+	-- the far view gives nothing
+	Hm.npc_tasks = { [700] = {} }
+	NOW = NOW + 5000 -- past the gap between two requests about one NPC
+	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)
+	pump()
+	Cm.gen_calls = 0
+	a.generate_available_tasks(Cm.npc)
+	check(Cm.gen_calls == 1, "nothing over the far view: the stock generation runs on the client (" .. tostring(Cm.gen_calls) .. " call)")
+	check(#a.available_tasks[700] == 3, "and its board has the tasks of the NPC here (" .. #a.available_tasks[700] .. ")")
+	-- the host of one level has the real NPC: its empty list is the answer
+	Hm.far_open = nil
+	NOW = NOW + 5000
+	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)
+	pump()
+	Cm.gen_calls = 0
+	a.generate_available_tasks(Cm.npc)
+	check(Cm.gen_calls == 0 and #a.available_tasks[700] == 0, "the host's own empty list stands: the NPC has no task for this player")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end
