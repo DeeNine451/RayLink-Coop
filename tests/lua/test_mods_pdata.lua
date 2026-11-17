@@ -51,6 +51,12 @@ if which == "client" then
 		npe = { npe_state = { gamma = { gun = { played = true } } } }, -- the host's (a world server's: nobody played anything)
 		fast_travel_system = { spawned_travel_zones = { 11, 12 }, zone_spawn_version = 3, locations_found = 7, cooldowns = { ft = 900 } },
 		coop_mods_pdata = { ["777"] = { t = "other", d = { skills_levels = { strength = 1 } } } },
+		-- Build 56 (review of 2026-11-18): Perk-Based Artefacts keeps five keys, only the cooldowns were a player's own; the
+		-- host's running perk effects, statuses, virtual artefacts and Lucifer condition ran on every client after a load
+		perk_based_artefacts_effects = { { time = 5, effect_function = "host" } },
+		perk_based_artefacts_status_effects = { af_lucifer_overcharge = { time = 1800 } },
+		perk_based_artefacts_virtual_artefacts = { af_sandstone = 1 },
+		perk_based_artefacts_lucifer_condition = 0.3,
 	}
 	local seen_at_load
 	RegisterScriptCallback("load_state", function(m) seen_at_load = { xp = m.experience_framework_savedata.XP, sk = m.skills_levels } end)
@@ -61,6 +67,12 @@ if which == "client" then
 		"sub-keys: player part cleared, world part (nls_storage) kept")
 	check(seen_at_load and seen_at_load.xp == nil and seen_at_load.sk == nil, "load_state already saw the player's values")
 	check(m.coop_mods_pdata == nil, "other players' records dropped on the client")
+	check(P.owns("perk_based_artefacts_effects") and P.owns("perk_based_artefacts_status_effects")
+		and P.owns("perk_based_artefacts_virtual_artefacts") and P.owns("perk_based_artefacts_lucifer_condition"),
+		"perk artefacts: the running effects, statuses, virtual artefacts and the Lucifer's condition are a player's own")
+	check(m.perk_based_artefacts_effects == nil and m.perk_based_artefacts_status_effects == nil
+		and m.perk_based_artefacts_virtual_artefacts == nil and m.perk_based_artefacts_lucifer_condition == nil,
+		"perk artefacts: a new player does not run the host's effects")
 	check(m.npe == nil, "tutorials: a new player does not take the host's list of what was shown")
 	check(m.fast_travel_system.cooldowns == nil and m.fast_travel_system.locations_found == nil, "fast travel: the host's cooldowns are not his")
 	check(m.fast_travel_system.spawned_travel_zones[2] == 12 and m.fast_travel_system.zone_spawn_version == 3,
@@ -101,6 +113,19 @@ if which == "client" then
 	m = alife_storage_manager.get_state()
 	check(m.skills_levels.strength == 5 and m.experience_framework_savedata.XP == 43, "same lineage: the newer session data wins")
 
+	-- 3'. perk artefacts across a level change: his own statuses and Lucifer condition, not the host's
+	STASH.coop_mods_pdata = "TOK1|" .. coop_mods_core.ser({ skills_levels = { strength = 5 }, experience_framework_savedata = { XP = 43 },
+		perk_based_artefacts_status_effects = { af_moh = { time = 60 } }, perk_based_artefacts_lucifer_condition = 0.8 })
+	alife_storage_manager.CALifeStorageManager_load({
+		perk_based_artefacts_status_effects = { af_lucifer_overcharge = { time = 1800 } }, perk_based_artefacts_lucifer_condition = 0.3,
+		perk_based_artefacts_virtual_artefacts = { af_sandstone = 1 },
+		coop_mods_pdata = { ["500"] = { t = "TOK1", d = {} } },
+	})
+	m = alife_storage_manager.get_state()
+	check(m.perk_based_artefacts_status_effects and m.perk_based_artefacts_status_effects.af_moh ~= nil
+		and m.perk_based_artefacts_status_effects.af_lucifer_overcharge == nil and m.perk_based_artefacts_lucifer_condition == 0.8
+		and m.perk_based_artefacts_virtual_artefacts == nil, "perk artefacts: after the level change his own statuses run, the host's do not")
+
 	-- 3a. the owner's case: a tutorial was shown and a trip put fast travel on cooldown, then he changed level
 	NPE_LIVE.gamma.gun.played = true
 	FFT_LIVE.cooldowns, FFT_LIVE.locations_found = { ft = 5000 }, 3
@@ -123,6 +148,78 @@ if which == "client" then
 	check(seen_npe and seen_npe.gamma.task.played == false, "and one he has not seen yet is still to come")
 	check(m.fast_travel_system.cooldowns.ft == 5000 and m.fast_travel_system.locations_found == 3, "his cooldown and found points came with him")
 	check(m.fast_travel_system.spawned_travel_zones[3] == 13 and m.fast_travel_system.zone_spawn_version == 4, "the world's zones are the new save's")
+
+	-- 3b. Build 56 (live 2026-11-18, "everything a client has must come through a transition exactly as in a usual game").
+	-- The engine says the load starts while the old world is still up (coop_main.on_world_leaving(epoch of the new world)):
+	-- the keys go into the stash as they are NOW, not as the last 15 s report had them, and the load reads them back whatever
+	-- the host did with its record meanwhile.
+	local world_epoch = 4
+	coop.world_epoch = function() return world_epoch end
+	local leaving_seen
+	RegisterScriptCallback("coop_on_world_leaving", function(epoch) leaving_seen = epoch end)
+	EF_LIVE.XP = 77 -- changed 3 s ago: the 15 s report has not come yet
+	m.skills_levels = { strength = 6 }
+	SENT = {}
+	coop_main.on_world_leaving(5)
+	check(leaving_seen == 5, "other scripts hear of the load too (coop_on_world_leaving)")
+	check(sent("mods.pd") == nil, "nothing is sent to a host that is saving already")
+	check(STASH.coop_mods_pdata:sub(1, 8) == "@load:5|", "the stash holds the state this load starts with")
+	coop_main.on_event("mods.pd_ack", coop_main.encode({ t = "TOK2" }), 0)
+	check(STASH.coop_mods_pdata:sub(1, 8) == "@load:5|", "a late ack of an older report does not put the older report back")
+	m.skills_levels = { strength = 1 } -- whatever the dying world still does
+	NOW = NOW + 20000
+	SendScriptCallback("actor_on_update")
+	check(sent("mods.pd") == nil and STASH.coop_mods_pdata:sub(1, 8) == "@load:5|", "no report after it in this world")
+	world_epoch = 5
+	alife_storage_manager.CALifeStorageManager_load({
+		skills_levels = { strength = 9 }, experience_framework_savedata = { XP = 999 },
+		-- the host stored the older report under a new token after the client's last ack: the tokens do not match
+		coop_mods_pdata = { ["500"] = { t = "TOK2", d = { skills_levels = { strength = 5 }, experience_framework_savedata = { XP = 43 } } } },
+	})
+	m = alife_storage_manager.get_state()
+	check(m.skills_levels.strength == 6 and m.experience_framework_savedata.XP == 77,
+		"the state kept at the start of the load is what the player has after it (" .. tostring(m.skills_levels and m.skills_levels.strength) .. ")")
+	check(STASH.coop_mods_pdata:sub(1, 5) == "TOK2|", "from then on the stash builds on the save's record again")
+	SENT = {}
+	EF_LIVE.XP = 78
+	NOW = NOW + 20000
+	SendScriptCallback("actor_on_update")
+	check(sent("mods.pd") ~= nil, "and the reports go on in the new world")
+	-- kept for another world (the host loaded a save while this one was coming): not this world's
+	STASH.coop_mods_pdata = "@load:9|" .. s5
+	alife_storage_manager.CALifeStorageManager_load({
+		skills_levels = { strength = 9 },
+		coop_mods_pdata = { ["500"] = { t = "TOK2", d = { skills_levels = { strength = 2 } } } },
+	})
+	m = alife_storage_manager.get_state()
+	check(m.skills_levels.strength == 2, "a state kept for another world is not read: the host's record is")
+	STASH.coop_mods_pdata = "TOK1|" .. s5
+	coop.world_epoch = nil
+
+	-- 3c. a kept state whose load never came (a transition called off): after KEPT_MS the reports go on
+	EF_LIVE.XP = 90
+	coop_main.on_world_leaving(6)
+	SENT = {}
+	NOW = NOW + 20000
+	SendScriptCallback("actor_on_update")
+	check(sent("mods.pd") == nil, "kept: quiet while the load may still come")
+	NOW = NOW + 200000
+	SendScriptCallback("actor_on_update")
+	check(sent("mods.pd") ~= nil, "kept, but no load came in 3 minutes: the reports go on")
+	-- 3d. the own character is not known at the load: the keys stay the host's, and are not reported as this player's
+	do
+		local real_hid = coop_mods_core.hid
+		coop_mods_core.hid = function() return 0 end
+		alife_storage_manager.CALifeStorageManager_load({ skills_levels = { strength = 9 }, experience_framework_savedata = { XP = 999 } })
+		coop_mods_core.hid = real_hid
+		SENT = {}
+		NOW = NOW + 20000
+		SendScriptCallback("actor_on_update")
+		check(sent("mods.pd") == nil, "the host's values left in place by a failed restore never go into this player's record")
+		coop_main.on_world_leaving(7)
+		check(STASH.coop_mods_pdata == nil or STASH.coop_mods_pdata:sub(1, 6) ~= "@load:", "nor into the state kept for a load")
+	end
+	STASH.coop_mods_pdata = "TOK1|" .. s5
 
 	-- 4. the host loaded an older save: its record has another token -> the save wins
 	alife_storage_manager.CALifeStorageManager_load({

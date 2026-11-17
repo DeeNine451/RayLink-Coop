@@ -36,6 +36,10 @@ transfer_per_min        = 30
 ; price by wpn_upgr_mult 0.5, a tier discount 0.5 / 1.1 / 1.5 and 0.3 for novice outfits (MCM defaults; each slider
 ; goes down to 0.1), and its cheapest mechanic takes 1.8: its cheapest default price is about 0.13 x cost.
 upgrade_min_percent     = 1.70
-; An upgrade that names no mechanic (a script installed it on the client, e.g. the workshop's upgrade with your own
-; tools) is refused unless this is true. coop_status counts them: "upgrades without a mechanic".
-scripted_upgrades       = false
+; An upgrade that names no mechanic: a script installed it on the client, as the workbench does (the modifications tab,
+; paid with upgrade kits). true: the host takes it; it still checks that the item is the player's and that the upgrade
+; fits the item. false: refused. It was false until build 55, and a client's workbench upgrade never worked: his script
+; spent the kit (released through the host) and the host refused the upgrade itself (live, build 55: "тратят ящики,
+; ничего не происходит"). A client's craft at the workbench is taken on the same trust: what his own script asks for his
+; own bag. coop_status counts them: "upgrades without a mechanic".
+scripted_upgrades       = true

@@ -206,6 +206,15 @@ local function install_pba()
 	local pba = C().mod("perk_based_artefacts")
 	if not pba then return end
 	P().register("perk_based_artefacts_cooldowns", { prime = { "perk_based_artefacts" } })
+	-- Build 56 (review of 2026-11-18, "everything a client has must come through a transition exactly as in a usual game"):
+	-- the mod's save_state writes five keys and load_state reads five; only the cooldowns were a player's own. After every
+	-- load a client ran the HOST's timed effects (his infinite sprint, his food heal), statuses (Lucifer overcharge, Moss
+	-- invisibility), virtual artefacts (Sandstone) and Lucifer condition, and lost his own. The same save_state fills them
+	-- (the functions of an effect travel as the dumped strings the mod itself saves).
+	for _, key in ipairs({ "perk_based_artefacts_effects", "perk_based_artefacts_status_effects",
+		"perk_based_artefacts_virtual_artefacts", "perk_based_artefacts_lucifer_condition" }) do
+		P().register(key, { prime = { "perk_based_artefacts" } })
+	end
 	local ok = C().wrap(pba, "process_artefacts", "perk_based_artefacts.process_artefacts", function(orig)
 		return function(tbl, ...)
 			if not C().active() then return orig(tbl, ...) end

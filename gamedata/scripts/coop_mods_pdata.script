@@ -15,6 +15,12 @@
 	          client asks the listed modules to refresh their keys (module.save_state, if they have one) and
 	          sends the keys to the host when they changed.
 	  Keys with `subs` travel only partly (the rest of the table is world state and stays the host's).
+	  Build 56 (live 2026-11-18, "everything a client has must come through a transition exactly as in a usual game"):
+	  the 15 s report left a window: what changed in the seconds before a level change came back as it was at the last
+	  report. The engine now says when a load that continues this world starts, while the old world is still up
+	  (coop_main.on_world_leaving -> keep_for_load): the keys go into the stash as they are that moment, under the
+	  token "@load:<epoch of the new world>", and the load reads them back in that world whatever token the host's
+	  record has. Nothing is sent then: the host is saving already.
 
 	Single player and the host's own data are untouched.
 
@@ -30,12 +36,16 @@ local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type,
 local STORE = "coop_mods_pdata" -- host m_data key
 local STASH = "coop_mods_pdata" -- client session stash key
 local REPORT_MS = 15000
+local LOAD_TOKEN = "@load:" -- the stash token of a state kept for one load: "@load:<epoch>|<data>"
+local KEPT_MS = 180000 -- a state kept for a load whose world never came (a transition called off): the reports go on after this
 local AVATAR_SECTION = "coop_player_avatar"
 
 local keys = {} -- key -> { subs = list|nil, prime = list|nil }
 local order = {}
 
-local st = { token = nil, last = nil, next_report = 0, applied = 0, sent = 0, acks = 0, stored = 0, refused = 0 }
+local st = { token = nil, last = nil, next_report = 0, applied = 0, sent = 0, acks = 0, stored = 0, refused = 0,
+	kept = false, kept_at = 0, keeps = 0, -- kept: the stash holds the state a load starts with, nothing may replace it in this world
+	foreign = false } -- the restore of this world failed: the registered keys are still the HOST's, never to be reported as mine
 
 local function C() return coop_mods_core end
 
@@ -80,12 +90,32 @@ end
 -------------------------------------------------------------------------------
 -- Client: restore at load, report on change
 -------------------------------------------------------------------------------
+local function world_epoch()
+	if not (api and api.world_epoch) then return nil end
+	local ok, e = pcall(api.world_epoch)
+	return ok and tonumber(e) or nil
+end
+
+-- The session stash, when it is this player's newer state: the data, and "load" when it was kept at the start of this load.
 local function stash_data(saved_token)
 	if not api then return nil end
 	local ok, s = pcall(api.stash_get, STASH)
 	if not (ok and type(s) == "string") then return nil end
 	local tok, body = s:match("^([^|]*)|(.*)$")
-	if not tok or tok ~= (saved_token or "") then return nil end
+	if not tok then return nil end
+	local kept_for = tok:match("^@load:(%d+)$")
+	if kept_for then
+		-- kept by keep_for_load: the player's state the moment he left the old world. It is read in the world it was kept
+		-- for and nowhere else (the host loaded a save meanwhile: that world does not continue the one he left).
+		local d = tonumber(kept_for) == world_epoch() and C().deser(body) or nil
+		if type(d) ~= "table" then
+			pcall(api.stash_set, STASH, nil)
+			return nil
+		end
+		pcall(api.stash_set, STASH, (saved_token or "") .. "|" .. body) -- from now on it builds on the save's record
+		return d, "load"
+	end
+	if tok ~= (saved_token or "") then return nil end
 	local d = C().deser(body)
 	return type(d) == "table" and d or nil
 end
@@ -100,14 +130,18 @@ function apply_loaded(m)
 	if type(my) ~= "number" or my == 0 then
 		log("! own character id unknown: per-player mod data not restored")
 		m[STORE] = nil
+		-- Review of build 56: the keys stay the host's then, and a report (or a state kept for a load) would write the
+		-- host's values into this player's record. Nothing of this world is reported.
+		st.foreign = true
 		return
 	end
+	st.foreign = false
 	local store = type(m[STORE]) == "table" and m[STORE] or {}
 	local rec = store[tostring(my)]
 	local saved_token = type(rec) == "table" and type(rec.t) == "string" and rec.t or nil
 	local data = type(rec) == "table" and type(rec.d) == "table" and rec.d or {}
-	local fresher = stash_data(saved_token)
-	local src = fresher and "session" or (rec and "host save" or "none (new player)")
+	local fresher, kept = stash_data(saved_token)
+	local src = fresher and (kept and "this load (kept as he left)" or "session") or (rec and "host save" or "none (new player)")
 	data = fresher or data
 	for _, key in ipairs(order) do
 		local spec, v = keys[key], data[key]
@@ -125,6 +159,7 @@ function apply_loaded(m)
 	end
 	m[STORE] = nil -- other players' records are the host's business
 	st.token = saved_token
+	st.kept = false -- a new world: the reports go on
 	st.applied = st.applied + 1
 	log("restored %d key(s) for character %d from %s", #order, my, src)
 end
@@ -166,7 +201,11 @@ local function collect()
 end
 
 local function client_report(force)
-	if #order == 0 or not C().live_client() then return end
+	if #order == 0 or st.foreign or not C().live_client() then return end
+	if st.kept then
+		if time_global() - st.kept_at < KEPT_MS then return end
+		st.kept = false -- the load it was kept for never came: this world goes on, and so do its reports
+	end
 	local tg = time_global()
 	if not force and tg < st.next_report then return end
 	st.next_report = tg + REPORT_MS
@@ -189,10 +228,34 @@ function report_now()
 	client_report(true)
 end
 
+-- Client, the engine's word that a load continuing this world starts (coop_main.on_world_leaving; the old world and the
+-- actor are still up): the keys as they are now, kept for the world of `epoch`. Not sent: the host is saving already, and
+-- its record is not what this load reads.
+function keep_for_load(epoch)
+	epoch = tonumber(epoch)
+	if #order == 0 or not epoch or st.foreign or not C().live_client() then return false end
+	local s, why = C().ser(collect())
+	if not s then
+		C().report("pdata", "serialize", why)
+		return false
+	end
+	local ok, done = pcall(api.stash_set, STASH, LOAD_TOKEN .. string.format("%d", epoch) .. "|" .. s)
+	if not (ok and done) then
+		log("! the state for the load was not kept (the stash refused %d bytes): the last report is used", #s)
+		return false
+	end
+	st.kept = true
+	st.kept_at = time_global()
+	st.keeps = st.keeps + 1
+	log("kept %d key(s) for the load into the world of epoch %d (%d bytes)", #order, epoch, #s)
+	return true
+end
+
 local function on_ack(t, from)
 	if type(t.t) ~= "string" or #t.t > 64 then return end
 	st.token = t.t
 	st.acks = st.acks + 1
+	if st.kept then return end -- the stash holds the state the load starts with: an older report must not replace it
 	if st.last then pcall(api.stash_set, STASH, t.t .. "|" .. st.last) end
 end
 
@@ -250,8 +313,8 @@ local function install_load_hook()
 end
 
 function status()
-	return string.format("%d key(s) [%s] | client: restored %d, reports %d, acks %d, token %s | host: stored %d, refused %d",
-		#order, table.concat(order, " "), st.applied, st.sent, st.acks, tostring(st.token), st.stored, st.refused)
+	return string.format("%d key(s) [%s] | client: restored %d, reports %d, acks %d, kept for a load %d, token %s | host: stored %d, refused %d",
+		#order, table.concat(order, " "), st.applied, st.sent, st.acks, st.keeps, tostring(st.token), st.stored, st.refused)
 end
 
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an

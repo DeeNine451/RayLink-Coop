@@ -30,6 +30,9 @@
 	   perks ...) are carried by coop_mods_pdata (mods group); a key it owns is skipped here.
 	   coop_economy_mdata.register_player_key(key, provider): provider() returns the current value on a
 	   client (default: the live m_data entry).
+	   Build 56 (live 2026-11-18): at the engine's word that a load continuing this world starts (coop_on_world_leaving)
+	   a client keeps every key as it is then in the session stash for that load ("@load:<epoch>|..."); the load of that
+	   world reads it instead of the host's record (up to 15 s older), and the next look tells the host.
 	4. World m_data keys that only the host writes but clients read (player-made stashes of addons ...):
 	   polled on the host, sent to clients on change. coop_economy_mdata.register_world_key(key).
 
@@ -599,15 +602,60 @@ local function from_save_state(modname, key)
 	end
 end
 
+-- Build 56 (live 2026-11-18): a client never runs save_state (the engine saves only on the host), so a key that only a
+-- mod's own local save_state writes never changed in m_data on a client: the disguise, the detector out and the radio
+-- frequency were read from that dead entry and were lost at every load (disguise off, detector put away, a new random
+-- frequency). These providers read the live module state the stock save_state would write.
+-- A global accessor of a module: its value, or "not used" (the m_data entry stays) when the module or the function is missing.
+local function from_global(modname, fname)
+	return function()
+		local m = core.mod(modname)
+		local f = m and m[fname]
+		if type(f) ~= "function" then return nil, false end
+		local ok, v = pcall(f)
+		if not ok then return nil, false end
+		return v, true
+	end
+end
+
+-- A file local of a module (its save_state is local): found as an upvalue of its functions (coop_mods_core.find_local).
+local function from_local(modname, name)
+	return function()
+		local m = core.mod(modname)
+		local mc = core.mod("coop_mods_core")
+		if not (m and mc and type(mc.find_local) == "function") then return nil, false end
+		local ok, v, holder = pcall(mc.find_local, m, name)
+		if not (ok and holder) then return nil, false end
+		return v, true
+	end
+end
+
+-- actor_effects shows the detector at its first update when the loaded flag says so (actor_effects.script:1865-1867); while
+-- that runs active_detector() is still nil, and the first look of a new Lua state comes right then: it would tell the host
+-- "put away". Not read before this long after the first update; until then the m_data entry (his own, from the load) stands.
+local DETECTOR_SETTLE_MS = 2000
+local first_update_at = nil -- core.now() of the actor's first update in this Lua state
+
+local function detector_out()
+	local actor = db and db.actor
+	if not (actor and first_update_at) or core.now() < first_update_at + DETECTOR_SETTLE_MS then return nil, false end
+	return actor:active_detector() and true or false, true -- the stock's own save_state expression
+end
+
 -- Stock keys only: third-party mod keys (skills, XP, perks, ...) travel through coop_mods_pdata (mods group);
 -- a key that file owns is skipped here.
 MANIFEST = {
 	sleep = from_save_state("actor_status_sleep", "sleep"), -- sleepiness
 	drink = from_save_state("actor_status_thirst", "drink"), -- thirst
 	psy_table = from_save_state("arszi_psy", "psy_table"), -- psy health (arszi_psy)
-	disguise_state = false, -- gameplay_disguise (live m_data entry)
-	detector_was_active = false, -- actor_effects
-	RF_freq = false, -- item_radio frequency
+	disguise_state = from_global("gameplay_disguise", "is_actor_disguised"), -- gameplay_disguise (is_disguised)
+	-- The player's side of the disguise (gameplay_disguise.script:1122-1123): the relation it replaced and whether he could
+	-- talk to his faction. Left to the host's, the first update's has_comms() wrote a relation from the host's values
+	-- (:220-223). The NPC side (disguise_highest_suspicion, disguise_npcs_memory) runs on the host and is not carried.
+	disguise_previous_relation = from_local("gameplay_disguise", "previous_relation"),
+	disguise_can_communicate = from_local("gameplay_disguise", "can_communicate"),
+	detector_was_active = detector_out, -- actor_effects
+	RF_freq = from_global("item_radio", "get_freq"), -- item_radio frequency
 	RepairItemList = from_save_state("inventory_upgrades", "RepairItemList"), -- items lent to a mechanic, ids are the world's
 	-- The engine saves no bolt (CSE_ALifeItemBolt::can_save is false): the stock keeps their count here and makes them again at
 	-- the first update. In the host's save these are the HOST's counts, so after a level change a client had as many bolts as
@@ -635,6 +683,9 @@ local BOLT_MAX_DEFAULT = 99 -- itms_manager.ltx [settings] bolt_max_num (ish_fix
 local BOLT_MAX_CEIL = 500
 local bolts_hold = nil -- { bolts = {sec = n}, slot = sec | nil, at = ms, queue = {sec, ...} } a client's own bolts to make
 local bolts_quiet_until = 0
+-- Build 56: his own bolts of this load ({ bolts, slot }) while they are made and come online: a load that starts then keeps
+-- these, not his hands (empty or half made). Set with bolts_hold, read only while it or the quiet time lasts.
+local bolts_carry = nil
 
 function register_player_key(key, provider)
 	if type(key) == "string" then MANIFEST[key] = type(provider) == "function" and provider or false end
@@ -654,6 +705,9 @@ end
 
 local pmd_sig = {} -- key -> packed value last sent
 local pmd_loaded_for = nil -- m_data table the surrogate was applied to
+local pmd_kept = false -- Build 56: the stash holds the keys a load starts with; nothing is told from the dying world
+local pmd_kept_at = 0
+local PMD_KEPT_MS = 180000 -- ... unless that load never comes (a transition called off): the looks go on after this long
 
 local function pmd_current(m, key)
 	local provider = MANIFEST[key]
@@ -667,6 +721,10 @@ end
 local function pmd_poll()
 	local m = m_data()
 	if not m then return end
+	if pmd_kept then
+		if core.now() - pmd_kept_at < PMD_KEPT_MS then return end
+		pmd_kept = false -- the load it was kept for never came: this world goes on
+	end
 	local bolts_busy = bolts_hold ~= nil or core.now() < bolts_quiet_until
 	for key in pairs(MANIFEST) do
 		local packed = not owned_elsewhere(key) and not (bolts_busy and KEEP_UNTIL_TOLD[key] == "bolts")
@@ -727,15 +785,79 @@ function player_value(avatar_id, key)
 	return e and e.keys and e.keys[key]
 end
 
+-------------------------------------------------------------------------------
+-- Build 56 (live 2026-11-18, "everything a client has must come through a transition exactly as in a usual game"): the
+-- host's record is the last 15 s look, so a drink, a sleep or a psy hit in the seconds before a level change came back
+-- undone. The engine says when a load that continues this world starts, while the old world and the actor are still up
+-- (coop_main.on_world_leaving -> script callback coop_on_world_leaving(epoch of the new world)): the keys go into the
+-- session stash as they are that moment, "@load:<epoch>|<pack>", and the load of that world reads them instead of the
+-- record (the same rule as coop_mods_pdata.stash_data). Nothing is sent then: the host is saving already. After the load
+-- the normal look tells the host what its record lacks.
+-------------------------------------------------------------------------------
+local STASH_KEY = "coop_economy_mdata"
+
+local function world_epoch()
+	local api = core.engine()
+	if not (api and api.world_epoch) then return nil end -- an older exe: nothing kept is ever read
+	local ok, e = pcall(api.world_epoch)
+	return ok and tonumber(e) or nil
+end
+
+local function keep_for_load(epoch)
+	epoch = tonumber(epoch)
+	if not (epoch and epoch >= 0 and epoch == math.floor(epoch)) or not core.is_client() or not core.live() then return end
+	local api = core.engine()
+	local m = m_data()
+	if not (api and api.stash_set and m) then return end
+	local bolts_busy = bolts_hold ~= nil or core.now() < bolts_quiet_until
+	local t = {}
+	for key in pairs(MANIFEST) do
+		if owned_elsewhere(key) then
+			-- coop_mods_pdata keeps it
+		elseif KEEP_UNTIL_TOLD[key] == "bolts" and bolts_busy then
+			-- his bolts of the last load are still being made: those, not his hands
+			if bolts_carry then t[key] = core.copy(key == "bolts" and bolts_carry.bolts or bolts_carry.slot) end
+		else
+			t[key] = core.copy(pmd_current(m, key))
+		end
+	end
+	local s = core.pack(t)
+	local ok, done = pcall(api.stash_set, STASH_KEY, string.format("@load:%d|", epoch) .. s)
+	if not (ok and done) then
+		core.log("! player data for the load not kept (the stash refused %d bytes): the host's record is used", #s)
+		return
+	end
+	pmd_kept = true
+	pmd_kept_at = core.now()
+	core.log("player data kept for the load into the world of epoch %d (%d bytes)", epoch, #s)
+end
+
+-- The keys kept for this load, or nil. Read once: a state kept for another world (the host loaded a save meanwhile) is dropped.
+local function kept_for_load()
+	local api = core.engine()
+	if not (api and api.stash_get) then return nil end
+	local ok, s = pcall(api.stash_get, STASH_KEY)
+	if not (ok and type(s) == "string") then return nil end
+	if api.stash_set then pcall(api.stash_set, STASH_KEY, nil) end
+	local epoch, body = s:match("^@load:(%d+)|(.*)$")
+	if not epoch or tonumber(epoch) ~= world_epoch() then return nil end
+	local t, err = core.unpack(body)
+	if err ~= nil or type(t) ~= "table" then return nil end
+	return t
+end
+
 -- Client loading the host's world: its own per-player values replace the host's before load_state runs.
 local function apply_surrogate(m)
 	if type(m) ~= "table" or pmd_loaded_for == m then return end
 	pmd_loaded_for = m
-	bolts_hold, bolts_quiet_until = nil, 0 -- a new world: what the last one had to make is void
+	pmd_kept = false -- a new world: the looks go on
+	bolts_hold, bolts_quiet_until, bolts_carry = nil, 0, nil -- a new world: what the last one had to make is void
 	local my = core.host_id(0)
 	local root = m[PEER_STORE]
 	local e = type(root) == "table" and root[my] or nil
-	local keys = type(e) == "table" and type(e.keys) == "table" and e.keys or {}
+	local record = type(e) == "table" and type(e.keys) == "table" and e.keys or {}
+	local kept = kept_for_load()
+	local keys = kept or record
 	local n = 0
 	pmd_sig = {}
 	for key in pairs(MANIFEST) do
@@ -744,7 +866,8 @@ local function apply_surrogate(m)
 			-- never told: the host's value stands, and the first look sends his own
 		elseif not owned_elsewhere(key) then
 			m[key] = core.copy(keys[key])
-			pmd_sig[key] = core.pack(keys[key]) -- the host already has these: only changes are sent
+			-- what the host's record has: only changes are sent (a kept value newer than the record is one of them)
+			pmd_sig[key] = core.pack(record[key])
 			if keys[key] ~= nil then n = n + 1 end
 		end
 	end
@@ -752,9 +875,11 @@ local function apply_surrogate(m)
 	if keys.bolts ~= nil and not owned_elsewhere("bolts") then
 		-- his own bolts: made once he is live (bolts_make), not by the stock's first update while loading
 		bolts_hold = { bolts = m.bolts, slot = m.bolt_slot }
+		bolts_carry = { bolts = core.copy(m.bolts), slot = m.bolt_slot }
 		m.bolts, m.bolt_slot = nil, nil
 	end
-	core.log("own player data applied before load_state: %d key(s)%s", n, e and "" or " (first visit: defaults)")
+	core.log("own player data applied before load_state: %d key(s)%s", n,
+		kept and " (kept as he left the last world)" or e and "" or " (first visit: defaults)")
 end
 
 -- alife_storage_manager.CALifeStorageManager_load reads the save's m_data, calls on_before_load_state(), then
@@ -1227,5 +1352,14 @@ function on_game_start()
 			if ok and TOLD_SOON[sec] then pmd_next_poll = math.min(pmd_next_poll, core.now() + 1000) end
 		end)
 	end
-	RegisterScriptCallback("actor_on_first_update", function() start_step("clone hook", install_clone_hook) end)
+	RegisterScriptCallback("actor_on_first_update", function()
+		first_update_at = core.now() -- Build 56: the detector is read from 2 s after this (DETECTOR_SETTLE_MS)
+		start_step("clone hook", install_clone_hook)
+	end)
+	-- Build 56 (live 2026-11-18): a client's keys as they are when a load that continues this world starts (coop_main creates
+	-- the callback name at its load; the core.on calls above loaded it). Client only, inside keep_for_load.
+	RegisterScriptCallback("coop_on_world_leaving", function(epoch)
+		local ok, err = pcall(keep_for_load, epoch)
+		if not ok then core.log("! player data for the load: %s", tostring(err)) end
+	end)
 end

@@ -185,8 +185,11 @@ end
 
 local function cd() return rawget(_G, "coop_death") end
 
--- a clean world, the script loaded the way axr_main loads it (load, then on_game_start)
-local function fresh(mode)
+-- a clean world, the script loaded the way axr_main loads it (load, then on_game_start). Build 56 (live 2026-11-18): every
+-- load builds a new Lua state, and the session stash (coop.stash_*) is what survives it; keep_stash = a load inside the same
+-- session (the stash stays), otherwise a new session (the engine ends the stash with the session).
+local function fresh(mode, keep_stash)
+	if not keep_stash then STASH = {} end
 	MODE = mode
 	SELF = mode == "client" and 1 or 0
 	SE, OBJ, CREATED, RELEASED, TIMEEV = {}, {}, {}, {}, {}
@@ -390,7 +393,7 @@ case("contusion_survives_a_level_change_not_a_new_state", function()
 	check(#PPE_REMOVES == 0, "500 s into it: still on")
 	advance(1000)
 	check(#PPE_REMOVES == 1, "600 s after the death it ends")
-	-- a new Lua state (reconnect, plan decision 8): there is nothing to resume
+	-- a new session (reconnect, plan decision 8): the engine ended the stash with the old one, there is nothing to resume
 	fresh("host")
 	fire("actor_on_first_update")
 	check(#PPE_ADDS == 0 and #POWER_SETS == 0, "a new Lua state: no contusion (it does not survive a reconnect)")
@@ -434,6 +437,142 @@ case("contusion_end_tip_when_standing", function()
 	advance(61000)
 	coop.life_of = saved
 	check(MSGS[#MSGS] == STR.st_coop_contusion_off, "no coop.life_of: the tip is shown")
+end)
+
+-- Build 56 (live 2026-11-18), F5 of the lua-runtime-effects review: every world load builds a new Lua state (client and host
+-- player alike), so the contusion is kept in the session stash as { remaining ms, total ms } and put on again in the first
+-- update of the new state with the time that was left (not an end time: time_global goes on through the loading screen).
+local CKEY = "coop_death_contusion"
+
+-- the stash calls of the script, counted (the stand-in keeps the values in STASH)
+local function count_stash()
+	local calls = { set = 0, get = 0 }
+	local set0, get0 = coop.stash_set, coop.stash_get
+	coop.stash_set = function(k, v) calls.set = calls.set + 1; return set0(k, v) end
+	coop.stash_get = function(k) calls.get = calls.get + 1; return get0(k) end
+	return calls, function() coop.stash_set, coop.stash_get = set0, get0 end
+end
+
+local function stashed()
+	local s = STASH[CKEY]
+	if type(s) ~= "string" then return nil end
+	local left, total = s:match("^(%d+)|(%d+)$")
+	return tonumber(left), tonumber(total)
+end
+
+case("contusion_resumes_from_the_stash", function()
+	for _, role in ipairs({ "client", "host" }) do
+		fresh(role)
+		STASH[CKEY] = "30000|600000" -- 30 s of a 10 min contusion were left when the old world went
+		fire("actor_on_first_update")
+		check(#PPE_ADDS == 1 and PPE_ADDS[1].name == "blur.ppe" and PPE_ADDS[1].id == 39570 and PPE_ADDS[1].loop == true,
+			role .. ": a new Lua state with 30 s in the stash puts the blur on again")
+		check(POWER_SETS[1] == 0.6 and MAXPOWER == 0.6, role .. ": and the stamina ceiling 0.6")
+		local f = PPE_FACTORS[#PPE_FACTORS] and PPE_FACTORS[#PPE_FACTORS].f
+		check(f and math.abs(f - (0.2 + 0.8 * 30000 / 600000)) < 1e-9, role .. ": the factor of 30 s left of 600 (" .. tostring(f) .. ")")
+		check(#MSGS == 0 and #NEWS_ITEMS == 0, role .. ": no respawn tip, no news (it is not a new death)")
+		advance(29000)
+		check(#PPE_REMOVES == 0, role .. ": 29 s later still on")
+		advance(1000)
+		check(#PPE_REMOVES == 1 and POWER_SETS[#POWER_SETS] == 1, role .. ": 30 s later over, not a full 10 min")
+		check(STASH[CKEY] == nil, role .. ": and the stash key is gone")
+	end
+end)
+
+case("contusion_survives_a_load_with_the_time_left", function()
+	fresh("client")
+	respawned("campfire", 600, 0, 0, 1)
+	local left, total = stashed()
+	check(left == 600000 and total == 600000, "the start keeps 600 s of 600 in the stash (" .. tostring(STASH[CKEY]) .. ")")
+	advance(100000)
+	left = stashed()
+	check(left and left <= 500000 and left >= 499000, "100 s later the stash says about 500 s are left (" .. tostring(left) .. ")")
+	-- the old world goes: its actor is destroyed while the old Lua state is still up
+	fire("actor_on_net_destroy")
+	left = stashed()
+	check(left == 500000, "the actor of the old world goes: the exact time left is kept (" .. tostring(left) .. ")")
+	-- the load: a new Lua state, and fresh() moves the clock 1000 s on (the loading screen): that time is not taken
+	fresh("client", true)
+	fire("actor_on_first_update")
+	check(#PPE_ADDS == 1 and POWER_SETS[1] == 0.6, "after the load the contusion is on again")
+	local t0 = NOW
+	advance(499000)
+	check(#PPE_REMOVES == 0, "499 s after the load: still on (the loading screen took nothing)")
+	advance(1000)
+	check(#PPE_REMOVES == 1, "500 s after the load it ends: no more than was left")
+	check(NOW - t0 == 500000 and STASH[CKEY] == nil, "and the stash key goes with it")
+end)
+
+case("contusion_stash_writes_are_bounded", function()
+	fresh("host")
+	respawned("campfire", 600, 0, 0, 1)
+	local calls, restore = count_stash()
+	advance(10000, 50) -- 200 updates
+	restore()
+	check(calls.set >= 9 and calls.set <= 11, "10 s of updates every 50 ms: about one stash write a second (" .. calls.set .. ")")
+	check(calls.get == 0, "an update never reads the stash")
+end)
+
+case("contusion_stop_clears_the_stash", function()
+	fresh("host")
+	respawned("campfire", 60, 0, 0, 1)
+	check(STASH[CKEY] ~= nil, "a contusion is kept in the stash")
+	advance(61000)
+	check(STASH[CKEY] == nil, "it ended by itself: the stash key is cleared")
+	-- the session ends during a contusion: cleared too (the engine drops the stash with the session anyway)
+	fresh("host")
+	respawned("campfire", 600, 0, 0, 1)
+	MODE = "sp"
+	advance(1000)
+	check(STASH[CKEY] == nil, "the session ended: the stash key is cleared")
+	-- a new death restarts it from the full length in the stash too
+	fresh("host")
+	respawned("campfire", 600, 0, 0, 1)
+	advance(100000)
+	respawned("campfire", 300, 0, 0, 2)
+	local left, total = stashed()
+	check(left == 300000 and total == 300000, "a new death keeps its own full length (" .. tostring(STASH[CKEY]) .. ")")
+end)
+
+case("contusion_no_stash_no_contusion", function()
+	fresh("client")
+	fire("actor_on_first_update")
+	advance(5000)
+	check(#PPE_ADDS == 0 and #POWER_SETS == 0 and #PPE_FACTORS == 0, "an empty stash: no contusion")
+	-- the stash is the script's own, but a broken value must not start anything strange
+	for _, v in ipairs({ "abc", "0|600000", "|", "5000", "-5|10", "5000|0", 42 }) do
+		fresh("client")
+		STASH[CKEY] = v
+		fire("actor_on_first_update")
+		check(#PPE_ADDS == 0 and #POWER_SETS == 0, "stash " .. tostring(v) .. ": no contusion")
+	end
+	-- more left than the whole, or more than a day: bounded
+	fresh("client")
+	STASH[CKEY] = "999999999999|999999999999"
+	fire("actor_on_first_update")
+	check(#PPE_ADDS == 1, "a huge value: the contusion is on")
+	advance(86400000 - 1000, 60000)
+	check(#PPE_REMOVES == 0, "... at most a day")
+	advance(61000, 1000)
+	check(#PPE_REMOVES == 1, "... and not longer")
+	fresh("client")
+	STASH[CKEY] = "700000|600000"
+	fire("actor_on_first_update")
+	advance(600000, 10000)
+	check(#PPE_REMOVES == 1, "more left than the whole length: no longer than the whole length")
+end)
+
+case("contusion_single_player_untouched", function()
+	fresh("sp")
+	STASH[CKEY] = "30000|600000" -- the stand-in returns it even without a session; the engine would not
+	local calls, restore = count_stash()
+	fire("actor_on_first_update")
+	respawned("campfire", 600, 0, 0, 1)
+	advance(5000)
+	fire("actor_on_net_destroy")
+	restore()
+	check(#PPE_ADDS == 0 and #POWER_SETS == 0, "single player: no contusion")
+	check(calls.set == 0 and calls.get == 0, "single player: the stash is never asked")
 end)
 
 -- ------------------------------------------------------------------ money: the host's

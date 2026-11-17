@@ -12,7 +12,10 @@
 	   Both go through the mods group's per-player channel (coop_mods_pdata: the host keeps every player's keys in
 	   its save, a client gets its own back right after the save is read, before any load_state; a new player
 	   starts fresh). Statistics: key "game_statistics" (its own save_state/load_state, without achievements).
-	   Boosters: key "coop_core_boosters" ("type,seconds,value|..."), applied to the actor once it is live.
+	   Boosters: key "coop_core_boosters_v2" ("type,seconds,value|...", the seconds left and the value as the engine has
+	   them), applied to the actor once it is live. ("_v2", build 56: the engine's ClearAllBoosters cleared a copy of the
+	   list up to build 55, the host's boosters stayed in a client's list and went into his record; those records are
+	   not read.)
 	   The rank news are re-baselined after a world load, so the restored rank does not pop "rank increased".
 	2. Join/leave notices on every machine (PDA tip + chat line), the session start notice once per session.
 	3. Level exits: the group waits at the exit (the waiting point of a level change: the engine's board, the placard and the
@@ -33,7 +36,8 @@ local EV_MOVING = "core.moving" -- host -> clients: the group moves to another l
 local ROSTER_MS = 1000
 local STASH_SEEN = "coop_core_session" -- coop.stash: the session-start notice was shown
 local KEY_STATS = "game_statistics"
-local KEY_BOOSTERS = "coop_core_boosters"
+local KEY_BOOSTERS = "coop_core_boosters_v2"
+local KEY_SLOT = "coop_core_slot" -- the slot in the player's hands (build 56), see own_slot
 -- game_statistics parts that belong to the player (actor_achievements are the group's)
 local STATS_SUBS = { "actor_statistics", "actor_visited_levels", "actor_visited_smarts", "actor_artefacts",
 	"actor_anomaly_maps", "actor_miscellaneous" }
@@ -137,15 +141,18 @@ local function actor_conditions()
 	return a and a:conditions()
 end
 
--- Current boosters of the local actor: "type,seconds,value|..." (seconds in 10 s steps).
+-- Current boosters of the local actor: "type,seconds,value|...": the seconds left and the value as the engine has them
+-- (live 2026-11-18, "exactly as in a usual game": they were rounded up to 10 s and to 4 digits). nil on a mirror until this
+-- player's own boosters are in: the list is the host's until then (from his save), not this player's to report.
 local function boosters_string()
+	if is_mirror() and not after_load_done then return nil end
 	local cond = actor_conditions()
 	if not cond then return nil end
 	local list = {}
 	cond:BoosterForEach(function(btype, btime, bvalue)
 		pcall(function()
 			if btime and btime > 0 then
-				list[#list + 1] = string_format("%d,%d,%.4f", btype, math.ceil(btime / 10) * 10, bvalue)
+				list[#list + 1] = string_format("%d,%.3f,%.9g", btype, btime, bvalue)
 			end
 		end)
 		return false -- the engine reads a bool: keep iterating
@@ -153,13 +160,51 @@ local function boosters_string()
 	return table.concat(list, "|")
 end
 
+-- Build 56 (review of 2026-11-18): the stock actor binder saves the slot in the player's hands with the save
+-- (m_data.game_object[0].actor_binder.active_slot) and activates it at its first update. A client loads the HOST's save, so
+-- he came out of every load holding the weapon of the host's slot number. The slot the player holds now, as a per-player key
+-- (nil on a mirror until his own state is in: until then it is the host's).
+local function own_slot()
+	if is_mirror() and not after_load_done then return nil end
+	local actor = db.actor
+	if not actor then return nil end
+	local ok, slot = pcall(actor.active_slot, actor)
+	return ok and tonumber(slot) or nil
+end
+
+-- A mirror's first update. The binder fires actor_on_first_update and only then activates the slot it loaded: the player's
+-- own goes in here (no record: a new player, empty hands as a new game starts).
+local function actor_on_first_update()
+	if not (api and api.is_active() and is_mirror() and pdata_ok) then return end
+	local binder = db.actor_binder
+	if type(binder) ~= "table" and type(binder) ~= "userdata" then return end
+	local m = alife_storage_manager.get_state()
+	binder.loaded_active_slot = type(m) == "table" and tonumber(m[KEY_SLOT]) or 0
+end
+
+local function boosters_count(cond)
+	local n = 0
+	cond:BoosterForEach(function()
+		n = n + 1
+		return false
+	end)
+	return n
+end
+
 -- Replaces the actor's boosters (the host's, from its save) with this player's.
 local function apply_boosters(s)
 	local cond = actor_conditions()
 	if not cond then return false end
 	cond:ClearAllBoosters()
+	-- Live 2026-11-18 (build 55): every exe up to build 55 subtracts the boosters' effects here and leaves them in the list;
+	-- each is subtracted again when it runs out, and the player's health restore, weight and protections stay negative.
+	local left = boosters_count(cond)
+	if left > 0 then
+		log("! this engine did not take the host's boosters away (%d left in the list): they will count twice, the game needs build 56 or newer",
+			left)
+	end
 	for entry in tostring(s or ""):gmatch("[^|]+") do
-		local bt, btime, bval = entry:match("^(%d+),([%d%.]+),(%-?[%d%.]+)$")
+		local bt, btime, bval = entry:match("^(%d+),([%d%.]+),([%d%.eE%+%-]+)$")
 		bt, btime, bval = tonumber(bt), tonumber(btime), tonumber(bval)
 		if bt and btime and bval and bt <= MAX_BOOSTER_TYPE and btime > 0 and btime < 1000000
 			and math.abs(bval) < 100000 then
@@ -191,15 +236,24 @@ local function register_pdata()
 	end
 	local ok1 = pd.register(KEY_STATS, { subs = STATS_SUBS, prime = { "game_statistics" } })
 	local ok2 = pd.register(KEY_BOOSTERS, { get = boosters_string })
-	pdata_ok = ok1 == true and ok2 == true
-	if not pdata_ok then log("! per-player keys not registered (%s, %s)", tostring(ok1), tostring(ok2)) end
+	local ok3 = pd.register(KEY_SLOT, { get = own_slot })
+	pdata_ok = ok1 == true and ok2 == true and ok3 == true
+	if not pdata_ok then log("! per-player keys not registered (%s, %s, %s)", tostring(ok1), tostring(ok2), tostring(ok3)) end
 end
 
 -- Mirror (a remote client), first live update of this Lua state: the restored keys are in m_data, the actor exists. The host
 -- player's Lua state is its own (the save it loaded is its), so there is nothing to put back for it.
 local function client_after_load()
 	after_load_done = true
-	if pdata_ok then
+	-- Build 56: in a load that continues his world (a group transition, the host going alone, his own exit) the engine holds
+	-- the player's whole condition through it and puts it back with its own save/load: wounds, alcohol, boosters with the
+	-- seconds they had. Then there is nothing to replace here; the list below is for a join, a rejoin and a rolled back world.
+	local carried = false
+	if api.condition_carried then
+		local ok, yes = pcall(api.condition_carried)
+		carried = ok and yes == true
+	end
+	if pdata_ok and not carried then
 		local m = alife_storage_manager.get_state()
 		local s = type(m) == "table" and m[KEY_BOOSTERS] or nil
 		apply_boosters(type(s) == "string" and s or "") -- nothing stored: a new player has no boosters
@@ -345,6 +399,10 @@ function on_game_start()
 	if not api then return end -- an exe without co-op: nothing of this runs
 	start_step("register_pdata", register_pdata) -- before the save is read
 	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_first_update", function()
+		local ok, err = pcall(actor_on_first_update)
+		if not ok then log("! the slot in hands after the world load: %s", tostring(err)) end
+	end)
 	local cm = codec()
 	if not (cm and cm.add_event_handler) then
 		log("! coop_main.add_event_handler not found: player events are not handled")

@@ -793,22 +793,93 @@ for _, k in ipairs(pdC.game_statistics and pdC.game_statistics.subs or {}) do su
 check(subs.actor_statistics and subs.actor_visited_levels and subs.actor_visited_smarts and subs.actor_artefacts
 	and subs.actor_anomaly_maps and subs.actor_miscellaneous and not subs.actor_achievements,
 	"only the player's parts, achievements stay the group's")
-check(pdC.coop_core_boosters and type(pdC.coop_core_boosters.get) == "function", "boosters registered with a getter")
+-- Live, build 55 (2026-11-18): the engine's ClearAllBoosters cleared a copy of the list, so the host's boosters stayed in a
+-- client's list and went into his own record every 15 s. The key is a new one: a record written by those builds is not read.
+local pdB = pdC.coop_core_boosters_v2
+check(pdB and type(pdB.get) == "function", "boosters registered with a getter")
+check(pdC.coop_core_boosters == nil, "the key of builds up to 55 is not carried: its records hold the host's boosters")
 check(#C.boosters == 0, "new player (nothing stored): the host's boosters from the save are cleared")
 check(C.gs_news >= 1, "rank news re-baselined after the world load")
-C.boosters = { { 5, 61, 0.5 } }
-check(pdC.coop_core_boosters.get() == "5,70,0.5000", "getter: type, seconds in 10 s steps, value")
+-- "exactly as in a usual game": the seconds left and the value as they are (they were rounded up to 10 s and to 4 digits:
+-- G.A.M.M.A.'s 0.000102 and 0.00015 came back as 0.0001 and 0.0002)
+C.boosters = { { 5, 61.25, 0.5 }, { 0, 1732.5, 0.000102 } }
+check(pdB.get() == "5,61.250,0.5|0,1732.500,0.000102", "getter: type, the seconds left, the value, none rounded (" .. tostring(pdB.get()) .. ")")
 C.boosters = {}
-check(pdC.coop_core_boosters.get() == "", "getter: no boosters = empty string (the stored value is replaced)")
+check(pdB.get() == "", "getter: no boosters = empty string (the stored value is replaced)")
 -- next world load: the channel has put our record into m_data before load_state
 local C2 = machine("client", 1, "bob")
 C2.players = C.players
-C2.mdata.coop_core_boosters = "5,70,0.5000|99,60,1|2,30,0.1"
+C2.mdata.coop_core_boosters_v2 = "5,61.250,0.5|99,60,1|2,30.5,1.02e-04"
+C2.mdata.coop_core_boosters = "7,100,9" -- a record of a build up to 55
 MACHINES[2] = C2
 for _, name in ipairs(SCRIPTS) do if C2.env[name].on_game_start then C2.env[name].on_game_start() end end
+-- before the first live update the list is still the host's (from his save): it is not this player's to report
+check(C2.pd.coop_core_boosters_v2.get() == nil, "getter before the own boosters are in: nothing (the host's list is not reported as mine)")
 tick(1000)
-check(#C2.boosters == 2 and C2.boosters[1][1] == 5 and C2.boosters[1][3] == 0.5 and C2.boosters[2][1] == 2,
-	"own boosters applied, the host's cleared, an out-of-range type dropped")
+check(#C2.boosters == 2 and C2.boosters[1][1] == 5 and C2.boosters[1][2] == 61.25 and C2.boosters[1][3] == 0.5
+	and C2.boosters[2][1] == 2 and C2.boosters[2][2] == 30.5 and math.abs(C2.boosters[2][3] - 0.000102) < 1e-12,
+	"own boosters applied with their seconds and value, the host's cleared, an out-of-range type and the old key dropped")
+check(C2.pd.coop_core_boosters_v2.get() == "5,61.250,0.5|2,30.500,0.000102", "getter after: the own list")
+-- an engine whose ClearAllBoosters leaves the list (every exe up to build 55): said once, so that a log names it
+do
+	local C5 = machine("client", 1, "bob")
+	C5.players = C.players
+	C5.cond.ClearAllBoosters = function() end
+	MACHINES[2] = C5
+	for _, name in ipairs(SCRIPTS) do if C5.env[name].on_game_start then C5.env[name].on_game_start() end end
+	tick(1000)
+	check(count_log(C5, "did not take the host's boosters away") == 1, "an engine that leaves the host's boosters in the list is named in the log")
+	MACHINES[2] = C2
+end
+-- Build 56 (review of 2026-11-18): the stock actor binder keeps the slot in the player's hands in the save
+-- (m_data.game_object[0].actor_binder.active_slot) and activates it at the first update. A client loads the host's save: he
+-- came out of every load with the weapon of the HOST's slot number in his hands. The slot is a per-player key now, and it is
+-- given to the binder before the binder activates it (the binder fires actor_on_first_update first).
+do
+	local pdS = pdC.coop_core_slot
+	check(pdS and type(pdS.get) == "function", "the slot in hands is a per-player key")
+	C.actor.active_slot = function() return 3 end
+	check(pdS.get() == 3, "its value is the slot the player holds now")
+	local C7 = machine("client", 1, "bob")
+	C7.players = C.players
+	C7.mdata.coop_core_slot = 2
+	C7.env.db.actor_binder = { loaded_active_slot = 5 } -- the host's, from his save
+	C7.actor.active_slot = function() return 5 end
+	MACHINES[2] = C7
+	for _, name in ipairs(SCRIPTS) do if C7.env[name].on_game_start then C7.env[name].on_game_start() end end
+	check(C7.pd.coop_core_slot.get() == nil, "before his own state is in, the slot in hands (the host's) is not reported as his")
+	fire(C7, "actor_on_first_update")
+	check(C7.env.db.actor_binder.loaded_active_slot == 2, "a client's binder activates the player's own slot, not the host's")
+	local C8 = machine("client", 1, "bob")
+	C8.players = C.players
+	C8.env.db.actor_binder = { loaded_active_slot = 5 }
+	MACHINES[2] = C8
+	for _, name in ipairs(SCRIPTS) do if C8.env[name].on_game_start then C8.env[name].on_game_start() end end
+	fire(C8, "actor_on_first_update")
+	check(C8.env.db.actor_binder.loaded_active_slot == 0, "a new player comes in with empty hands, not with the host's slot")
+	H.env.db.actor_binder = { loaded_active_slot = 4 }
+	fire(H, "actor_on_first_update")
+	check(H.env.db.actor_binder.loaded_active_slot == 4, "the host's own slot is left alone")
+	MACHINES[2] = C2
+end
+-- Build 56: in a load that continues the world the engine itself puts the player's whole condition back, boosters with
+-- their exact seconds among it (coop.condition_carried). The scripts' list is not applied on top of it then.
+do
+	local C6 = machine("client", 1, "bob")
+	C6.players = C.players
+	C6.env.coop.condition_carried = function() return true end
+	C6.boosters = { { 4, 33.333, 0.25 } } -- what the engine put back
+	C6.mdata.coop_core_boosters_v2 = "5,61.250,0.5"
+	local cleared = 0
+	C6.cond.ClearAllBoosters = function() cleared = cleared + 1 C6.boosters = {} end
+	MACHINES[2] = C6
+	for _, name in ipairs(SCRIPTS) do if C6.env[name].on_game_start then C6.env[name].on_game_start() end end
+	tick(1000)
+	check(cleared == 0 and #C6.boosters == 1 and C6.boosters[1][1] == 4 and C6.boosters[1][2] == 33.333,
+		"the engine restored the condition: the scripts leave the boosters as they are")
+	check(C6.pd.coop_core_boosters_v2.get() == "4,33.333,0.25", "and report that list as the player's own")
+	MACHINES[2] = C2
+end
 local hist = lines_of(C2)
 local found_hello = false
 for _, l in ipairs(hist or {}) do if l.text == "hello there" and l.at == -1 then found_hello = true end end

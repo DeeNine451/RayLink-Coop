@@ -13,8 +13,14 @@
 	     factor that fades out, and a stamina ceiling of 0.6 (conditions():SetMaxPower). Other scripts raise the ceiling (sleep,
 	     boosters, the stock regeneration): it is put back every 5 s, never raised if fatigue already holds it lower. It ends
 	     at contusion_s by itself: the effector is removed and the ceiling goes back to 1. A new death starts it again from
-	     the full length (it does not add up). It is NOT kept for a reconnect (plan decision 8): a new Lua state knows
-	     nothing of it. A level change within the same Lua state puts it on again for the time that is left.
+	     the full length (it does not add up). Build 56 (live 2026-11-18, F5 of the lua-runtime-effects review): every
+	     world load builds a new Lua state (client and host player alike), so a Lua local alone would lose it at every
+	     level change. The time that is LEFT and the whole length are kept in the session stash (coop.stash, key
+	     coop_death_contusion, "<left ms>|<total ms>"): at the start, once a second while it runs and when the actor of
+	     the old world goes (actor_on_net_destroy, the exact time). The first update of the new Lua state puts it on
+	     again for that time. The time left, not an end time: time_global goes on through the loading screen, which must
+	     take nothing and give nothing. The key goes when it ends or the session ends. It is NOT kept for a reconnect
+	     (plan decision 8): the engine ends the stash with the session. Single player never asks the stash.
 	   - Money: the HOST takes it (death::host_take_money, through its ledger); this script never touches the balance, a
 	     second cut here would make the penalty double. money_pct is only for the text.
 	   - Rank (rank_pct, host rule coop_death_rank, 0 = off): the rank is cut to floor(rank * (100 - rank_pct) / 100), a
@@ -67,6 +73,7 @@ local POWER_TICK_MS = 5000 -- other scripts raise the ceiling: put it back
 local FACTOR_TICK_MS = 1000
 local FACTOR_MIN = 0.2 -- the blur never fades below this before it ends
 local MAX_CONTUSION_S = 86400
+local CONTUSION_KEY = "coop_death_contusion" -- session stash key (build 56): "<left ms>|<total ms>"
 local MAX_HANDLED = 256 -- fall numbers kept per world
 local TIP_SECONDS = 6
 local NEWS_MS = 15000
@@ -215,12 +222,51 @@ local function put_contusion(now)
 	limit_power()
 end
 
-local function start_contusion(seconds, now)
+-- Build 56 (live 2026-11-18): the next world is a new Lua state, the session stash is what it finds. The time LEFT is kept,
+-- not the end: time_global goes on through the loading screen. Only in a session (the stash is the session's); a refused
+-- write (the stash is full) leaves the last value, which is never more than was left a second ago.
+local function keep_contusion(now)
+	local c = contusion
+	if not c or not (api and type(api.stash_set) == "function") or not in_session() then return end
+	local left = math_max(0, c.ends - now)
+	pcall(api.stash_set, CONTUSION_KEY, string_format("%d|%d", math_floor(left), math_floor(c.total)))
+end
+
+local function forget_kept_contusion()
+	if api and type(api.stash_set) == "function" then pcall(api.stash_set, CONTUSION_KEY, nil) end
+end
+
+-- `left` of `total` ms (a new death: left == total; a new Lua state: what the stash says)
+local function start_contusion_ms(left, total, now)
 	contusion = {
-		ends = now + seconds * 1000, total = seconds * 1000,
+		ends = now + left, total = total,
 		next_power = now + POWER_TICK_MS, next_factor = now + FACTOR_TICK_MS,
 	}
 	put_contusion(now)
+	keep_contusion(now)
+end
+
+local function start_contusion(seconds, now)
+	start_contusion_ms(seconds * 1000, seconds * 1000, now)
+end
+
+-- Build 56 (live 2026-11-18): the first update of a new Lua state puts on the contusion the old one kept, for the time left.
+-- The value is this script's own ("<left ms>|<total ms>"); anything else, or nothing left, starts nothing. Bounded by a day.
+local function resume_contusion(now)
+	if contusion or not (api and type(api.stash_get) == "function") then return end
+	local ok, s = pcall(api.stash_get, CONTUSION_KEY)
+	if not (ok and type(s) == "string") then return end
+	local left, total = s:match("^(%d+)|(%d+)$")
+	left, total = tonumber(left), tonumber(total)
+	if not (left and total) then return end
+	total = math_min(total, MAX_CONTUSION_S * 1000)
+	left = math_min(left, total)
+	if left <= 0 then
+		forget_kept_contusion()
+		return
+	end
+	log("the contusion of the last world goes on: %d s of %d s left", math_floor(left / 1000), math_floor(total / 1000))
+	start_contusion_ms(left, total, now)
 end
 
 -- Is the owner on his feet? (R1 M-6: "it has passed" is not for a player who is down, dead or being evacuated.) An exe whose
@@ -234,6 +280,7 @@ end
 local function stop_contusion(announce)
 	if not contusion then return end
 	contusion = nil
+	forget_kept_contusion() -- build 56: the next Lua state must not put it on again
 	pcall(level.remove_pp_effector, CONTUSION_ID)
 	release_power()
 	if announce and standing() then tip(text("st_coop_contusion_off")) end
@@ -253,6 +300,7 @@ local function update_contusion(now)
 	if now >= c.next_factor then
 		c.next_factor = now + FACTOR_TICK_MS
 		pcall(level.set_pp_effector_factor, CONTUSION_ID, factor_at(now))
+		keep_contusion(now) -- build 56: once a second is enough for the stash
 	end
 end
 
@@ -575,13 +623,20 @@ local function on_first_update()
 	end
 	handled, handled_count = {}, 0 -- the actor is new, its falls are counted from 0 again
 	update_contusion(now)
-	if contusion then put_contusion(now) end
+	-- build 56 (live 2026-11-18): every load is a new Lua state, so this is where a kept contusion comes back
+	if contusion then put_contusion(now) else resume_contusion(now) end
 	if not marks_here() then return end -- the marks are the level authority's
 	for _, m in pairs(markers) do
 		m.since = now
 		if spot_exists(m.id) ~= true then m.added = add_spot(m.id, hint_of(m)) end
 	end
 	restore_stash_markers(now)
+end
+
+-- Build 56 (live 2026-11-18): the actor of the old world goes (a load; the old Lua state is still up): the exact time left
+-- goes into the stash, so the next world gets no part of the last second as a gift.
+local function on_net_destroy()
+	if contusion then keep_contusion(time_global()) end
 end
 
 -- axr_main.callback_add prints "callback <name> already exists!" with a stack trace for a second add, and coop_main
@@ -600,4 +655,5 @@ function on_game_start()
 	RegisterScriptCallback("coop_death_marker", on_death_marker)
 	RegisterScriptCallback("actor_on_update", on_update)
 	RegisterScriptCallback("actor_on_first_update", on_first_update)
+	RegisterScriptCallback("actor_on_net_destroy", on_net_destroy) -- build 56: the contusion's time left for the next state
 end

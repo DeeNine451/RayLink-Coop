@@ -16,6 +16,8 @@
 	                                           save at every level change and was taught everything anew (live 2026-11-16).
 	Fair Fast Travel (game_fast_travel)        the cooldowns, the count of found points and the paused hunger are per
 	                                           player (sub-keys of fast_travel_system; the zones it spawned are the world's).
+	Small per-player keys (PREFS, build 56)    belt per outfit, voice cooldown, last helmet, sorting favourites/junk,
+	                                           scope FOVs, NVG scope flag, DOF reload times are the player's own after a load.
 	Guitar / harmonica (guitar_anim, harmonica_anim)  original Daiviey HUD entry points feed bounded native
 	                                           coop.instrument state; older engines retain event mods.song.
 	Immersive Sleep (ui_sleep_dialog)          the tiredness veto judges the most tired player of the group
@@ -58,6 +60,56 @@ local EF_SUBS = { "XP", "skills_savedata", "traits_savedata", "tasks_manager", "
 -- game_fast_travel.save_state: the rest of the table (spawned_travel_zones, zone_spawn_version) names objects of the world
 local FFT_SUBS = { "cooldowns", "locations_found", "survival_paused", "stored_satiety" }
 
+-- Build 56 (live 2026-11-18, "everything a client has must come through a transition exactly as in a usual game"; review
+-- F8): small per-player keys these mods keep in m_data came back as the HOST's after every world load (a client loads the
+-- host's save). Each one is read the way the mod saves it: the mod's own save function run on a scratch table, so the
+-- value is exactly what its next save would write. A local save_state is reached as an upvalue (find_local).
+--   module, its save function, keys it writes
+-- Ids in the values: beltMemory (outfit and belt item OBJECT ids) is only ever looked up in the player's own inventory
+-- (db.actor:object_id), so the player's own record can touch no other player's item; the rest is keyed by section names
+-- (favourites, junk, FOVs, reload times) or is a flag.
+local PREFS = {
+	{ "remember_outfit_belt", "on_save_state", { "beltMemory" } }, -- the belt each of the last 5 outfits had
+	{ "zzz_rax_sortingplus_mcm", "save_state", { "rax_favorite_itms", "rax_junk_itms" } }, -- z_auto_looter reads the favourites too
+	{ "scope_fov_mcm", "save_state", { "snk_saved_hud_fov", "snk_saved_gl_fov" } }, -- per weapon / per grenade launcher
+	{ "bas_nvg_scopes", "save_state", { "snk_bas_nvg_flag" } }, -- the NVG scope switch (false is a value)
+	{ "ssfx_weapons_dof", "save_state", { "ssfx_saved_reload_time" } }, -- measured reload times per weapon section
+}
+
+local function install_prefs()
+	local n = 0
+	for _, spec in ipairs(PREFS) do
+		local M = C().mod(spec[1])
+		local save = M and (C().fn(M, spec[2]) or C().find_local(M, spec[2]))
+		-- no save function found: the current value cannot be read, and a key that is never reported is better left alone
+		if type(save) == "function" then
+			for _, key in ipairs(spec[3]) do
+				P().register(key, { get = function()
+					local t = {}
+					save(t)
+					return t[key] -- nil (the helmet hotkey writes nothing while no helmet is off): the loaded value stays
+				end })
+				n = n + 1
+			end
+		end
+	end
+	-- The helmet the headgear hotkey puts back on (lastHelmetId). Its save function calls lastHelmet:id() on a game object
+	-- the mod keeps for good; once that helmet is destroyed (sold, dropped and gone offline) the call reads freed memory.
+	-- A single player reaches it at a save, a report would reach it every 15 s. So the value is not read: the key is only
+	-- made the player's own (nothing is ever reported: after a load he has no last helmet, and never the host's id).
+	if C().mod("liz_fdda_redone_headgear_animations_hotkey") then
+		P().register("lastHelmetId", {})
+		n = n + 1
+	end
+	-- its save_state is a global (agdd_voiced_actor.script:1481): the remaining ms of the long shout cooldown
+	local voiced = C().mod("agdd_voiced_actor")
+	if voiced and C().fn(voiced, "save_state") then
+		P().register("varefined_random_long_cd", { prime = { "agdd_voiced_actor" } })
+		n = n + 1
+	end
+	if n > 0 then installed[#installed + 1] = "prefs(" .. n .. " keys)" end
+end
+
 local function install_pdata()
 	local inspect = C().mod("grok_doom_weapons_inspect")
 	if inspect then
@@ -88,6 +140,7 @@ local function install_pdata()
 		P().register("fast_travel_system", { subs = FFT_SUBS, prime = { "game_fast_travel" } })
 		installed[#installed + 1] = "fast_travel"
 	end
+	install_prefs()
 end
 
 -- Wheel entries that name an item by id: the item must be in this player's own inventory.

@@ -478,7 +478,12 @@ local function client_apply(f)
 		log("! gameplay_disguise.update_default is not there: the group's faction %s is not applied", f)
 		return false
 	end
-	gd.update_default(f, true)
+	-- Build 56 (live 2026-11-18): the stock's `now` sets the community at once even in a disguise (gameplay_disguise.script
+	-- update_default, 190-192). A disguise now comes with the player across a load (coop_economy_mdata carries its flag):
+	-- with `now` always true every load stripped it. Not disguised: at once, as before; disguised: the true faction
+	-- changes and the disguise stays, as the stock does for a player in a disguise.
+	local disguised = call(gd.is_actor_disguised) == true
+	gd.update_default(f, not disguised)
 	stats.applied = stats.applied + 1
 	log("this character joined the group's faction %s", f)
 	return true

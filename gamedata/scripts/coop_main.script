@@ -300,6 +300,22 @@ function say(text)
 	return false
 end
 
+-- Engine entry (a client, build 56; coop_join.cpp world_leaving): the load that starts now continues this world (a
+-- transition's save), and the old world is still up. What a script carries per player goes with him as it is this moment,
+-- the way a single player's save has it at a level change: whoever keeps such state hears coop_on_world_leaving(epoch of
+-- the world that comes) and may bring its keys up to date, then coop_mods_pdata keeps the registered keys for this load.
+function on_world_leaving(epoch)
+	if callback_exists("coop_on_world_leaving") then
+		local ok, err = pcall(SendScriptCallback, "coop_on_world_leaving", epoch)
+		if not ok then report_error("coop_on_world_leaving", tostring(epoch), err) end
+	end
+	local pd = rawget(_G, "coop_mods_pdata")
+	if pd and pd.keep_for_load then
+		local ok, err = pcall(pd.keep_for_load, epoch)
+		if not ok then report_error("coop_mods_pdata", "keep for the load", err) end
+	end
+end
+
 -- Engine entry (host, requested from coop_join: host_on_transition_vote): a player stands at a level exit and
 -- asks the group to move. coop_core_player shows it and arms /go.
 function on_transition_vote(nick)
@@ -1292,6 +1308,8 @@ ensure_callback("coop_respawned") -- coop_death adds it at its own start: a subs
 ensure_callback("coop_events_lost")
 -- Fired by the engine (xrCoop/coop_soft_move.h) on who stays in his world through the host's move, a player or a map server: the world
 -- server is away, the world server is back. On the world server: _back, its new Lua is up and its connections open again.
+-- Fired by coop_main.on_world_leaving (build 56) on a client when a load that continues this world starts: (epoch).
+ensure_callback("coop_on_world_leaving")
 ensure_callback("coop_world_away")
 ensure_callback("coop_world_back")
 -- Fired by the engine (coop::debug, docs\DEBUG_DESIGN.md B.2) on every machine when the server's debug state changes:
