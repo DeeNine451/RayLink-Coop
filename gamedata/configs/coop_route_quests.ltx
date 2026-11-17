@@ -31,8 +31,8 @@ npc_on_item_take@drx_da_main      = level
 on_game_load@drx_da_main          = level
 on_option_change@drx_da_main      = level
 time_event@drx_da_main            = level
-; Build 52: an anomaly hurts a client through the client's own copy of the zone, so the modifiers of that hit (the flash mine
-; and the like) run on the machine of the player who is hit; coop_quests_story wraps the flash mine's time jump for a client.
-actor_on_before_hit@drx_da_main  = owner
+; No pair for actor_on_before_hit@drx_da_main: the script rule (host) stands. A client's own anomaly hit is modified by
+; coop_quests_story.client_before_hit, which runs the same table of drx_da_main for the client's character (since before
+; build 51). Build 53 made the handler "owner" as well, and the flash mine ran twice for every hit of a client.
 on_enemy_eval@guards_spawner      = level
 actor_on_interaction@coop_levels_tables = host ; drx_da_main's handler in a wrapper of ours: the roll after an emission stays one

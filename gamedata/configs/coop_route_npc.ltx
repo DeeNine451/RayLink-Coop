@@ -33,3 +33,11 @@ npc_on_hit_callback@coop_npc_adapters = level
 npc_on_before_hit@coop_npc_adapters   = level
 monster_on_update@coop_npc_phantoms   = level
 time_event@coop_npc_adapters          = level ; trader_autoinject.timed_update in its wrapper
+; Build 53 put a function of coop_npc_compat in place of grok_bo's hit handlers (the host runs G.A.M.M.A.'s ballistics for a
+; client's bullet). The router tells a handler by the file its function is written in, so that chain (momo_multihit_fix,
+; grok_bo) went from the level's authority to "view" and ran on every client too, inside the check that decides whether his
+; hit is sent at all: momo's "this bullet has hit already" test could drop a client's real hit. As in build 51: the host
+; or the map server of the level, never a client. The other npc_on_before_hit of coop_npc_compat (the peace zone) acts on
+; a host with clients only.
+npc_on_before_hit@coop_npc_compat     = level
+monster_on_before_hit@coop_npc_compat = level

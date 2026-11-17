@@ -57,10 +57,17 @@ check(runs_on_map_server("time_event", "xcv_phantoms_fix"), "phantoms: the relea
 
 print("== a wrapper of a world handler keeps its domain")
 check(coop_native.route("actor_on_interaction", "coop_levels_tables") == "host", "drx_da_main's handler in a wrapper: world server only, one roll")
--- Build 52: a zone now hurts a client through the client's own copy of it (the host's zone feels his character and its states
--- reach him), so Dynamic Anomalies' modifiers of an anomaly's hit (drx_da_main.actor_on_before_hit: the flash mine and the
--- like) must run on the machine of the player who is hit; coop_quests_story's client branch of the flash mine waits for it.
-check(coop_native.route("actor_on_before_hit", "drx_da_main") == "owner", "Dynamic Anomalies' hit modifiers run for each player's own anomaly hit")
+-- Dynamic Anomalies' modifiers of an anomaly's hit (drx_da_main.actor_on_before_hit: the flash mine) run once for each
+-- player: the host's own by drx_da_main's handler (host), a client's by coop_quests_story.client_before_hit, which calls the
+-- same table. Build 53 made the handler "owner" too: the flash mine ran twice for every hit of a client.
+check(coop_native.route("actor_on_before_hit", "drx_da_main") == "host", "Dynamic Anomalies' own hit handler stays the host's: one run for a client's hit")
+check(not coop_native.runs_here(coop_native.route("actor_on_before_hit", "drx_da_main"), false), "and a client does not run it besides coop_quests_story's")
+-- Build 53: coop_npc_compat puts its own function in place of grok_bo's hit handlers; the router tells a handler by the file
+-- of its function, so without a pair "coop_* = view" took G.A.M.M.A.'s ballistics chain to every client
+for _, cb in ipairs({ "npc_on_before_hit", "monster_on_before_hit" }) do
+	check(domain_on_map_server(cb, "coop_npc_compat") == "level", cb .. "@coop_npc_compat runs where grok_bo's handler ran in build 51")
+	check(not coop_native.runs_here(domain_on_map_server(cb, "coop_npc_compat"), false), cb .. "@coop_npc_compat: never on a client")
+end
 check(domain_on_map_server("actor_on_interaction", "coop_levels_tables") == "host", "and not on a map server")
 -- what a player's search starts runs where the body or the box is: the timers of these two stay at the authority of the level
 check(domain_on_map_server("time_event", "guaranteed_loot") == "level", "the check of guaranteed_loot's search on a map server")
