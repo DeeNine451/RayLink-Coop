@@ -165,6 +165,22 @@ local m2 = held("matches")
 light(l1, m2)
 check(HF_DATA[l1:id()].is_on == true and released(m2:id()), "an honest light still goes")
 
+-- Round 6 (review 5, H1): the stock utils_item.degrade clamps the new condition to 0.01, so a lighter at 0.055 drops only to
+-- 0.01 (a step of 0.045). The host takes that as spent and removes it at the next light, as the mod does.
+print("== a lighter at the end of its life: degrade clamps to 0.01, still spent")
+off(l2)
+local le = held("hf_lighter", 500, { _cond = 0.155 })
+light(l2, le) -- 0.155: left to his machine
+local fails = counter("hf_lamp_tool").failed
+for _, c in ipairs({ 0.105, 0.055 }) do
+	off(l2); le._cond = c; light(l2, le)
+end
+check(counter("hf_lamp_tool").failed == fails and HF_DATA[l2:id()].is_on == true, "0.155 -> 0.105 -> 0.055: each step passes")
+off(l2); le._cond = 0.01; light(l2, le)
+check(counter("hf_lamp_tool").failed == fails and HF_DATA[l2:id()].is_on == true,
+	"0.055 -> 0.01 (degrade's clamp): passes in refuse mode: " .. tostring(trust_line("hf_lamp_tool")))
+check(released(le:id()) and last_answer() == "took", "at 0.01 the host removes the lighter, as the mod does")
+
 -- Round 4 (blocker 2 of the round 3 review): a light without the tool's id is its own check, hf_lamp_tool_id, that always
 -- fails (as hf_refuel_item_id and mine_item_id): "log" lights it as today, "refuse" lights nothing. Mixed builds cannot connect
 -- (the content manifest), so no honest client sends one; the build 56 branch passed hf_lamp_tool and spent nothing anywhere.

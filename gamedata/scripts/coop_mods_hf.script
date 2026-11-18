@@ -134,12 +134,13 @@ end
 -- machine reports, is lower now). Round 5 (blocker 3 of the round 4 review): lower by the mod's own step, not by any amount: a use
 -- of a multi-use item (utils_item.discharge), TOOL_STEP of a degradable tool's condition (ui_furniture_light.toggle_light:
 -- utils_item.degrade(obj, 0.05)); STEP_SLACK covers the item state's travel (condition in steps of 1/65535). A machine that reports
--- 0.0001 a light lit one lighter about 9000 times. -> ok, why
+-- 0.0001 a light lit one lighter about 9000 times. Round 6 (review 5, H1): the stock utils_item.degrade clamps the new
+-- condition to 0.01, so the last step of a tool may be shorter than TOOL_STEP (0.055 -> 0.01). -> ok, why
 local function spent_since(obj, kind)
 	local w = spend.left[obj:id()]
 	if not w then return true end
 	local k, v = spend_state(obj, kind)
-	local most = k == "u" and w.v - 1 or w.v - spend.TOOL_STEP + spend.STEP_SLACK
+	local most = k == "u" and w.v - 1 or math.max(w.v - spend.TOOL_STEP, 0.01) + spend.STEP_SLACK
 	if k == w.k and v ~= nil and v > most then
 		if k == "u" then
 			return false, string.format("the use left to his machine at the last request was not spent (uses still %s, were %s)",
