@@ -1,0 +1,282 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - the mode facade (gamedata\scripts\coop_mode.script), docs\MODES.md section 4 "Lua", step S4.
+	Frozen contract: temp\b58\contracts\coop_mode_api.md (after the W0 gate it changes only through the lead).
+
+	The Core never asks which mode it runs in. It asks this facade about a player, a level or its own actor, and the
+	answer comes from the layer of the mode this process runs in:
+	  hostplay  scripts\coop_hostplay_mode.script: the co-op (the host plays, everybody on one map)
+	  srv       scripts\coop_srv_mode.script: the server (a world server without a player's map, map servers, and the
+	            players' machines of such a world)
+	Those two read the engine's predicates; this file never does. Before a layer is installed, and outside a session,
+	the answers are those of "none" (single player: the stock game).
+
+	Questions (call as coop_mode.x(...), no new file local in the caller: docs\MODES.md section 4):
+		where(peer)          "here" | "away" | "joining": is that player's character on the map this process has
+		decider(peer)        "this" | "other" | "nobody": who decides for that player's character
+		actor_is_player()    this process's own actor is a player (false: a server's ghost)
+		decides_world()      this process decides the world (offline, time, story, money, the save)
+		leads_here()         this process leads the map it has loaded (objects, AI, physics)
+		is_player_mirror()   this process is a player's machine: its objects are copies
+		seat_plays(peer)     the seat of that peer plays a character (seat 0: is the host's seat a player)
+		group_travels()      the group moves between maps together
+	Delivery:
+		on_level_request(name, fn[, door])  a player's request to the logic of the map he stands on, event `name`:
+		                     fn(payload, from, relayed) runs on the process that leads that map, `from` = the player;
+		                     door(payload, from) -> true runs first on the process the player reached (false drops it);
+		                     a request another process passed on (relayed) has been through its door there
+		publish(verb, t)     world data this process changed, to those who keep the world: event `verb`, t a flat table
+		                     (coop_main.encode) or a string; true when it was sent
+	Layers:
+		install(layer)       a mode's layer (the table described in the contract); true when accepted
+		uninstall(name)      removes the layer "hostplay" or "srv"
+		when_srv(fn[, layer]) fn() runs once in this process, as soon as the srv layer answers (at once if it does now).
+		                     The only place a srv script registers callbacks, condition functions, events and saves
+		                     (check_layers L9). `layer`: the srv layer itself, passed by scripts\coop_srv_mode.script
+		                     only: L9 lets a srv script call nothing at load but this function
+	print_status()           coop_status: which layers are installed and which one answers
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, pairs, ipairs, pcall, tostring, tonumber = type, pairs, ipairs, pcall, tostring, tonumber
+local string_format = string.format
+
+local NAMES = { "hostplay", "srv" } -- the order the layers are asked in: the co-op first
+local KNOWN = { hostplay = true, srv = true }
+local WHERE = { here = true, away = true, joining = true }
+local DECIDER = { this = true, other = true, nobody = true }
+local ACTIONS = { here = true, pass = true, drop = true }
+-- every function a layer has (applies() says whether it answers now)
+local FIELDS = { "applies", "where", "decider", "actor_is_player", "decides_world", "leads_here", "is_player_mirror",
+	"seat_plays", "group_travels", "publish_to", "level_request" }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("[coop-mode] %s", ok and line or tostring(fmt))
+end
+
+-- a fault of a layer is told three times, then every 100th
+local faults = {}
+local function fault(what, e)
+	local n = (faults[what] or 0) + 1
+	faults[what] = n
+	if n <= 3 or n % 100 == 0 then log("! %s (#%d): %s", tostring(what), n, tostring(e)) end
+end
+
+local function main()
+	local m = rawget(_G, "coop_main") or coop_main
+	return type(m) == "table" and m or nil
+end
+
+-------------------------------------------------------------------------------
+-- "none": no session, or no layer installed. Single player is the stock game.
+-------------------------------------------------------------------------------
+local NONE = {
+	name = "none",
+	applies = function() return true end,
+	where = function() return "away" end,
+	decider = function() return "nobody" end,
+	actor_is_player = function() return true end,
+	decides_world = function() return false end,
+	leads_here = function() return false end,
+	is_player_mirror = function() return false end,
+	seat_plays = function() return false end,
+	group_travels = function() return false end,
+	publish_to = function() return nil end,
+	-- nothing arrives without a session; whatever does is this process's own business
+	level_request = function(name, payload, from) return "here", payload, from, false end,
+}
+
+-------------------------------------------------------------------------------
+-- Layers
+-------------------------------------------------------------------------------
+local layers = {} -- name -> layer table
+local pending = {} -- when_srv functions that have not run yet, in the order they came
+local flushing = false
+
+local function valid(layer)
+	if type(layer) ~= "table" or not KNOWN[layer.name] then return false, "not a layer (name hostplay or srv)" end
+	for _, k in ipairs(FIELDS) do
+		if type(layer[k]) ~= "function" then return false, "no function " .. k end
+	end
+	return true
+end
+
+local function run_pending()
+	flushing = true
+	while pending[1] do
+		local fn = table.remove(pending, 1)
+		local ok, e = pcall(fn)
+		if not ok then fault("when_srv", e) end
+	end
+	flushing = false
+end
+
+-- The layer that answers now: the first installed one whose applies() is true, else "none". The srv layer that
+-- answers runs the waiting when_srv functions first.
+local function current()
+	for _, name in ipairs(NAMES) do
+		local layer = layers[name]
+		if layer then
+			local ok, yes = pcall(layer.applies)
+			if not ok then
+				fault(name .. ".applies", yes)
+			elseif yes == true then
+				if name == "srv" and pending[1] and not flushing then run_pending() end
+				return layer
+			end
+		end
+	end
+	return NONE
+end
+
+-- layer.k(...) of the layer that answers; on an error the answer of "none"
+local function ask(k, ...)
+	local layer = current()
+	local ok, a, b, c, d = pcall(layer[k], ...)
+	if ok then return a, b, c, d end
+	fault(layer.name .. "." .. k, a)
+	return NONE[k](...)
+end
+
+function install(layer)
+	local ok, why = valid(layer)
+	if not ok then
+		log("! install refused: %s", why)
+		return false
+	end
+	if layers[layer.name] and layers[layer.name] ~= layer then log("the %s layer is replaced", layer.name) end
+	layers[layer.name] = layer
+	return true
+end
+
+function uninstall(name)
+	if not KNOWN[name] then return false end
+	layers[name] = nil
+	return true
+end
+
+function when_srv(fn, layer)
+	if layer ~= nil then
+		if type(layer) == "table" and layer.name == "srv" then install(layer) else log("! when_srv: the layer is not srv") end
+	end
+	if type(fn) ~= "function" then return false end
+	pending[#pending + 1] = fn
+	current() -- runs it now when the srv layer answers
+	return true
+end
+
+-------------------------------------------------------------------------------
+-- Questions
+-------------------------------------------------------------------------------
+local function peer_of(v)
+	local n = tonumber(v)
+	if type(v) ~= "number" or n ~= n or n < 0 or n % 1 ~= 0 then return nil end
+	return n
+end
+
+function where(peer)
+	peer = peer_of(peer)
+	if not peer then return "away" end
+	local v = ask("where", peer)
+	if WHERE[v] then return v end
+	fault("where answer", v)
+	return NONE.where(peer)
+end
+
+function decider(peer)
+	peer = peer_of(peer)
+	if not peer then return "nobody" end
+	local v = ask("decider", peer)
+	if DECIDER[v] then return v end
+	fault("decider answer", v)
+	return NONE.decider(peer)
+end
+
+function actor_is_player() return ask("actor_is_player") == true end
+function decides_world() return ask("decides_world") == true end
+function leads_here() return ask("leads_here") == true end
+function is_player_mirror() return ask("is_player_mirror") == true end
+function group_travels() return ask("group_travels") == true end
+
+function seat_plays(peer)
+	peer = peer_of(peer)
+	return peer ~= nil and ask("seat_plays", peer) == true
+end
+
+-------------------------------------------------------------------------------
+-- Delivery
+-------------------------------------------------------------------------------
+local function send(name, payload, target)
+	if not (api and type(api.send_event) == "function") then return false end
+	local ok, sent = pcall(api.send_event, name, payload, target)
+	return ok and sent == true
+end
+
+function publish(verb, t)
+	if type(verb) ~= "string" or verb == "" then return false end
+	local target = ask("publish_to", verb)
+	if type(target) ~= "number" then return false end
+	local payload = t
+	if type(t) == "table" then
+		local m = main()
+		if not (m and m.encode) then return false end
+		payload = m.encode(t)
+	elseif type(t) ~= "string" then
+		payload = tostring(t or "")
+	end
+	return send(verb, payload, target)
+end
+
+-- One request: the layer says what to do with it (here / pass / drop), this runs it.
+local function request(name, fn, door, payload, from)
+	local act, a, b, c = ask("level_request", name, payload, from)
+	if not ACTIONS[act] then
+		fault("level_request answer", act)
+		act, a, b, c = NONE.level_request(name, payload, from)
+	end
+	if act == "drop" then return end
+	if act == "pass" then
+		-- to the process that leads his map: a = its peer, b = the request with the player in it
+		if door and door(payload, from) ~= true then return end
+		if type(a) == "number" and type(b) == "string" then send(name, b, a) end
+		return
+	end
+	-- here: a = the request, b = the player, c = another process passed it on (its door ran there)
+	if c ~= true and door and door(a, b) ~= true then return end
+	return fn(a, b, c == true)
+end
+
+function on_level_request(name, fn, door)
+	if type(name) ~= "string" or name == "" or type(fn) ~= "function" then return false end
+	if door ~= nil and type(door) ~= "function" then return false end
+	local m = main()
+	if not (m and m.add_event_handler) then return false end
+	return m.add_event_handler(name, function(payload, from)
+		return request(name, fn, door, payload, from)
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- Status, game start
+-------------------------------------------------------------------------------
+function print_status()
+	local have = {}
+	for _, name in ipairs(NAMES) do
+		if layers[name] then have[#have + 1] = name end
+	end
+	log("layers %s, answers %s, when_srv waiting %d", #have > 0 and table.concat(have, ",") or "-", current().name,
+		#pending)
+end
+
+-- A player's machine learns the server mode from its first level map (step S3 moves that into Welcome): the waiting
+-- when_srv functions run on the first frame the srv layer answers, if no question came before.
+local function actor_on_update()
+	if pending[1] and not flushing then current() end
+end
+
+function on_game_start()
+	if not api then return end -- an exe without co-op: no layer ever answers
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+end

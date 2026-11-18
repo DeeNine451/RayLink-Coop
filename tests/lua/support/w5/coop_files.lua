@@ -15,10 +15,12 @@ COOP_FILES = {
 	"coop_game_record", -- game settings (T4): the catalog and the record are read at run time (coop_settings.rule)
 	"coop_game_schema",
 	"coop_game_settings", -- the host's game: the record, its callbacks and the save wrapper
+	"coop_hostplay_mode", -- S4: the co-op layer of the facade coop_mode
 	"coop_main",
 	"coop_menu",
 	"coop_menu_char",
 	"coop_menu_options",
+	"coop_mode", -- S4: the mode facade (Core)
 	"coop_mods_core",
 	"coop_mods_guard", -- B3 review round 1: client guards of mod item paths
 	"coop_mods_hf",
@@ -50,6 +52,7 @@ COOP_FILES = {
 	"coop_quests_story",
 	"coop_route", -- F2 T10: the callback router shim
 	"coop_settings",
+	"coop_srv_mode", -- S4: the server layer of the facade coop_mode
 	"coop_tasks",
 	"coop_ui",
 	"modxml_coop_menu",

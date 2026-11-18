@@ -337,8 +337,10 @@ local function setup(split)
 		if peer ~= 0 and peer ~= MK then load_ui(W) end
 		load_script(W, "coop_economy_core")
 		load_script(W, "coop_economy_mdata")
+		for _, n in ipairs({ "coop_hostplay_mode", "coop_mode", "coop_srv_mode" }) do load_script(W, n) end
 		load_script(W, "coop_mods_core")
 		load_script(W, "coop_mods_mags")
+		for _, n in ipairs({ "coop_hostplay_mode", "coop_mode", "coop_srv_mode" }) do W[n].on_game_start() end
 		W.coop_economy_mdata.on_game_start()
 		W.coop_mods_mags.on_game_start()
 		W.JAM_REFRESH = W.coop_mods_core.upvalue(jam.on_game_start, "actor_on_update")

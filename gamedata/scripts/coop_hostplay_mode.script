@@ -1,0 +1,97 @@
+-- Кооп (hostplay): ответы режима «Кооп» для фасада coop_mode (docs/MODES.md, раздел 4)
+--[[
+	Anomaly Coop - the co-op mode's answers (gamedata\scripts\coop_hostplay_mode.script), step S4, layer hostplay.
+	Contract: temp\b58\contracts\coop_mode_api.md; the facade: scripts\coop_mode.script.
+
+	The co-op: the host plays and everybody is on one map, the host's. The host's process has every player's map loaded
+	and decides for all of them; a client mirrors it. This layer answers in such a session only: an active session
+	that is neither a map server, nor a world server without a player (-coop_dedicated), nor split into maps. A player's
+	machine in a server world knows it from its first level map (step S3 moves that into Welcome); until then it is
+	answered here, as today's code does.
+
+	Reads today's engine predicates (coop.is_active / is_host / is_map_server / is_dedicated / levels.split); in step S4
+	the server ones move to the table srv.* (docs\MODES.md section 4).
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, pairs, ipairs, pcall, tonumber = type, pairs, ipairs, pcall, tonumber
+
+-- f(...) of the engine; nil when it is not there or raises
+local function call(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, ...)
+	if ok then return v end
+	return nil
+end
+
+local function engine(name) return api ~= nil and call(api[name]) == true end
+
+-- the other mode's processes: a map server, a world server without a player, a session split into maps
+local function server_mode()
+	if engine("is_map_server") or engine("is_dedicated") then return true end
+	local l = api and api.levels
+	return type(l) == "table" and call(l.split) == true
+end
+
+local function applies()
+	return engine("is_active") and not server_mode()
+end
+
+-- the host's process (it plays, decides and leads the map); otherwise a player's machine
+local function host() return engine("is_host") end
+
+local function self_peer()
+	local v = api and tonumber(call(api.self_id))
+	return v ~= nil and v >= 0 and v or nil
+end
+
+-- that peer's row of coop.players() (the seats that play a character), nil when he has none
+local function row(peer)
+	local list = api and call(api.players)
+	if type(list) ~= "table" then return nil end
+	for _, p in ipairs(list) do
+		if type(p) == "table" and p.id == peer then return p end
+	end
+	return nil
+end
+
+local function where(peer)
+	if peer == self_peer() then return "here" end
+	local p = row(peer)
+	if not p then return "away" end
+	-- one map for everybody: his character is here once it is in the world (the host's id, or the mirror's)
+	return p.avatar_id ~= nil and "here" or "joining"
+end
+
+local function decider(peer)
+	if peer ~= self_peer() and not row(peer) then return "nobody" end
+	return host() and "this" or "other"
+end
+
+local function seat_plays(peer)
+	return row(peer) ~= nil
+end
+
+local function level_request(name, payload, from)
+	return "here", payload, from, false -- one map: the host leads it, nothing is passed on
+end
+
+LAYER = {
+	name = "hostplay",
+	applies = applies,
+	where = where,
+	decider = decider,
+	actor_is_player = function() return true end,
+	decides_world = host,
+	leads_here = host,
+	is_player_mirror = function() return not host() end,
+	seat_plays = seat_plays,
+	group_travels = function() return true end,
+	publish_to = function() return -1 end, -- the session's broadcast, as coop_mods_core.to_all
+	level_request = level_request,
+}
+
+function on_game_start()
+	coop_mode.install(LAYER)
+end

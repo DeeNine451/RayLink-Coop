@@ -436,65 +436,59 @@ local function side_ok(side, from)
 	return true
 end
 
--- The world server: the bridge of the map server this player stands under, nil on the host's level. Split levels off: nil.
-local function his_bridge(peer)
-	local l = api.levels
-	return l and l.split and l.split() == true and l.bridge_of_player and l.bridge_of_player(peer) or nil
-end
-
+-- side "host": a player's request to the logic of the level he stands on. The mode delivers it to the process that leads
+-- that level (coop_mode.on_level_request: in the server mode the world server passes it to the map server of his level,
+-- which runs it as his); the door below runs where the player's request arrived, a passed request went through it there.
 function on(verb, f, side)
 	local cm = mod("coop_main")
 	if not (cm and cm.add_event_handler) then return false end
-	local to_his_level = side == "host"
-	return cm.add_event_handler(PREFIX .. verb, function(payload, from)
+	local function door(payload, from)
 		stats.received = stats.received + 1
-		local t
-		if to_his_level and is_map_server() then
-			t = cm.decode(payload)
-			local peer = tonumber(t._peer)
-			if from ~= 0 or not peer then
-				stats.rejected = stats.rejected + 1
-				return
-			end
-			t._peer = nil
-			from = peer -- the world server is the door: the limit below was counted there
+		if side == nil then
+			-- anyone, anywhere: the limit only
 		elseif not side_ok(side, from) then
 			stats.rejected = stats.rejected + 1
-			return
-		elseif not rate_ok(from, verb) then
-			stats.limited = stats.limited + 1
-			local told = limits[verb] and limits[verb][3]
-			if told then
-				local ok, e = pcall(told, cm.decode(payload), from)
-				if not ok then report("net", verb .. " limited", e) end
-			end
-			return
+			return false
 		end
-		if to_his_level and is_world_server() then
-			local bridge = his_bridge(from)
-			if bridge then
-				t = cm.decode(payload)
-				t._peer = from
-				pcall(api.send_event, PREFIX .. verb, cm.encode(t), bridge)
-				return
-			end
+		if rate_ok(from, verb) then return true end
+		stats.limited = stats.limited + 1
+		local told = limits[verb] and limits[verb][3]
+		if told then
+			local ok, e = pcall(told, cm.decode(payload), from)
+			if not ok then report("net", verb .. " limited", e) end
 		end
-		local ok, e = pcall(f, t or cm.decode(payload), from)
+		return false
+	end
+	local function run(payload, from)
+		local ok, e = pcall(f, cm.decode(payload), from)
 		if not ok then report("net", verb, e) end
+	end
+	if side == "host" then
+		return coop_mode.on_level_request(PREFIX .. verb, function(payload, from, relayed)
+			if relayed then stats.received = stats.received + 1 end
+			run(payload, from)
+		end, door)
+	end
+	return cm.add_event_handler(PREFIX .. verb, function(payload, from)
+		if door(payload, from) then run(payload, from) end
 	end)
 end
 
-function send(verb, t, target)
-	if not active() then return false end
+-- The payload of an event, or nil (and counted) when it cannot go: no session, too big.
+local function payload_of(verb, t)
+	if not active() then return nil end
 	local cm = mod("coop_main")
 	local payload = type(t) == "table" and cm and cm.encode(t) or tostring(t or "")
 	if #payload > MAX_PAYLOAD then
 		log("net", "! %s not sent: %d bytes", verb, #payload)
 		stats.send_failed = stats.send_failed + 1
-		return false
+		return nil
 	end
-	local ok, sent = pcall(api.send_event, PREFIX .. verb, payload, target or -1)
-	if ok and sent == true then
+	return payload
+end
+
+local function counted(sent)
+	if sent == true then
 		stats.sent = stats.sent + 1
 		return true
 	end
@@ -502,10 +496,22 @@ function send(verb, t, target)
 	return false
 end
 
+function send(verb, t, target)
+	local payload = payload_of(verb, t)
+	if not payload then return false end
+	local ok, sent = pcall(api.send_event, PREFIX .. verb, payload, target or -1)
+	return counted(ok and sent)
+end
+
 function to_host(verb, t) return send(verb, t, 0) end
 function to_all(verb, t) return send(verb, t, -1) end
 function to_peer(peer, verb, t) return send(verb, t, peer) end
-function publish(verb, t) return is_map_server() and to_host(verb, t) or to_all(verb, t) end
+-- World data this process changed, to those who keep the world: the mode delivers it (a map server's goes to the world server).
+function publish(verb, t)
+	local payload = payload_of(verb, t)
+	if not payload then return false end
+	return counted(coop_mode.publish(PREFIX .. verb, payload))
+end
 
 -- Chunked strings (> one event). Each piece: k = transfer key, i = index, n = count, d = data.
 local big_seq = 0

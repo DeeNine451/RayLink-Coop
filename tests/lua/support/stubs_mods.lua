@@ -479,10 +479,14 @@ end
 -- Loads coop_main + all coop_mods_* and runs their on_game_start in file order.
 MODS_FILES = { "coop_mods_core", "coop_mods_guard", "coop_mods_hf", "coop_mods_items", "coop_mods_mags", "coop_mods_misc",
 	"coop_mods_nta", "coop_mods_pdata", "coop_mods_perks", "coop_mods_radio" }
+-- the mode facade and its layers (docs\MODES.md section 4), loaded and started as axr_main does in the game
+MODE_FILES = { "coop_hostplay_mode", "coop_mode", "coop_srv_mode" }
 function start_all()
 	load_script("coop_main")
+	for _, n in ipairs(MODE_FILES) do load_script(n) end
 	for _, n in ipairs(MODS_FILES) do load_script(n) end
 	coop_main.on_game_start()
+	for _, n in ipairs(MODE_FILES) do _G[n].on_game_start() end
 	for _, n in ipairs(MODS_FILES) do _G[n].on_game_start() end
 end
 

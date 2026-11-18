@@ -67,6 +67,22 @@ local function judge(text, rc)
 end
 
 os.execute("mkdir " .. OUT_DIR .. " 2>nul")
+
+-- A Core test that loops over the answer sets (modes.names( / modes.each(, tests/lua/support/modes.lua) runs once per set of the facade coop_mode
+-- (docs/MODES.md section 10, COOP_LUA_MODE), its row named <stem>@<set>. Every other test runs once, without the variable.
+local SETS = { "hostplay", "srv_world", "srv_map", "none" }
+local function runs_of(list)
+	local out = {}
+	for _, t in ipairs(list) do
+		local text = read_all(TEST_DIR .. BS .. t.name) or ""
+		if text:find("modes.names(", 1, true) or text:find("modes.each(", 1, true) then
+			for _, set in ipairs(SETS) do out[#out + 1] = { name = t.name, stem = t.stem .. "@" .. set, set = set } end
+		else
+			out[#out + 1] = t
+		end
+	end
+	return out
+end
 local list = filters()
 local files_run, files_failed, total_passed, total_failed = 0, 0, 0, 0
 local width = 0
@@ -83,9 +99,11 @@ if #tests == 0 then
 	os.exit(1)
 end
 
-for _, t in ipairs(tests) do
+for _, run in ipairs(runs_of(tests)) do
+	local t = run
 	local out = OUT_DIR .. BS .. t.stem .. ".txt"
-	local rc = os.execute(RUNLUA .. " " .. TEST_DIR .. BS .. t.name .. " > " .. out .. " 2>&1")
+	local rc = os.execute("set COOP_LUA_MODE=" .. (t.set or "") .. "&& " .. RUNLUA .. " " .. TEST_DIR .. BS ..
+		t.name .. " > " .. out .. " 2>&1")
 	local text = read_all(out) or ""
 	local passed, failed, problems, fail_lines = judge(text, rc)
 	files_run = files_run + 1
