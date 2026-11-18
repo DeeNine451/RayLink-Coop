@@ -1,0 +1,3 @@
+local reg = RegisterScriptCallback
+local function u() end
+reg("actor_on_update", u)

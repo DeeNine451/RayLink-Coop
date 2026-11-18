@@ -1,0 +1,18 @@
+-- srv
+local xc = xr_conditions
+local items = coop_items
+xc.coop_far = function() return true end
+xr_logic["pick"] = function() end
+function coop_items.pick() return false end
+rawset(items, "pick", function() return false end)
+_G.coop_far_seen = true
+local own = {}
+own.x = 1
+coop_srv_far.y = 2
+function on_game_start()
+	coop_mode.when_srv(function()
+		xc.coop_far2 = function() return true end
+		coop_items.pick = function() return false end
+		rawset(xr_effects, "coop_go", function() end)
+	end)
+end

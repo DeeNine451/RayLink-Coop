@@ -1,0 +1,198 @@
+-- Stand only (temp/stand/carry_group.ps1 puts it into the stand's gamedata and takes it away). 2026-11-18, build 56: a client's
+-- state through a group transition, and a silencer given through the debug to a client that holds the gun it fits.
+-- A process started with `-coop_probe <role>` runs the steps of its role and writes "[carry] <role> <step>: <result>".
+--   h  = the host (plays, runs the debug): takes boosters and alcohol, then jumps to another level (the group follows)
+--   ag = the client: takes his own boosters, asks for the gun and its silencer, says yes to the trip, reports his state
+--        before the load and after it
+-- The Lua state is new after the load: the stage is kept in the session stash (coop.stash).
+
+local ROLE = nil
+local GOAL = "l02_garbage"
+local GUN, SILENCER = "wpn_vihr", "wpn_sil_vihr"
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[carry] " .. tostring(ROLE) .. " " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local function cond()
+	local a = db.actor and db.actor:cast_Actor()
+	return a and a:conditions()
+end
+
+local function boosters()
+	local t = {}
+	local c = cond()
+	if c then
+		c:BoosterForEach(function(ty, time, val)
+			t[#t + 1] = string.format("%d:%.6g:%.1f", ty, val, time)
+			return false
+		end)
+	end
+	table.sort(t)
+	return #t .. " [" .. table.concat(t, " ") .. "]"
+end
+
+local function try(f, ...)
+	local ok, v = pcall(f, ...)
+	return ok and v or nil
+end
+
+local function state(tag)
+	local a, c = db.actor, cond()
+	if not (a and c) then return out("%s: no actor", tag) end
+	local sil = try(function() return a:object(SILENCER) ~= nil end)
+	local gun = try(function() return a:object(GUN) ~= nil end)
+	out("%s: level %s epoch %s carried %s | hp %.3f power %.3f sat %.3f rad %.3f psy %.3f alcohol %.3f bleed %.4f | slot %s q0 '%s' crouch %s | gun %s silencer %s | boosters %s",
+		tag, tostring(level.name()), tostring(try(coop.world_epoch)), tostring(coop.condition_carried and try(coop.condition_carried)),
+		a.health, a.power, try(function() return c:GetSatiety() end) or -1, a.radiation, a.psy_health,
+		try(function() return c:GetAlcohol() end) or -1, try(function() return c:BleedingSpeed() end) or -1,
+		tostring(try(function() return a:active_slot() end)), tostring(try(get_console_cmd, 0, "slot_0")),
+		tostring(try(function() return IsMoveState("mcCrouch") end)), tostring(gun), tostring(sil), boosters())
+	flush()
+end
+
+local function boost(ty, value, seconds)
+	local c = cond()
+	if not c then return end
+	local b = SBooster()
+	b.m_type = ty
+	b.fBoostTime = seconds
+	b.fBoostValue = value
+	c:ApplyBooster(b, "")
+end
+
+local function players()
+	local ok, l = pcall(coop.players)
+	return ok and type(l) == "table" and #l or 0
+end
+
+local function stage() return tostring(try(coop.stash_get, "carry_stage") or "") end
+local function set_stage(s) pcall(coop.stash_set, "carry_stage", s) end
+
+local t0, done = nil, {}
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+local function ask(sec)
+	local ok, sent, code = pcall(coop_debug_client.run, "spawn_item", { sec = sec, n = 1, at = "inv" }, function(ok2, res)
+		out("debug answer for %s: %s %s", sec, tostring(ok2), tostring(res))
+	end)
+	out("debug spawn %s asked: %s %s %s", sec, tostring(ok), tostring(sent), tostring(code))
+end
+
+local function host_steps()
+	if stage() == "" then
+		at("take", 8, function()
+			boost(0, 0.005, 900) -- health restore: the army medkit's
+			boost(1, 0.004, 900) -- power restore
+			boost(4, 20, 900) -- max weight
+			boost(5, 0.3, 900) -- radiation protection
+			boost(6, 0.25, 900) -- telepatic protection
+			cond():ChangeAlcohol(0.45)
+			cond():ChangeRadiation(0.2)
+			out("took: boosters 0 1 4 5 6, alcohol +0.45, radiation +0.2")
+		end)
+		at("before", 12, function() state("before") end)
+		at("before2", 44, function() state("before the jump") end)
+		at("jump", 46, function()
+			set_stage("moved")
+			out("jump to %s", GOAL)
+			flush()
+			local ok, went = pcall(function() return JumpToLevel(GOAL) end)
+			out("JumpToLevel: %s %s", tostring(ok), tostring(went))
+		end)
+	else
+		at("after5", 5, function() state("after 5 s") end)
+		at("after25", 25, function() state("after 25 s") end)
+		at("done", 60, function()
+			state("after 60 s")
+			get_console():execute("coop_status")
+			out("done")
+			flush()
+		end)
+	end
+end
+
+local function client_steps()
+	if stage() == "" then
+		at("take", 6, function()
+			boost(0, 0.001, 300) -- his own health restore, smaller than the host's
+			boost(2, 0.0003, 400) -- radiation restore
+			boost(7, 0.2, 200) -- chemical burn protection
+			cond():ChangeAlcohol(0.1)
+			pcall(exec_console_cmd, "slot_0 bandage")
+			out("took: boosters 0 2 7, alcohol +0.1, quick slot 0 = bandage")
+		end)
+		at("gun", 9, function() ask(GUN) end)
+		at("silencer", 16, function() state("with the gun") ask(SILENCER) end)
+		at("silencer2", 24, function() state("after the silencer was asked") end)
+		at("slot", 26, function() pcall(function() db.actor:activate_slot(3) end) end)
+		at("late", 40, function()
+			boost(1, 0.002, 250) -- taken a few seconds before the load
+			cond():ChangeRadiation(0.1)
+			out("late: booster 1 and radiation +0.1")
+		end)
+		at("before", 43, function() state("before") end)
+		-- yes to the host's trip, as the window's button does
+		if t0 and time_global() - t0 > 44000 and time_global() - (done.confirm_at or 0) > 2000 then
+			done.confirm_at = time_global()
+			if stage() == "" then pcall(function() get_console():execute("coop_transition_confirm") end) end
+		end
+	end
+end
+
+local first_new_world = false
+local function client_new_world()
+	at("after0", 0, function() state("after 0 s") end)
+	at("after10", 10, function() state("after 10 s") end)
+	at("after30", 30, function() state("after 30 s") end)
+	at("done", 60, function()
+		state("after 60 s")
+		get_console():execute("coop_status")
+		out("done")
+		flush()
+	end)
+end
+
+local epoch0 = nil
+local function actor_on_update()
+	if not (db.actor and coop.is_active()) then return end
+	if players() < 2 then return end
+	if ROLE == "ag" then
+		local e = tonumber(try(coop.world_epoch)) or 0
+		local kept = tonumber(try(coop.stash_get, "carry_epoch"))
+		if not kept then
+			pcall(coop.stash_set, "carry_epoch", tostring(e))
+			kept = e
+		end
+		if e ~= kept then
+			if not first_new_world then
+				first_new_world = true
+				t0 = time_global()
+				done = {}
+			end
+			return client_new_world()
+		end
+	end
+	if not t0 then
+		t0 = time_global()
+		out("two players: the steps start (stage '%s')", stage())
+	end
+	if ROLE == "h" then host_steps() else client_steps() end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	if ROLE ~= "h" and ROLE ~= "ag" then return end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_first_update", function() out("first update: stage '%s'", stage()) end)
+	printf("%s", "[carry] " .. ROLE .. " armed")
+end

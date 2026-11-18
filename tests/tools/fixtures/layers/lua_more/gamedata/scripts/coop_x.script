@@ -1,0 +1,11 @@
+-- Ядро
+local lv = coop_levels
+local api = coop
+function give(peer)
+	if lv.key() then return end
+	if rawget(_G, "coop_levels").key() then return end
+	local t = api.levels
+	if t.split() then return end
+	if coop.levels["on_host_level"](peer) then return end
+	return coop_mode.where(peer) == "here"
+end

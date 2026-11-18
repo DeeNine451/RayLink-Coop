@@ -1,0 +1,4 @@
+-- hostplay: co-op menu answers
+function invite()
+	api.steam_invite()
+end

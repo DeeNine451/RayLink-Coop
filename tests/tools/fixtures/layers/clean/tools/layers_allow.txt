@@ -1,0 +1,4 @@
+# ceiling: 2
+# Fixture: today's mode checks of the clean tree (rule|path|code of the line|count).
+L2|engine/src/xrGame/coop/coop_net.cpp|if (mgr().is_host()) send_all();|1
+L5|engine/src/xrGame/alife_switch_manager.cpp|if (coop::levels::online_at_server(id)) return;|1

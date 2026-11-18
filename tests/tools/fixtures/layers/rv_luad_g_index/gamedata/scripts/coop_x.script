@@ -1,0 +1,3 @@
+function give()
+	if _G["coop_levels"].key() then return end
+end

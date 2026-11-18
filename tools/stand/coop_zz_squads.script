@@ -1,0 +1,272 @@
+-- Stand only (temp/stand/squads_group.ps1 puts it into the stand's gamedata and takes it away). 2026-11-18, step S0 of
+-- docs/plans/2026-11-18-two-modes.md, regression R1 of build 52 (issue 1293): squads made to appear near a co-op CLIENT, away
+-- from the host. In builds 52-54 every client of an ordinary co-op session crashed on such a squad
+-- (CSE_ALifeOnlineOfflineGroup::switch_online, R_ASSERT(!m_bOnline)). The client must stay alive and see the members.
+-- A process started with `-coop_probe <role>` runs the steps of its role and writes "[squads] <role> <step>: <result>".
+--   h  = the co-op host: waits until the client stands far from him, then makes two squads (sections of squads that
+--        already live on this level) on AI-map vertices 15-30 m from the client, the way the stock debug spawner does
+--        (alife_create + create_npc + setup_squad_and_group, coop_debug_cmds.script setup_squad), and writes the member
+--        ids into zz_squads_<token>.txt in the game's root
+--   ag = the client: moves himself 100-180 m away from the host onto an AI-map vertex, then reads that file and counts the
+--        members he has as live objects; "[squads] ag PASS" when every squad has at least one member seen and he is
+--        still alive 30 s later
+-- Lessons of the stand (2026-11-18): act only after coop.is_live(); a character only on a vertex of the AI map
+-- (level.vertex_id answers 4294967295 for "no vertex": search around the point).
+
+local ROLE = nil
+local TOKEN = "s0"
+local NO_VERTEX = 4294967295
+local FAR_M = 100      -- the client stands at least this far from the host before the squads come
+local SQUADS = 2
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[squads] " .. tostring(ROLE) .. " " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local function try(f, ...)
+	local ok, v = pcall(f, ...)
+	if ok then return v end
+	return nil
+end
+
+local function live()
+	local ok, yes = pcall(coop.is_live)
+	return ok and yes == true
+end
+
+local function file_path()
+	return getFS():update_path("$fs_root$", "zz_squads_" .. TOKEN .. ".txt")
+end
+
+-- A vertex of the AI map near (x, z) at height y: rings of growing radius around the point, nil when none.
+local function vertex_near(x, y, z, max_r)
+	for _, r in ipairs({ 0, 3, 6, 10, 15, 22, 30 }) do
+		if r > (max_r or 30) then break end
+		for k = 0, (r == 0 and 0 or 11) do
+			local a = k * math.pi / 6
+			local p = vector():set(x + math.cos(a) * r, y, z + math.sin(a) * r)
+			local id = try(level.vertex_id, p)
+			if id and id < NO_VERTEX then
+				return id, level.vertex_position(id)
+			end
+		end
+	end
+	return nil
+end
+
+local function other_player()
+	local ok, list = pcall(coop.players)
+	if not ok or type(list) ~= "table" then return nil end
+	for _, p in ipairs(list) do
+		if not p.is_self and p.avatar_id then
+			local o = level.object_by_id(p.avatar_id)
+			if o then return p, o end
+		end
+	end
+	return nil
+end
+
+local t0, done = nil, {}
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+-- ---------------------------------------------------------------- host
+
+local function squad_sections()
+	local seen, list = {}, {}
+	local board = rawget(_G, "SIMBOARD")
+	local sim = alife()
+	local here = try(function() return game_graph():vertex(sim:actor().m_game_vertex_id):level_id() end)
+	for id in pairs(board and board.squads or {}) do
+		local se = sim:object(id)
+		local sec = se and try(function() return se:section_name() end)
+		local lvl = se and try(function() return game_graph():vertex(se.m_game_vertex_id):level_id() end)
+		if sec and not seen[sec] and (here == nil or lvl == here) and not sec:find("trader") then
+			seen[sec] = true
+			list[#list + 1] = sec
+		end
+	end
+	table.sort(list)
+	return list
+end
+
+local function make_squad(sec, lv, pos)
+	local gv = level.vertex_game_vertex_id and try(level.vertex_game_vertex_id, lv) or db.actor:game_vertex_id()
+	local se = alife_create(sec, pos, lv, gv)
+	if not se then return nil, "alife_create failed" end
+	se:create_npc(nil, pos, lv, gv)
+	local ids = {}
+	local sim = alife()
+	for k in se:squad_members() do
+		local npc = k.object or (k.id and sim:object(k.id))
+		if npc then
+			pcall(function() SIMBOARD:setup_squad_and_group(npc) end)
+			pcall(SendScriptCallback, "squad_on_npc_creation", se, npc, nil)
+		end
+		ids[#ids + 1] = k.id
+	end
+	return se.id, ids
+end
+
+local function host_steps()
+	if done.made then
+		at("check", 45, function()
+			local player, avatar = other_player()
+			out("45 s after the squads: client in the session %s", tostring(player ~= nil))
+			out("done")
+			flush()
+		end)
+		return
+	end
+	local player, avatar = other_player()
+	if not avatar then return end
+	local d = avatar:position():distance_to(db.actor:position())
+	if not done.far then
+		if d < FAR_M then
+			if not done.wait_said then done.wait_said = true; out("waiting for the client to stand %d m away (now %.0f m)", FAR_M, d) end
+			return
+		end
+		done.far = time_global()
+		out("the client stands %.0f m away", d)
+		return
+	end
+	if time_global() - done.far < 5000 then return end -- let him settle on his vertex
+	done.made = true
+	t0 = time_global()
+	local secs = squad_sections()
+	out("squad sections living on this level: %d (%s)", #secs, table.concat(secs, ", ", 1, math.min(#secs, 8)))
+	if #secs == 0 then return out("! no squad section to use") end
+	local cp = avatar:position()
+	local lines = {}
+	for i = 1, SQUADS do
+		local sec = secs[(i - 1) % #secs + 1]
+		local a = (i - 1) * math.pi * 2 / SQUADS + 0.4
+		local lv, pos = vertex_near(cp.x + math.cos(a) * 20, cp.y, cp.z + math.sin(a) * 20, 30)
+		if not lv then
+			out("! squad %d: no AI-map vertex 20 m from the client", i)
+		else
+			local ok, sid, ids = pcall(make_squad, sec, lv, pos)
+			if ok and sid then
+				local dist = pos:distance_to(cp)
+				out("squad %d [%s] id %s at %.1f %.1f %.1f (%.0f m from the client, %.0f m from me): members %s", i, sec,
+					tostring(sid), pos.x, pos.y, pos.z, dist, pos:distance_to(db.actor:position()), table.concat(ids, " "))
+				lines[#lines + 1] = sec .. " " .. tostring(sid) .. " " .. table.concat(ids, " ")
+			else
+				out("! squad %d [%s]: %s", i, sec, tostring(ok and ids or sid))
+			end
+		end
+	end
+	local fh = io.open(file_path(), "w")
+	if fh then
+		fh:write(table.concat(lines, "\n") .. "\n")
+		fh:close()
+		out("wrote %d squad(s) for the client", #lines)
+	else
+		out("! cannot write %s", file_path())
+	end
+	flush()
+end
+
+-- ---------------------------------------------------------------- client
+
+local function read_squads()
+	local fh = io.open(file_path(), "r")
+	if not fh then return nil end
+	local list = {}
+	for line in fh:lines() do
+		local sec, sid, rest = line:match("^(%S+)%s+(%d+)%s*(.*)$")
+		if sec then
+			local ids = {}
+			for id in rest:gmatch("%d+") do ids[#ids + 1] = tonumber(id) end
+			list[#list + 1] = { sec = sec, id = tonumber(sid), members = ids }
+		end
+	end
+	fh:close()
+	return list
+end
+
+local function client_steps()
+	at("away", 6, function()
+		local player, avatar = other_player()
+		local hp = avatar and avatar:position() or db.actor:position()
+		local me = db.actor:position()
+		local base = math.atan2(me.z - hp.z, me.x - hp.x)
+		for _, r in ipairs({ 140, 120, 160, 180, 105 }) do
+			for k = 0, 11 do
+				local a = base + (k % 2 == 0 and 1 or -1) * math.floor((k + 1) / 2) * (math.pi / 6)
+				local lv, p = vertex_near(hp.x + math.cos(a) * r, hp.y, hp.z + math.sin(a) * r, 6)
+				if lv and math.abs(p.y - hp.y) < 25 then
+					db.actor:set_actor_position(vector():set(p.x, p.y + 0.3, p.z))
+					out("moved %.0f m from the host onto vertex %d (%.1f %.1f %.1f)", p:distance_to(hp), lv, p.x, p.y, p.z)
+					flush()
+					return
+				end
+			end
+		end
+		out("! no AI-map vertex 105-180 m from the host")
+	end)
+	if not done.away then return end
+	local list = done.squads
+	if not list then
+		list = read_squads()
+		if not list or #list == 0 then return end
+		done.squads = list
+		done.seen_at = time_global()
+		out("the host made %d squad(s) near me", #list)
+	end
+	-- count what is live here, every 2 s for 40 s
+	if time_global() - (done.count_at or 0) < 2000 then return end
+	done.count_at = time_global()
+	local all_seen = true
+	local text = {}
+	for _, sq in ipairs(list) do
+		local n = 0
+		for _, id in ipairs(sq.members) do
+			local o = level.object_by_id(id)
+			if o and try(function() return o:alive() end) then n = n + 1 end
+		end
+		sq.best = math.max(sq.best or 0, n)
+		if sq.best == 0 then all_seen = false end
+		text[#text + 1] = string.format("%s %d/%d", sq.sec, n, #sq.members)
+	end
+	local since = (time_global() - done.seen_at) / 1000
+	if not done.reported or since - done.reported >= 10 then
+		done.reported = since
+		out("%.0f s: members live here: %s", since, table.concat(text, ", "))
+		flush()
+	end
+	if since >= 40 and not done.verdict then
+		done.verdict = true
+		if all_seen then out("PASS: every squad has members live here, the client is alive 40 s after") else
+			out("FAIL: a squad has no member live here") end
+		out("done")
+		flush()
+	end
+end
+
+local function actor_on_update()
+	if not (db.actor and live()) then return end
+	local ok, list = pcall(coop.players)
+	if not ok or type(list) ~= "table" or #list < 2 then return end
+	if not t0 then
+		t0 = time_global()
+		out("two players, the session is live: the steps start")
+	end
+	if ROLE == "h" then host_steps() else client_steps() end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	if ROLE ~= "h" and ROLE ~= "ag" then return end
+	TOKEN = ok and line:match("%-zz_token%s+(%w+)") or TOKEN
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	printf("%s", "[squads] " .. ROLE .. " armed")
+end

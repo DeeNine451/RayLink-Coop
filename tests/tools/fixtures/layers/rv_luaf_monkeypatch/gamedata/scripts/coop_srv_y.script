@@ -1,0 +1,1 @@
+coop_items.pick = function() return false end

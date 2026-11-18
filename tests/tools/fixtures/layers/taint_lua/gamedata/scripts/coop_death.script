@@ -1,0 +1,22 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+local api = coop
+
+local function authority()
+	return api.is_dedicated() and true
+end
+
+local split = coop.levels.split
+
+local function judge()
+	return authority()
+end
+
+function on_death(id)
+	if judge() then
+		return false
+	end
+	if split() then
+		return false
+	end
+	return id ~= 0
+end

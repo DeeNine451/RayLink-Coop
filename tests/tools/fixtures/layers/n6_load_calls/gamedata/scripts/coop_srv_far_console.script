@@ -1,0 +1,6 @@
+-- srv: lighter AI on the world server
+function on_game_start()
+	exec_console_cmd("ai_use_old_vision 1")
+	get_console():execute("coop_viewer_range 50")
+	simulation_objects.max_squads = 2
+end

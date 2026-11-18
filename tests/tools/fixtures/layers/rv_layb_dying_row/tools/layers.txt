@@ -1,0 +1,16 @@
+# Fixture for tests/tools/test_layers.py: a tiny tree with one file of every layer.
+# <layer> <glob>; the last matching row wins; a path no row matches is core.
+stock-list tools/stock_files.txt
+stock engine/src/**
+core engine/src/xrGame/coop/**
+core engine/src/xrCoop/**
+srv engine/src/xrGame/coop/coop_mapserver.cpp
+srv engine/src/xrGame/coop/coop_levels_far.cpp
+srv engine/src/xrCoop/coop_scope.h
+hostplay engine/src/xrCoop/coop_local_link.h
+dying engine/src/xrCoop/coop_soft_move.h
+srv gamedata/scripts/coop_levels.script
+srv gamedata/scripts/coop_srv_*.script
+hostplay gamedata/scripts/coop_hostplay_*.script
+gate-core gamedata/scripts/coop_levels.script
+dying engine/src/xrGame/coop/coop_x.cpp

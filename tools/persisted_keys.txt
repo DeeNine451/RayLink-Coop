@@ -1,0 +1,57 @@
+# Saved names that must never disappear from gamedata/scripts (docs/MODES.md rule 10; tools/check_layers.py L10).
+# <kind> <key>: record = world record key c|<cvar>, pstor = save_var/load_var name, mdata = m_data field of a
+# save_state, event = add_event_handler name. L10 fails when the key (for c|x: x) appears in no script any more.
+# c|coop_world_server is the only mark of a server world: the card's "world_server" (coop_json_card.script:27,81),
+# the launcher's "Start server" (list.rs:117) and the world server's own save check (coop_dedicated.script:162-171).
+# Generated 2026-11-18 by temp/modes_s1/gen_keys.py; add new saved names by hand, never remove one.
+record c|coop_autosave_count
+record c|coop_autosave_interval
+record c|coop_bleedout
+record c|coop_checkpoints_group
+record c|coop_contusion
+record c|coop_death_drop
+record c|coop_death_mode
+record c|coop_death_money
+record c|coop_death_rank
+record c|coop_death_share
+record c|coop_death_wear
+record c|coop_friendly_fire
+record c|coop_hardcore_new_kit
+record c|coop_max_new_characters
+record c|coop_npc_finish_downed
+record c|coop_respawn_delay
+record c|coop_revive_health
+record c|coop_share_rewards
+record c|coop_split_levels
+record c|coop_story_together
+record c|coop_world_server
+pstor coop_lost_gives
+mdata coop_arena
+mdata coop_arena_gear
+mdata coop_game
+mdata coop_loot_claims
+mdata coop_mods_pdata
+mdata coop_npc_last_leaders
+mdata coop_npc_leaders
+mdata coop_npc_mines
+mdata coop_npc_peace_crime
+mdata coop_quest_spawns
+mdata coop_reward_group
+mdata coop_scorcher
+mdata coop_sync
+mdata coop_task_fx
+mdata coop_task_fx_done
+event coop_env
+event coop_env_cover
+event coop_env_kill
+event coop_env_npc_kill
+event coop_env_req
+event coop_rep_map
+event coop_rep_map_ack
+event coop_set
+event coop_set_req
+# Build 57, phase 4 units (added by the lead 2026-11-18): G1-1, G13-2, G3-1
+mdata coop_gamma_trading_choices
+mdata coop_npc_relations_v1
+mdata coop_weapon_camo
+mdata coop_weapon_jam

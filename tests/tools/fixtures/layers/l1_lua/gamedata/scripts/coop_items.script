@@ -1,0 +1,15 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+local LIMIT = 3
+
+local function may_pick(owner, me)
+	return owner == 0 or owner == me
+end
+
+function pick(peer, owner, me)
+	if coop_mode.where(peer) ~= "here" then
+		return false
+	end
+	if coop.levels.split() then return false end
+	local text = "coop.levels.split() in a string is not code" -- coop.is_map_server() in a comment
+	return may_pick(owner, me) and LIMIT > 0 and text ~= nil
+end

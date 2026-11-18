@@ -1,0 +1,9 @@
+-- srv: world facts
+local state = {}
+counter = 0
+function on_game_start()
+	db.coop_far_world = true -- when_srv ran too late on fresh worlds
+	state.started = true
+	counter = counter + 1
+	coop_mode.when_srv(function() db.coop_far_seen = true end)
+end

@@ -187,62 +187,139 @@
 
 ### `tools/check_layers.py`
 
-Запуск: `python -I tools\check_layers.py`. Устроен как уже работающий `tools/check_actor_compare.py`: список разрешённых
-строк `путь|строка|счётчик` без номеров строк, потолок только вниз, тесты в `tests/tools/test_layers.py` на файлах-примерах.
+Запуск: `python -I tools\check_layers.py` (или `tools\check_all.cmd`). Устроен как уже работающий
+`tools/check_actor_compare.py`: список разрешённых строк `правило|путь|строка|счётчик` без номеров строк (строка — код без
+комментариев, строки в кавычках сохранены), потолок только вниз, тесты в `tests/tools/test_layers.py` на деревьях-примерах
+`tests/tools/fixtures/layers/` (запуск `python -m pytest tests\tools\test_layers.py -q`: pytest стоит в пользовательском
+site-packages, ключ `-I` его прячет).
 
 Входные файлы:
 
 | Файл | Что в нём |
 |---|---|
-| `tools/layers.txt` | слой каждого файла, маски по порядку, последняя совпавшая побеждает. По умолчанию всё `core`. Строки `hostplay`, `srv`, `stock` (55 файлов с хуками) |
-| `tools/layers_allow.txt` | сегодняшние нарушения. Первая строка `# ceiling: N`. Шаг миграции удаляет строки и **в том же коммите** снижает N |
-| `tools/srv_entry.txt` | серверные функции, которые зовут сток и Ядро (`online_at_server`, `logic_may_update`, `xfer_scheduled`, `xfer_on_switched_offline`, `leader_takes_ids`, `leader_free_id`, `levels::frame`) |
+| `tools/layers.txt` | слой каждого файла, маски по порядку, последняя совпавшая побеждает. Файл, которого не назвала ни одна строка, — `core`. Строки `hostplay`, `srv`, `dying` (гибрид до S2; действует только для пяти файлов `DYING_FROZEN` в `check_layers.py`: строка `dying` на другой файл не работает), `stock engine/src/**` и `gate-core` (только для `check_gates.py`: 9 серверных скриптов до S4, H4). Строка `stock-list tools/stock_files.txt` обязательна, если есть `stock` |
+| `tools/stock_files.txt` | файлы GSC как они пришли: коммит движка `ad9d8416` (2026-09-12, последний перед нашей работой), 4217 файлов C++ без «3rd party». Строка `stock` действует **только** на них: **новый наш файл где угодно в `engine/src` (например `xrGame/ui/…`) — `core`, а не сток**. Скрипт `gamedata/scripts/coop_*.script` без строки — тоже `core`; `coop_srv_*` / `coop_hostplay_*` — по приставке |
+| `tools/layers_allow.txt` | сегодняшние нарушения. Первая строка `# ceiling: N`, N — сумма счётчиков. Шаг миграции удаляет строки и **в том же коммите** снижает N (`--write-allow` делает и то и другое) |
+| `tools/srv_entry.txt` | серверные функции, которые зовут сток и Ядро (`online_at_server`, `logic_may_update`, `xfer_scheduled`, `xfer_on_switched_offline`, `leader_takes_ids`, `leader_free_id`, `levels::frame`, `mapserver::host_incoming` — `coop_levels.cpp:505` на каждое входящее сообщение кооп-хоста, `mapserver_stats_frame` — `coop_manager.cpp:910` каждый кадр). Список — явная часть: проверка сама находит любую функцию, определённую только в файле `srv`/`hostplay`, которую зовёт Ядро или сток (L3, L5, `check_gates.py`) |
 | `tools/persisted_keys.txt` | сохранённые ключи, которые не могут исчезнуть из скриптов |
+
+Что читается: `engine/src` (без «3rd party»), `gamedata/scripts/*.script`, а как сток-Lua — `engine/gamedata/scripts/*.script`
+и `gamedata_gamma/scripts/*.script` (правленые стоковые скрипты и слой GAMMA: `axr_main` выполняет уровень файла и
+`on_game_start` каждого скрипта в каждом процессе). Для ворот (`core_reach`) ещё конфиги `gamedata/configs`,
+`engine/gamedata/configs`, `gamedata_gamma/configs` (`*.ltx` без `;`-комментариев, `*.xml` без `<!-- -->`).
 
 Правила:
 
 | Правило | Где | Падает, когда |
 |---|---|---|
-| L1 имя режима | Ядро, C++ и Lua | строка кода (без комментариев и строк) называет запрещённое имя из раздела 3, правило 1, **или функцию, которая его возвращает**: обёртка заражается, по цепочке, в пределах файла для Lua-локалей и по полному имени для C++. Простой поиск `return … is_map_server() / dedicated::on() / levels::split() / ghost_actor()` уже находит 9 таких обёрток в `xrGame/coop` |
-| L2 перегруженная роль | Ядро | новая строка с `is_host(`, `is_client(`, `is_map_authority(` (Lua: `is_world_server(`, `is_host(`) |
-| L3 ссылка через слой | Ядро → `hostplay`/`srv`; `hostplay` ↔ `srv` | `#include` файла другого слоя, Lua-имя `coop_hostplay_…` / `coop_srv_…`, `mod("…")` такого модуля. Фасад `coop_mode` разрешён |
-| L4 умолчание режима | Ядро, заголовки | параметр или поле с именем, где есть `level`, `split`, `host`, `here`, `plays`, `server`, `elsewhere`, имеет `= значение` |
-| L5 хук в стоке | `stock` | новая строка, которая называет `coop::`, `g_coop_headless`, `g_coop_dedicated` и которой нет в разрешённых |
-| L6 надгробия гибрида | везде | упоминание удалённого: `coop_soft_move`, `softmove::`, `story_together`, `coop_world_wait`, `coop_world_server.h`, `HostProcess`, `led_by_host_process` |
-| L7 локали Lua | все скрипты | в файле больше 190 локалей (предел Lua — 200) |
+| L1 имя режима | Ядро, C++ и Lua | строка кода (без комментариев и строк) называет запрещённое имя из раздела 3, правило 1 и консольные переменные режима (`g_coop_split_levels`, `g_coop_world_server`, `g_coop_story_together`, `g_coop_soft_host_move`, `g_coop_max_map_servers`, `g_coop_map_servers_rev`, `g_coop_mapserver_*`), `world_server_now(`, `game_split(`, `has_role(ProcessRole::WorldServer / MapAuthority / MapServer`, `using namespace …dedicated / …mapserver` и псевдоним `namespace d = coop::dedicated;`; строку `"-coop_mapserver"`, `"-coop_dedicated"`, `"-coop_host"`, `"-coop_operator"`, `"-coop_hidden"`, `"-coop_stage"` (проба командной строки); макрос, тело которого называет режим (в любом нашем файле, и в серверном заголовке); в Lua — и имена C++ из того же списка, **или функцию, которая его возвращает**: обёртка заражается по `return` и по короткому (до двух `;` / трёх строк) телу, по цепочке; `void`-функция не заражает (команда — не вопрос режима); C++ — по последнему квалификатору (`levels::leads_here(`, псевдонимы пространств `namespace lv = coop::levels` разворачиваются) и голым именем в своём файле, своих пространствах и подключённых `using namespace`; Lua — в пределах файла (локали, псевдонимы `local split = coop.levels.split`), как `скрипт.fn(` из других файлов, через псевдоним таблицы (`local L = coop.levels; L.split()`, `local l = api.levels`) и через поле в скобках (`coop.levels["split"]()`) |
+| L2 обёртки ролей | Ядро | обёртка `is_host(` / `is_client(` / `is_map_authority(` (Lua `is_world_server(` / `is_host(`) заражается так же, её вызов — L2. Функция с именем самого предиката или роли не заражается (её вызовы находятся по имени) |
+| L2 перегруженная роль | Ядро | новая строка с `is_host(`, `is_client(`, `is_map_authority(`, `has_role(ProcessRole::WorldClient` (Lua: `is_world_server(`, `is_host(`). `has_role(ProcessRole::Player)` — это `is_player()`, один смысл в обоих режимах, не нарушение |
+| L3 ссылка через слой | Ядро и сток → `hostplay`/`srv`; `hostplay` ↔ `srv` | `#include` файла другого слоя (в Ядре и `#include` макроса: слой файла не проверить), Lua-имя `скрипт.fn` / `mod("…")` / `rawget(_G, "…")` / `_G["…"]` / `module_of` / `call_module` / псевдоним `local lv = coop_levels` скрипта другого слоя (по `layers.txt`, не только по префиксу; и из сток-Lua), вызов (или адрес, `&coop::levels::f`) функции из `srv_entry.txt` и **любой функции, определённой только в файлах другого слоя** (индекс определений: `q::f`, голое `f(` в своих и подключённых пространствах; функция, которую определяет и Ядро, не считается); **строка C++ с именем скрипта другого слоя** (`lua_getglobal(L, "coop_dedicated")`); **`extern` глобала, который определён только в `srv`/`hostplay`**; в файле `srv`/`hostplay` — **определение члена класса, который определяют только Ядро или сток** (`bool coop::FarPolicy::keep_online(…)`: Ядро зовёт его через объект). Фасад `coop_mode` разрешён |
+| L4 умолчание режима | Ядро, все файлы C++ | параметр или поле (не `static` / `constexpr`) **типа `bool`** имеет `= значение`, и в его имени есть слово `level(s)`, `split`, `host(s)`, `here`, `plays`, `server(s)`, `elsewhere` или в комментарии строки — `split`, `map server`, `world server`, `dedicated`, `hybrid`. Умолчания других типов — данные (`uint16_t level = kNoLevel`). Поле в `.cpp` считается только с `= true`: `bool here = false;` строки данных своего файла — безопасное значение; в заголовках и у параметров — всегда |
+| L5 хук в стоке | `stock` | новая строка, которая называет предикат режима (список L1, в том числе `g_coop_headless`, `g_coop_dedicated`), `coop_console::`, функцию из `srv_entry.txt`, функцию, определённую только в `srv`/`hostplay` (и в файле стока без байтов `coop`), или заражённую обёртку L1 и которой нет в разрешённых; в сток-Lua — предикат режима. Хук в функцию Ядра (`coop::players::own_condition_held(this)`) — **не** L5: правка стока для `check_gates.py` и так правка Ядра |
+| L6 надгробия гибрида | везде | упоминание удалённого: `coop_soft_move`, `softmove::`, `story_together` (и внутри `g_coop_story_together`), `coop_world_wait`, `coop_world_server.h`, `HostProcess`, `led_by_host_process` |
+| L7 локали Lua | все скрипты | в файле больше 190 локалей (предел Lua — 200); каждая локаль сверх 190 — одна строка списка (`coop_tasks.script` сегодня 197) |
 | L8 Steam | всё, кроме `hostplay` и `x_ray.cpp` | `Steam`, `RAYLINK_STEAM_`, `steam_invite`, `steam_join` |
-| L9 регистрация в `srv`-скрипте | `coop_srv_*.script` | `RegisterScriptCallback`, `xr_conditions.X =`, `xr_effects.X =`, `add_event_handler` на верхнем уровне файла, а не внутри `coop_mode.when_srv(...)` |
+| L9 регистрация в `srv`-скрипте | `srv`-скрипты | вне `coop_mode.when_srv(...)`: `RegisterScriptCallback` (и через псевдоним `local reg = RegisterScriptCallback`), поле `xr_conditions` / `xr_effects` / `xr_logic` через `.X =`, `["X"] =`, `rawset(…)` или псевдоним таблицы, `add_event_handler`; **запись в любую не свою таблицу** — скрипта Ядра, `hostplay`, стока, в том числе не из репозитория (`sim_board`, `smart_terrain`), `db.флаг = true`, глобал через `_G`; своими считаются локали, параметры, переменные `for`, `self`, свои классы (`class "x"`), глобалы уровня файла и сам скрипт; **любой вызов при загрузке** — на уровне файла или прямо в `on_game_start` (`CreateTimeEvent`, `AddUniqueCall`, `level.add_call`, `exec_console_cmd`, `get_console():execute`, сеттер Ядра); чистые чтения не считаются (`rawget`, `type`, `pairs`, `tostring`, `tonumber`, `string.*`, `math.*`, `setmetatable`, `class`, `table.insert` в свою таблицу) |
+| L9C статическая инициализация | C++ `srv`/`hostplay` | переменная уровня пространства имён, чей инициализатор зовёт функцию (`static const bool registered = (coop::hooks::set_skip(&far_skip), true);`): она выполняется в каждом процессе, и у кооп-хоста. Регистрироваться — из init режима через `mode()`. `constexpr` — не вызов |
 | L10 сохранённый ключ | скрипты | ключ из `persisted_keys.txt` пропал из скриптов |
 
 Пометки-исключения вида `layer-ok: причина` **нет**: это был бы простой обход проверки.
 
-Что печатает:
+Что печатает (строка на нарушение, предупреждения о лишних строках списка, итог):
 
 ```
-layers: OK  core 0 new | allow 1234/1234 used (ceiling 1234) | stale 0 | cross 0 | stock 0 new
+check_layers: OK (4607 files, ceiling 2335, used 2335)
 ```
 
 ```
-layers: FAIL L1 core engine/src/xrGame/coop/coop_net.cpp:109 'is_map_server(' — Ядро never asks the mode; move the branch into hostplay/ or srv/ behind coop_mode (docs/MODES.md §3)
-layers: 1 new violation(s)
+engine/src/xrGame/coop/coop_net.cpp:109: [L1] if (is_map_server()) return; ('is_map_server') — Ядро never asks the mode; move the branch into hostplay/ or srv/ behind coop_mode (docs/MODES.md §3 rule 1)
+check_layers: FAIL (1)
 ```
 
-Коды выхода: 0 — чисто, 1 — нарушения, 2 — нет входного файла. `--write-allow` переписывает список и отказывает, если
-строк больше потолка.
+Коды выхода: 0 — чисто, 1 — нарушения, 2 — нет входного файла (и `stock` без `stock-list`). `--write-allow` переписывает
+список (отсортированно: одно дерево — один файл) и ставит потолок = сумма; без `--reset-ceiling` он только снижает:
+отказывается от **новой** строки и от выросшего счётчика, даже если сумма под потолком (иначе убранную разрешённую строку
+можно было бы обменять на новую проверку режима), и от потолка выше прежнего. `--reset-ceiling` ставит только ведущая после
+просмотра добавленных строк. `--top N` печатает N файлов Ядра с наибольшим числом строк L1+L2 и числа по правилам.
 
-Где запускается: первым делом в `tools\build_tests.cmd` и `tools\test_lua.cmd` (ошибка останавливает сборку тестов),
-в `tools/release.py --channel dev verify` (ошибка блокирует черновик выпуска), в `tests/tools/test_layers.py`.
+Потолок 2308 (2026-11-18, `--write-allow --reset-ceiling` на рабочем дереве): правила этого дня поменяли ключи списка —
+L5 больше не считает хуки в функции Ядра (−557), L4 не считает умолчания не `bool` (−16), вызовы `void`-функций больше не
+L1/L2, а новые предикаты и псевдонимы (L1 +134), индекс серверных функций (L3 +176), правка чужих таблиц и псевдонимы
+регистрации (L9 +17) добавили строки. Прежний список 2570 к новым ключам не подходит: с ним проверка даёт FAIL (347), а
+`--write-allow` без `--reset-ceiling` отказывает (324 новые или выросшие строки). 9 строк из 2308 — незакоммиченная работа
+других исполнителей (`coop_story.cpp:1203`, `coop_quests_trust.script`, `coop_economy_mdata.script`,
+`coop_npc_world.script`, `coop_tasks.script`): это новые проверки режима в Ядре; на HEAD без неё потолок 2301.
+
+Потолок 2335 (2026-11-18, второе ревью, `--write-allow --reset-ceiling` на рабочем дереве; без `--reset-ceiling` отказ:
+36 новых строк): +37 L9 — серверные скрипты сегодня делают при загрузке в каждом процессе то, что должно быть внутри
+`when_srv` (`coop_scorcher.script:417` ставит функции условий, `coop_storyline.script:1474`, `coop_levels_tables.script:259`
+… `share.up/down`, `coop_quests_far.script:1101` подписки `q.on`, записи `db.anomaly_by_name` / `db.actor_inside_zones`),
++1 L3 — `coop_join.cpp:1143 lua_getglobal(L, "coop_dedicated")`; −11 L4 — поля `bool … = false` в `.cpp`
+(`BaseSeen::here` и подобные). По правилам: L1 817, L2 923, L3 240, L4 16, L5 131, L6 77, L7 7, L8 35, L9 89, L9C 0.
+Статических инициализаторов с вызовом, `extern` серверных глобалов и членов классов Ядра в файлах `srv` сегодня нет.
+
+Где запускается: сейчас — `tools\check_all.cmd` (сам по себе), `tools/release.py --channel dev --build <N> verify` (ошибка
+блокирует черновик выпуска), `tests/tools/test_layers.py`. Первой строкой в `tools\build_tests.cmd` и `tools\test_lua.cmd`
+его ставит ведущая, когда закоммичена работа, начатая до шага S1, и потолок пересчитан.
 
 ### `tools/check_gates.py`
 
-Запуск из `release.py verify`: `python -I tools\check_gates.py <прошлый тег>..HEAD` в обоих репозиториях. Для каждого
-коммита определяет слой по `layers.txt`; таблицы маршрутов — классификатором разницы (только `host` ↔ `level` → `srv`,
-всё остальное → Ядро). Требует метки стендов `temp\b<N>\stand-hostplay.ok` и `stand-srv.ok` с номером сборки exe и
-хешами коммитов, на которых стенд прошёл. Коммит, который трогает и `hostplay`, и `srv` без Ядра, отклоняется
-(«раздели коммит»). Поднятый потолок печатается предупреждением в заметки выпуска.
+Запуск из `release.py verify`: `python -I tools\check_gates.py <прошлый тег>..HEAD --exe <выпускаемый exe>` в обоих
+репозиториях (тег движка указывает на публичный снимок — диапазон движка начинается с его «Source tree»); без диапазона —
+рабочее дерево против HEAD. Переименование считается обоими путями (`git --no-renames`): перенос файла Ядра под имя
+`coop_srv_*` — правка Ядра. Коммит слияния считается разницей со своим первым родителем (`--diff-merges=first-parent`):
+правка, сделанная при слиянии, видна; коммиты боковой ветки проверяются каждый сам. Для каждого коммита определяет слой
+по `layers.txt` (через `check_layers.py`); таблицы маршрутов — классификатором разницы (только `host` ↔ `level` → `srv`,
+всё остальное → Ядро). **Ядром** для ворот считаются:
+
+- списки и проверки, которые решают слой и ворота: `tools/layers.txt`, `layers_allow.txt`, `srv_entry.txt`,
+  `persisted_keys.txt`, `stock_files.txt`, `check_layers.py`, `check_gates.py`, `release.py`, `stand_common.ps1`,
+  `stand_hostplay.ps1`, `stand_srv.ps1` (одна строка `srv …` в `layers.txt` иначе превращала бы файл Ядра в серверный);
+  прогонщики кооп-тестов `tools/test_lua.cmd`, `tools/build_tests.cmd`, `tests/lua/run_all.lua`; сценарии и пробы
+  стендов — всё в `tools/stand/` и `tools/ded_check.ps1`;
+- файл со строками в `layers_allow.txt`, сток, `dying`, `coop_protocol.h`, строки `gate-core`, файл, где определена
+  функция из `srv_entry.txt`;
+- файл `srv` или `hostplay`, до которого дотягивается Ядро, сток (и сток-Lua `engine/gamedata/scripts`,
+  `gamedata_gamma/scripts`) или `dying` (`check_layers.core_reach`, по рабочему дереву): его включают (`#include`, по
+  цепочке), в нём определена функция, которую зовут (`mapserver::host_incoming`, `mapserver_stats_frame`,
+  `levels::logic_may_update` …; функция с тем же именем в Ядре не считается), его скрипт называют (Lua, строка C++
+  `lua_getglobal(L, "coop_dedicated")`, конфиг `<precondition>coop_x.fn</precondition>`), в нём определён глобал, который
+  Ядро объявляет `extern`, или член класса, который определяют только Ядро и сток, или в нём статический инициализатор с
+  вызовом (работает в каждом процессе). Дальше — **до неподвижной точки**: всё, что включает, зовёт или называет уже
+  достигнутый файл (и файлы `gate-core` / `srv_entry.txt`), тоже достигнуто. На 2026-11-18 это 37 из 38 файлов
+  `srv`/`hostplay` (последний, `coop_levels_tables.script`, — `gate-core`): **только-серверных файлов для ворот сегодня
+  нет**. `coop_levels_keeper.h` достигнут через `coop_levels_xfer.cpp` (его `marked()` держит `online_at_server()`
+  молчащим у кооп-хоста, а её зовёт сток), `coop_xfer*.h` — через него же. Так и должно быть до S4: этот код сегодня
+  работает и в кооп-процессе.
+
+Продукт для ворот: `gamedata/`, `gamedata_gamma/`, `engine/src/`, `engine/gamedata/` (правка `engine/README.md` или CI
+движка стенда не требует). Все вызовы git идут с `core.quotePath=false`; путь в кавычках — ошибка ворот (код 2), а не
+«вне продукта».
+
+Требует метки стендов `temp\gates\hostplay.ok` и `temp\gates\srv.ok` (их пишут `tools\stand_hostplay.ps1` /
+`stand_srv.ps1`). Стенд гоняет **HEAD**: прогонщик сначала выкладывает на стенд gamedata из `git archive HEAD` обоих
+репозиториев (`tools\stand\stand_head.py`: слой Engine, сверху Core, сверху GAMMA; файл Engine, который на стенде
+перекрывает мод по `.raylink-stand.json`, не трогается; `axr_options.ltx` не трогается; заменённое — в
+`temp\stand\head_backup`) и отказывается стартовать, пока в рабочем дереве есть изменения продукта или сценарий
+отличается от HEAD; после сценариев сверяет, что на стенде всё ещё gamedata HEAD и ничего не сдвинулось. Сценарии и пробы
+лежат в отслеживаемой `tools\stand\` (`temp\stand` — только история прогонов). Метка считается, только если в ней `mode=`
+своего стенда, `dirty=0`, в `scenarios=` все сценарии своего стенда (`check_gates.SCENARIOS`, тест сверяет их со списками
+в `stand_*.ps1`), совпали оба HEAD и SHA-256 exe, а `scenarios_sha256` (файлы сценариев, что отработали) и
+`gamedata_sha256` (выложенная gamedata) совпали с пересчётом из блобов HEAD; незакоммиченные файлы продукта метка не
+покрывает. Коммит, который трогает и `hostplay`, и `srv` без Ядра, отклоняется («раздели коммит»; слияние — нет). Правка
+только `srv` ещё требует неизменного **набора** кооп-тестов (имена `TEST(…)` в `tests/*.cpp` и файлы
+`tests/lua/test_*.lua`, кроме `test_srv_*`) и **ни одной правки** в `tests/` и прогонщиках кроме файлов `test_srv_*`
+(тела тестов и вспомогательные файлы тоже).
 
 ```
-gates: 37 commits — core 5 (stand-hostplay.ok b58 OK, stand-srv.ok b58 OK), srv 21, hostplay 11, refused 0
+gates: dev-42.1..HEAD (mod fb8aa080, engine 99f74ddc), 172 commit(s)
+gates: core 482 file(s), srv 0, hostplay 0, outside the product 299
+gates: required: hostplay.ok, srv.ok
+gates: hostplay.ok missing (run tools\stand_hostplay.ps1)
+gates: srv.ok does not count: the stand ran a dirty tree (dirty=3): its exe may hold uncommitted code
+gates: FAIL (2)
 ```
 
 ### Как это не даёт «чинили сервер — сломали кооп»
@@ -253,7 +330,13 @@ gates: 37 commits — core 5 (stand-hostplay.ok b58 OK, stand-srv.ok b58 OK), sr
 | Серверная проверка, спрятанная в обёртку (`authority()`, `ghost()`) | L1 с заражением |
 | Аргумент по умолчанию, который в коопе значит не то (R1) | L4 — гигиена; **поймает** R1 кооп-стенд `squads_group` и нативный тест `placement` под набором `hostplay` |
 | Серверный скрипт, который заодно меняет кооп-условия и кадры | L9 + правило «до S4 эти файлы — Ядро» |
-| Хук в стоке, который зовёт серверную функцию в кооп-процессе | L5 + `srv_entry.txt` + вызов через `mode()` |
+| Хук в стоке, который зовёт серверную функцию в кооп-процессе | L5 + `srv_entry.txt` + индекс серверных функций + вызов через `mode()` |
+| Правка серверного заголовка, который включает Ядро, или серверной функции, которую зовёт Ядро (`host_incoming`, `mapserver_stats_frame`) | `check_gates.py` считает такой файл Ядром: оба стенда |
+| Переименование файла Ядра в `coop_srv_*`, правка при слиянии, строка `srv …` в `layers.txt` | `check_gates.py`: старый путь считается, слияние — разницей с первым родителем, списки и проверки — Ядро |
+| Правка серверного заголовка, который включает только достигнутый серверный `.cpp` (`Keeper::marked()` под `online_at_server`), члена класса Ядра в серверном файле, серверного глобала под `extern`, статической регистрации, серверного скрипта, который Ядро зовёт из C++ строкой, конфиг — из диалога, `axr_main` — из сток-Lua | `core_reach` до неподвижной точки и новые источники: оба стенда; в Ядре — L3, в серверном файле — L3 / L9C |
+| Серверный скрипт при загрузке патчит не свою таблицу (`sim_board`, `db.флаг`) или зовёт таймер, консоль, сеттер Ядра | L9 |
+| Серверная правка ослабляет тело кооп-теста или прогонщик Lua | ворота: правка `tests/` кроме `test_srv_*` в серверной правке — отказ; прогонщики — Ядро |
+| Метка стенда, который гонял старые сценарии или старую gamedata | сценарии в `tools/stand` (Ядро), стенд сам выкладывает HEAD; `scenarios_sha256` и `gamedata_sha256` сверяются с HEAD |
 | Правка стока, маршрута, протокола без единой проверки режима (`88a20a9b`, R4, R5) | правило 8 → `check_gates.py` требует оба стенда |
 | Поломка вне сессии (R2, R3) | набор ответов `none` в тестах и одиночная игра в кооп-стенде |
 | Скрытые условия по данным (`who:id() ~= db.actor:id()`, `link.plays`) | статическая проверка их не видит. Только оба стенда |
@@ -346,20 +429,31 @@ gates: 37 commits — core 5 (stand-hostplay.ok b58 OK, stand-srv.ok b58 OK), sr
 | G | `python -I tools\check_layers.py` | раздел 5 |
 | N | `tools\build_tests.cmd` | нативные тесты; тесты Ядра под наборами ответов `hostplay`, `srv`, `none` (`MODE_CASES`) |
 | L | `tools\test_lua.cmd` | Lua-тесты; файл Ядра гоняется под каждым набором (`COOP_LUA_MODE`), файл режима — под своим |
-| SC | `powershell -File tools\stand_hostplay.ps1` | стенд Коопа: `carry_group`, `base_group`, `sil_group`, `squads_group` (отряды рядом с клиентом, R1), одиночная игра: загрузка и перезагрузка без `-coop_host`. Пишет `temp\b<N>\stand-hostplay.ok` |
-| SS | `powershell -File tools\stand_srv.ps1` | стенд Сервера: `ded_check -World new`, `base_server`, `carry_server`, `taskboard_ws`. Пишет `temp\b<N>\stand-srv.ok` |
-| R | `python tools\release.py --channel dev verify` | G + `check_gates.py` + проверки пакета |
+| SC | `powershell -ExecutionPolicy Bypass -File tools\stand_hostplay.ps1 -Tag b<N>` | стенд Коопа: выкладывает gamedata HEAD, затем `carry_group`, `base_group`, `sil_group`, `squads_group` (отряды рядом с клиентом, R1), `sp_smoke` (одиночная игра без ключей `-coop_`: новая игра, сохранение, загрузка, минута) из `tools\stand`. Пишет `temp\gates\hostplay.ok` |
+| SS | `powershell -ExecutionPolicy Bypass -File tools\stand_srv.ps1 -Tag b<N>` | стенд Сервера: выкладывает gamedata HEAD, затем `ded_check -World new`, `base_server`, `carry_server`, `taskboard_ws` из `tools\stand`. Пишет `temp\gates\srv.ok` |
+| R | `python -I tools\release.py --channel dev --build <N> verify` | G + `check_gates.py` + проверки пакета |
 
 Стенд — только `E:\RayLinkGames\GAMMA\game-dev`. Живая игра владельца не трогается.
 
 | Что меняется | Нужно |
 |---|---|
-| Ядро (включая сток, маршруты кроме `host`↔`level`, протокол, файлы из `layers_allow.txt`) | G N L SC SS на одном exe |
-| Только `srv` | G N L SS; число тестов Коопа не изменилось; SC зелёный на той же сборке |
+| Ядро (включая сток, маршруты кроме `host`↔`level`, протокол, файлы из `layers_allow.txt`, списки и проверки `tools/` из раздела 5, файлы `srv`/`hostplay`, которые Ядро включает или зовёт) | G N L SC SS на одном exe |
+| Только `srv` | G N L SS; набор кооп-тестов (имена) не изменился, в `tests/` правлены только файлы `test_srv_*`; SC зелёный на той же сборке. Сегодня (до S4) Ядро достигает 37 из 38 серверных файлов, последний — `gate-core`: любая правка серверного файла требует обоих стендов |
 | Только `hostplay` | G N L SC |
 | `hostplay` и `srv` в одном коммите без Ядра | отказ: разделить коммит |
 
 Прогоны стендов собираются пачкой на dev-сборку (около 20-30 минут стенда), а не на каждый коммит. Выпуск без
-меток `.ok` для слоёв, которые менялись, `release.py verify` не пропускает.
+меток `.ok` для слоёв, которые менялись, `release.py verify` не пропускает. Метка считается только полная (все сценарии
+стенда), со своим `mode=`, `dirty=0` (стенд гонял exe без незакоммиченных и неотслеживаемых файлов продукта) и с
+`scenarios_sha256` / `gamedata_sha256`, равными пересчёту из HEAD (стенд гонял сценарии и gamedata этого HEAD).
+
+`release.py`: `verify` гейтит от последнего тега выпуска своего канала (другой `--since` — только с `--since-override` и
+только предок этого тега: диапазон можно расширить, сузить нельзя; печатается и пишется в `verified.json`; текст отказа
+флаг не подсказывает), сверяет каждый файл пакета с блобом HEAD (выходит только закоммиченное) и
+записывает SHA-256 текстов выпуска; `draft` и `publish` отказывают, если сдвинулся любой HEAD, текст выпуска изменился
+после `verify`, диапазон начинался не с последнего опубликованного тега канала (с `--since-override` — не с его предка);
+`publish` до правки проверяет оба
+черновика (черновик, канал, дайджесты) и для Dev — что Stable `latest` тот же, что сохранил `draft`; Stable выходит только
+на коммите, опубликованном как `dev-<N>`.
 
 Отчёт владельцу и `docs/TESTERS.md` — по каждому режиму отдельной строкой (`CLAUDE.md`, правила 4-5).

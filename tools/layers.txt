@@ -1,0 +1,93 @@
+# The layer of every file (tools/check_layers.py, docs/MODES.md sections 2 and 5).
+# One row: <layer> <glob>. Globs are relative to the repository root, `**` = any folders, `*` = any name part.
+# The LAST matching row wins. A path no row matches is core (Ядро): an unclassified new file gets the strictest rules.
+#   stock-list <file>  the list of GSC files that `stock` rows cover (tools/stock_files.txt)
+#   core      Ядро: both modes, same behaviour, no mode checks
+#   hostplay  Кооп: only where the host plays himself (LocalLink, group move, Steam)
+#   srv       Сервер: world server and map servers only
+#   stock     GSC engine files (with or without our hooks): a new hook line fails (L5), an edit is an Ядро change
+#   dying     hybrid code, removed in step S2 (exempt from L1/L2/L4/L6 until then); only the five files of
+#             check_layers.DYING_FROZEN: a dying row that names another file is ignored
+#   gate-core read by tools/check_gates.py only: the file counts as Ядро for the gate whatever its layer (critique H4)
+# Classification source: temp/modes/map-engine.md 2.1 (classes SERVER, MAPSERVER, SPLIT -> srv; COOP -> hostplay;
+# HYBRID, GAME-STARTS-SERVER -> dying; CORE, CORE-R, MIXED -> core), temp/modes/map-scripts.md section 3.
+
+# --- engine: every GSC file is stock, our folders are Ядро ---------------------------------------------------------
+# `stock` covers only the GSC files of the stock list (the engine as imported, commit ad9d8416): a new file of ours
+# anywhere under engine/src is core by default, never stock.
+stock-list tools/stock_files.txt
+stock engine/src/**
+core engine/src/xrGame/coop/**
+core engine/src/xrCoop/**
+
+# --- engine: Сервер (27 files: 11 SERVER, 3 MAPSERVER, 13 SPLIT) ---------------------------------------------------
+srv engine/src/xrCoop/coop_dedicated_rules.h
+srv engine/src/xrCoop/coop_operator.h
+srv engine/src/xrCoop/coop_world_server_rules.h
+srv engine/src/xrCoop/coop_world_stage.h
+srv engine/src/xrCoop/coop_xfer_journal.h
+srv engine/src/xrGame/coop/coop_dedicated.cpp
+srv engine/src/xrGame/coop/coop_dedicated.h
+srv engine/src/xrGame/coop/coop_levels_alife.cpp
+srv engine/src/xrGame/coop/coop_levels_map.h
+srv engine/src/xrEngine/coop_host_console.cpp
+srv engine/src/xrEngine/coop_host_console.h
+srv engine/src/xrCoop/coop_ghost_rules.h
+srv engine/src/xrCoop/coop_xfer_holder.h
+srv engine/src/xrGame/coop/coop_mapserver_stats.cpp
+srv engine/src/xrCoop/coop_level_hash.h
+srv engine/src/xrCoop/coop_levels_dynamic.h
+srv engine/src/xrCoop/coop_levels_keeper.h
+srv engine/src/xrCoop/coop_levels_logic.h
+srv engine/src/xrCoop/coop_levels_wire.h
+srv engine/src/xrCoop/coop_mapserver_rules.h
+srv engine/src/xrCoop/coop_scope.h
+srv engine/src/xrCoop/coop_xfer.h
+srv engine/src/xrCoop/coop_xfer_base.h
+srv engine/src/xrGame/coop/coop_levels_xfer.cpp
+srv engine/src/xrGame/coop/coop_mapserver.cpp
+srv engine/src/xrGame/coop/coop_mapserver.h
+srv engine/src/xrGame/coop/coop_trunk.cpp
+# the folders of step S4
+srv engine/src/xrGame/coop/srv/**
+srv engine/src/xrCoop/srv/**
+
+# --- engine: Кооп ---------------------------------------------------------------------------------------------------
+hostplay engine/src/xrCoop/coop_local_link.h
+hostplay engine/src/xrCoop/coop_steam_join.h
+hostplay engine/src/xrGame/coop/hostplay/**
+hostplay engine/src/xrCoop/hostplay/**
+
+# --- engine: removed in S2 ------------------------------------------------------------------------------------------
+dying engine/src/xrCoop/coop_soft_move.h
+dying engine/src/xrGame/coop/coop_world_server.cpp
+dying engine/src/xrGame/coop/coop_world_server.h
+
+# --- scripts --------------------------------------------------------------------------------------------------------
+srv gamedata/scripts/coop_srv_*.script
+hostplay gamedata/scripts/coop_hostplay_*.script
+# the 9 server scripts (docs/MODES.md section 6; renamed to coop_srv_* in S4)
+srv gamedata/scripts/coop_dedicated.script
+srv gamedata/scripts/coop_levels.script
+srv gamedata/scripts/coop_levels_brain.script
+srv gamedata/scripts/coop_levels_share.script
+srv gamedata/scripts/coop_levels_tables.script
+srv gamedata/scripts/coop_quests_far.script
+srv gamedata/scripts/coop_task_audience.script
+srv gamedata/scripts/coop_storyline.script
+srv gamedata/scripts/coop_scorcher.script
+dying gamedata/scripts/coop_world_wait.script
+dying gamedata/scripts/coop_world_stage_file.script
+
+# --- gate only: until step S4 the 9 server scripts also run in the co-op process (coop_scorcher.script:417 installs
+# condlist functions in every mode, coop_storyline.script:1472-1486 registers actor_on_update in every process), so a
+# change to them needs both stands (critique H4, docs/MODES.md rule 8). Remove these rows in S4.
+gate-core gamedata/scripts/coop_dedicated.script
+gate-core gamedata/scripts/coop_levels.script
+gate-core gamedata/scripts/coop_levels_brain.script
+gate-core gamedata/scripts/coop_levels_share.script
+gate-core gamedata/scripts/coop_levels_tables.script
+gate-core gamedata/scripts/coop_quests_far.script
+gate-core gamedata/scripts/coop_task_audience.script
+gate-core gamedata/scripts/coop_storyline.script
+gate-core gamedata/scripts/coop_scorcher.script

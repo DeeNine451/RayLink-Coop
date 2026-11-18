@@ -1,0 +1,3 @@
+function give()
+	if coop.levels["split"]() then return end
+end

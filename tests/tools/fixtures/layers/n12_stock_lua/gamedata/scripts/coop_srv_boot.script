@@ -1,0 +1,4 @@
+-- srv: world start
+function on_start()
+	return
+end

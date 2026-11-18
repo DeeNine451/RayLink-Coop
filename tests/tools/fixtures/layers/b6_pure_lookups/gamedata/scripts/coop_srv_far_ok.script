@@ -1,0 +1,25 @@
+-- srv: lookups at load are fine
+local ini = rawget(_G, "coop_srv_far_cfg")
+local fmt = string.format("%d", 3)
+local n = tonumber("4") or math.max(1, 2)
+local t = setmetatable({}, { __index = function(_, k) return k end })
+local list = {}
+table.insert(list, fmt)
+local helpers = { pick = function(x) return coop_items.pick(x) end }
+class "coop_srv_far_ok_class"
+function coop_srv_far_ok_class:__init()
+	coop_items.pick(1)
+end
+local function tick()
+	coop_items.pick(2)
+end
+function on_game_start()
+	local name = ("%s"):format("x")
+	if type(ini) == "table" then
+		return
+	end
+	coop_mode.when_srv(function()
+		RegisterScriptCallback("actor_on_update", tick)
+		coop_items.pick(3)
+	end)
+end

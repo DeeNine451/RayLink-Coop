@@ -1,0 +1,9 @@
+-- srv: far squads keep their targets on the world server
+local base_assign = sim_board.simulation_board.assign_squad_to_smart
+function sim_board.simulation_board.assign_squad_to_smart(self, squad, smart_id)
+	if squad and squad.coop_far then
+		return
+	end
+	return base_assign(self, squad, smart_id)
+end
+smart_terrain.se_smart_terrain.coop_far_ok = true

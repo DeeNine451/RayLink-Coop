@@ -1,0 +1,225 @@
+-- Stand only (temp/stand/carry_server.ps1 puts it into the stand's gamedata and takes it away). 2026-11-18: build 56 keeps a
+-- client's own state through a world load; in the SERVER mode (a world server, map servers) this was never run. A client
+-- started with `-coop_probe cs` takes boosters, walks into the nearest level changer by himself, says yes, and reports his
+-- state before the load and after it: "[cs] <step>: <result>". The Lua state is new after the load: the stage is kept in
+-- the session stash (coop.stash).
+
+local ROLE = nil
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[cs] " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local function try(f, ...)
+	local ok, v = pcall(f, ...)
+	if ok then return v end
+	return nil
+end
+
+local function cond()
+	local a = db.actor and db.actor:cast_Actor()
+	return a and a:conditions()
+end
+
+local function boosters()
+	local t = {}
+	local c = cond()
+	if c then
+		c:BoosterForEach(function(ty, time, val)
+			t[#t + 1] = string.format("%d:%.6g:%.1f", ty, val, time)
+			return false
+		end)
+	end
+	table.sort(t)
+	return #t .. " [" .. table.concat(t, " ") .. "]"
+end
+
+local function state(tag)
+	local a, c = db.actor, cond()
+	if not (a and c) then return out("%s: no actor", tag) end
+	local p = a:position()
+	out("%s: level %s epoch %s carried %s at %.1f %.1f %.1f | hp %.3f power %.3f sat %.3f rad %.3f psy %.3f alcohol %.3f bleed %.4f | slot %s q0 '%s' | boosters %s",
+		tag, tostring(level.name()), tostring(try(coop.world_epoch)), tostring(coop.condition_carried and try(coop.condition_carried)),
+		p.x, p.y, p.z, a.health, a.power, try(function() return c:GetSatiety() end) or -1, a.radiation, a.psy_health,
+		try(function() return c:GetAlcohol() end) or -1, try(function() return c:BleedingSpeed() end) or -1,
+		tostring(try(function() return a:active_slot() end)), tostring(try(get_console_cmd, 0, "slot_0")), boosters())
+	flush()
+end
+
+local function boost(ty, value, seconds)
+	local c = cond()
+	if not c then return end
+	local b = SBooster()
+	b.m_type = ty
+	b.fBoostTime = seconds
+	b.fBoostValue = value
+	c:ApplyBooster(b, "")
+end
+
+local function stash(key) return try(coop.stash_get, key) end
+local function set_stash(key, v) pcall(coop.stash_set, key, v) end
+
+local function changers()
+	local list = {}
+	local want = { [clsid.level_changer or -1] = true, [clsid.level_changer_s or -1] = true }
+	local me = db.actor:position()
+	for id = 1, 65534 do
+		local o = level.object_by_id(id)
+		if o and want[o:clsid()] then
+			local p = o:position()
+			list[#list + 1] = { id = id, name = o:name(), x = p.x, y = p.y, z = p.z, d = p:distance_to(me) }
+		end
+	end
+	table.sort(list, function(a, b) return a.d < b.d end)
+	return list
+end
+
+-- A point a character can stand at: the AI map's vertex at (x, y, z), else the point itself.
+local function ground(x, y, z)
+	local p = vector():set(x, y, z)
+	local ok, v = pcall(function()
+		local id = level.vertex_id(p)
+		if id and id < 4294967295 then return level.vertex_position(id) end
+	end)
+	if ok and v then return v, true end
+	return p, false
+end
+
+local function live()
+	local ok, yes = pcall(coop.is_live)
+	if ok and yes == true then return true end
+	local ok2, host = pcall(coop.is_host)
+	return ok2 and host == true
+end
+
+local t0, done, arrived = nil, {}, false
+local beside
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+local target
+local function before_steps()
+	at("take", 8, function()
+		boost(0, 0.001, 300) -- health restore
+		boost(2, 0.0003, 400) -- radiation restore
+		boost(7, 0.2, 200) -- chemical burn protection
+		cond():ChangeRadiation(0.03)
+		pcall(exec_console_cmd, "slot_0 bandage")
+		out("took: boosters 0 2 7, radiation +0.03, quick slot 0 = bandage")
+	end)
+	at("list", 18, function()
+		local l = changers()
+		for i = 1, math.min(#l, 6) do
+			out("level changer %d [%s] at %.1f %.1f %.1f, %.0f m", l[i].id, l[i].name, l[i].x, l[i].y, l[i].z, l[i].d)
+		end
+		target = l[1]
+		if not target then out("! no level changer on this level") end
+	end)
+	at("before", 24, function() state("before") end)
+	-- first beside the exit (the world server hears where he stands once a second and ignores an ask from far away), then in
+	at("near", 26, function()
+		if not target then return end
+		local me = db.actor:position()
+		local dx, dz = me.x - target.x, me.z - target.z
+		local d = math.sqrt(dx * dx + dz * dz)
+		if d < 1 then dx, dz, d = 1, 0, 1 end
+		-- a point of the AI map 8..24 m from the exit, first towards where he came from, then around
+		local on_grid = false
+		local base = math.atan2(dz, dx)
+		for _, r in ipairs({ 12, 16, 9, 20, 24 }) do
+			for k = 0, 15 do
+				local a = base + (k % 2 == 0 and 1 or -1) * math.floor((k + 1) / 2) * (math.pi / 8)
+				local v, ok = ground(target.x + math.cos(a) * r, target.y, target.z + math.sin(a) * r)
+				if ok and math.abs(v.y - target.y) < 6 then
+					beside, on_grid = v, true
+					break
+				end
+			end
+			if on_grid then break end
+		end
+		if not on_grid then beside = vector():set(target.x + dx / d * 14, target.y, target.z + dz / d * 14) end
+		out("go beside level changer %d [%s]: %.1f %.1f %.1f (on the AI map %s)", target.id, target.name, beside.x, beside.y,
+			beside.z, tostring(on_grid))
+		db.actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))
+	end)
+	at("walk", 34, function()
+		if not target then return end
+		set_stash("cs_from", tostring(level.name()))
+		state("beside the exit")
+		out("walk into level changer %d [%s]", target.id, target.name)
+		flush()
+		db.actor:set_actor_position(vector():set(target.x, target.y + 0.2, target.z))
+	end)
+	-- not taken in 20 s: out of the exit and in again, as a player would do
+	if done.walk and target and beside and (done.confirms or 0) > 0 and (done.confirms % 8) == 0 and done.again ~= done.confirms then
+		done.again = done.confirms
+		local p = db.actor:position()
+		local inside = math.abs(p.x - target.x) + math.abs(p.z - target.z) < 3
+		out("still here: step %s", inside and "out of the exit" or "into the exit")
+		if inside then
+			db.actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))
+		else
+			db.actor:set_actor_position(vector():set(target.x, target.y + 0.2, target.z))
+		end
+	end
+	-- yes to the trip, as the window's button does; again while he still stands here
+	if done.walk and not done.gave_up and time_global() - (done.confirm_at or 0) > 2500 then
+		done.confirm_at = time_global()
+		pcall(function() get_console():execute("coop_transition_confirm") end)
+		done.confirms = (done.confirms or 0) + 1
+		if done.confirms == 1 or done.confirms % 8 == 0 then
+			out("confirm %d sent (level %s)", done.confirms, tostring(level.name()))
+			flush()
+		end
+		if done.confirms == 40 then
+			state("! still here 100 s after the walk")
+			done.gave_up = true
+			out("done")
+			flush()
+		end
+	end
+end
+
+local function after_steps()
+	at("after0", 0, function() state("after 0 s") end)
+	at("after10", 10, function() state("after 10 s") end)
+	at("after30", 30, function() state("after 30 s") end)
+	at("done", 45, function()
+		state("after 45 s")
+		out("done")
+		flush()
+	end)
+end
+
+local function actor_on_update()
+	if not (db.actor and coop.is_active() and live()) then return end
+	if not t0 then
+		t0 = time_global()
+		out("the steps start: level %s, came from '%s'", tostring(level.name()), tostring(stash("cs_from") or ""))
+	end
+	local from = stash("cs_from")
+	if from and from ~= "" and from ~= tostring(level.name()) then
+		if not arrived then -- the same Lua state lived through the load: count from the arrival
+			arrived = true
+			t0 = time_global()
+			done = {}
+		end
+		return after_steps()
+	end
+	before_steps()
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	if ROLE ~= "cs" then return end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	printf("%s", "[cs] armed")
+end

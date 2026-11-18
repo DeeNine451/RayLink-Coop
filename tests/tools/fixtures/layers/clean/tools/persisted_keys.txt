@@ -1,0 +1,2 @@
+# Fixture: saved keys that must stay in the scripts.
+record c|coop_world_server

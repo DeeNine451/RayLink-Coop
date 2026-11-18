@@ -1,0 +1,193 @@
+-- Stand only (temp/stand/base_group.ps1 and base_server.ps1 put it into the stand's gamedata and take it away).
+-- 2026-11-18, build 57: the checkpoint at the sleeping place of a base, and no "checkpoint updated" again at the same place.
+-- A process started with `-coop_probe <role>` walks its character and writes "[base] <role> <step>: <result>".
+--   bh = the host that plays (co-op mode)        bc = a client (co-op mode or the server mode)
+-- The host (or, in the server mode, the map server of the level, which has no role) lights every campfire of the level.
+-- The walk: the start (a base) -> a campfire inside the base -> a campfire outside -> back -> outside -> into the base at
+-- its campfire -> stay. After every step: the checkpoint as coop.checkpoint.get(0) tells it, and how many tips were shown.
+
+local ROLE = nil
+local INSIDE_M, OUTSIDE_M = 40, 90
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[base] " .. tostring(ROLE or "-") .. " " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local tips = 0
+local function hook_tips()
+	local cp = rawget(_G, "coop_checkpoints")
+	if not (cp and type(cp.tell) == "function") or cp.zz_base_hooked then return end
+	local orig = cp.tell
+	cp.zz_base_hooked = true
+	cp.tell = function(key, close_menu)
+		tips = tips + 1
+		out("TIP %d: %s", tips, tostring(key))
+		return orig(key, close_menu)
+	end
+end
+
+local function checkpoint()
+	local ok, r = pcall(function() return coop.checkpoint.get(0) end)
+	if not ok then return "error " .. tostring(r) end
+	if type(r) ~= "table" then return "none" end
+	return string.format("%s object %s level %s at %s %s %s", tostring(r.kind), tostring(r.source), tostring(r.level),
+		tostring(r.x and string.format("%.1f", r.x)), tostring(r.y and string.format("%.1f", r.y)),
+		tostring(r.z and string.format("%.1f", r.z)))
+end
+
+local function here()
+	local p = db.actor:position()
+	return string.format("%.1f %.1f %.1f", p.x, p.y, p.z)
+end
+
+local function report(tag)
+	out("%s: at %s | checkpoint %s | tips %d", tag, here(), checkpoint(), tips)
+	flush()
+end
+
+local function fires()
+	local list = {}
+	local all = rawget(_G, "bind_campfire") and bind_campfire.campfires_all
+	if type(all) ~= "table" then return list end
+	for id, binder in pairs(all) do
+		pcall(function()
+			local p = binder.object:position()
+			list[#list + 1] = { id = id, x = p.x, y = p.y, z = p.z, on = binder.campfire:is_on() }
+		end)
+	end
+	return list
+end
+
+local function light_all()
+	local n, lit = 0, 0
+	local all = rawget(_G, "bind_campfire") and bind_campfire.campfires_all
+	if type(all) ~= "table" then return 0, 0 end
+	for _, binder in pairs(all) do
+		pcall(function()
+			n = n + 1
+			if not binder.campfire:is_on() then
+				binder.campfire:turn_on()
+				lit = lit + 1
+			end
+		end)
+	end
+	return n, lit
+end
+
+-- A point a character can stand at: the AI map's vertex at (x, y, z), else the point itself.
+local function ground(x, y, z)
+	local p = vector():set(x, y, z)
+	local ok, v = pcall(function()
+		local id = level.vertex_id(p)
+		if id and id < 4294967295 then return level.vertex_position(id) end
+	end)
+	if ok and v then return v, true end
+	return p, false
+end
+
+local function live()
+	local ok, yes = pcall(coop.is_live)
+	if ok and yes == true then return true end
+	local ok2, host = pcall(coop.is_host)
+	return ok2 and host == true
+end
+
+local home, inside, outside
+
+local function pick()
+	local p = db.actor:position()
+	home = { x = p.x, y = p.y, z = p.z }
+	local best_in, best_out
+	for _, f in ipairs(fires()) do
+		local dx, dz = f.x - home.x, f.z - home.z
+		f.d = math.sqrt(dx * dx + dz * dz)
+		if f.d <= INSIDE_M and math.abs(f.y - home.y) < 8 and (not best_in or f.d < best_in.d) then best_in = f end
+		if f.d >= OUTSIDE_M and (not best_out or f.d < best_out.d) then best_out = f end
+	end
+	inside, outside = best_in, best_out
+	out("home %s; campfire inside: %s; campfire outside: %s; %d campfire(s) on the level", here(),
+		inside and string.format("%d at %.0f m (on %s)", inside.id, inside.d, tostring(inside.on)) or "none",
+		outside and string.format("%d at %.0f m (on %s)", outside.id, outside.d, tostring(outside.on)) or "none", #fires())
+	flush()
+end
+
+local function go(spot, tag)
+	if not spot then return out("! %s: no such place", tag) end
+	local side = ROLE == "bh" and 1.3 or -1.3 -- the two characters do not stand in each other
+	local p, on_grid = ground(spot.x + side, spot.y, spot.z)
+	local dx, dz = p.x - spot.x, p.z - spot.z
+	if dx * dx + dz * dz > 2.5 * 2.5 or math.abs(p.y - spot.y) > 2 then p, on_grid = vector():set(spot.x + side, spot.y, spot.z), false end
+	local ok, err = pcall(function() db.actor:set_actor_position(vector():set(p.x, p.y + 0.3, p.z)) end)
+	out("go %s: %s%s (%.1f %.1f %.1f, on the AI map %s)", tag, tostring(ok), ok and "" or (" " .. tostring(err)), p.x, p.y, p.z,
+		tostring(on_grid))
+end
+
+local t0, done = nil, {}
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+local function is_decider()
+	local ok, host = pcall(coop.is_host)
+	return ok and host
+end
+
+local function steps()
+	local lag = ROLE == "bh" and 3 or 0
+	at("start", 14 + lag, function() report("start") end)
+	at("pick", 15 + lag, pick)
+	at("go1", 17 + lag, function() go(inside, "the campfire inside the base") end)
+	at("r1", 30 + lag, function() report("13 s at the campfire inside (expected: the base, no new tip)") end)
+	at("go2", 31 + lag, function() go(outside, "the campfire outside") end)
+	at("r2", 44 + lag, function() report("13 s at the campfire outside (expected: campfire, one tip)") end)
+	at("go3", 45 + lag, function() go(home, "home") end)
+	at("r3", 54 + lag, function() report("9 s at home (expected: the base, one tip)") end)
+	at("go4", 55 + lag, function() go(outside, "the campfire outside again") end)
+	at("r4", 68 + lag, function() report("13 s at the campfire outside (expected: campfire, one tip)") end)
+	at("go5", 69 + lag, function() go(inside, "into the base at its campfire") end)
+	at("r5", 79 + lag, function() report("10 s at the campfire inside (expected: the base, one tip)") end)
+	at("r6", 96 + lag, function() report("27 s at the campfire inside (expected: no more tips)") end)
+	at("done", 98 + lag, function()
+		if is_decider() then
+			pcall(function() get_console():execute("coop_checkpoint_status") end)
+		end
+		out("done")
+		flush()
+	end)
+end
+
+local next_light = 0
+local function keep_lit()
+	if time_global() < next_light then return end
+	next_light = time_global() + 10000
+	local n, lit = light_all()
+	if lit > 0 then out("campfires: %d of %d lit now", lit, n) end
+end
+
+local function actor_on_update()
+	if not (db.actor and coop.is_active()) then return end
+	hook_tips()
+	local map_server = false
+	pcall(function() map_server = coop.levels.is_map_server() end)
+	if map_server or ROLE == "bh" then keep_lit() end
+	if ROLE ~= "bh" and ROLE ~= "bc" then return end
+	if not live() then return end
+	if not t0 then
+		t0 = time_global()
+		out("the steps start")
+	end
+	steps()
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	printf("%s", "[base] " .. tostring(ROLE or "-") .. " armed")
+end

@@ -1,0 +1,2 @@
+xr_conditions["coop_far"] = function() return true end
+rawset(xr_effects, "coop_go", function() end)

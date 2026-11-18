@@ -1,0 +1,3 @@
+# Fixture: server entry points that stock hooks reach.
+online_at_server
+levels::frame

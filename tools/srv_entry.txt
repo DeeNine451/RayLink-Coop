@@ -1,0 +1,18 @@
+# Server entry points that stock hooks and Ядро reach today (critique H5, temp/modes/map-engine.md 2.6).
+# Each keeps the co-op process safe only by an early return inside it (coop_levels_xfer.cpp:1116-1119, 1156-1159,
+# 1256-1258, 1293-1296, 1363; coop_levels.cpp:544-548). Until step S4 makes the hooks call mode():
+#   - a call from a stock file is L5, a call from an Ядро file is L3 (tools/check_layers.py);
+#   - a change to the file that defines one counts as an Ядро change for tools/check_gates.py.
+# One name per line; `ns::name` matches only that qualified call (or a bare call after `using namespace ns`).
+# The list is the explicit part: tools/check_layers.py also finds any function defined only in a srv or hostplay
+# file that Ядро or stock code calls (L3 / L5), and tools/check_gates.py counts its file as Ядро (core_reach).
+online_at_server
+logic_may_update
+xfer_scheduled
+xfer_on_switched_offline
+leader_takes_ids
+leader_free_id
+levels::frame
+# the review of 2026-11-18: server code that runs in the co-op process
+mapserver::host_incoming
+mapserver_stats_frame

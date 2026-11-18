@@ -1,0 +1,3 @@
+-- srv: a call at file level
+coop_core_hud.set_spots_enabled(false)
+local function tick() return 1 end function on_load() coop_items.pick(tick()) end

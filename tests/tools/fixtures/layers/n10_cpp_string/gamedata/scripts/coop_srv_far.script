@@ -1,0 +1,4 @@
+-- srv: what the world server keeps
+function keep(id)
+	return false
+end

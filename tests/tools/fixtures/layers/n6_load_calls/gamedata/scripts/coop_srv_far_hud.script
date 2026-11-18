@@ -1,0 +1,5 @@
+-- srv: no map spots for players on other levels
+function on_game_start()
+	coop_core_hud.set_spots_enabled(false)
+	coop_game_settings.set_world_faction("stalker")
+end

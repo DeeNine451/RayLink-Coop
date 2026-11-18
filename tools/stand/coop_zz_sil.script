@@ -1,0 +1,144 @@
+-- Stand only (temp/stand/sil_group.ps1). 2026-11-18: who takes away a silencer the debug gives to a client that holds the gun it
+-- fits. Roles: h = the host (debug on), ag = the client. On both machines, from the moment the silencer comes to the player (or to
+-- his character on the host) and for 5 s: every call of a function named like a removal, an attach, a drop or a move is written
+-- with the scripts on the stack, and the item is looked for every frame, so the frame it goes is in the log.
+
+local ROLE = nil
+local GUN, SILENCER = "wpn_vihr", "wpn_sil_vihr"
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[sil] " .. tostring(ROLE) .. " " .. (ok and line or tostring(fmt)))
+end
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local WATCH = { release = true, alife_release = true, alife_release_id = true, destroy_object = true, weapon_addon_attach = true,
+	weapon_addon_detach = true, attach_addon = true, detach_addon = true, drop_item = true, drop_item_and_teleport = true,
+	transfer_item = true, eat = true, set_condition = true, alife_create_item = true, alife_create = true, create = true,
+	alife_process_item = true, alife_clone_weapon = true, iterate_inventory = false, install_upgrade = true, make_item_active = true,
+	move_to_slot = true, move_to_ruck = true, move_to_belt = true, activate_slot = true }
+
+local hook_until, lines = 0, 0
+local watched = nil -- { id, at }
+
+local function stack()
+	local t = {}
+	for depth = 3, 12 do
+		local info = debug.getinfo(depth, "Sl")
+		if not info then break end
+		if info.what ~= "C" then
+			t[#t + 1] = tostring(info.short_src):gsub("^.*[\\/]", "") .. ":" .. tostring(info.currentline)
+			if #t >= 5 then break end
+		end
+	end
+	return table.concat(t, " <- ")
+end
+
+local function hook()
+	local info = debug.getinfo(2, "nS")
+	if not info or not info.name or not WATCH[info.name] then return end
+	lines = lines + 1
+	if lines > 120 then return end
+	out("call %s (%s) from %s", info.name, tostring(info.what), stack())
+end
+
+local function arm(id, where)
+	if watched then return end
+	watched = { id = id, at = time_global(), where = where, seen = true }
+	hook_until = time_global() + 5000
+	pcall(function() if jit then jit.off() jit.flush() end end)
+	debug.sethook(hook, "c")
+	out("the silencer %d came to %s: the calls are watched for 5 s", id, where)
+end
+
+local function disarm()
+	debug.sethook()
+	pcall(function() if jit then jit.on() end end)
+	out("watch over: %d call line(s)", lines)
+	flush()
+end
+
+local function players()
+	local ok, l = pcall(coop.players)
+	return ok and type(l) == "table" and #l or 0
+end
+
+local t0, done = nil, {}
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+local function ask(sec)
+	local ok, sent, code = pcall(coop_debug_client.run, "spawn_item", { sec = sec, n = 1, at = "inv" }, function(ok2, res)
+		out("debug answer for %s: %s", sec, tostring(ok2))
+	end)
+	out("debug spawn %s asked: %s %s %s", sec, tostring(ok), tostring(sent), tostring(code))
+end
+
+local function is_live()
+	local ok, yes = pcall(function() return coop_mods_core.live_client() end)
+	return ok and yes
+end
+
+local function actor_on_update()
+	if not (db.actor and coop.is_active()) then return end
+	if watched then
+		local here = level.object_by_id(watched.id) ~= nil
+		local se = alife_object(watched.id)
+		if watched.seen and not (here and se) then
+			watched.seen = false
+			out("the silencer %d is GONE %d ms after it came (game object %s, server object %s)", watched.id,
+				time_global() - watched.at, tostring(here), tostring(se ~= nil))
+			flush()
+		end
+		if hook_until ~= 0 and time_global() > hook_until then
+			hook_until = 0
+			disarm()
+		end
+	end
+	if players() < 2 then return end
+	if ROLE == "ag" and not is_live() then return end
+	if not t0 then
+		t0 = time_global()
+		out("two players, live: the steps start")
+	end
+	if ROLE == "ag" then
+		at("gun", 6, function() ask(GUN) end)
+		at("silencer", 14, function()
+			out("gun here: %s", tostring(db.actor:object(GUN) ~= nil))
+			ask(SILENCER)
+		end)
+		at("done", 26, function()
+			local gun = db.actor:object(GUN)
+			out("after 12 s: silencer in the inventory %s, gun %s, silencer on the gun %s", tostring(db.actor:object(SILENCER) ~= nil),
+				tostring(gun ~= nil), tostring(gun and gun:weapon_is_silencer()))
+			out("done")
+			flush()
+		end)
+	else
+		at("done", 40, function()
+			out("done")
+			flush()
+		end)
+	end
+end
+
+local function on_take_actor(item)
+	if item and item:section() == SILENCER then arm(item:id(), "the player here") end
+end
+local function on_take_npc(npc, item)
+	if npc and item and item:section() == SILENCER then arm(item:id(), "the character " .. tostring(npc:id()) .. " [" .. tostring(npc:section()) .. "]") end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	if ROLE ~= "h" and ROLE ~= "ag" then return end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_item_take", on_take_actor)
+	RegisterScriptCallback("npc_on_item_take", on_take_npc)
+	printf("%s", "[sil] " .. ROLE .. " armed")
+end

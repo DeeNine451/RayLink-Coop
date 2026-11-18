@@ -1,0 +1,9 @@
+-- srv: the world server ticks far squads
+local function far_tick()
+	return false
+end
+function on_game_start()
+	CreateTimeEvent("coop_srv_far", "tick", 5, far_tick)
+	AddUniqueCall(far_tick)
+	level.add_call(far_tick, far_tick)
+end

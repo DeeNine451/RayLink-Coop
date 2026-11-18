@@ -1,0 +1,89 @@
+-- Stand only (temp/stand/sp_smoke.ps1 puts it into the stand's gamedata and takes it away). 2026-11-18, step S0 of
+-- docs/plans/2026-11-18-two-modes.md: single player, no -coop_ key at all (regressions R2 and R3 of builds 52-54 broke the
+-- game outside a session). A process started with `-zz_sp <token>` saves the new game, loads that save, and stays alive one
+-- minute after the load: "[sp] <step>: <result>". The stage survives the load in zz_sp_<token>.txt in the game's root.
+
+local TOKEN = nil
+local SAVE = "zz_sp_smoke"
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[sp] " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local function stage_file() return getFS():update_path("$fs_root$", "zz_sp_" .. TOKEN .. ".txt") end
+
+local function stage()
+	local fh = io.open(stage_file(), "r")
+	if not fh then return "" end
+	local s = fh:read("*l") or ""
+	fh:close()
+	return s
+end
+
+local function set_stage(s)
+	local fh = io.open(stage_file(), "w")
+	if fh then fh:write(s .. "\n") fh:close() end
+end
+
+local t0, done = nil, {}
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+local function state(tag)
+	local a = db.actor
+	if not a then return out("%s: no actor", tag) end
+	local active = rawget(_G, "coop") and type(coop.is_active) == "function" and coop.is_active()
+	out("%s: level %s hp %.3f, in a co-op session %s", tag, tostring(level.name()), a.health, tostring(active))
+	flush()
+end
+
+local function actor_on_update()
+	if not db.actor then return end
+	if not t0 then
+		t0 = time_global()
+		out("the steps start (stage '%s')", stage())
+	end
+	local s = stage()
+	if s == "" then
+		at("before", 15, function() state("new game") end)
+		at("save", 20, function()
+			get_console():execute("save " .. SAVE)
+			out("save %s asked", SAVE)
+			flush()
+		end)
+		at("load", 32, function()
+			set_stage("loading")
+			out("load %s asked", SAVE)
+			flush()
+			get_console():execute("load " .. SAVE)
+		end)
+	elseif s == "loading" then
+		set_stage("loaded")
+		t0 = time_global()
+		done = {}
+		state("after the load")
+	else
+		at("half", 30, function() state("30 s after the load") end)
+		at("done", 60, function()
+			state("60 s after the load")
+			out("alive 60 s after the load")
+			out("done")
+			flush()
+		end)
+	end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	TOKEN = ok and type(line) == "string" and line:match("%-zz_sp%s+(%w+)") or nil
+	if not TOKEN then return end
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	printf("%s", "[sp] armed")
+end

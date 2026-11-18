@@ -1,0 +1,156 @@
+# 2026-11-18, step S0 of docs/plans/2026-11-18-two-modes.md: single player WITHOUT any -coop_ key (regressions R2 and R3 of
+# builds 52-54 crossed the line "inside / outside a session"). A new game, a save, a load of that save, one minute alive after
+# the load, no error line (coop_zz_sp.script, started by the key -zz_sp <token>).
+#   powershell -ExecutionPolicy Bypass -File tools\stand\run_guarded.ps1 -Script sp_smoke.ps1 -Out b57_sp.out -ScriptArgs '-Tag b57'
+# The last line is "sp_smoke: PASS" or "sp_smoke: FAIL (<why>)".
+param(
+    [string]$Stand = 'E:\RayLinkGames\GAMMA\game-dev',
+    [string]$Tag = 'b57',
+    [string]$Faction = 'stalker',
+    [string]$Map = 'rookie_village',
+    [int]$StepsTimeoutS = 900
+)
+$ErrorActionPreference = 'Stop'
+# Tracked in tools\stand (docs/MODES.md section 10): the probes come from this folder; logs and the stand's
+# settings kept for the restore go to the repository's temp\stand (ignored: the run history).
+$OutDir = Join-Path $PSScriptRoot '..\..\temp\stand'
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+$cp1251 = [System.Text.Encoding]::GetEncoding(1251)
+$exe = Join-Path $Stand 'bin\AnomalyCoopDX11AVX.exe'
+if (Get-Process -Name 'AnomalyCoop*', 'RayLinkServer*' -ErrorAction SilentlyContinue) { throw 'a game is running' }
+if (-not (Test-Path -LiteralPath (Join-Path $Stand 'appdata_t'))) { throw 'no appdata_t: run auto_world.ps1 once' }
+# errors the run must not show (single player has no "! [coop" line at all: any is a fault)
+$bad = 'FATAL ERROR|LUA error|SCRIPT ERROR|stack traceback|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game'
+
+function New-Profile([string]$letter) {
+    $name = "appdata_$letter"
+    $text = [System.IO.File]::ReadAllText((Join-Path $Stand 'fsgame.ltx'), $cp1251) -replace '(?m)^(\$app_data_root\$\s*=.*\|\s*)appdata\\', "`${1}$name\"
+    if ($text -notmatch [regex]::Escape("$name\")) { throw 'fsgame.ltx format unexpected' }
+    [System.IO.File]::WriteAllText((Join-Path $Stand "fsgame_$letter.ltx"), $text, $cp1251)
+    $appdata = Join-Path $Stand $name
+    New-Item -ItemType Directory -Force -Path $appdata | Out-Null
+    & robocopy (Join-Path $Stand 'appdata_t') $appdata /E /XF coop_player.key axr_options.ltx /XD savedgames logs raylink screenshots /NFL /NDL /NJH /NJS /NP | Out-Null
+    $global:LASTEXITCODE = 0
+    return $appdata
+}
+function Get-StartKit([string]$Ltx, [string]$Fac) {
+    $own = @{}; $parents = @{}; $cur = $null
+    foreach ($raw in [System.IO.File]::ReadAllLines($Ltx, $cp1251)) {
+        $l = ($raw -replace ';.*$', '').Trim()
+        if (-not $l) { continue }
+        if ($l -match '^\[([^\]]+)\]\s*(?::\s*(.+))?$') {
+            $cur = $Matches[1]
+            $own[$cur] = [ordered]@{}
+            $parents[$cur] = if ($Matches[2]) { @($Matches[2].Split(',') | ForEach-Object { $_.Trim() }) } else { @() }
+            continue
+        }
+        if ($cur -and $l -match '^([^=\s]+)\s*=\s*(.*)$') { $own[$cur][$Matches[1]] = $Matches[2].Trim() }
+    }
+    $resolve = {
+        param($s)
+        $r = [ordered]@{}
+        foreach ($p in $parents[$s]) { foreach ($kv in (& $resolve $p).GetEnumerator()) { $r[$kv.Key] = $kv.Value } }
+        if ($own.Contains($s)) { foreach ($kv in $own[$s].GetEnumerator()) { $r[$kv.Key] = $kv.Value } }
+        $r
+    }
+    $kit = [System.Collections.Generic.List[string]]::new()
+    foreach ($kv in (& $resolve "$($Fac)_loadout").GetEnumerator()) {
+        $v = $kv.Value.Split(',')
+        if ($v[0].Trim() -eq 'false') { for ($i = 0; $i -lt [int]$v[1]; $i++) { $kit.Add($kv.Key) } }
+    }
+    [pscustomobject]@{ Loadout = ($kit -join ','); Money = (& $resolve "$($Fac)_money")['money'] }
+}
+function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
+    $until = (Get-Date).AddSeconds($seconds)
+    while ((Get-Date) -lt $until) {
+        if ((Test-Path -LiteralPath $file) -and (Select-String -LiteralPath $file -Pattern $pattern -Quiet)) { return $true }
+        if ($proc -and $proc.HasExited) { return $false }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+function Show-Lines([string]$file, [string]$pattern, [int]$most) {
+    if (-not (Test-Path -LiteralPath $file)) { Write-Host "  no log $file"; return }
+    Select-String -LiteralPath $file -Pattern $pattern | Select-Object -Last $most | ForEach-Object {
+        $l = $_.Line -replace '[0-9a-fA-F]{32,}', '<hidden>'
+        if ($l.Length -gt 420) { $l = $l.Substring(0, 420) }
+        Write-Host "  $l"
+    }
+}
+
+$token = 'sp' + (Get-Date -Format 'HHmmss')
+$data = New-Profile 's'
+$log = Join-Path $data ('logs\xray_' + $env:USERNAME + '.log')
+if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
+$saves = Join-Path $data 'savedgames'
+if (Test-Path -LiteralPath $saves) { Get-ChildItem -LiteralPath $saves -Filter 'zz_sp_smoke*' | Remove-Item -Force }
+$scripts = Join-Path $Stand 'gamedata\scripts'
+Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'coop_zz_sp.script') -Destination (Join-Path $scripts 'coop_zz_sp.script') -Force
+Get-ChildItem -LiteralPath $Stand -Filter 'zz_sp_*.txt' | Remove-Item -Force
+
+$opt = Join-Path $Stand 'gamedata\configs\axr_options.ltx'
+$optKeep = Join-Path $OutDir 'axr_options.before_sp.ltx'
+if (-not (Test-Path -LiteralPath $optKeep)) { Copy-Item -LiteralPath $opt -Destination $optKeep }
+$kit = Get-StartKit (Join-Path $Stand 'gamedata\configs\items\settings\new_game_loadouts.ltx') $Faction
+if (-not $kit.Loadout) { throw "no free kit for faction '$Faction'" }
+$lines = [System.Collections.Generic.List[string]]::new()
+$lines.AddRange([string[]][System.IO.File]::ReadAllLines($opt, $cp1251))
+$start = $lines.FindIndex([Predicate[string]] { param($l) $l -match '^\[character_creation\]' })
+if ($start -ge 0) {
+    $end = $lines.FindIndex($start + 1, [Predicate[string]] { param($l) $l -match '^\[' })
+    if ($end -lt 0) { $end = $lines.Count }
+    $lines.RemoveRange($start, $end - $start)
+}
+$lines.Add('[character_creation]')
+$lines.Add('new_game_difficulty = 1')
+$lines.Add('new_game_economy = 1')
+$lines.Add('new_game_economy_treasure = 1')
+$lines.Add('new_game_story_mode = true')
+$lines.Add('new_game_character_name = Loner')
+$lines.Add("new_game_faction = $Faction")
+$lines.Add("new_game_loadout = $($kit.Loadout)")
+$lines.Add("new_game_map = $Map")
+if ($kit.Money) { $lines.Add("new_game_money = $($kit.Money)") }
+[System.IO.File]::WriteAllLines($opt, $lines, $cp1251)
+
+$game = $null
+$why = ''
+try {
+    # no -coop_ key: the plain single player game of the stand's exe
+    $game = Start-Process -FilePath $exe -WorkingDirectory $Stand -PassThru -ArgumentList "-fsltx fsgame_s.ltx -zz_sp $token -silent_error_mode -start server(all/single/alife/new) client(localhost)"
+    $null = $game.Handle
+    Write-Host "game pid $($game.Id)"
+    if (-not (Wait-Log $log '\[sp\] the steps start' 900 $game)) { throw 'the new game did not start' }
+    Write-Host ("in the new game ({0:HH:mm:ss})" -f (Get-Date))
+    if (-not (Wait-Log $log '\[sp\] load zz_sp_smoke asked' 180 $game)) { throw 'the save and the load were not asked' }
+    if (-not (Wait-Log $log '\[sp\] after the load' 600 $game)) { throw 'the save did not load' }
+    Write-Host ("the save is loaded ({0:HH:mm:ss})" -f (Get-Date))
+    if (-not (Wait-Log $log '\[sp\] done' 180 $game)) { throw 'the game did not live 60 s after the load' }
+    $alive = -not $game.HasExited
+    Write-Host "steps done; game alive $alive"
+    if (-not $alive) { $why = 'the game ended' }
+    $saved = Test-Path -LiteralPath (Join-Path $saves 'zz_sp_smoke.scop')
+    Write-Host "save file: $saved"
+    if (-not $saved -and -not $why) { $why = 'no save file' }
+    if (-not $why -and (Select-String -LiteralPath $log -Pattern $bad -Quiet)) { $why = 'error lines in the log' }
+}
+catch {
+    $why = "$_"
+    if ($game -and $game.HasExited) { Write-Host ("the game ended by itself: exit code {0} (0x{0:X8})" -f $game.ExitCode) }
+    Write-Host "! $why"
+}
+finally {
+    if ($game -and -not $game.HasExited) { Stop-Process -Id $game.Id -Force }
+    Start-Sleep -Seconds 3
+    Get-Process -Name 'AnomalyCoop*' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($Stand, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host "! left running: $($_.Id), stopped"; Stop-Process -Id $_.Id -Force }
+    if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $OutDir "${Tag}_sp.log") -Force }
+    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
+    Get-ChildItem -LiteralPath $Stand -Filter 'zz_sp_*.txt' | Remove-Item -Force
+    Copy-Item -LiteralPath $optKeep -Destination $opt -Force
+}
+Write-Host '--- the probe ---'
+Show-Lines $log '\[sp\]' 40
+Write-Host '--- errors ---'
+Show-Lines $log $bad 30
+if ($why) { Write-Host "sp_smoke: FAIL ($why)" } else { Write-Host 'sp_smoke: PASS' }

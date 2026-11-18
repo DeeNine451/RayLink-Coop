@@ -1,0 +1,23 @@
+-- srv: the world server's levels
+local KEY = "c|coop_other"
+
+local function on_map()
+	return coop.is_map_server()
+end
+
+local function on_update()
+	if on_map() then
+		return
+	end
+end
+
+function key()
+	return KEY
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		RegisterScriptCallback("actor_on_update", on_update)
+		xr_conditions.coop_split_mode = function() return true end
+	end)
+end

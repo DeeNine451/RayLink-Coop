@@ -1,0 +1,217 @@
+-- Stand only (temp/stand/hybrid_save.ps1 puts it into the stand's gamedata and takes it away). 2026-11-18, step S0 of
+-- docs/plans/2026-11-18-two-modes.md: a world of the HYBRID mode of build 56 (the host plays and leads his level, the other
+-- levels run on hidden map servers) is saved with players on two levels, as the fixture tests/fixtures/saves/hybrid_b56/ for
+-- the check of step S2 ("a hybrid world opens as a co-op world"). "[hy] <role> <step>: <result>".
+--   h = the host: waits until client a stands on another level, then saves the world (`save <name>`) and says "saved"
+--   a = a client: walks into the nearest level exit by himself (first to an AI-map vertex beside it, a pause of 6 s, then
+--       in), says yes to the trip, and once on the other level drops one item there (an object of that level) and writes
+--       "arrived <level>" into zz_hybrid_<token>.txt in the game's root
+--   c = a third player (optional): stays with the host
+-- Lessons of the stand (2026-11-18): act only after coop.is_live(); a character only on a vertex of the AI map
+-- (level.vertex_id answers 4294967295 for "no vertex"); approach a level exit in two steps with a pause of 5 s or more.
+
+local ROLE, TOKEN, SAVE = nil, "hy", "hybrid_b56"
+local NO_VERTEX = 4294967295
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[hy] " .. tostring(ROLE) .. " " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local function try(f, ...)
+	local ok, v = pcall(f, ...)
+	if ok then return v end
+	return nil
+end
+
+local function live()
+	local ok, yes = pcall(coop.is_live)
+	return ok and yes == true
+end
+
+local function note_file() return getFS():update_path("$fs_root$", "zz_hybrid_" .. TOKEN .. ".txt") end
+
+local function read_note()
+	local fh = io.open(note_file(), "r")
+	if not fh then return "" end
+	local s = fh:read("*l") or ""
+	fh:close()
+	return s
+end
+
+local function write_note(s)
+	local fh = io.open(note_file(), "w")
+	if fh then fh:write(s .. "\n") fh:close() end
+end
+
+local function stash(key) return try(coop.stash_get, key) end
+local function set_stash(key, v) pcall(coop.stash_set, key, v) end
+
+local function ground(x, y, z)
+	local id = try(level.vertex_id, vector():set(x, y, z))
+	if id and id < NO_VERTEX then return level.vertex_position(id), true end
+	return vector():set(x, y, z), false
+end
+
+local function changers()
+	local list = {}
+	local want = { [clsid.level_changer or -1] = true, [clsid.level_changer_s or -1] = true }
+	local me = db.actor:position()
+	for id = 1, 65534 do
+		local o = level.object_by_id(id)
+		if o and want[o:clsid()] then
+			local p = o:position()
+			list[#list + 1] = { id = id, name = o:name(), x = p.x, y = p.y, z = p.z, d = p:distance_to(me) }
+		end
+	end
+	table.sort(list, function(a, b) return a.d < b.d end)
+	return list
+end
+
+local t0, done = nil, {}
+local function at(name, seconds, f)
+	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	done[name] = true
+	local ok, err = pcall(f)
+	if not ok then out("! %s: %s", name, tostring(err)) end
+end
+
+-- ---------------------------------------------------------------- host
+
+local function host_steps()
+	at("hello", 2, function()
+		out("split levels %s, world server %s, story together %s", tostring(try(get_console_cmd, 0, "coop_split_levels")),
+			tostring(try(get_console_cmd, 0, "coop_world_server")), tostring(try(get_console_cmd, 0, "coop_story_together")))
+	end)
+	if done.saved then
+		at("done", (done.saved_s or 0) + 20, function() out("done") flush() end)
+		return
+	end
+	local note = read_note()
+	if note:find("^arrived") then
+		if not done.seen then
+			done.seen = time_global()
+			out("client a says: %s; the players: %s", note, tostring(try(function()
+				local t = {}
+				for _, p in ipairs(coop.players()) do t[#t + 1] = tostring(p.nick) .. "@" .. tostring(p.level or "?") end
+				return table.concat(t, " ")
+			end)))
+		end
+		if time_global() - done.seen > 20000 then -- let the map server take what he brought
+			done.saved = true
+			done.saved_s = (time_global() - t0) / 1000
+			out("save %s asked on level %s", SAVE, tostring(level.name()))
+			flush()
+			get_console():execute("save " .. SAVE)
+			out("saved")
+			flush()
+		end
+	end
+end
+
+-- ---------------------------------------------------------------- client a
+
+local target, beside
+local function client_before()
+	at("list", 10, function()
+		local l = changers()
+		for i = 1, math.min(#l, 4) do
+			out("level changer %d [%s] at %.1f %.1f %.1f, %.0f m", l[i].id, l[i].name, l[i].x, l[i].y, l[i].z, l[i].d)
+		end
+		target = l[1]
+		if not target then out("! no level changer on this level") end
+	end)
+	-- step 1: an AI-map vertex 9..24 m from the exit
+	at("near", 14, function()
+		if not target then return end
+		local me = db.actor:position()
+		local base = math.atan2(me.z - target.z, me.x - target.x)
+		local on_grid = false
+		for _, r in ipairs({ 12, 16, 9, 20, 24 }) do
+			for k = 0, 15 do
+				local a = base + (k % 2 == 0 and 1 or -1) * math.floor((k + 1) / 2) * (math.pi / 8)
+				local v, ok = ground(target.x + math.cos(a) * r, target.y, target.z + math.sin(a) * r)
+				if ok and math.abs(v.y - target.y) < 6 then beside, on_grid = v, true break end
+			end
+			if on_grid then break end
+		end
+		if not on_grid then return out("! no AI-map vertex beside level changer %d", target.id) end
+		out("go beside level changer %d [%s]: %.1f %.1f %.1f", target.id, target.name, beside.x, beside.y, beside.z)
+		db.actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))
+	end)
+	-- step 2, 8 s later (5 s or more: the host hears where he stands once a second and ignores an ask from far away)
+	at("walk", 22, function()
+		if not (target and beside) then return end
+		set_stash("hy_from", tostring(level.name()))
+		out("walk into level changer %d [%s]", target.id, target.name)
+		flush()
+		db.actor:set_actor_position(vector():set(target.x, target.y + 0.2, target.z))
+	end)
+	if done.walk and beside and time_global() - (done.confirm_at or 0) > 2500 then
+		done.confirm_at = time_global()
+		pcall(function() get_console():execute("coop_transition_confirm") end)
+		done.confirms = (done.confirms or 0) + 1
+		if done.confirms % 8 == 0 then -- not taken: out of the exit, a pause, in again
+			db.actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))
+			done.reenter = time_global() + 6000
+			out("confirm %d sent, still on %s: out and in again", done.confirms, tostring(level.name()))
+			flush()
+		end
+		if done.reenter and time_global() > done.reenter then
+			done.reenter = nil
+			db.actor:set_actor_position(vector():set(target.x, target.y + 0.2, target.z))
+		end
+		if done.confirms == 48 then out("! still on %s 120 s after the walk", tostring(level.name())) out("done") flush() end
+	end
+end
+
+local function client_after()
+	at("arrived", 5, function()
+		out("arrived on %s (came from %s)", tostring(level.name()), tostring(stash("hy_from")))
+		-- one object of this level: the first item of the inventory dropped here
+		local dropped
+		db.actor:iterate_inventory(function(_, item)
+			if not dropped and item and item:section() ~= "device_pda" and not item:section():find("^wpn_") then
+				dropped = item
+			end
+		end)
+		if dropped then
+			pcall(function() db.actor:drop_item(dropped) end)
+			out("dropped %s [%d] here", dropped:section(), dropped:id())
+		end
+		write_note("arrived " .. tostring(level.name()))
+		flush()
+	end)
+	at("done", 90, function() out("done") flush() end)
+end
+
+local arrived = false
+local function actor_on_update()
+	if not (db.actor and live()) then return end
+	local ok, list = pcall(coop.players)
+	if ROLE == "h" and (not ok or type(list) ~= "table" or #list < 2) then return end
+	if not t0 then
+		t0 = time_global()
+		out("the steps start on %s", tostring(level.name()))
+	end
+	if ROLE == "h" then return host_steps() end
+	if ROLE ~= "a" then return end
+	local from = stash("hy_from")
+	if from and from ~= "" and from ~= tostring(level.name()) then
+		if not arrived then arrived = true t0 = time_global() done = {} end
+		return client_after()
+	end
+	client_before()
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	if ROLE ~= "h" and ROLE ~= "a" and ROLE ~= "c" then return end
+	TOKEN = line:match("%-zz_token%s+(%w+)") or TOKEN
+	SAVE = line:match("%-zz_save%s+([%w_]+)") or SAVE
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	printf("%s", "[hy] " .. ROLE .. " armed")
+end

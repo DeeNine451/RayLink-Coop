@@ -1,0 +1,6 @@
+# Fixture: the GSC files of the tiny tree (a stock row covers only these).
+engine/src/xrGame/Level.cpp
+engine/src/xrGame/alife_switch_manager.cpp
+engine/src/xrGame/alife_x.cpp
+engine/src/xrGame/alife_y.cpp
+engine/src/xrGame/actor_hook.cpp
