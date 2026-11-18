@@ -2,12 +2,17 @@
 
 ## Every mode is worked out separately (owner's decision, 2026-11-18)
 
-The game has two modes that players switch on, and a transitional one:
+The game has two modes (owner's decision of 2026-11-18): the game itself starts only the co-op, the launcher starts only
+the server. The hybrid (the host plays and leads its own map while hidden map servers lead the others) and the rule
+"story maps together" are being removed: write no new code for them.
 
 - **Co-op**: the host plays, everybody is on one map. The host process has the player's map loaded and decides.
 - **Server**: a world server process (a console) plus map servers. The world server decides and has no map of the player;
   the map server of the player's level reports the facts (`levels::body_facts`).
-- **Hybrid** (transitional): the host plays and leads its own map, other maps are led by hidden map servers. Both paths at once.
+
+Three layers of code: the **Core** (shared), **Co-op**, **Server** (`docs/MODES.md`). The Core never asks which mode it
+runs in; what depends on the mode it gets as an answer from the mode's layer. A change of one mode's layer does not
+touch the other mode's files. A change of the Core needs the tests and the stand scenario of both modes.
 
 For any feature, behaviour change or bug:
 
