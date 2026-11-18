@@ -1,0 +1,4 @@
+-- srv: far prices
+function price_factor(item)
+	return 1
+end

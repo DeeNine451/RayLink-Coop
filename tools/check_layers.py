@@ -37,8 +37,10 @@ Rules (ids as in docs/MODES.md section 5):
       (srv_entry.txt) or of any function defined only in a file of that layer, a string that names a script of that
       layer (`lua_getglobal(L, "coop_dedicated")`), `extern` of a global only that layer defines; Lua `coop_x.fn` /
       mod("coop_x") / rawget(_G, "coop_x") / _G["coop_x"] / module_of / call_module of a script of that layer (also from
-      the stock Lua roots). The facade coop_mode is allowed. And a srv / hostplay file that defines a member of a class
-      only Ядро or stock define (`bool coop::FarPolicy::keep_online(...)`: Ядро calls it through an object)
+      the stock Lua roots), and a plain string that is exactly a script's name (a dispatch table `{ "coop_x" }` read
+      through rawget(_G, name); review 3, C6). The facade coop_mode is allowed. And a srv / hostplay file that defines a
+      member of a class only Ядро or stock define (`bool coop::FarPolicy::keep_online(...)`: Ядро calls it through an
+      object), a member function or a static data member (`u32 FarLimits::squads_per_player = 4;`, C8)
   L4  a default argument or a default member of type bool in an Ядро file whose name has a mode word (level, split,
       host, here, plays, server, elsewhere) or whose comment speaks of a mode (split, map server, world server,
       dedicated, hybrid). Defaults of other types are data (`uint16_t level = kNoLevel`). A member of a .cpp counts only
@@ -51,15 +53,20 @@ Rules (ids as in docs/MODES.md section 5):
       g_coop_story_together), coop_world_wait, coop_world_server.h, HostProcess, led_by_host_process)
   L7  a script with more than 190 file-level locals (LuaJIT's limit is 200); every local above 190 counts once
   L8  Steam outside hostplay and xrEngine/x_ray.cpp (Steam, RAYLINK_STEAM_, steam_invite, steam_join)
-  L9  a srv script, outside coop_mode.when_srv(...): registers (RegisterScriptCallback, also through an alias;
-      xr_conditions / xr_effects / xr_logic fields assigned by `.X =`, `["X"] =` or rawset; add_event_handler); assigns
-      into a table that is not its own (`coop_items.pick = ...`, `function sim_board.x.f()`, rawset(t, ...),
-      `db.flag = true`, `_G.x =`: anything but its locals, parameters, for variables, self, its classes, its file-level
-      globals and itself); or calls anything at load (at file level or directly in on_game_start: CreateTimeEvent,
-      exec_console_cmd, an Ядро setter ...), except pure lookups (rawget, type, pairs, tostring, tonumber, string.*,
-      math.*, setmetatable, class, table.insert into a table of its own ...)
-  L9C a namespace-scope variable of a srv / hostplay C++ file whose initializer calls a function (static
-      initialization runs in every process, the co-op host too); constexpr initializers are not calls
+  L9  a srv script, outside the anonymous functions given to coop_mode.when_srv(...): registers
+      (RegisterScriptCallback, also through an alias; xr_conditions / xr_effects / xr_logic fields assigned by `.X =`,
+      `["X"] =` or rawset; add_event_handler); assigns into a table that is not its own (`coop_items.pick = ...`,
+      `function sim_board.x.f()`, rawset(t, ...), setmetatable(t, ...), `db.flag = true`, `_G.x =`: anything but its
+      locals, parameters, for variables, self, its classes, its file-level globals and itself; a local that copies a
+      table which is not its own, `local db = db`, is that table, review 3 C1, C3); or calls anything at load: at file
+      level, in on_game_start, in a function assigned to it (`on_game_start = start`) and in every function of the file
+      those call by name, also from inside a when_srv(...) parenthesis outside an anonymous function (C2, C4):
+      CreateTimeEvent, exec_console_cmd, an Ядро setter ..., except pure lookups (rawget, type, pairs, tostring,
+      tonumber, string.*, math.*, printf, class, table.insert or setmetatable on a table of its own or a new one,
+      pcall of a pure function ...). `coop_mode.when_srv(f())` (the result of a call) is L9 too
+  L9C a namespace-scope variable of a srv / hostplay C++ file whose initializer calls a function, or an object of a
+      class of ours with a user-declared constructor (`static Registrar s_r;`, `static Registrar s_r(1);`, review 3 C7):
+      static initialization runs in every process, the co-op host too; constexpr initializers are not calls
   L10 a key of persisted_keys.txt no longer appears in any script
 Comments are not code; string contents are not code either (L6, L8, the command-line keys and the Lua module
 references read them).
@@ -171,8 +178,20 @@ LUA_KEYWORDS = frozenset({"if", "elseif", "while", "until", "return", "and", "or
                           "for", "function", "end", "else"})
 # pure lookups a srv script may make at load: they change nothing in the process
 LUA_PURE = frozenset({"rawget", "rawequal", "rawlen", "type", "pairs", "ipairs", "next", "select", "tostring", "tonumber",
-                      "unpack", "setmetatable", "getmetatable", "class", "table.concat", "table.unpack", "table.getn",
-                      "table.maxn", "coop_mode.when_srv"})
+                      "unpack", "getmetatable", "class", "table.concat", "table.unpack", "table.getn",
+                      "table.maxn", "coop_mode.when_srv", "printf", "print"})
+# pcall / xpcall run their first argument: pure only when that is a pure function (`pcall(string.format, ...)`)
+LUA_PROTECTED = frozenset({"pcall", "xpcall"})
+# calls that change their first argument: allowed at load only on a table of the script's own (setmetatable also on a
+# new table `{...}`); setmetatable(db.storage, {__mode = "v"}) makes a shared table weak in every process (review 3, C3)
+LUA_OWN_ARG = frozenset({"table.insert", "table.remove", "table.sort", "setmetatable"})
+LUA_SETMETA = re.compile(r"\bsetmetatable\s*\(\s*([A-Za-z_]\w*)")
+# a script named by a plain string: a dispatch table of Ядро (`{ "coop_economy_group", "coop_srv_far_prices" }` read
+# through rawget(_G, name)) reaches the script as surely as `coop_x.fn` (review 3, C6)
+LUA_SCRIPT_STRING = re.compile(r"""["'](coop_\w+)["']""")
+# a local that copies a table (`local db = db`, `local t = sim_board.x or {}`): the copy is that table, not the
+# script's own (review 3, C1)
+LUA_TABLE_COPY = re.compile(r"([A-Za-z_]\w*)(?:\s*\.\s*\w+|\[[^\]]*\])*(?:\s+or\s+\{\s*\})?")
 LUA_PURE_PREFIX = ("string.", "math.", "bit.")
 LUA_STRING_METHODS = frozenset({"format", "sub", "gsub", "find", "match", "gmatch", "len", "lower", "upper", "rep", "byte",
                                 "char", "reverse", "split", "trim"})
@@ -197,7 +216,7 @@ LIT_TOMBSTONE = ("coop_soft_move", "softmove", "story_together", "coop_world_wai
                  "led_by_host_process")
 LIT_STEAM = ("Steam", "RAYLINK_STEAM_", "steam_invite", "steam_join")
 LIT_LUA_REGISTER = ("RegisterScriptCallback", "xr_conditions", "xr_effects", "xr_logic", "add_event_handler", "rawset",
-                    "_G", "=")
+                    "_G", "=", "setmetatable")
 LIT_INCLUDE = ("include",)
 QUICK = (b"coop", b"Steam", b"steam_", b"softmove", b"story_together", b"HostProcess", b"led_by_host_process",
          b"RAYLINK_STEAM_", b"has_role", b"ghost_actor", b"body_facts", b"on_host_level", b"is_bridge")
@@ -522,6 +541,8 @@ class CppVar:
     name: str
     internal: bool        # `static`, or in an anonymous namespace: no other file can name it
     call: str = ""        # a function its initializer calls (it runs at static initialization, in every process)
+    qualifier: str = ""   # `Q` of `u32 Q::x = 4;`: the definition of a static member of class Q (review 3, C8)
+    type: str = ""        # the declared class of an object (`Registrar` of `static Registrar r;`); "" for a pointer
 
 
 @dataclass
@@ -630,12 +651,32 @@ NOT_A_VAR = re.compile(r"^\s*(?:using|typedef|friend|enum|class|struct|union|nam
                        r"template|public|private|protected)\b")
 
 
+CPP_DECL_WORDS = frozenset({"static", "const", "inline", "constexpr", "constinit", "thread_local", "volatile", "extern",
+                            "mutable", "unsigned", "signed", "struct", "class"})
+VALUE_ARG = re.compile(r"""^\s*(?:-?\d[\w.']*|""|''|true|false|nullptr|[&!\-].*|[A-Za-z_][\w:]*\s*\((?!\s*[*&]).*)\s*$""", re.S)
+
+
 def init_call(text: str) -> str:
     """The first function an initializer calls (sizeof, decltype and the like are not calls)."""
     for m in INIT_CALL.finditer(text):
         if m.group(1) not in CONTROL:
             return m.group(1)
     return ""
+
+
+def object_args(head: str, open_: int) -> bool:
+    """`T x(1)`, `T x(&f)`, `T x(make())`: the parenthesis after the name holds a value (a literal, an address, a call),
+    so the statement defines an object; `T f(int a)` / `T f()` declare a function."""
+    close = next((c for o, c in top_groups(head) if o == open_), None)
+    if close is None:
+        return False
+    inner = head[open_ + 1:close]
+    if not inner.strip() or not re.search(r"[A-Za-z_]\w*\s*$", head[:open_]):
+        return False
+    before = head[:open_].rstrip()
+    if re.search(r"::\s*~?[A-Za-z_]\w*$", before) or not re.match(r"^\s*(?:[\w:<>,\s\*&]+?)\s+[A-Za-z_]\w*$", before):
+        return False  # `X::f(...)`: an out-of-class member, or no declared type before the name
+    return any(VALUE_ARG.match(part) for _, part in split_top(inner))
 
 
 def parse_cpp(path: str, code: str) -> CppFile:
@@ -690,13 +731,21 @@ def parse_cpp(path: str, code: str) -> CppFile:
             return
         prefix = m.group(1)
         init = body[m.end(3) - (1 if m.group(3) == "{" else 0):] if m.group(3) else ""
-        call = "" if re.search(r"\b(?:constexpr|consteval|constinit)\b", prefix) else init_call(init)
+        compile_time = bool(re.search(r"\b(?:constexpr|consteval|constinit)\b", prefix))
+        call = "" if compile_time else init_call(init)
         anonymous = any(k == "ns" and n == "" for k, n, _, _ in stack)
         # internal linkage: `static`, an anonymous namespace, or a const object that is not `inline` / `extern`
         constant = bool(re.search(r"\bconstexpr\b", prefix) or re.search(r"\*\s*const\s*$", prefix)
                         or (re.search(r"\bconst\b", prefix) and "*" not in prefix and "&" not in prefix))
         internal = anonymous or bool(re.search(r"\bstatic\b", prefix)) or (constant and not re.search(r"\binline\b", prefix))
-        result.variables.append(CppVar(line_of(offset + m.start(2)), m.group(2), internal, call))
+        # `u32 FarLimits::squads_per_player = 4;` defines a static member of FarLimits (C8)
+        q = re.search(r"([A-Za-z_]\w*)\s*::\s*$", prefix)
+        type_text = re.sub(r"(?:[A-Za-z_]\w*\s*::\s*)+$", "", prefix)
+        names = [n for n in IDENT.findall(type_text) if n not in CPP_DECL_WORDS]
+        # the class of an object, when it is one: its constructor runs at static initialization (C7)
+        obj_type = names[-1] if names and not compile_time and "*" not in type_text and "&" not in type_text else ""
+        result.variables.append(CppVar(line_of(offset + m.start(2)), m.group(2), internal, call,
+                                       q.group(1) if q else "", obj_type))
 
     def statement(stmt: str, offset: int) -> None:
         """A declaration at namespace or class scope ended by ';'."""
@@ -704,6 +753,14 @@ def parse_cpp(path: str, code: str) -> CppFile:
         body = strip_template(body)
         fn = function_name(body)
         eq_top = [o for o, part in split_top(body, "=")][1:]
+        if fn and not eq_top and scope_kind() == "ns" and object_args(body, fn[2]):
+            # `static Registrar s_r(1);` at namespace scope: an object built with arguments, not a function declared
+            # (the parenthesis holds values, not parameters; review 3, C7): read it as `static Registrar s_r{1};`
+            close = next((c for o, c in top_groups(body) if o == fn[2]), None)
+            if close is not None:
+                variable(body[:fn[2]] + "{" + body[fn[2] + 1:close] + "}" + body[close + 1:],
+                         offset + (len(stmt) - len(body)))
+                return
         if fn and (not eq_top or fn[2] < eq_top[0] - 1):
             # a declaration: its parameter defaults
             params(body, offset + (len(stmt) - len(body)), fn[2])
@@ -1346,8 +1403,8 @@ def srv_refs(src: Source, line: str, defs: Defs, exclusive: bool) -> list[tuple[
             continue
         if is_definition(line[:m.start()]):
             continue
-        if any((ns, nm) in defs.other for ns in visible):
-            continue  # an Ядро function of the same name is nearer
+        if exclusive and any((ns, nm) in defs.other for ns in visible):
+            continue  # an Ядро function of the same name is nearer (not exclusive: an overload may be the srv one, C9)
         for ns in sorted(visible):
             key = (ns, nm)
             if key in defs.srv and not (exclusive and key in defs.other):
@@ -1438,6 +1495,15 @@ def build(root: pathlib.Path, layers: LayerMap, srv_entry: Sequence[str]) -> Mod
     qualified, by_ns, local = taint_cpp(sources, macros)
     lua_in_file, lua_module = taint_lua([s for s in sources if s.layer != "stock"])
 
+    # an object of a class with a user-declared constructor, defined at namespace scope, is built at static
+    # initialization: its constructor runs in every process, the co-op host too (`static Registrar s_r;`, review 3, C7)
+    ctor_classes = {f.qualifier for s in sources if s.cpp for f in s.cpp.functions if f.qualifier and f.name == f.qualifier}
+    for src in sources:
+        if src.cpp:
+            for var in src.cpp.variables:
+                if not var.call and var.type and var.type in ctor_classes:
+                    var.call = f"the constructor {var.type}()"
+
     # namespace-scope variables: those a srv / hostplay file defines (Ядро must not read them through extern, B4)
     srv_globals: dict[str, list[str]] = defaultdict(list)
     core_globals: set[str] = set()
@@ -1487,8 +1553,11 @@ def build(root: pathlib.Path, layers: LayerMap, srv_entry: Sequence[str]) -> Mod
     # classes that only Ядро, stock or dying files define, among those whose members srv / hostplay files define:
     # such a member is server code inside an Ядро object (`far_policy().keep_online(id)`, review 2, B2)
     core_classes: dict[str, str] = {}
-    candidates = {f.qualifier for s in sources if s.cpp and s.layer in ("srv", "hostplay")
-                  for f in s.cpp.functions if f.out_of_class and f.qualifier} - srv_classes
+    candidates = ({f.qualifier for s in sources if s.cpp and s.layer in ("srv", "hostplay")
+                   for f in s.cpp.functions if f.out_of_class and f.qualifier}
+                  # and static data members defined in a srv / hostplay file (`u32 FarLimits::n = 4;`, review 3, C8)
+                  | {v.qualifier for s in sources if s.cpp and s.layer in ("srv", "hostplay")
+                     for v in s.cpp.variables if v.qualifier}) - srv_classes
     for name in sorted(candidates & set(class_files)):
         core_classes[name] = class_files[name]
     rest = sorted(candidates - set(core_classes))
@@ -1515,10 +1584,12 @@ def build(root: pathlib.Path, layers: LayerMap, srv_entry: Sequence[str]) -> Mod
 
 # ---- srv scripts: what runs at load -------------------------------------------------------------------------------
 
-def lua_own_names(code: str, mod_name: str, code_strings: str = "") -> set[str]:
+def lua_own_names(code: str, mod_name: str, code_strings: str = "",
+                  aliases: Sequence[tuple[str, int, str]] = ()) -> set[str]:
     """Tables a script may assign into outside when_srv: its locals (any scope), parameters, for variables, `self`, the
     script itself, its classes (`class "x"`) and its file-level globals (a script's globals live in its own module
-    table)."""
+    table). A local that copies a table which is not its own (`local db = db`, `local t = sim_board.x or {}`: aliases,
+    the `local NAME = <expression without a call>` of parse_lua) is that table, not its own (review 3, C1)."""
     own = {"self", mod_name}
     own |= set(re.findall(r"""\bclass\s*["']([A-Za-z_]\w*)["']""", code_strings))
     own |= set(re.findall(r"\blocal\s+function\s+([A-Za-z_]\w*)", code))
@@ -1529,20 +1600,45 @@ def lua_own_names(code: str, mod_name: str, code_strings: str = "") -> set[str]:
     for names in re.findall(r"\bfor\s+([A-Za-z_][\w\s,]*?)\s+in\b", code) + re.findall(r"\bfor\s+([A-Za-z_]\w*)\s*=", code):
         own |= {n.strip() for n in names.split(",")}
     own |= set(re.findall(r"^([A-Za-z_]\w*)\s*=(?!=)", code, re.M))
+    for name, _, expr in aliases:
+        m = LUA_TABLE_COPY.fullmatch(expr.strip())
+        if m and m.group(1) not in ("nil", "true", "false") and (m.group(1) == name or m.group(1) not in own):
+            own.discard(name)
     return own
 
 
-def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]) -> list[tuple[int, str]]:
-    """Calls of a srv script that run when the script loads, in every process (axr_main runs every script's file level
-    and on_game_start): at file level or directly in on_game_start, outside coop_mode.when_srv(...). Pure lookups
-    (rawget, type, string.*, math.*, table.insert into an own table ...) and calls inside other functions are not."""
+def lua_load_functions(src: Source, calls: list[tuple[int, str, Optional[LuaFunction]]]) -> set[int]:
+    """ids of the named functions of a script that run at load: on_game_start, a function assigned to it at file level
+    (`on_game_start = start`) and, to a fixed point, every function of the file called by its bare name from code that
+    runs at load (file level, a function that runs at load, a when_srv(...) argument outside an anonymous function;
+    review 3, C2 and C4)."""
+    by_name: dict[str, list[LuaFunction]] = defaultdict(list)
+    for fn in src.lua_functions:
+        by_name[fn.name].append(fn)
+    load = {id(fn) for fn in by_name.get("on_game_start", ()) if not fn.local}
+    for name in re.findall(r"(?m)^[ \t]*on_game_start\s*=\s*([A-Za-z_]\w*)\s*$", src.code):
+        load |= {id(fn) for fn in by_name.get(name, ())}
+    changed = True
+    while changed:
+        changed = False
+        for pos, name, inner in calls:
+            if inner is not None and id(inner) not in load:
+                continue
+            for fn in by_name.get(name, ()) if re.fullmatch(r"[A-Za-z_]\w*", name) else ():
+                if id(fn) not in load:
+                    load.add(id(fn))
+                    changed = True
+    return load
+
+
+def lua_calls(src: Source) -> list[tuple[int, re.Match[str], Optional[LuaFunction]]]:
+    """Every call of a script that is not a definition (`function foo(`) or a keyword (`if (`): (offset, match, the
+    innermost function around it or None at file level)."""
     code = src.code
-    starts = line_starts(code)
-    spans = sorted(src.lua_spans, key=lambda f: f.start)
+    spans = sorted(src.lua_spans, key=lambda f: (f.start, -f.end))
     stack: list[LuaFunction] = []
     k = 0
-    out: list[tuple[int, str]] = []
-    seen: set[int] = set()
+    out = []
     for m in LUA_CALL.finditer(code):
         pos = m.start()
         while k < len(spans) and spans[k].start <= pos:
@@ -1550,21 +1646,58 @@ def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]
             k += 1
         while stack and stack[-1].end <= pos:
             stack.pop()
-        inner = stack[-1] if stack else None
-        if inner is not None and not (inner.name == "on_game_start" and not inner.local):
+        first = re.split(r"[.:]", m.group(1))[0]
+        if first in LUA_KEYWORDS or re.search(r"\bfunction\s*$", code[max(0, pos - 24):pos]):
+            continue  # `if (`, `function foo(`: not a call
+        out.append((pos, m, stack[-1] if stack else None))
+    return out
+
+
+def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """Calls of a srv script that run when the script loads, in every process (axr_main runs every script's file level
+    and on_game_start): at file level, in on_game_start, in a function assigned to it and in every function of the file
+    those call by name (lua_load_functions), outside the anonymous functions given to coop_mode.when_srv(...). Pure
+    lookups (rawget, type, string.*, math.*, table.insert or setmetatable on an own table ...), calls of a load-time
+    function of the file (its body is checked instead) and calls inside other functions are not."""
+    code = src.code
+    starts = line_starts(code)
+    calls = lua_calls(src)
+    bare = [(pos, "" if pos and code[pos - 1] in ".:" else m.group(1), inner) for pos, m, inner in calls]
+    load = lua_load_functions(src, bare)
+    load_names = {fn.name for fn in src.lua_functions if id(fn) in load}
+    pure_aliases: set[str] = set()
+    for names, exprs in re.findall(r"(?m)^[ \t]*local\s+([A-Za-z_][\w \t,]*?)\s*=\s*([^\n(]*)$", code):
+        # `local string_format, table_sort = string.format, table.sort`: locals that stand for pure functions
+        for name, expr in zip(names.split(","), exprs.split(",")):
+            expr = re.sub(r"\s+", "", expr)
+            if expr in LUA_PURE or expr.startswith(LUA_PURE_PREFIX):
+                pure_aliases.add(name.strip())
+    out: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for pos, m, inner in calls:
+        if inner is not None and id(inner) not in load:
             continue  # runs when that function is called
         if any(a <= pos <= b for a, b in when_spans):
             continue
         name = m.group(1)
-        first = re.split(r"[.:]", name)[0]
-        if first in LUA_KEYWORDS or re.search(r"\bfunction\s*$", code[max(0, pos - 24):pos]):
-            continue  # `if (`, `function foo(`: not a call
         if name in LUA_PURE or name.startswith(LUA_PURE_PREFIX):
             continue
-        if name in ("table.insert", "table.remove", "table.sort"):
-            arg = re.match(r"\s*\(\s*([A-Za-z_]\w*)\s*[,)]", code[m.end() - 1:])
+        if name in load_names and not (pos and code[pos - 1] in ".:"):
+            continue  # a load-time function of this file: its own calls are checked
+        if name in pure_aliases:
+            continue  # `local string_format = string.format`
+        if name in LUA_PROTECTED:
+            arg = re.match(r"\s*\(\s*([A-Za-z_][\w.]*)\s*[,)]", code[m.end() - 1:])
+            if arg and (arg.group(1) in LUA_PURE or arg.group(1).startswith(LUA_PURE_PREFIX)
+                        or arg.group(1) in pure_aliases):
+                continue  # pcall(string.format, ...): a pure function, protected
+        if name in LUA_OWN_ARG:
+            rest = code[m.end() - 1:]
+            arg = re.match(r"\s*\(\s*([A-Za-z_]\w*)", rest)
             if arg and arg.group(1) in own:
                 continue  # into a table of its own
+            if name == "setmetatable" and re.match(r"\s*\(\s*\{", rest):
+                continue  # a new table
         if pos and code[pos - 1] in ":." and name in LUA_STRING_METHODS and \
                 re.search(r"""(?:\(\s*(?:""|'')\s*\)|""|'')\s*[:.]$""", code[max(0, pos - 12):pos]):
             continue  # ("%s"):format(...)
@@ -1572,7 +1705,8 @@ def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]
         if number in seen:
             continue
         seen.add(number)
-        where = "on_game_start" if inner is not None else "file level"
+        where = "file level" if inner is None else (
+            "on_game_start" if inner.name == "on_game_start" else f"{inner.name}(), which runs at load")
         out.append((number, f"calls {name}() at load ({where}) outside coop_mode.when_srv: every process runs it"))
     return out
 
@@ -1786,12 +1920,17 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                     if var.call:
                         by = var.call if " " in var.call else f"{var.call}(...)"
                         add("L9C", var.line, f"{var.name} is initialized by {by} when the exe loads")
+                    if var.qualifier and var.qualifier in model.core_classes:
+                        # `u32 FarLimits::squads_per_player = 4;`: Ядро reads it through its class (review 3, C8)
+                        add("L3", var.line, f"defines the static member {var.qualifier}::{var.name} of the Ядро class "
+                                            f"{var.qualifier} ({model.core_classes[var.qualifier]})")
         else:
             mod_name = pathlib.PurePosixPath(src.path).stem
             tainted_local = model.lua_in_file.get(src.path, {})
             lua_qual = {k: t for k, t in model.lua_module.items() if k[0] != mod_name}
             alias_lines = {line for name, line, expr in src.lua_aliases}
             spans = []
+            call_results: list[int] = []
             if layer == "srv":
                 for m in WHEN_SRV.finditer(src.code):
                     depth = 0
@@ -1804,8 +1943,12 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                             if depth == 0:
                                 break
                         j += 1
-                    spans.append((m.start(), j))
-            own = lua_own_names(src.code, mod_name, src.code_strings) if layer == "srv" else set()
+                    # only the bodies of the anonymous functions given to when_srv wait for the srv layer; the rest of
+                    # the parenthesis is evaluated at once (`when_srv(hide_far_spots())` runs it at load; review 3, C2)
+                    spans += [(f.start, f.end) for f in src.lua_spans if m.end() <= f.start < j]
+                    if re.match(r"\s*(?!function\b)[A-Za-z_][\w.:]*\s*\(", src.code[m.end():j]):
+                        call_results.append(bisect.bisect_right(starts, m.start()))
+            own = lua_own_names(src.code, mod_name, src.code_strings, src.lua_aliases) if layer == "srv" else set()
             candidates = lines_with(LIT_TOMBSTONE + LIT_STEAM)
             if layer == "core":
                 candidates |= lines_with(LIT_LUA_MODE + LIT_LUA_ROLE) | calls_of(lua_names) | alias_lines
@@ -1853,6 +1996,8 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                     for v in variants:
                         refs |= {m.group(1) for m in LUA_MODULE_NAME.finditer(v)}
                     refs |= {m.group(1) or m.group(2) for m in LUA_MODULE_CALL.finditer(with_strings)}
+                    # a plain string with a script's name (a dispatch table read through rawget(_G, name), C6)
+                    refs |= set(LUA_SCRIPT_STRING.findall(with_strings))
                     for ref in sorted(refs):
                         if ref == FACADE or ref == mod_name or ref not in model.script_layer:
                             continue
@@ -1879,12 +2024,16 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                         if m:
                             reg = f"'{m.group(0).strip()}' outside coop_mode.when_srv"
                             break
-                    for rx in (LUA_PATCH, LUA_PATCH_FN, LUA_RAWSET):
+                    for rx in (LUA_PATCH, LUA_PATCH_FN, LUA_RAWSET, LUA_SETMETA):
                         for m in (rx.finditer(rew_line) if reg is None else ()):
                             target = m.group(1)
                             if not outside(m.start()):
                                 continue
-                            if target == "_G":
+                            if rx is LUA_SETMETA and target not in own:
+                                # setmetatable changes how a shared table behaves in every process (C3)
+                                reg = (f"sets the metatable of {target}, a table this script does not own, outside "
+                                       "coop_mode.when_srv")
+                            elif target == "_G":
                                 reg = "assigns a global through _G outside coop_mode.when_srv"
                             elif target not in own:
                                 # any table that is not this script's own: another script (in the repository or not:
@@ -1901,6 +2050,9 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
             if layer == "srv":
                 for number, why in lua_load_calls(src, own, spans):
                     add("L9", number, why)
+                for number in call_results:
+                    add("L9", number, "coop_mode.when_srv gets the result of a call: the call runs at load in every "
+                                      "process; give it the function, not its result")
             locals_ = count_locals(src.code)
             if len(locals_) > LOCALS_LIMIT:
                 for k, line_no in enumerate(locals_[LOCALS_LIMIT:], LOCALS_LIMIT + 1):
@@ -1959,10 +2111,12 @@ def config_refs(root: pathlib.Path, script_layer: dict[str, str]) -> list[tuple[
 def core_reach(model: Model, roots: Iterable[str] = ()) -> dict[str, str]:
     """srv and hostplay files that run in both modes, lower-case path -> why; tools/check_gates.py counts them as Ядро.
     Ядро, stock (also the stock-patch scripts) and dying code reach a file when they include it, call a function it
-    defines, name it (Lua, a C++ string, a config), declare `extern` a global it defines, or own the class whose member it
-    defines; a srv file with a static initializer that calls a function runs in every process. Then, to a fixed point,
-    every reached file is a root itself (and so are `roots`: the files the gate counts as Ядро for another reason), so a
-    srv header that only a reached srv .cpp includes is reached too (review 2, B1)."""
+    defines (an overload of an Ядро function too: review 3, C9), name it (Lua, also a plain string of a dispatch table;
+    a C++ string, a config), declare `extern` a global it defines, or own the class whose member (function or static
+    data, C8) it defines; a srv file with a static initializer that calls a function or a constructor (C7) runs in every
+    process. Then, to a fixed point, every reached file is a root itself (and so are `roots`: the files the gate counts
+    as Ядро for another reason), so a srv header that only a reached srv .cpp includes is reached too (review 2, B1),
+    and so is a srv file that defines a member of a class declared in a reached file (review 3, C11)."""
     layers = model.layers
     reach: dict[str, str] = {}
     gate_core = ("core", "stock", "dying")
@@ -1985,6 +2139,7 @@ def core_reach(model: Model, roots: Iterable[str] = ()) -> dict[str, str]:
             refs = {m.group(1) for v in (line, normed, rewrite_lua(normed, aliases_at(src, number)))
                     for m in LUA_MODULE_NAME.finditer(v)}
             refs |= {m.group(1) or m.group(2) for m in LUA_MODULE_CALL.finditer(with_strings)}
+            refs |= set(LUA_SCRIPT_STRING.findall(with_strings))  # a dispatch table of script names (C6)
             for ref in sorted(refs):
                 if ref != mod_name and model.script_layer.get(ref) in ("srv", "hostplay"):
                     out.append((number, ref))
@@ -2008,9 +2163,9 @@ def core_reach(model: Model, roots: Iterable[str] = ()) -> dict[str, str]:
         code_lines = src.lines()
         for number in sorted({n for nm in table.keys() & set(words) for n in table[nm]}):
             line = rewrite_cpp_aliases(code_lines[number - 1], src.aliases)
-            # a name that Ядро defines too (an overload, a helper namespace like detail::) is left to the include graph:
-            # a header that defines it inline is reached by its #include
-            for key, paths in srv_refs(src, line, model.defs, exclusive=True):
+            # a name that Ядро defines too counts as well: the call may pick the srv overload (`may_switch(g)` of
+            # `may_switch(const FarGroup&)`); the gate errs towards Ядро, L3 stays exclusive (review 3, C9)
+            for key, paths in srv_refs(src, line, model.defs, exclusive=False):
                 out.append((number, key, paths))
         return out
 
@@ -2078,31 +2233,55 @@ def core_reach(model: Model, roots: Iterable[str] = ()) -> dict[str, str]:
         var = next((v for v in src.cpp.variables if v.call), None)
         if var:
             mark(src.path, f"a static initializer with a call at {src.path}:{var.line} runs in every process")
-    # 8. to a fixed point: what a reached file (or a root) includes, calls or names is reached too
+        var = next((v for v in src.cpp.variables if v.qualifier and v.qualifier in model.core_classes), None)
+        if var:
+            # `u32 FarLimits::squads_per_player = 4;` of an Ядро class: Ядро reads it (review 3, C8)
+            mark(src.path, f"defines the static member {var.qualifier}::{var.name} of the Ядро class {var.qualifier} "
+                           f"({model.core_classes[var.qualifier]})")
+    # 8. to a fixed point: what a reached file (or a root) includes, calls or names is reached too; and a srv / hostplay
+    # file that defines a member (a function or a static data member) of a class declared in a reached file: Ядро calls
+    # it through an object of that class (`operator_book().may_run(line)` of coop_operator.h's Book, review 3, C11)
     by_low = {s.path.lower(): s for s in model.sources}
-    pending = list(reach) + [r.lower() for r in roots]
+    members = [(s, f"{f.qualifier}::{f.name}", f.qualifier) for s in model.sources
+               if s.cpp and s.layer in ("srv", "hostplay") for f in s.cpp.functions if f.out_of_class and f.qualifier]
+    members += [(s, f"{v.qualifier}::{v.name}", v.qualifier) for s in model.sources
+                if s.cpp and s.layer in ("srv", "hostplay") for v in s.cpp.variables if v.qualifier]
+    root_lows = [r.lower() for r in roots]
+    pending = list(reach) + root_lows
     done: set[str] = set()
     while pending:
-        low = pending.pop()
-        if low in done:
-            continue
-        done.add(low)
-        src = by_low.get(low)
-        if src is None or not src.code:
-            continue
-        before = set(reach)
-        if src.lang == "cpp":
-            for t in edges.get(src.path, ()):
-                mark(t, f"included by the reached {src.path}")
-            for number, (q, nm), paths in call_refs(src, inside):
-                for p in paths:
-                    mark(p, f"defines {q + '::' if q else ''}{nm}, called by the reached {src.path}:{number}")
-            for number, ref in string_refs(src):
-                mark(script(ref), f"named in a string by the reached {src.path}:{number}")
-        else:
-            for number, ref in lua_refs(src):
-                mark(script(ref), f"named by the reached {src.path}:{number}")
-        pending.extend(set(reach) - before)
+        while pending:
+            low = pending.pop()
+            if low in done:
+                continue
+            done.add(low)
+            src = by_low.get(low)
+            if src is None or not src.code:
+                continue
+            before = set(reach)
+            if src.lang == "cpp":
+                for t in edges.get(src.path, ()):
+                    mark(t, f"included by the reached {src.path}")
+                for number, (q, nm), paths in call_refs(src, inside):
+                    for p in paths:
+                        mark(p, f"defines {q + '::' if q else ''}{nm}, called by the reached {src.path}:{number}")
+                for number, ref in string_refs(src):
+                    mark(script(ref), f"named in a string by the reached {src.path}:{number}")
+            else:
+                for number, ref in lua_refs(src):
+                    mark(script(ref), f"named by the reached {src.path}:{number}")
+            pending.extend(set(reach) - before)
+        declared: dict[str, str] = {}
+        for low in sorted(set(reach) | set(root_lows)):
+            src = by_low.get(low)
+            if src is not None and src.cpp:
+                for name in sorted(src.cpp.classes):
+                    declared.setdefault(name, src.path)
+        for s, what, cls in members:
+            if cls in declared and s.path.lower() not in reach and s.path.lower() not in root_lows:
+                mark(s.path, f"defines {what}, a member of the class {cls} declared in the reached {declared[cls]}")
+                if s.path.lower() in reach:
+                    pending.append(s.path.lower())
     return reach
 
 
@@ -2146,7 +2325,9 @@ def load_inputs(root: pathlib.Path, args: argparse.Namespace) -> tuple[LayerMap,
     return layers, srv_entry, keys, paths["persisted_keys.txt"], paths["layers.txt"]
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Optional[Sequence[str]] = None, model: Optional[Model] = None) -> int:
+    """model: one tools/check_gates.py already built from the same tree and lists (it runs this check first, in its own
+    process, instead of building the model twice)."""
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("--root", default=str(ROOT), help="repository root (default: this repository)")
     ap.add_argument("--layers", help="layers.txt (default <root>/tools/layers.txt)")
@@ -2176,7 +2357,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         keys_rel = keys_file.resolve().relative_to(root).as_posix()
     except ValueError:
         keys_rel = keys_file.as_posix()
-    findings, sources = scan(root, layers, srv_entry, keys, keys_rel)
+    if model is not None:
+        findings, sources = scan_model(model, keys, keys_rel), model.sources
+    else:
+        findings, sources = scan(root, layers, srv_entry, keys, keys_rel)
     found = group(findings)
     total = sum(len(v) for v in found.values())
 

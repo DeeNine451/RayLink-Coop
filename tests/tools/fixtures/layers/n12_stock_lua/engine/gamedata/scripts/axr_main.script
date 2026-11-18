@@ -1,0 +1,6 @@
+-- stock: the start of every script
+function on_game_start()
+	if coop_srv_boot then coop_srv_boot.on_start() end
+	if coop_items then coop_items.pick() end
+	if coop.is_map_server() then return end
+end

@@ -14,11 +14,33 @@ rem   shared exe the move fails: this run says so loudly and runs on its own fre
 rem   shared exe free replaces it.
 rem   LUA51_LIB   path to the engine's static lua51.lib (default: engine\_build, then engine-ci\_build, Release-AVX)
 rem   VCVARS      path to vcvars64.bat
-rem Per-file output: temp\lua\out\<name>.txt. Exit code: number of failed files; 255 = could not build/start the runner.
+rem Per-file output: temp\lua\out\<name>.txt (COOP_LUA_OUT=<dir> moves it: tests\lua\run_all.lua reads the variable).
+rem First step: tools\check_layers.py (the layer border, docs/MODES.md section 5); a refusal stops the run with exit 254
+rem and its lines. COOP_SKIP_LAYERS=1 skips it: the lead's emergency only, printed loudly.
+rem Exit code: number of failed files; 255 = could not build/start the runner; 254 = check_layers refused the tree.
 setlocal
 
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
+
+if /i "%COOP_SKIP_LAYERS%"=="1" goto layers_skipped
+where python >nul 2>nul
+if errorlevel 1 goto layers_no_python
+python -I "%ROOT%\tools\check_layers.py" --root "%ROOT%"
+if errorlevel 1 goto layers_failed
+goto layers_done
+:layers_no_python
+echo [test_lua] python is not on PATH: tools\check_layers.py cannot run, so no tests ^(COOP_SKIP_LAYERS=1 skips it^)
+exit /b 254
+:layers_failed
+echo [test_lua] tools\check_layers.py refused the tree ^(lines above, docs/MODES.md section 5^): no tests
+exit /b 254
+:layers_skipped
+echo [test_lua] ******************************************************************************************
+echo [test_lua] COOP_SKIP_LAYERS=1: the layer check tools\check_layers.py is SKIPPED ^(the lead's emergency only^)
+echo [test_lua] ******************************************************************************************
+:layers_done
+
 set "OUT=%ROOT%\temp\lua"
 set "LUAJIT=%ROOT%\engine\src\3rd party\luajit-2\src"
 set "RUNREL=temp\lua\runlua.exe"

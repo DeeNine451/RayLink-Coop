@@ -2,11 +2,32 @@
 rem Anomaly Coop: builds and runs the xrCoop unit tests (no framework, MSVC command line).
 rem   tools\build_tests.cmd [test-name-substring ...]     extra arguments are passed to coop_tests.exe
 rem Output: anomaly-coop\temp\tests\coop_tests.exe; COOP_TEST_OUT=<dir> moves it (parallel agents must not share one).
-rem Exit code: build error code, else the test exe exit code.
+rem First step: tools\check_layers.py (the layer border, docs/MODES.md section 5); a refusal stops the run with exit 254
+rem and its lines. COOP_SKIP_LAYERS=1 skips it: the lead's emergency only, printed loudly.
+rem Exit code: 254 = check_layers refused the tree, else the build error code, else the test exe exit code.
 setlocal
 
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
+
+if /i "%COOP_SKIP_LAYERS%"=="1" goto layers_skipped
+where python >nul 2>nul
+if errorlevel 1 goto layers_no_python
+python -I "%ROOT%\tools\check_layers.py" --root "%ROOT%"
+if errorlevel 1 goto layers_failed
+goto layers_done
+:layers_no_python
+echo [build_tests] python is not on PATH: tools\check_layers.py cannot run, so no build ^(COOP_SKIP_LAYERS=1 skips it^)
+exit /b 254
+:layers_failed
+echo [build_tests] tools\check_layers.py refused the tree ^(lines above, docs/MODES.md section 5^): no build, no tests
+exit /b 254
+:layers_skipped
+echo [build_tests] ******************************************************************************************
+echo [build_tests] COOP_SKIP_LAYERS=1: the layer check tools\check_layers.py is SKIPPED ^(the lead's emergency only^)
+echo [build_tests] ******************************************************************************************
+:layers_done
+
 set "SRC=%ROOT%\engine\src"
 set "COOP=%SRC%\xrCoop"
 set "ENET=%SRC%\3rd party\enet"

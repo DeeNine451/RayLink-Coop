@@ -1,0 +1,11 @@
+-- srv: the far world flag (review 3, C1: a local copy of a table that is not the script's own is not its own)
+local db = db
+local mine = {}
+local cfg = mine.cfg or {}
+local store = db.storage or {}
+function on_game_start()
+	db.coop_far_world = true
+	store.coop_far = true
+	mine.started = true
+	cfg.x = 1
+end

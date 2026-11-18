@@ -1,0 +1,16 @@
+-- srv: the far tick (review 3, C4: a function assigned to on_game_start, and what it calls, runs at load)
+local function far_tick()
+	return false
+end
+local function arm()
+	AddUniqueCall(far_tick)
+end
+local function start()
+	CreateTimeEvent("coop_srv_far", "tick", 5, far_tick)
+	coop_core_hud.set_spots_enabled(false)
+	arm()
+end
+local function later()
+	exec_console_cmd("ai_use_old_vision 1")
+end
+on_game_start = start

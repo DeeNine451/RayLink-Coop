@@ -28,9 +28,11 @@ class Fake:
     records every call. Anything else fails the test."""
 
     def __init__(self, root=None, layers=0, gates=0, out="", tags=("b42", "b41.9", "dev-42.1"), points_at=(),
-                 heads=(PROJECT, ENGINE), remote=None, releases=None, latest=None, network=True, ancestors=()):
+                 heads=(PROJECT, ENGINE), remote=None, releases=None, latest=None, network=True, ancestors=(),
+                 untracked=""):
         self.root = Path(root) if root else None
         self.ancestors = set(ancestors)            # (a, b): a is an ancestor of b (git merge-base --is-ancestor)
+        self.untracked = untracked                 # git status --untracked-files=all -- <product folders>
         self.calls = []
         self.layers, self.gates, self.out = layers, gates, out
         self.tags, self.points_at, self.heads = list(tags), list(points_at), heads
@@ -44,11 +46,16 @@ class Fake:
         args = [str(a) for a in args]
         self.calls.append(args)
         joined = " ".join(args)
+        layers = "check_layers: " + ("OK (1 files, ceiling 0, used 0)" if self.layers == 0 else "FAIL (1)") + "\n" + \
+            self.out
         if "check_layers.py" in joined:
-            return done(args, "check_layers: " + ("OK (1 files, ceiling 0, used 0)" if self.layers == 0 else "FAIL (1)")
-                        + "\n" + self.out, self.layers)
+            return done(args, layers, self.layers)
         if "check_gates.py" in joined:
-            return done(args, "gates: required: hostplay.ok, srv.ok\n" + (
+            # --layers: the layer check runs first on the same model; exit 3 when it fails (the gate does not run)
+            first = layers if "--layers" in args else ""
+            if "--layers" in args and self.layers:
+                return done(args, first + "gates: tools/check_layers.py failed on the tree (above): fix it first\n", 3)
+            return done(args, first + "gates: required: hostplay.ok, srv.ok, tests.ok\n" + (
                 "gates: OK\n" if self.gates == 0 else "gates: hostplay.ok missing (run tools\\stand_hostplay.ps1)\ngates: FAIL (1)\n"),
                 self.gates)
         if args[:3] == ["git", "tag", "--list"]:
@@ -64,7 +71,7 @@ class Fake:
             engine = self.root is not None and Path(cwd) == self.root / "engine"
             return done(args, self.heads[1] if engine else self.heads[0])
         if args[:2] == ["git", "status"]:
-            return done(args, "")  # clean trees
+            return done(args, self.untracked if "--untracked-files=all" in args else "")  # clean trees
         if args[:3] == ["git", "merge-base", "--is-ancestor"]:
             return done(args, "", 0 if args[3] == args[4] or (args[3], args[4]) in self.ancestors else 1)
         network = args[:2] in (["git", "ls-remote"], ["git", "push"], ["gh", "api"], ["gh", "release"]) \
@@ -197,16 +204,37 @@ def test_verify_refuses_when_check_layers_fails(tmp_path):
     with pytest.raises(release.Refused, match="check_layers failed"):
         release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", fake)
     assert [c[:3] for c in fake.calls][0] == ["git", "tag", "--list"]
-    assert "check_layers.py" in " ".join(fake.calls[1]) and len(fake.calls) == 2
+    assert "check_gates.py" in " ".join(fake.calls[1]) and "--layers" in fake.calls[1] and len(fake.calls) == 2
 
 
 def test_verify_refuses_without_the_stand_marks(tmp_path):
     fake = Fake(gates=1)
     with pytest.raises(release.Refused, match="stand marks"):
         release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", fake)
-    assert "check_layers.py" in " ".join(fake.calls[1])
-    assert "check_gates.py" in " ".join(fake.calls[2]) and "dev-42.1..HEAD" in fake.calls[2]
-    assert any(str(tmp_path / "x.exe") == str(a) for a in fake.calls[2])
+    assert "check_gates.py" in " ".join(fake.calls[1]) and "dev-42.1..HEAD" in fake.calls[1]
+    assert any(str(tmp_path / "x.exe") == str(a) for a in fake.calls[1])
+
+
+def test_verify_runs_the_release_rule_on_one_model(tmp_path, capsys):
+    # item 1 of round 4: --release (both stands and tests.ok whatever the layers, the exe built from engine HEAD);
+    # item 6: --layers runs check_layers on the gate's own model, so no second model build in another process
+    with pytest.raises(release.Refused, match="tests.ok"):
+        release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", Fake(gates=1))
+    fake = Fake()
+    (tmp_path / "x.exe").write_bytes(b"MZ no label")
+    with pytest.raises(release.Refused, match="labels"):  # past both checks: the next one is the exe's label
+        release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", fake)
+    python = [c for c in fake.calls if "check_gates.py" in " ".join(c) or "check_layers.py" in " ".join(c)]
+    assert len(python) == 1 and "--release" in python[0] and "--layers" in python[0], fake.calls
+    out = capsys.readouterr().out
+    assert "verify: check_layers: OK" in out and "verify: gates: required: hostplay.ok, srv.ok, tests.ok" in out, out
+
+
+def test_verify_refuses_untracked_product_files(tmp_path):
+    # C12: an untracked engine source is in no commit, no mark and no tests.ok, but the exe may hold it
+    fake = Fake(untracked="?? src/xrGame/coop/coop_wip.cpp")
+    with pytest.raises(release.Refused, match="untracked product files in .*coop_wip.cpp"):
+        release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", fake)
 
 
 def test_verify_gates_from_the_last_release_of_the_channel(tmp_path):
@@ -214,7 +242,7 @@ def test_verify_gates_from_the_last_release_of_the_channel(tmp_path):
     fake = Fake(gates=1, tags=("b42", "b56", "dev-42.1", "dev-50"))
     with pytest.raises(release.Refused, match="stand marks"):
         release.verify(release.names_for("dev", "57"), tmp_path, None, tmp_path / "x.exe", fake)
-    assert "dev-50..HEAD" in fake.calls[2]
+    assert "dev-50..HEAD" in fake.calls[1]
     fake = Fake(tags=("b42", "b56", "dev-42.1", "dev-50"))
     with pytest.raises(release.Refused, match="not the last dev release dev-50") as refused:
         release.verify(release.names_for("dev", "57"), tmp_path, "HEAD~1", tmp_path / "x.exe", fake)
@@ -231,7 +259,7 @@ def test_since_override_only_widens_the_range(tmp_path, capsys):
     with pytest.raises(release.Refused, match="stand marks"):
         release.verify(release.names_for("dev", "57"), tmp_path, "dev-41", tmp_path / "x.exe", fake, since_override=True)
     assert "--since-override: gating from dev-41, not from the last dev release dev-42.1" in capsys.readouterr().out
-    assert "dev-41..HEAD" in fake.calls[3]
+    assert "dev-41..HEAD" in fake.calls[2]
     # ... a newer one would narrow it (the commits before it would need nothing): refused before any gate runs
     fake = Fake(gates=1)
     with pytest.raises(release.Refused, match="only widen") as refused:
@@ -246,7 +274,7 @@ def test_stable_verify_needs_the_same_commit_out_as_dev_first(tmp_path):
     fake = Fake(tags=("b56", "dev-57"), points_at=())
     with pytest.raises(release.Refused, match="Dev first: no dev-57 tag"):
         release.verify(release.names_for("stable", "57"), tmp_path, None, tmp_path / "x.exe", fake)
-    assert "b56..HEAD" in fake.calls[2]
+    assert "b56..HEAD" in fake.calls[1]
     fake = Fake(tags=("b56", "dev-57"), points_at=("dev-57",))
     with pytest.raises(release.Refused, match="labels"):  # past the Dev rule: the next check is the exe's label
         (tmp_path / "x.exe").write_bytes(b"MZ no label")

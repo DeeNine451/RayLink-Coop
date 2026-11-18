@@ -1,0 +1,10 @@
+-- Ядро: price hooks by script name (review 3, C6: a plain string names a srv script)
+local HOOKS = { "coop_items", "coop_srv_far_prices" }
+function factor(item)
+	local f = 1
+	for _, name in ipairs(HOOKS) do
+		local m = rawget(_G, name)
+		if m and m.price_factor then f = f * m.price_factor(item) end
+	end
+	return f
+end

@@ -1,0 +1,8 @@
+-- srv: a weak cache (review 3, C3: setmetatable on a table that is not the script's own)
+setmetatable(db.storage, { __mode = "v" })
+local cache = setmetatable({}, { __mode = "k" })
+local own = {}
+setmetatable(own, { __index = cache })
+function on_game_start()
+	setmetatable(_G, { __index = function() return nil end })
+end

@@ -18,12 +18,14 @@ the owner's word for that build, CLAUDE.md):
 prepare  makes the work folder temp/<tag>/ with release.json (names, tags, titles) and empty notes files to write.
 verify   gates from the last release tag of the channel (the newest local b* or dev-* tag by build number; another
          --since only with --since-override, only an ancestor of that tag (it widens the range, never narrows it), and
-         printed and recorded): tools/check_layers.py passes, tools/check_gates.py
-         <since>..HEAD passes with the exe being released (the stand marks temp/gates/*.ok must name both HEADs and
-         that exe); then both working trees clean, the exe's label, the package (entries, layers byte for byte with
-         the working files AND with HEAD's blobs: only committed files ship; release.txt, fomod version), the public
-         diff free of secret-like text, the notes free of the lines the owner forbade. Writes temp/<tag>/verified.json
-         with the notes' SHA-256. Talks to no network.
+         printed and recorded): `tools/check_gates.py <since>..HEAD --release --layers` with the exe being released,
+         one process and one model: tools/check_layers.py passes on the tree, then the release rule (review 3): both
+         stand marks and tests.ok of both HEADs whatever the changed files' layers (the stand marks name both HEADs,
+         that exe and the stand's own folder), and the exe is engine-ci's build of engine HEAD (check_gates.exe_source);
+         then both working trees clean (no tracked change; no untracked product file), the exe's label, the package
+         (entries, layers byte for byte with the working files AND with HEAD's blobs: only committed files ship;
+         release.txt, fomod version), the public diff free of secret-like text, the notes free of the lines the owner
+         forbade. Writes temp/<tag>/verified.json with the notes' SHA-256. Talks to no network.
 draft    (GitHub) refuses unless verified.json is of this tag and channel, both HEADs are the verified ones, the notes
          are the verified ones, the --since tag is the last published release of the channel on GitHub (an override:
          an ancestor of it) (stable: and dev-<N> is published on the same project commit); then pushes the tag (and
@@ -229,19 +231,22 @@ def must(run: Runner, args: list[str], cwd: pathlib.Path) -> str:
 # ---- verify ------------------------------------------------------------------------------------------------------------
 
 def gate_checks(run: Runner, root: pathlib.Path, since: str, exe: pathlib.Path) -> list[str]:
-    """check_layers and check_gates, first: the lines to show. Raises Refused when either fails."""
-    shown = []
-    layers = run([sys.executable, "-I", str(root / "tools" / "check_layers.py"), "--root", str(root)], root)
-    last = (layers.stdout or "").strip().splitlines()[-1:] or [""]
-    shown.append(scrub(last[0]))
-    if layers.returncode != 0:
-        raise Refused("check_layers failed: " + scrub((layers.stdout or "")[-1500:]))
-    gates = run([sys.executable, "-I", str(root / "tools" / "check_gates.py"), f"{since}..HEAD", "--root", str(root),
-                 "--exe", str(exe)], root)
-    shown += [scrub(l) for l in (gates.stdout or "").splitlines() if l.startswith("gates: required") or "ok" in l.lower()]
+    """check_layers and check_gates, first, in one process (check_gates --layers builds the layer model once and runs
+    check_layers on it before the gate; exit 3: the layer check failed): the lines to show. Raises Refused when either
+    fails. --release: the release rule (both stand marks and tests.ok whatever the files' layers) and the exe built
+    from engine HEAD."""
+    gates = run([sys.executable, "-I", str(root / "tools" / "check_gates.py"), f"{since}..HEAD", "--release", "--layers",
+                 "--root", str(root), "--exe", str(exe)], root)
+    out = gates.stdout or ""
+    layer_lines = [l for l in out.splitlines() if l.startswith("check_layers:")]
+    shown = [scrub(layer_lines[-1])] if layer_lines else []
+    if gates.returncode == 3:
+        raise Refused("check_layers failed: " + scrub(out[-1500:]))
+    shown += [scrub(l) for l in out.splitlines()
+              if l.startswith("gates: required") or (l.startswith("gates:") and "ok" in l.lower())]
     if gates.returncode != 0:
-        raise Refused("check_gates refused (stand marks temp/gates/*.ok missing or stale, or a commit to split): "
-                      + scrub((gates.stdout or "")[-1500:]))
+        raise Refused("check_gates refused (stand marks temp/gates/*.ok or tests.ok missing or stale, the exe not "
+                      "engine-ci's build of engine HEAD, or a commit to split): " + scrub(out[-1500:]))
     return shown
 
 
@@ -365,6 +370,12 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
     for repo in (root, engine):
         if must(run, ["git", "status", "--porcelain", "--untracked-files=no"], repo):
             raise Refused(f"uncommitted changes in {repo.name}")
+    # an untracked product file is in no HEAD and in no mark (the engine's: the exe may hold it; review 3, C12)
+    for repo, paths in ((root, ["gamedata", "gamedata_gamma"]), (engine, ["src", "gamedata"])):
+        untracked = must(run, ["git", "status", "--porcelain", "--untracked-files=all", "--", *paths], repo)
+        if untracked:
+            raise Refused(f"untracked product files in {repo.name}: "
+                          + "; ".join(l.strip() for l in untracked.splitlines()[:5]) + ": commit or remove them")
     project = must(run, ["git", "rev-parse", "HEAD"], root)
     engine_sha = must(run, ["git", "rev-parse", "HEAD"], engine)
     if n.channel == "stable":
@@ -395,7 +406,8 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
     if asset.resolve() != exe.resolve():
         shutil.copy2(exe, asset)
     result = dict(asdict(n), project=project, engine=engine_sha, archive=str(archive), zip_sha256=sha256(archive.read_bytes()),
-                  exe=str(asset), exe_source=str(exe), exe_sha256=exe_hash, since=since, since_override=since != last,
+                  exe=str(asset), exe_source=str(exe), exe_built_from=engine_sha, exe_sha256=exe_hash, since=since,
+                  since_override=since != last,
                   last_release=last, notes_sha256=notes_digests(work), **package)
     (work / "verified.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"verify: OK, {package['entries']} entries, {package['compared']} compared, exe {exe_hash[:8]}")

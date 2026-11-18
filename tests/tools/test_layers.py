@@ -279,6 +279,66 @@ def test_member_l4_in_a_cpp_counts_only_true(work, capsys):
     assert found == [7, 10], out  # 6: here = false, 8: level_known{false}; 10: a parameter default stays
 
 
+# --- the third review: what still ran in the co-op process (temp/modes_review3/review3.md, C1-C8) -----------------------
+
+def l9_lines(out: str, name: str) -> list[int]:
+    return sorted(line for path, line, rule in violations(out) if rule == "L9" and path.endswith(name))
+
+
+def test_self_alias_of_a_foreign_table_is_not_own(work, capsys):
+    # C1: `local db = db` made db "own", so `db.coop_far_world = true` in on_game_start passed
+    code, out = run(make(work, "c1_self_alias"), capsys)
+    assert code == 1, out
+    assert l9_lines(out, "coop_srv_world_alias.script") == [7, 8], out  # 9, 10: its own table and a copy of it
+
+
+def test_when_srv_given_the_result_of_a_call_is_l9(work, capsys):
+    # C2: when_srv(hide_far_spots()) calls hide_far_spots at load; its body runs at load too
+    code, out = run(make(work, "c2_when_srv_call"), capsys)
+    assert code == 1, out
+    assert l9_lines(out, "coop_srv_far_spots.script") == [3, 4, 8], out  # 9: a function, 10: an anonymous one
+    assert "gets the result of a call" in out
+
+
+def test_setmetatable_on_a_foreign_table_is_l9(work, capsys):
+    # C3: setmetatable was a pure lookup; on db.storage it makes a shared table weak in every process
+    code, out = run(make(work, "c3_setmetatable"), capsys)
+    assert code == 1, out
+    assert l9_lines(out, "coop_srv_memory.script") == [2, 7], out  # 3: a new table, 5: its own table
+    assert "sets the metatable of db" in out
+
+
+def test_function_assigned_to_on_game_start_and_its_callees_run_at_load(work, capsys):
+    # C4: `on_game_start = start`; start calls arm(); both bodies run at load
+    code, out = run(make(work, "c4_assigned_start"), capsys)
+    assert code == 1, out
+    assert l9_lines(out, "coop_srv_far_start.script") == [6, 9, 10], out  # 14: later() never runs at load
+
+
+def test_core_script_naming_a_srv_script_in_a_plain_string_is_l3(work, capsys):
+    # C6: a dispatch table of script names read through rawget(_G, name)
+    code, out = run(make(work, "c6_dispatch_string"), capsys)
+    found = {(line, rule) for path, line, rule in violations(out) if path.endswith("coop_price_hooks.script")}
+    assert found == {(2, "L3")}, out  # coop_items is Ядро
+    assert "coop_srv_far_prices" in out
+
+
+def test_static_object_with_a_constructor_in_srv_is_l9c(work, capsys):
+    # C7: `static Registrar s_registrar;` runs Registrar() (which registers a hook) in every process
+    code, out = run(make(work, "c7_static_ctor"), capsys)
+    found = sorted(line for path, line, rule in violations(out) if rule == "L9C" and path.endswith("coop_far_reg.cpp"))
+    assert found == [12, 13], out  # 18: Plain has no constructor; 19: a pointer; 20: a declaration
+    assert "the constructor Registrar()" in out
+
+
+def test_static_member_of_a_core_class_defined_in_srv_is_l3(work, capsys):
+    # C8: `u32 FarLimits::squads_per_player = 4;` in a srv file; Ядро reads FarLimits::squads_per_player
+    code, out = run(make(work, "c8_static_member"), capsys)
+    found = {(path, line, rule) for path, line, rule in violations(out) if "coop_far_limits" in path}
+    assert found == {("engine/src/xrGame/coop/srv/coop_far_limits_srv.cpp", 2, "L3")}, out
+    assert "static member FarLimits::squads_per_player" in out
+
+
 # --- false alarms of the review's replay (item 11) --------------------------------------------------------------------
 
 def test_l4_counts_only_bool_defaults(work, capsys):

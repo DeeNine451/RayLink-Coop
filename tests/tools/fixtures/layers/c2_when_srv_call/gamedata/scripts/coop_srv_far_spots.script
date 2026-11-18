@@ -1,0 +1,11 @@
+-- srv: hide far spots (review 3, C2: when_srv(f()) runs f at load in every process)
+local function hide_far_spots()
+	coop_core_hud.set_spots_enabled(false)
+	exec_console_cmd("ai_use_old_vision 1")
+end
+local function show() return true end
+function on_game_start()
+	coop_mode.when_srv(hide_far_spots())
+	coop_mode.when_srv(show)
+	coop_mode.when_srv(function() coop_core_hud.set_spots_enabled(true) end)
+end
