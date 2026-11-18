@@ -5,7 +5,8 @@
 	Runs on every machine (a "view" script in configs\coop_domains_checkpoints.ltx). The item_tent side of the tents
 	(wrappers of the stock functions; F3a task 7: the host player claims like any player) is coop_tent_guard.script.
 
-	1. Tips and PDA spots (engine callback coop_checkpoint_changed(local_id, kind, source, rollback, level)).
+	1. Tips and PDA spots (engine callback coop_checkpoint_changed(local_id, kind, source, rollback, level, base); base,
+	   Build 57 round 3: "bed" | "base" | "none" | nil, what the engine of this machine says the record is - update_key).
 	   The player's own camp: a tip st_coop_cp_updated_<kind> (st_coop_cp_rollback when the camp was lost and the previous one
 	   is used again; Build 57: kind rest without an object is a base without a sleeping place, st_coop_cp_updated_base, and
 	   has no spot, as arrival and story; round 2: kind rest whose object is a sleep zone of [coop_bases] is the bed of a base,
@@ -395,9 +396,14 @@ end
 -- The tip of an own record: st_coop_cp_updated_<kind>, but a rest record is told apart (Build 57 round 2, review S6):
 -- without an object a base without a sleeping place ("a base"), with a sleep zone of [coop_bases] as its object the bed of a
 -- base ("a sleeping place"), any other rest place (a surge cover, a rest zone of no base, the object or the section not
--- found) the generic text ("a resting place").
-function update_key(kind, source)
+-- found) the generic text ("a resting place"). Round 3 (the lead 2026-11-18, review S6): the engine says it (`base`, the sixth
+-- argument of coop_checkpoint_changed: "bed" | "base" | "none"), so a client needs no alife() and no online zone object; nil
+-- (an older exe, or an object this machine does not hold) keeps the lookup below.
+local BASE_KEYS = { bed = "updated_bed", base = "updated_base", none = "updated_rest" }
+
+function update_key(kind, source, base)
 	if kind ~= "rest" then return "updated_" .. kind end
+	if type(base) == "string" and BASE_KEYS[base] then return BASE_KEYS[base] end
 	if source == nil then return "updated_base" end
 	local name = object_name(source)
 	if name and ini_sys and ini_sys:section_exist("coop_bases") and ini_sys:r_string_ex("coop_bases", name, nil) ~= nil then
@@ -547,10 +553,10 @@ end
 -------------------------------------------------------------------------------
 -- Engine callbacks
 -------------------------------------------------------------------------------
--- The camp of a player changed: coop_checkpoint_changed(local_id, kind, source local id or -1, rollback, level or nil).
--- kind "none": he has none (rolled back to nothing, gone, no longer shared; also the first message of every player who
--- comes into the world).
-local function on_changed(lid, kind, source, rollback, lvl)
+-- The camp of a player changed: coop_checkpoint_changed(local_id, kind, source local id or -1, rollback, level or nil,
+-- base or nil). kind "none": he has none (rolled back to nothing, gone, no longer shared; also the first message of every
+-- player who comes into the world). base (Build 57 round 3): what the record is for the text, update_key.
+local function on_changed(lid, kind, source, rollback, lvl, base)
 	if type(lid) ~= "number" or type(kind) ~= "string" then return end
 	rollback = rollback == true
 	if kind == "none" then
@@ -581,7 +587,7 @@ local function on_changed(lid, kind, source, rollback, lvl)
 	if kind == "tent" and not rollback and pending and pending.sent and pending.what ~= "pack" then
 		pending = nil -- the answer to my claim
 	end
-	tell(rollback and "rollback" or update_key(kind, source))
+	tell(rollback and "rollback" or update_key(kind, source, base))
 end
 
 -- The host refused my claim: coop_checkpoint_refused(reason, what).

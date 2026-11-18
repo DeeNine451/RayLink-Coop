@@ -529,6 +529,59 @@ case("rest_texts_bed_base_rest", function()
 	check(MSG == STR.st_coop_cp_updated_campfire, "a campfire: campfire")
 end)
 
+-- Build 57 round 3 (the lead 2026-11-18, review S6): the engine tells the script what a record is (the sixth argument of
+-- coop_checkpoint_changed: "bed" | "base" | "none"), so a client with no alife() and the sleep zone not online on it still
+-- reads "a sleeping place" for the bed of a sleep zone base and "a base" for a start base. nil (an older exe, or an object
+-- that machine does not hold) keeps the script's own lookup.
+case("rest_texts_engine_mark", function()
+	fresh("client")
+	INI.coop_bases = { esc_basement_sleep_area = "50, stalker, csky, ecolog" }
+	-- the sleep zone 320 is neither a server object (a client has no alife()) nor an online object here
+	check(SE[320] == nil and OBJ[320] == nil, "the zone is not known on this client")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 320, false, "l01_escape", "bed")
+	check(MSG == STR.st_coop_cp_updated_bed, "a client, the zone not online, the engine says bed: a sleeping place (" .. tostring(MSG) .. ")")
+	MSG = nil
+	CP_RECORD[0] = { kind = "rest", level = "l01_escape", x = 900, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "rest", -1, false, "l01_escape", "base")
+	check(MSG == STR.st_coop_cp_updated_base, "a client, the engine says base: a base (" .. tostring(MSG) .. ")")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 321, false, "l01_escape", "none")
+	check(MSG == STR.st_coop_cp_updated_rest, "the engine says none: a resting place (" .. tostring(MSG) .. ")")
+	-- the engine's word wins over the script's own lookup: an online object named in [coop_bases], the engine says none
+	OBJ[322] = { _id = 322, name = function() return "esc_basement_sleep_area" end }
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 322, false, "l01_escape", "none")
+	check(MSG == STR.st_coop_cp_updated_rest, "the engine's none wins (" .. tostring(MSG) .. ")")
+	-- a record without an object the engine calls none (the debug "checkpoint here"): a resting place, not a base
+	MSG = nil
+	CP_RECORD[0] = { kind = "rest", level = "l01_escape", x = 1500, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "rest", -1, false, "l01_escape", "none")
+	check(MSG == STR.st_coop_cp_updated_rest, "no object, the engine says none: a resting place (" .. tostring(MSG) .. ")")
+	-- nil: the script's own lookup as before (the online object's name)
+	OBJ[323] = { _id = 323, name = function() return "esc_basement_sleep_area" end }
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 323, false, "l01_escape", nil)
+	check(MSG == STR.st_coop_cp_updated_bed, "nil: the script's lookup, bed (" .. tostring(MSG) .. ")")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 324, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_rest, "nil, the object not here: a resting place (" .. tostring(MSG) .. ")")
+	-- a value the script does not know: the lookup as for nil
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 325, false, "l01_escape", "something")
+	check(MSG == STR.st_coop_cp_updated_rest, "an unknown value: the lookup (" .. tostring(MSG) .. ")")
+	-- other kinds ignore it
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "campfire", 326, false, "l01_escape", "bed")
+	check(MSG == STR.st_coop_cp_updated_campfire, "a campfire stays a campfire (" .. tostring(MSG) .. ")")
+	-- the host player hears it the same way (his engine tells it from its own tables)
+	fresh("host")
+	INI.coop_bases = { bar_actor_sleep_zone = "50, dolg" }
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 330, false, "l05_bar", "bed")
+	check(MSG == STR.st_coop_cp_updated_bed, "the host: the engine says bed (" .. tostring(MSG) .. ")")
+end)
+
 case("group_spot", function()
 	for _, case_ in ipairs({ { "host", "joiner" }, { "client", "hoster" } }) do
 		local mode, nick = case_[1], case_[2]

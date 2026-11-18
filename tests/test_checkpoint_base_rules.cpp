@@ -323,6 +323,131 @@ TEST(cp_base_hostile)
 	CHECK_EQ(true_faction("actor"), std::string("actor"));
 	CHECK_EQ(true_faction("actor_"), std::string("actor_"));
 	CHECK_EQ(true_faction(""), std::string(""));
+	// Build 57 round 3 (lead's ruling on review B1): the first owner of a row is its holder; the base is hostile when the holder
+	// is his enemy, or when every owner the game knows is
+	CHECK(base_hostile(true, 3, 1)); // the guards shoot him: hostile, whatever the other factions of the camp think
+	CHECK(base_hostile(true, 1, 1));
+	CHECK(!base_hostile(false, 3, 2)); // the holder is no enemy of his
+	CHECK(base_hostile(false, 3, 3)); // every owner is (the holder can only be false here when the row's first name is unknown)
+	CHECK(!base_hostile(false, 0, 0)); // nobody's
+	CHECK(!base_hostile(true, 0, 0)); // nobody's, whatever the caller says of a holder
+	// Round 3 (lead's ruling on review S4): the community the guards judge him by is his own (the actor_<f> column) while the
+	// relation table has a row for it; else the NPC community <f>; else none
+	CHECK_EQ(judged_community(24, 9, 32), 24); // actor_killer, not killer
+	CHECK_EQ(judged_community(0, 9, 32), 0);
+	CHECK_EQ(judged_community(31, 9, 32), 31);
+	CHECK_EQ(judged_community(32, 9, 32), 9); // no row for his own: the NPC community's
+	CHECK_EQ(judged_community(-1, 9, 32), 9);
+	CHECK_EQ(judged_community(-1, -1, 32), -1);
+	CHECK_EQ(judged_community(40, 40, 32), -1);
+	CHECK_EQ(judged_community(5, 9, 0), -1); // no table at all
+}
+
+namespace
+{
+// The stand's configs\creatures\game_relations.ltx (G.A.M.M.A. game-dev, read 2026-11-18 by temp\tests_bed\relations_table_r3.py),
+// [communities_relations]: the rows of the owner communities of [coop_bases] in the actor_<f> columns, the relation of that
+// owner's guards to a player of <f> (RELATION_REGISTRY::GetCommunityRelation(owner, his community)). On the stand the actor_<f>
+// column and the NPC <f> column of these rows agree on "enemy" everywhere (relations_r3.py).
+const char* const kStandColumns[10] = {"actor_stalker", "actor_bandit", "actor_dolg", "actor_freedom", "actor_csky",
+	"actor_ecolog", "actor_killer", "actor_army", "actor_monolith", "actor_renegade"};
+struct StandRow
+{
+	const char* owner;
+	int to[10];
+};
+const StandRow kStandRows[] = {
+	{"stalker", {0, -2000, 0, 0, 0, 0, -2000, -2000, -2000, -2000}}, // line 69
+	{"csky", {0, -2000, -2000, 0, 300, 0, 0, -2000, -2000, -2000}}, // line 71
+	{"ecolog", {0, -2000, 0, 0, 0, 300, 0, 0, -2000, -2000}}, // line 63
+	{"dolg", {0, -2000, 300, -2000, -2000, 0, -2000, 0, -2000, -2000}}, // line 62
+	{"freedom", {0, 0, -2000, 300, 0, 0, 0, -2000, -2000, -2000}}, // line 64
+	{"bandit", {-2000, 300, -2000, 0, -2000, -2000, 0, -2000, -2000, 300}}, // line 61
+	{"killer", {-2000, 0, -2000, 0, 0, 0, 300, -2000, -2000, -2000}}, // line 65
+	{"army", {-2000, -2000, 0, -2000, -2000, 0, -2000, 300, -2000, -2000}}, // line 66
+};
+
+int stand_relation(const std::string& owner, const std::string& player)
+{
+	for (const StandRow& r : kStandRows)
+		if (owner == r.owner)
+			for (int c = 0; c < 10; ++c)
+				if (player == kStandColumns[c])
+					return r.to[c];
+	return 1000000; // a mistake of the test itself: CHECKed below never to happen
+}
+
+// What hostile_to does in the engine, on the stand's numbers: each owner by hostile() (relation + his goodwill with it), the
+// first owner the holder.
+bool stand_hostile(const std::vector<std::string>& owners, const char* player, int goodwill = 0)
+{
+	size_t n = 0;
+	bool holder = false;
+	for (size_t i = 0; i < owners.size(); ++i)
+	{
+		const bool h = hostile(true, stand_relation(owners[i], player), goodwill);
+		n += h ? 1 : 0;
+		holder = holder || (i == 0 && h);
+	}
+	return base_hostile(holder, owners.size(), n);
+}
+
+bool stand_all_hostile(const std::vector<std::string>& owners, const char* player)
+{
+	size_t n = 0;
+	for (const std::string& o : owners)
+		n += hostile(true, stand_relation(o, player), 0) ? 1 : 0;
+	return all_hostile(owners.size(), n);
+}
+} // namespace
+
+// Build 57 round 3 (lead's ruling on review B1): the five cases of the review on the stand's relations. A mercenary or a soldier
+// at Rookie Village, the Agroprom stalker camp, Skadovsk, Yanov or the Pripyat stalkers' base is among enemies (their stalker
+// guards); nobody who lives there becomes hostile; the Yantar bunker's holder is ecolog (its smart spawns only ecolog squads).
+TEST(cp_base_holder_on_stand_relations)
+{
+	for (const StandRow& r : kStandRows)
+		for (const char* c : kStandColumns)
+			CHECK(stand_relation(r.owner, c) != 1000000);
+	const std::vector<std::string> rookie = {"stalker", "csky", "ecolog"}; // esc_basement_sleep_area
+	const std::vector<std::string> agr_camp = {"stalker", "csky", "ecolog"}; // agr_sr_sleep_wagon
+	const std::vector<std::string> yantar = {"ecolog", "stalker", "csky"}; // yan_bunker_sleep_restrictor (round 3: ecolog first)
+	const std::vector<std::string> skadovsk = {"stalker", "csky", "dolg"}; // zat_a2_sr_sleep
+	const std::vector<std::string> yanov = {"stalker", "freedom", "ecolog"}; // jup_a6_sr_sleep
+	const std::vector<std::string> pri_a16 = {"stalker", "bandit", "csky", "dolg", "freedom"}; // pri_a16_sr_sleep
+	// 1. Rookie Village: killer and army are its guards' enemies (the old rule called it theirs: csky / ecolog are not)
+	CHECK(stand_hostile(rookie, "actor_killer"));
+	CHECK(stand_hostile(rookie, "actor_army"));
+	CHECK(!stand_all_hostile(rookie, "actor_killer") && !stand_all_hostile(rookie, "actor_army")); // what the old rule said
+	CHECK(stand_hostile(rookie, "actor_bandit"));
+	for (const char* friendly : {"actor_stalker", "actor_csky", "actor_ecolog", "actor_dolg", "actor_freedom"})
+		CHECK(!stand_hostile(rookie, friendly));
+	// goodwill earned with the stalkers counts as in the game: a mercenary at +1500 with them is let in
+	CHECK(!stand_hostile(rookie, "actor_killer", 1500));
+	// 2. the Agroprom stalker camp the same; the Yantar bunker is held by the ecologists, who do not shoot mercenaries and soldiers
+	CHECK(stand_hostile(agr_camp, "actor_killer") && stand_hostile(agr_camp, "actor_army"));
+	CHECK(!stand_hostile(yantar, "actor_killer") && !stand_hostile(yantar, "actor_army"));
+	CHECK(stand_hostile(yantar, "actor_bandit") && stand_hostile(yantar, "actor_monolith"));
+	for (const char* friendly : {"actor_stalker", "actor_csky", "actor_ecolog", "actor_dolg", "actor_freedom"})
+		CHECK(!stand_hostile(yantar, friendly));
+	// 3. Skadovsk: army and killer (dolg / csky are no enemies of theirs); its dolg and csky stay welcome
+	CHECK(stand_hostile(skadovsk, "actor_army") && stand_hostile(skadovsk, "actor_killer"));
+	CHECK(!stand_all_hostile(skadovsk, "actor_army") && !stand_all_hostile(skadovsk, "actor_killer"));
+	for (const char* friendly : {"actor_stalker", "actor_csky", "actor_dolg", "actor_freedom", "actor_ecolog"})
+		CHECK(!stand_hostile(skadovsk, friendly));
+	// 4. Yanov: bandit, killer, army; its freedom and ecolog stay welcome
+	CHECK(stand_hostile(yanov, "actor_bandit") && stand_hostile(yanov, "actor_killer") && stand_hostile(yanov, "actor_army"));
+	CHECK(!stand_all_hostile(yanov, "actor_bandit"));
+	for (const char* friendly : {"actor_stalker", "actor_freedom", "actor_ecolog", "actor_dolg", "actor_csky"})
+		CHECK(!stand_hostile(yanov, friendly));
+	// 5. pri_a16 (five owners): friendly to almost everyone before; now its stalker guards decide
+	CHECK(stand_hostile(pri_a16, "actor_bandit") && stand_hostile(pri_a16, "actor_killer") &&
+		stand_hostile(pri_a16, "actor_army") && stand_hostile(pri_a16, "actor_renegade"));
+	CHECK(!stand_all_hostile(pri_a16, "actor_bandit") && !stand_all_hostile(pri_a16, "actor_killer"));
+	for (const char* friendly : {"actor_stalker", "actor_csky", "actor_dolg", "actor_freedom", "actor_ecolog"})
+		CHECK(!stand_hostile(pri_a16, friendly));
+	// a single-owner base is what it was: the Bar is Duty's, a Freedom player is its enemy, a Duty one is home
+	CHECK(stand_hostile({"dolg"}, "actor_freedom") && !stand_hostile({"dolg"}, "actor_dolg"));
 }
 
 // Respawn: the current record is the bed of a base hostile to him now -> the previous record (on this level) is used;
@@ -335,7 +460,7 @@ TEST(cp_base_respawn_skips_hostile_bed)
 		Slot s;
 		s.cur = bed;
 		s.prev = fire;
-		CHECK(skip_hostile_bed(s, "l05_bar", true) == BedChoice::UsePrev);
+		CHECK(skip_hostile_bed(s, "l05_bar", true, false) == BedChoice::UsePrev);
 		CHECK(s.cur.source == 5 && !s.prev.valid());
 		CHECK(resolve(s, "l05_bar", nullptr, nullptr, bed.pos).pick == Pick::Current);
 	}
@@ -343,7 +468,7 @@ TEST(cp_base_respawn_skips_hostile_bed)
 		Slot s;
 		s.cur = bed;
 		s.prev = fire;
-		CHECK(skip_hostile_bed(s, "l05_bar", false) == BedChoice::Keep); // friendly: the bed
+		CHECK(skip_hostile_bed(s, "l05_bar", false, false) == BedChoice::Keep); // friendly: the bed
 		CHECK(s.cur.source == 10);
 	}
 	// Build 57 round 2 (lead's ruling on review S2): no previous record on his level: the hostile record is not used, the
@@ -352,8 +477,8 @@ TEST(cp_base_respawn_skips_hostile_bed)
 	{
 		Slot s;
 		s.cur = bed;
-		CHECK(hostile_bed_choice(s, "l05_bar", true) == BedChoice::DropCur);
-		CHECK(skip_hostile_bed(s, "l05_bar", true) == BedChoice::DropCur); // nothing before it
+		CHECK(hostile_bed_choice(s, "l05_bar", true, false) == BedChoice::DropCur);
+		CHECK(skip_hostile_bed(s, "l05_bar", true, false) == BedChoice::DropCur); // nothing before it
 		CHECK(!s.cur.valid() && !s.prev.valid());
 		CHECK(resolve(s, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Anchor);
 		CHECK(resolve(s, "l05_bar", nullptr, nullptr, bed.pos).pick == Pick::Body);
@@ -362,7 +487,7 @@ TEST(cp_base_respawn_skips_hostile_bed)
 		Slot s;
 		s.cur = bed;
 		s.prev = make(Kind::Campfire, 5, "l01_escape", 200.0f);
-		CHECK(skip_hostile_bed(s, "l05_bar", true) == BedChoice::DropCur); // the previous one is on another level: no use here
+		CHECK(skip_hostile_bed(s, "l05_bar", true, false) == BedChoice::DropCur); // the previous one is on another level: no use here
 		CHECK(!s.cur.valid());
 		CHECK(s.prev.level == "l01_escape"); // the slot copy keeps it; resolve skips it on this level
 		CHECK(resolve(s, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Anchor);
@@ -372,18 +497,61 @@ TEST(cp_base_respawn_skips_hostile_bed)
 		Slot s;
 		s.cur = bed;
 		s.prev = fire;
-		CHECK(hostile_bed_choice(s, "l05_bar", true) == BedChoice::UsePrev);
-		CHECK(hostile_bed_choice(s, "l05_bar", false) == BedChoice::Keep);
+		CHECK(hostile_bed_choice(s, "l05_bar", true, false) == BedChoice::UsePrev);
+		CHECK(hostile_bed_choice(s, "l05_bar", false, false) == BedChoice::Keep);
 		CHECK(s.cur.source == 10 && s.prev.source == 5);
 		// a hostile record of another level is not where he comes back here anyway: kept as it is
 		Slot o;
 		o.cur = make(Kind::Rest, 10, "l01_escape", 0.0f);
-		CHECK(hostile_bed_choice(o, "l05_bar", true) == BedChoice::Keep);
-		CHECK(skip_hostile_bed(o, "l05_bar", true) == BedChoice::Keep);
+		CHECK(hostile_bed_choice(o, "l05_bar", true, false) == BedChoice::Keep);
+		CHECK(skip_hostile_bed(o, "l05_bar", true, false) == BedChoice::Keep);
 		CHECK(o.cur.valid());
 		// no record: nothing to drop
 		Slot e;
-		CHECK(hostile_bed_choice(e, "l05_bar", true) == BedChoice::Keep);
+		CHECK(hostile_bed_choice(e, "l05_bar", true, true) == BedChoice::Keep);
+	}
+	// Build 57 round 3 (lead's ruling on review S1): the previous record is used only when it is not a hostile base's record too.
+	// A Freedom player: the Bar's bed now, before it the bed of another Duty base of the same level; Duty is hostile to him now.
+	const Record duty_post = make(Kind::Rest, 11, "l05_bar", 120.0f);
+	{
+		Slot s;
+		s.cur = bed;
+		s.prev = duty_post;
+		CHECK(hostile_bed_choice(s, "l05_bar", true, true) == BedChoice::DropCur);
+		CHECK(skip_hostile_bed(s, "l05_bar", true, true) == BedChoice::DropCur);
+		CHECK(!s.cur.valid() && !s.prev.valid()); // neither: resolve must not take the previous one
+		CHECK(resolve(s, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Anchor);
+		CHECK(resolve(s, "l05_bar", nullptr, nullptr, bed.pos).pick == Pick::Body);
+	}
+	{
+		// the current record is friendly: it is used, the hostile previous one does not matter
+		Slot s;
+		s.cur = fire;
+		s.prev = duty_post;
+		CHECK(skip_hostile_bed(s, "l05_bar", false, true) == BedChoice::Keep);
+		CHECK(resolve(s, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Current);
+	}
+	{
+		// the current record is on another level, resolve would take the previous one of his level: a hostile base's is dropped
+		Slot s;
+		s.cur = make(Kind::Campfire, 5, "l01_escape", 200.0f);
+		s.prev = duty_post;
+		CHECK(resolve(s, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Previous); // what it would do
+		CHECK(hostile_bed_choice(s, "l05_bar", false, true) == BedChoice::DropPrev);
+		CHECK(skip_hostile_bed(s, "l05_bar", false, true) == BedChoice::DropPrev);
+		CHECK(s.cur.level == "l01_escape" && !s.prev.valid());
+		CHECK(resolve(s, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Anchor);
+		// a friendly previous one is kept
+		Slot f;
+		f.cur = make(Kind::Campfire, 5, "l01_escape", 200.0f);
+		f.prev = duty_post;
+		CHECK(skip_hostile_bed(f, "l05_bar", false, false) == BedChoice::Keep);
+		CHECK(resolve(f, "l05_bar", anchor, nullptr, bed.pos).pick == Pick::Previous);
+		// a hostile previous one of another level: not his place here anyway
+		Slot o;
+		o.cur = make(Kind::Campfire, 5, "l01_escape", 200.0f);
+		o.prev = make(Kind::Rest, 11, "l02_garbage", 0.0f);
+		CHECK(hostile_bed_choice(o, "l05_bar", false, true) == BedChoice::Keep);
 	}
 }
 
@@ -629,57 +797,82 @@ TEST(cp_base_footing_check)
 	b.pos[1] = 0.0f;
 	b.pos[2] = 0.0f;
 	b.radius = 50.0f;
-	CHECK(footing_check(z, 3, 3, b, 10.0f) == FootCheck::Ok);
+	const float body[3] = {95.0f, 1.0f, 3.0f}; // the body of the same report, near the bed point
+	CHECK(footing_check(z, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	// none: nothing to keep, nothing refused
-	CHECK(footing_check(Footing(), 3, 3, b, 10.0f) == FootCheck::None);
+	CHECK(footing_check(Footing(), 3, 3, b, 10.0f, body) == FootCheck::None);
 	// not sound
 	Footing bad = z;
 	bad.kind = 7;
-	CHECK(footing_check(bad, 3, 3, b, 10.0f) == FootCheck::NotSound);
+	CHECK(footing_check(bad, 3, 3, b, 10.0f, body) == FootCheck::NotSound);
 	bad = Footing();
 	bad.ref = 4; // "none" naming something
-	CHECK(footing_check(bad, 3, 3, b, 10.0f) == FootCheck::NotSound);
+	CHECK(footing_check(bad, 3, 3, b, 10.0f, body) == FootCheck::NotSound);
 	// its game vertex is not on the sender's level (or no level at all)
-	CHECK(footing_check(z, 3, 4, b, 10.0f) == FootCheck::VertexOff);
-	CHECK(footing_check(z, 3, kNoLevel, b, 10.0f) == FootCheck::VertexOff);
-	CHECK(footing_check(z, kNoLevel, kNoLevel, b, 10.0f) == FootCheck::VertexOff);
+	CHECK(footing_check(z, 3, 4, b, 10.0f, body) == FootCheck::VertexOff);
+	CHECK(footing_check(z, 3, kNoLevel, b, 10.0f, body) == FootCheck::VertexOff);
+	CHECK(footing_check(z, kNoLevel, kNoLevel, b, 10.0f, body) == FootCheck::VertexOff);
 	// the base is not one of this world's (unknown zone, merged or unknown start)
 	FootBase unknown = b;
 	unknown.known = false;
-	CHECK(footing_check(z, 3, 3, unknown, 10.0f) == FootCheck::NoBase);
+	CHECK(footing_check(z, 3, 3, unknown, 10.0f, body) == FootCheck::NoBase);
 	// the base is on another level than the sender's
 	FootBase other = b;
 	other.level = 4;
-	CHECK(footing_check(z, 3, 3, other, 10.0f) == FootCheck::OtherLevel);
+	CHECK(footing_check(z, 3, 3, other, 10.0f, body) == FootCheck::OtherLevel);
 	// the point is off its ground: horizontally beyond radius + margin, or too high
 	Footing far_off = z;
 	far_off.pos[0] = 70.0f + 60.5f;
-	CHECK(footing_check(far_off, 3, 3, b, 10.0f) == FootCheck::OffGround);
+	CHECK(footing_check(far_off, 3, 3, b, 10.0f, body) == FootCheck::OffGround);
 	far_off.pos[0] = 70.0f + 59.5f; // within 50 + 10
-	CHECK(footing_check(far_off, 3, 3, b, 10.0f) == FootCheck::Ok);
+	CHECK(footing_check(far_off, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	Footing high = z;
 	high.pos[1] = 2.0f * kHeight + 0.5f;
-	CHECK(footing_check(high, 3, 3, b, 10.0f) == FootCheck::OffGround);
+	CHECK(footing_check(high, 3, 3, b, 10.0f, body) == FootCheck::OffGround);
 	high.pos[1] = -(2.0f * kHeight - 0.5f); // a cellar: within 2 x kHeight
-	CHECK(footing_check(high, 3, 3, b, 10.0f) == FootCheck::Ok);
+	CHECK(footing_check(high, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	// 3D would refuse this one (horizontal 59 m, 15 m down: 60.9 m), the ground rule takes it
 	Footing slope = z;
 	slope.pos[0] = 70.0f + 59.0f;
 	slope.pos[1] = -15.0f;
-	CHECK(footing_check(slope, 3, 3, b, 10.0f) == FootCheck::Ok);
+	CHECK(footing_check(slope, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	FootBase nan_base = b;
 	nan_base.pos[0] = std::nanf("");
-	CHECK(footing_check(z, 3, 3, nan_base, 10.0f) == FootCheck::OffGround);
+	CHECK(footing_check(z, 3, 3, nan_base, 10.0f, body) == FootCheck::OffGround);
 	// a start base the same way
 	Footing st;
 	CHECK(footing_of(start_key(2), st));
 	for (int i = 0; i < 3; ++i)
 		st.pos[i] = z.pos[i];
 	st.gv = 9;
-	CHECK(footing_check(st, 3, 3, b, 10.0f) == FootCheck::Ok);
+	CHECK(footing_check(st, 3, 3, b, 10.0f, body) == FootCheck::Ok);
+	// Build 57 round 3 (lead's ruling on review S5): the body of the same report must stand on the base's ground too:
+	// horizontally within radius + 2 x margin (50 + 20) of the base's position, within 2 x kHeight in height
+	const float edge[3] = {70.0f + 69.5f, 0.0f, 0.0f};
+	CHECK(footing_check(z, 3, 3, b, 10.0f, edge) == FootCheck::Ok);
+	const float beyond[3] = {70.0f + 70.5f, 0.0f, 0.0f};
+	CHECK(footing_check(z, 3, 3, b, 10.0f, beyond) == FootCheck::BodyOff);
+	const float diagonal[3] = {70.0f + 50.0f, 0.0f, 50.0f}; // 70.7 m: beyond
+	CHECK(footing_check(z, 3, 3, b, 10.0f, diagonal) == FootCheck::BodyOff);
+	const float above[3] = {80.0f, 2.0f * kHeight + 0.5f, 0.0f};
+	CHECK(footing_check(z, 3, 3, b, 10.0f, above) == FootCheck::BodyOff);
+	const float cellar[3] = {80.0f, -(2.0f * kHeight - 0.5f), 0.0f};
+	CHECK(footing_check(z, 3, 3, b, 10.0f, cellar) == FootCheck::Ok);
+	const float nan_body[3] = {std::nanf(""), 0.0f, 0.0f};
+	CHECK(footing_check(z, 3, 3, b, 10.0f, nan_body) == FootCheck::BodyOff);
+	CHECK(footing_check(z, 3, 3, b, 10.0f, nullptr) == FootCheck::BodyOff);
+	// a stale base of a map server: the footing names the Bar's bed, the body stands at the other end of the level
+	const float elsewhere[3] = {900.0f, 0.0f, -400.0f};
+	CHECK(footing_check(z, 3, 3, b, 10.0f, elsewhere) == FootCheck::BodyOff);
+	// the footing's own refusals come first
+	CHECK(footing_check(far_off, 3, 3, unknown, 10.0f, elsewhere) == FootCheck::NoBase);
+	far_off.pos[0] = 70.0f + 60.5f;
+	CHECK(footing_check(far_off, 3, 3, b, 10.0f, elsewhere) == FootCheck::OffGround);
+	// "none" needs no body
+	CHECK(footing_check(Footing(), 3, 3, b, 10.0f, nullptr) == FootCheck::None);
 	// every refusal has a name for the log
 	for (FootCheck c : {FootCheck::Ok, FootCheck::None, FootCheck::NotSound, FootCheck::VertexOff, FootCheck::NoBase,
-	         FootCheck::OtherLevel, FootCheck::OffGround})
+	         FootCheck::OtherLevel, FootCheck::OffGround, FootCheck::BodyOff})
 		CHECK(foot_check_name(c) != nullptr && *foot_check_name(c) != 0);
 }
 
@@ -764,4 +957,134 @@ TEST(cp_base_forget_absent)
 	CHECK(current.count(5) == 1 && current.count(7) == 1 && current.count(6) == 0);
 	forget_absent(current, std::vector<uint16_t>{});
 	CHECK(current.empty());
+}
+
+// Build 57 round 3 (lead's ruling on review S3): an arrival onto a base. The base's record takes the place of an Arrival record
+// of its level that lies on its ground; prev (the record before the arrival) is kept. Anything else is set() as before.
+TEST(cp_base_arrival_onto_base)
+{
+	const Spot zone = spot(Key(300), 0.0f, 0.0f, 50.0f, "l01_escape");
+	const Record bed = make(Kind::Rest, 300, "l01_escape", 0.0f);
+	const Record tent = make(Kind::Tent, 77, "l01_escape", 400.0f);
+	const Record arrival = make(Kind::Arrival, kNoSource, "l01_escape", 20.0f, 0.0f, 15.0f);
+	{
+		// his tent, then the arrival on the base (a level change), then the base 3 s later
+		Slot s;
+		CHECK(set(s, tent) == SetOutcome::New);
+		CHECK(set(s, arrival) == SetOutcome::New);
+		CHECK(s.cur.kind == Kind::Arrival && s.prev.kind == Kind::Tent);
+		CHECK(set_on_base(s, bed, zone) == SetOutcome::Moved); // written and announced once, nothing pushed down
+		CHECK(s.cur.kind == Kind::Rest && s.cur.source == 300);
+		CHECK(s.prev.kind == Kind::Tent && s.prev.source == 77); // the older record is not lost
+		CHECK(changes_slot(SetOutcome::Moved));
+		// the base again: the same place
+		CHECK(set_on_base(s, bed, zone) == SetOutcome::Same);
+		CHECK(s.prev.kind == Kind::Tent);
+	}
+	{
+		// what set() alone did (the review's case): prev = the worthless arrival, the tent lost
+		Slot s;
+		set(s, tent);
+		set(s, arrival);
+		CHECK(set(s, bed) == SetOutcome::New);
+		CHECK(s.prev.kind == Kind::Arrival);
+	}
+	{
+		// an arrival off the base's ground (60 m away): the base pushes it down as before
+		Slot s;
+		set(s, tent);
+		set(s, make(Kind::Arrival, kNoSource, "l01_escape", 60.0f));
+		CHECK(set_on_base(s, bed, zone) == SetOutcome::New);
+		CHECK(s.prev.kind == Kind::Arrival);
+		// above the ground (more than kHeight): off it
+		Slot h;
+		set(h, tent);
+		set(h, make(Kind::Arrival, kNoSource, "l01_escape", 5.0f, kHeight + 1.0f));
+		CHECK(set_on_base(h, bed, zone) == SetOutcome::New);
+		// an arrival of another level
+		Slot o;
+		set(o, tent);
+		set(o, make(Kind::Arrival, kNoSource, "l02_garbage", 0.0f));
+		CHECK(set_on_base(o, bed, zone) == SetOutcome::New);
+		CHECK(o.prev.level == "l02_garbage");
+	}
+	{
+		// not an arrival: a campfire on the ground (a hostile base's, or one lit before the base was his) is pushed down
+		Slot s;
+		set(s, make(Kind::Campfire, 5, "l01_escape", 10.0f));
+		CHECK(set_on_base(s, bed, zone) == SetOutcome::New);
+		CHECK(s.prev.kind == Kind::Campfire);
+		// a story record on the ground the same
+		Slot t;
+		set(t, make(Kind::Story, kNoSource, "l01_escape", 10.0f));
+		CHECK(set_on_base(t, bed, zone) == SetOutcome::New);
+	}
+	{
+		// not this base's record: set() as before
+		Slot s;
+		set(s, tent);
+		set(s, arrival);
+		CHECK(set_on_base(s, make(Kind::Rest, 301, "l01_escape", 0.0f), zone) == SetOutcome::New);
+		CHECK(s.prev.kind == Kind::Arrival);
+		// an invalid record is ignored
+		Slot i;
+		set(i, arrival);
+		CHECK(set_on_base(i, Record(), zone) == SetOutcome::Ignored);
+		CHECK(i.cur.kind == Kind::Arrival);
+	}
+	{
+		// a start base: its record has no object, its ground is the start point's
+		const Spot start_base = spot(start_key(2), 500.0f, 0.0f, 50.0f, "l01_escape");
+		const Record point = make(Kind::Rest, kNoSource, "l01_escape", 500.0f);
+		Slot s;
+		set(s, tent);
+		set(s, make(Kind::Arrival, kNoSource, "l01_escape", 530.0f));
+		CHECK(set_on_base(s, point, start_base) == SetOutcome::Moved);
+		CHECK(s.cur.kind == Kind::Rest && s.cur.source == kNoSource && s.prev.kind == Kind::Tent);
+		// a new game that starts on the base: an arrival and nothing before it
+		Slot n;
+		set(n, make(Kind::Arrival, kNoSource, "l01_escape", 505.0f));
+		CHECK(set_on_base(n, point, start_base) == SetOutcome::Moved);
+		CHECK(n.cur.kind == Kind::Rest && !n.prev.valid());
+	}
+}
+
+// Build 57 round 3 (lead's ruling on review S6): what a record is for the text its player reads, as the engine tells the Lua.
+TEST(cp_base_mark)
+{
+	CHECK(mark_of(make(Kind::Rest, 300), 1, false) == Mark::Bed);
+	CHECK(mark_of(make(Kind::Rest, 300), 0, false) == Mark::None); // a rest zone of no base, a surge cover
+	CHECK(mark_of(make(Kind::Rest, 300), -1, false) == Mark::Unknown); // its object is not known on this machine
+	CHECK(mark_of(make(Kind::Rest, kNoSource), -1, true) == Mark::Base);
+	CHECK(mark_of(make(Kind::Rest, kNoSource), 1, false) == Mark::None); // no start base there (the debug "checkpoint here")
+	CHECK(mark_of(make(Kind::Campfire, 300), 1, true) == Mark::None); // only rest records are told apart
+	CHECK(mark_of(make(Kind::Arrival, kNoSource), 1, true) == Mark::None);
+	CHECK(mark_of(Record(), 1, true) == Mark::None);
+	CHECK_EQ(std::string(mark_name(Mark::Bed)), std::string("bed"));
+	CHECK_EQ(std::string(mark_name(Mark::Base)), std::string("base"));
+	CHECK_EQ(std::string(mark_name(Mark::None)), std::string("none"));
+	CHECK(mark_name(Mark::Unknown) == nullptr);
+}
+
+// Round 3 review S1 (lead 2026-11-18): the hostile base's record was dropped at respawn, and the fallback points (his anchor,
+// the host's arrival, his body) may lie on that same base: a point on its ground (with the leave margin) is not used.
+TEST(cp_base_respawn_fallback_off_the_hostile_ground)
+{
+	Spot g;
+	g.id = zone_key(77);
+	g.bed = 77;
+	g.level = "l01_escape";
+	g.pos[0] = 0.f;
+	g.pos[1] = 0.f;
+	g.pos[2] = 0.f;
+	g.radius = 50.f;
+	const float on_base[3] = {20.f, 1.f, 10.f};
+	const float at_edge[3] = {55.f, 0.f, 0.f}; // inside the leave margin: still the base for a player who was on it
+	const float away[3] = {200.f, 0.f, 0.f};
+	CHECK(!fallback_ok(&g, "l01_escape", on_base));
+	CHECK(!fallback_ok(&g, "l01_escape", at_edge));
+	CHECK(fallback_ok(&g, "l01_escape", away));
+	CHECK(fallback_ok(&g, "k00_marsh", on_base)); // another level: not this base
+	CHECK(fallback_ok(nullptr, "l01_escape", on_base)); // nothing was dropped
+	CHECK(!fallback_ok(&g, "l01_escape", nullptr)); // no point: nothing to use
 }
