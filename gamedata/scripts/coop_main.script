@@ -1241,6 +1241,7 @@ end
 -------------------------------------------------------------------------------
 STATUS_MODULES = {
 	"coop_route",
+	"coop_trust", -- TZ v2 6.4: the checks of a client's request that log before they refuse
 	"coop_core_chat", "coop_core_hud", "coop_core_player", "coop_core_world",
 	"coop_world_weather", "coop_world_fx", "coop_world_fight", "coop_world_compat",
 	"coop_economy_core",

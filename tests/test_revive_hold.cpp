@@ -1027,3 +1027,88 @@ TEST(revive_pick_target_prefers_a_wounded_teammate_in_front)
 	c.push_back({9, {0.1f, 0.f, 1.6f}, true});
 	CHECK_EQ(pick_revive_target(eye, ahead, feet, c), uint16_t(9));
 }
+
+// ---------------------------------------------------------------- the wounded's time while he is raised (Build 57)
+// Owner 2026-11-18: "when another player raises somebody, his time must stop running for as long as he is being raised".
+
+TEST(revive_pause_time_runs_when_nobody_raises)
+{
+	BleedPause p;
+	CHECK_EQ(p.step(1000, false, 61000), uint64_t(61000));
+	CHECK_EQ(p.step(1016, false, 61000), uint64_t(61000));
+}
+
+TEST(revive_pause_time_stands_still_while_raised)
+{
+	BleedPause p;
+	uint64_t end = 61000; // 60 s left at 1000
+	end = p.step(1000, true, end); // the first frame of the hold: nothing has passed yet
+	CHECK_EQ(end, uint64_t(61000));
+	end = p.step(1016, true, end);
+	end = p.step(1033, true, end);
+	end = p.step(2000, true, end);
+	CHECK_EQ(end, uint64_t(62000)); // raised for 1 s: 60 s are still left
+}
+
+TEST(revive_pause_time_runs_again_when_the_hold_stops)
+{
+	BleedPause p;
+	uint64_t end = 61000;
+	end = p.step(1000, true, end);
+	end = p.step(1500, true, end);
+	end = p.step(1516, false, end); // he let go
+	CHECK_EQ(end, uint64_t(61500));
+	end = p.step(3000, false, end);
+	CHECK_EQ(end, uint64_t(61500)); // what passed after it is spent
+	end = p.step(3016, true, end); // a second hold does not give back the time between the two
+	CHECK_EQ(end, uint64_t(61500));
+	end = p.step(3516, true, end);
+	CHECK_EQ(end, uint64_t(62000));
+}
+
+TEST(revive_pause_a_long_frame_gives_back_a_bounded_time)
+{
+	BleedPause p;
+	uint64_t end = 61000;
+	end = p.step(1000, true, end);
+	end = p.step(9000, true, end); // 8 s in one frame
+	CHECK_EQ(end, uint64_t(61000) + kMaxPauseStepMs);
+}
+
+TEST(revive_pause_a_clock_that_goes_back_gives_nothing)
+{
+	BleedPause p;
+	uint64_t end = 61000;
+	end = p.step(5000, true, end);
+	end = p.step(4000, true, end);
+	CHECK_EQ(end, uint64_t(61000));
+	end = p.step(4100, true, end);
+	CHECK_EQ(end, uint64_t(61100));
+}
+
+TEST(revive_pause_lasts_as_long_as_the_ring_of_the_hold)
+{
+	// the wounded's owner: the ring is on from the host's Reviving to its end plus the grace; his time stands that long
+	LiftView v;
+	BleedPause p;
+	CHECK(v.on_reviving(10000, 7, 3, 2, kHoldMs, 0));
+	uint64_t end = 40000;
+	for (uint64_t t = 10000; t <= 10000 + kHoldMs + kGraceMs + 500; t += 100)
+		end = p.step(t, v.active(t, 7), end);
+	CHECK(end >= uint64_t(40000) + kHoldMs + kGraceMs - 200);
+	CHECK(end <= uint64_t(40000) + kHoldMs + kGraceMs);
+}
+
+TEST(revive_pause_a_stopped_hold_ends_it_at_once)
+{
+	LiftView v;
+	BleedPause p;
+	CHECK(v.on_reviving(10000, 7, 3, 2, kHoldMs, 0));
+	uint64_t end = 40000;
+	end = p.step(10000, v.active(10000, 7), end);
+	end = p.step(11000, v.active(11000, 7), end);
+	CHECK_EQ(end, uint64_t(41000));
+	v.on_stopped(7, 3);
+	end = p.step(12000, v.active(12000, 7), end);
+	CHECK_EQ(end, uint64_t(41000));
+}

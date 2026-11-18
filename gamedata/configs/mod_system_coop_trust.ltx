@@ -1,0 +1,7 @@
+; RayLink co-op: what a failed check of a client's request does (gamedata\scripts\coop_trust.script; TZ v2 section 6.4).
+;   log     the host writes what it would have refused and lets the request through (a new check's first Dev build)
+;   refuse  the request is refused
+;   off     the check does not run
+; default: every check without a line of its own.
+[coop_trust]
+default = log

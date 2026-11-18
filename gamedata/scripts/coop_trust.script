@@ -1,0 +1,98 @@
+-- RayLink co-op: one place for the host's checks of a client's request that were added by TZ v2 section 6.4 (owner
+-- 2026-11-18: "do the weak places of phase 2"). A check that fails is counted and logged. Whether the request is then
+-- refused is a setting, so that a new check runs for one Dev build in "log" (it says what it would have refused and lets
+-- the request through), and is switched to "refuse" after a look at the hosts' logs: honest play and mods get no sudden
+-- refusals.
+--
+-- Layer: the Core. It runs on the machine that decides (the host of a co-op, the world server of a server) and never asks
+-- which mode it is in: the caller is the handler of the request.
+--
+--   if not coop_trust.pass("task_complete", ok, "player %s, task %s: no such running task", nick, id) then return end
+--
+-- Settings: configs\mod_system_coop_trust.ltx, section [coop_trust]:
+--   default = log | refuse | off      what a failed check does when it has no line of its own
+--   <check> = log | refuse | off
+-- The console command coop_status prints the counters (coop_main.print_status calls print_status of every module).
+
+local SECTION = "coop_trust"
+local MODES = { log = true, refuse = true, off = true }
+local LOG_FIRST = 8 -- lines per check, then every 64th
+
+local counters = {} -- name -> { checked, failed, refused }
+local modes = nil -- name -> mode, read once per Lua state
+
+local function log(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[coop-trust] " .. (ok and line or tostring(fmt)))
+end
+
+local function read_modes()
+	local m = { default = "log" }
+	pcall(function()
+		local ini = ini_sys
+		if not (ini and ini:section_exist(SECTION)) then return end
+		local n = ini:line_count(SECTION)
+		for i = 0, n - 1 do
+			local _, key, value = ini:r_line_ex(SECTION, i)
+			if type(key) == "string" and type(value) == "string" and MODES[value] then m[key] = value end
+		end
+	end)
+	return m
+end
+
+function mode_of(name)
+	if not modes then modes = read_modes() end
+	return modes[name] or modes.default or "log"
+end
+
+local function counter(name)
+	local c = counters[name]
+	if not c then
+		c = { checked = 0, failed = 0, refused = 0 }
+		counters[name] = c
+	end
+	return c
+end
+
+-- True: let the request through. `ok` is the check's own verdict; the text says what was wrong (logged only when not ok).
+function pass(name, ok, fmt, ...)
+	name = tostring(name)
+	local mode = mode_of(name)
+	if mode == "off" then return true end
+	local c = counter(name)
+	c.checked = c.checked + 1
+	if ok then return true end
+	c.failed = c.failed + 1
+	local refuse = mode == "refuse"
+	if refuse then c.refused = c.refused + 1 end
+	if c.failed <= LOG_FIRST or c.failed % 64 == 0 then
+		local good, text = pcall(string.format, tostring(fmt or ""), ...)
+		log("! %s: %s (%s, %d of %d failed)", name, good and text or tostring(fmt), refuse and "refused" or "would be refused: let through",
+			c.failed, c.checked)
+	end
+	return not refuse
+end
+
+function status()
+	return counters
+end
+
+function print_status()
+	local names = {}
+	for name in pairs(counters) do names[#names + 1] = name end
+	table.sort(names)
+	if #names == 0 then
+		log("no check has run (default: %s)", mode_of("default"))
+		return
+	end
+	for _, name in ipairs(names) do
+		local c = counters[name]
+		log("%s [%s]: checked %d, failed %d, refused %d", name, mode_of(name), c.checked, c.failed, c.refused)
+	end
+end
+
+-- Tests only: a fresh state, with the given modes instead of the ini's.
+function reset_for_test(given)
+	counters = {}
+	modes = given
+end
