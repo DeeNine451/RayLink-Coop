@@ -64,8 +64,6 @@ INSTALL WITHOUT MOD ORGANIZER
 G.A.M.M.A.: WHAT TO TURN OFF
   Untick these in MO2's left list (the search box above the list finds them by the number or the word YACS). In
   co-op Anomaly Coop will replace these mechanics with its own (in development):
-    203- YACS Better Campfire Saves (forces campfire saves but they are better) - Ishmaeel
-        campfire stops and emergency saves of the host;
     G.A.M.M.A. YACS no quit
         the same; it is off in the G.A.M.M.A. profile, do not turn it on;
     338- Soulslike Gamemode - Jabbers

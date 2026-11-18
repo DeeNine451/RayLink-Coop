@@ -216,13 +216,6 @@ Get it: ModDB, "xrMPE NPC Animations" by Chemzs (Anomaly / GAMMA version). Insta
       <optionalFileGroups order="Explicit">
         <group name="Untick these mods in MO2's left list / Снимите галочки с этих модов в левом списке MO2" type="SelectAll">
           <plugins order="Explicit">
-            <plugin name="203 YACS Better Campfire Saves (Ishmaeel)">
-              <description>Untick it. In the MO2 list it is named "203- YACS Better Campfire Saves (forces campfire saves but they are better) - Ishmaeel" (type YACS into the search box above the list). In co-op Anomaly Coop will replace this mechanic with its own: campfire stops and emergency saves of the host (in development).
-
-Снимите галочку. В списке MO2 он называется "203- YACS Better Campfire Saves (forces campfire saves but they are better) - Ishmaeel" (введите YACS в поле поиска над списком). В коопе Anomaly Coop заменит эту механику своей: привалы и аварийные сейвы хоста (в разработке).</description>
-              <conditionFlags><flag name="step_off_yacs_campfire">On</flag></conditionFlags>
-              <typeDescriptor><type name="Required"/></typeDescriptor>
-            </plugin>
             <plugin name="G.A.M.M.A. YACS no quit">
               <description>It is off in the G.A.M.M.A. profile: keep it off and do not turn it on. In co-op Anomaly Coop will replace the same mechanic: campfire stops and emergency saves of the host (in development).
 
@@ -391,9 +384,9 @@ OK, затем выберите "Anomaly Coop" в списке справа вв
               <typeDescriptor><type name="Required"/></typeDescriptor>
             </plugin>
             <plugin name="2. Turn off the mods from the previous page / Выключите моды с предыдущей страницы">
-              <description>Untick the GAMMA mods listed on the previous page (203 YACS, G.A.M.M.A. YACS no quit, 338 Soulslike Gamemode, 208 Ironman Roguelite): in co-op Anomaly Coop will replace their mechanics with its own (in development).
+              <description>Untick the GAMMA mods listed on the previous page (G.A.M.M.A. YACS no quit, 338 Soulslike Gamemode, 208 Ironman Roguelite): in co-op Anomaly Coop will replace their mechanics with its own (in development).
 
-Снимите галочки с модов GAMMA, перечисленных на предыдущей странице (203 YACS, G.A.M.M.A. YACS no quit, 338 Soulslike Gamemode, 208 Ironman Roguelite): в коопе их механики заменит Anomaly Coop (в разработке).</description>
+Снимите галочки с модов GAMMA, перечисленных на предыдущей странице (G.A.M.M.A. YACS no quit, 338 Soulslike Gamemode, 208 Ironman Roguelite): в коопе их механики заменит Anomaly Coop (в разработке).</description>
               <conditionFlags><flag name="step_off_list">On</flag></conditionFlags>
               <typeDescriptor><type name="Required"/></typeDescriptor>
             </plugin>

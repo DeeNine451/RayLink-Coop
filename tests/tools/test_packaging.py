@@ -111,7 +111,7 @@ def test_fomod_part_choice_matches_installs() -> None:
 
 def test_mods_to_disable_listed() -> None:
     names = mods_to_disable()
-    assert len(names) >= 4, f"registry parse found only {names}"
+    assert len(names) >= 3, f"registry parse found only {names}"  # YACS stays on since 2026-11-18
     xml_text = fomod_text()
     rus = README_RUS.read_text(encoding="utf-8-sig")
     eng = README_ENG.read_text(encoding="ascii")

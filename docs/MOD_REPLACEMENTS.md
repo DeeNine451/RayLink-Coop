@@ -21,8 +21,8 @@
 
 | Мод / механика | Откуда | Действие | Чем заменено | Статус |
 |---|---|---|---|---|
-| `203- YACS Better Campfire Saves (forces campfire saves but they are better) - Ishmaeel` | GAMMA, вкл в профиле | выключить | привалы и аварийные сейвы хоста (`docs/CHECKPOINTS_DEATH.md` §2, §7) | план; в FOMOD и readme — сделано |
-| `G.A.M.M.A. YACS no quit` | GAMMA, выкл в профиле | выключить (не включать) | то же | план; в FOMOD и readme — сделано |
+| `203- YACS Better Campfire Saves (forces campfire saves but they are better) - Ishmaeel` | GAMMA, вкл в профиле | оставить включённым | не заменяется: скрипт мода идёт только на хосте (`coop_route_gamma.ltx`), его настройки хостовые (`coop_settings.ltx` `yasc/*`), а сохраняться в сессии игроки не могут (`docs/CHECKPOINTS_DEATH.md` §7) | решение владельца 2026-11-18: выключать не нужно (лаунчер ставит GAMMA с ним, игра идёт с ним с 29.10); из FOMOD и readme указание снять галочку убрано |
+| `G.A.M.M.A. YACS no quit` | GAMMA, выкл в профиле | выключить (не включать) | привалы и аварийные сейвы хоста (`docs/CHECKPOINTS_DEATH.md` §2, §7) | в FOMOD и readme — сделано |
 | `338- Soulslike Gamemode - Jabbers` | GAMMA, вкл в профиле, режим новой игры | выключить (режим в коопе недоступен) | смерть, эвакуация, потери, контузия, метки (`docs/CHECKPOINTS_DEATH.md` §3; `coop_survival`, `coop_death`, `coop_death.script`) | сделано |
 | `208- Ironman Roguelite (for easier ironman lovers) - Jabbers` | GAMMA, выкл в профиле | выключить (не включать) | режим `hardcore` (Ф3 T10): выбывший начинает новым персонажем, снаряжение старого — в тайнике у тела | сделано |
 | Сохранение у костра (campfire mode) | сток Anomaly, режим новой игры | нейтрализовано | привалы; сейвы игроку закрыты `coop_saves` у всех в сессии (стоковый гейт костра `bind_campfire.on_before_save_input` больше не нужен: сохранения нет вообще) | сделано |

@@ -64,8 +64,6 @@
 G.A.M.M.A.: ЧТО ВЫКЛЮЧИТЬ
   Снимите галочки в левом списке MO2 (поле поиска над списком находит эти моды по номеру или слову YACS). В коопе их
   механики Anomaly Coop заменит своими (в разработке):
-    203- YACS Better Campfire Saves (forces campfire saves but they are better) - Ishmaeel
-        привалы и аварийные сейвы хоста;
     G.A.M.M.A. YACS no quit
         то же; в профиле G.A.M.M.A. он выключен, не включайте;
     338- Soulslike Gamemode - Jabbers

@@ -10,3 +10,4 @@ engine/
 logic-md/
 engine-ci/
 releases/
+__pycache__/
