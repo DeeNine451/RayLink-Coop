@@ -1,0 +1,252 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- G12-3 / Dev 57. Player UI reads mirrored flags; only the level decider changes bodies/inventories.
+-- Co-op: the host has the bodies and inventories. Server: the leading map has them; the world routes requests.
+-- No save data. Wire (host ids): mods.compui_no_ammo {i}, mods.compui_no_ammo_r {i,n},
+-- mods.compui_ammo_state {i,w,a=0}. Sender identity always comes from the transport.
+
+local started = false
+local wrapped = setmetatable({}, { __mode = "k" })
+local panel, panel_hud, panel_module
+local previous, next_unstuck = {}, 0
+
+local function active() return coop_mods_core.active() end
+local function player() return active() and coop_mode.actor_is_player() end
+local function living(npc)
+    return npc and IsStalker(npc) and npc:has_info("npcx_is_companion") and npc:alive()
+end
+
+-- A single search for VAR and personal commands. The stock squad table is not a mirror.
+function companion_in_range(lo, hi, personal)
+    local actor = db.actor
+    if not (actor and actor:alive()) then return false end
+    local companions = coop_mods_core.mod("coop_npc_companions")
+    for _, st in pairs(db.storage or {}) do
+        local npc = st.object
+        if living(npc) and (not personal or (companions and companions.held_here(npc))) then
+            local distance = actor:position():distance_to(npc:position())
+            if (lo == nil or distance > lo) and (hi == nil or distance <= hi) then return true end
+        end
+    end
+    return false
+end
+
+local function wrap(module, key, make, callback)
+    if not module then return end
+    local done = wrapped[module]
+    if not done then done = {}; wrapped[module] = done end
+    if done[key] == module[key] then return end
+    local ok, old = coop_mods_core.wrap(module, key, "compui." .. key, make)
+    if ok then
+        done[key] = module[key]
+        if callback then coop_mods_core.swap_callback(callback, old, module[key]) end
+    end
+end
+
+local function patch_voice()
+    local voiced = coop_mods_core.mod("agdd_voiced_actor")
+    local ac = coop_mods_core.mod("axr_companions")
+    for _, spec in ipairs({
+        { voiced, "squad_near", nil, 24 }, { voiced, "squad_can_hear", 24, 60 },
+        { voiced, "squad_out", nil, 60, false, true }, { ac, "squad_close", nil, 12, true },
+        { ac, "squad_near", 12, 24, true }, { ac, "squad_mid", 24, 40, true },
+        { ac, "squad_far", 40, 60, true }, { ac, "squad_too_far", 60, nil, true },
+    }) do
+        local lo, hi, personal, inverse = spec[3], spec[4], spec[5], spec[6]
+        wrap(spec[1], spec[2], function(orig) return function(...)
+            if not active() then return orig(...) end
+            if not player() then return false end
+            local found = companion_in_range(lo, hi, personal)
+            if inverse then return not found end
+            return found
+        end end)
+    end
+end
+
+local function remove_panel()
+    if panel then
+        panel_hud:RemoveDialogToRender(panel)
+        if rawequal(panel_module.HUD, panel) then panel_module.HUD = nil end
+    end
+    panel, panel_hud, panel_module = nil, nil, nil
+end
+
+local function activate_panel()
+    if not player() or panel then return end
+    local ac = coop_mods_core.mod("axr_companions")
+    if not (ac and ac.UICompanionList and ac.list_actor_squad_by_id) or ac.Enabled == false then return end
+    -- Stock activation may already have run; adopt its panel and retire its callbacks.
+    for _, spec in ipairs({ { "actor_on_net_destroy", "actor_on_net_destroy" },
+        { "on_console_execute", "on_console_execute" }, { "GUI_on_show", "update_hud" },
+        { "GUI_on_hide", "update_hud" } }) do
+        if type(ac[spec[2]]) == "function" then UnregisterScriptCallback(spec[1], ac[spec[2]]) end
+    end
+    local hud = get_hud()
+    if not hud then return end
+    local p = ac.HUD or ac.UICompanionList()
+    if not ac.HUD then hud:AddDialogToRender(p) end
+    panel, panel_hud, panel_module, ac.HUD = p, hud, ac, p
+end
+
+local function update_panel()
+    if player() and panel then panel:Update(true) end
+end
+
+local function patch_panel()
+    local ac = coop_mods_core.mod("axr_companions")
+    wrap(ac, "activate_hud", function(orig) return function(...)
+        if not active() then return orig(...) end
+        return activate_panel()
+    end end)
+    wrap(ac, "deactivate_hud", function(orig) return function(...)
+        if not active() then return orig(...) end
+        return remove_panel()
+    end end)
+end
+
+local function unstuck()
+    if not active() then return end
+    -- The stock local callback is registered by on_game_load; it must never measure to db.actor in a session.
+    RemoveTimeEvent("cycle", "companion_unstuck")
+    if not coop_mode.leads_here() then return end
+    local now = time_global()
+    if now < next_unstuck then return end
+    next_unstuck = now + 30000
+    local companions = coop_mods_core.mod("coop_npc_companions")
+    local local_actor = coop_mode.actor_is_player() and db.actor
+    local seen = {}
+    for id, st in pairs(db.storage or {}) do
+        local npc = st.object
+        if living(npc) then
+            local leader = companions and companions.leader_of(npc)
+            -- The playing authority owns unassigned squads. leader_of only resolves player proxies.
+            if not leader and local_actor and companions and companions.owner_character(npc) == 0 then
+                leader = local_actor
+            end
+            if leader and leader:alive() then
+                local pos = npc:position()
+                local old = previous[id]
+                seen[id] = { pos = vector():set(pos), leader = leader:id() }
+                if old and old.leader == leader:id() and old.pos:distance_to(pos) < 1
+                    and npc:dont_has_info("npcx_beh_wait") and npc:dont_has_info("npcx_beh_ignore_combat")
+                    and not npc:best_enemy() and state_mgr.get_state(npc) == "panic"
+                    and leader:position():distance_to(pos) > 10 then
+                    if db.offline_objects[id] then db.offline_objects[id].level_vertex_id = nil end
+                    db.spawned_vertex_by_id[id] = nil
+                    alife():teleport_object(id, npc:game_vertex_id(), npc:level_vertex_id(), pos)
+                end
+            end
+        end
+    end
+    previous = seen
+end
+
+local function object_id(n)
+    return type(n) == "number" and n == n and n >= 1 and n < 65535 and n % 1 == 0
+end
+
+local function no_ammo(t, from)
+    local id = t.i
+    if not coop_trust.pass("compui_ammo_id", object_id(id), "invalid companion id from peer %s", tostring(from)) then return end
+    -- Structural safety remains necessary in log mode: an invalid number must never reach the engine.
+    local lid = object_id(id) and coop_mods_core.lid(id)
+    local npc = lid and level.object_by_id(lid)
+    local who = coop_mods_core.avatar(from)
+    local eligible = living(npc) and who ~= nil
+    if not coop_trust.pass("compui_ammo_companion", eligible,
+        "peer %s has no living companion", tostring(from)) then return end
+    if not eligible then return end
+    local companions = coop_mods_core.mod("coop_npc_companions")
+    -- Ruling F2-32b (coop_requests.cpp moves::check): every companion of the group shares its inventory with every player,
+    -- so the sender need not lead it; it must be some player's companion (review RV-G12-3).
+    local owner = companions and companions.owner_character(npc)
+    if not coop_trust.pass("compui_ammo_owner", owner ~= nil,
+        "peer %s: %s is no player's companion", tostring(from), tostring(id)) then return end
+    local here = coop_mode.leads_here() and coop_mode.where(from) == "here" and coop_mode.decider(from) == "this"
+    if not coop_trust.pass("compui_ammo_distance", here and who:alive()
+        and who:position():distance_to(npc:position()) <= 15,
+        "peer %s is away from companion %s", tostring(from), tostring(id)) then return end
+    -- Routing can fall back to the world. Log mode cannot grant it authority over a player’s map.
+    if not here then return end
+    local count = 0
+    npc:iterate_inventory(function(_, item)
+        if item and IsWeapon(item) then
+            item:set_ammo_elapsed(0)
+            if item:get_ammo_in_magazine() == 0 then
+                count = count + 1
+                -- Bounded, one weapon per event; map broadcasts go through the transport to its own players.
+                coop_mods_core.to_all("compui_ammo_state", { i = id, w = coop_mods_core.hid(item:id()), a = 0 })
+            end
+        end
+    end, npc)
+    coop_mods_core.to_peer(from, "compui_no_ammo_r", { i = id, n = count })
+end
+
+local function ammo_state(t)
+    if not (player() and coop_mode.is_player_mirror() and object_id(t.i) and object_id(t.w) and t.a == 0) then return end
+    local nid, wid = coop_mods_core.lid(t.i), coop_mods_core.lid(t.w)
+    local npc = nid and level.object_by_id(nid)
+    local item = wid and level.object_by_id(wid)
+    local parent = item and item:parent()
+    if living(npc) and item and IsWeapon(item) and parent and parent:id() == npc:id() then item:set_ammo_elapsed(0) end
+end
+
+local function patch_ammo()
+    local mod = coop_mods_core.mod("grok_companions_no_ammo")
+    wrap(mod, "unload_ammo", function(orig) return function(name, ...)
+        if not active() then return orig(name, ...) end
+        if name ~= "UIInventory" or not player() then return end
+        local inventory = coop_mods_core.mod("ui_inventory")
+        local npc = inventory and inventory.GUI and inventory.GUI:GetPartner()
+        if not living(npc) then return end
+        local t = { i = coop_mods_core.hid(npc:id()) }
+        if coop_mode.leads_here() then return no_ammo(t, coop_mods_core.self_peer()) end
+        return coop_mods_core.to_host("compui_no_ammo", t)
+    end end, "GUI_on_show")
+end
+
+local function step(name, f)
+    local ok, err = pcall(f)
+    if not ok then coop_mods_core.report("compui", name, err) end
+end
+
+local function patch()
+    step("VAR", patch_voice)
+    step("panel", patch_panel)
+    step("ammo", patch_ammo)
+end
+
+local function first_update()
+    patch()
+    step("activate", activate_panel)
+end
+
+local function load()
+    previous, next_unstuck = {}, 0
+    step("remove", remove_panel)
+end
+
+local function update()
+    if not active() then return end
+    step("unstuck", unstuck)
+end
+
+function on_game_start()
+    if started then return end
+    started = true
+    patch()
+    step("wire", function()
+        coop_mods_core.set_limit("compui_no_ammo", 12, 2)
+        coop_mods_core.on("compui_no_ammo", no_ammo, "host")
+        coop_mods_core.on("compui_ammo_state", ammo_state, "player")
+        coop_mods_core.on("compui_no_ammo_r", update_panel, "player")
+    end)
+    step("callbacks", function()
+        RegisterScriptCallback("actor_on_first_update", first_update)
+        RegisterScriptCallback("actor_on_update", update)
+        RegisterScriptCallback("on_game_load", load)
+        RegisterScriptCallback("actor_on_net_destroy", load)
+        RegisterScriptCallback("GUI_on_show", update_panel)
+        RegisterScriptCallback("GUI_on_hide", update_panel)
+        RegisterScriptCallback("on_console_execute", function(name) if name == "hud_draw" then update_panel() end end)
+    end)
+end
