@@ -151,13 +151,15 @@ SendScriptCallback("actor_on_update") -- late installs (NTA functors, rebinds)
 -- Hideout Furniture
 -------------------------------------------------------------------------------
 local item = spawn("furn_item", vec3(20, 0, 0), 500)
+OBJ[item.id]._cond = 0.7 -- the host's copy of his item
 SENT = {}
 from_client("hf_place", { i = item.id, s = "furn_obj", x = 21, y = 0, z = 0, ax = 0, ay = 1, az = 0, lv = 1, gv = 2,
-	d = C.ser({ condition = 0.7, is_on = true, evil = { nested = 1 } }) })
+	d = C.ser({ condition = 0.9, is_on = true, evil = { nested = 1 } }) })
 local placed
 for id, se in pairs(SE) do if se._sec == "furn_obj" then placed = id end end
 check(placed ~= nil and SE[item.id] == nil, "place: object created, the player's item spent")
-check(HF_DATA[placed] and HF_DATA[placed].condition == 0.7 and HF_DATA[placed].evil == nil, "place: scalar data copied, nested dropped")
+check(HF_DATA[placed] and HF_DATA[placed].condition == 0.7 and HF_DATA[placed].is_on == nil and HF_DATA[placed].evil == nil,
+	"place: the data is the host's (its item's condition), nothing of the client's (round 3, R2-B3)")
 check(sent("mods.hf_data") ~= nil, "place: furniture data published to clients")
 local foreign = spawn("furn_item", vec3(0, 0, 0), 0) -- the host's own item
 from_client("hf_place", { i = foreign.id, s = "furn_obj", x = 21, y = 0, z = 0, lv = 1, gv = 2, d = "" })

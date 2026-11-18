@@ -704,6 +704,7 @@ local function owned_elsewhere(key)
 end
 
 local pmd_sig = {} -- key -> packed value last sent
+local pmd_unsent = {} -- key -> a packed value over MAX_VALUE that was logged (not sent: the host would refuse it)
 local pmd_loaded_for = nil -- m_data table the surrogate was applied to
 local pmd_kept = false -- Build 56: the stash holds the keys a load starts with; nothing is told from the dying world
 local pmd_kept_at = 0
@@ -731,8 +732,12 @@ local function pmd_poll()
 			and core.pack(pmd_current(m, key)) or nil
 		if packed and pmd_sig[key] ~= packed then
 			if #packed > MAX_VALUE then
-				stats.oversize = stats.oversize + 1
-				pmd_sig[key] = packed
+				-- not sent and not signed: the next look sends it once it is small enough; told once per value
+				if pmd_unsent[key] ~= packed then
+					pmd_unsent[key] = packed
+					stats.oversize = stats.oversize + 1
+					core.log("! player key %s (%d bytes) not sent: over %d bytes", key, #packed, MAX_VALUE)
+				end
 			elseif core.send("pmd", { k = key, d = packed }, 0) then
 				pmd_sig[key] = packed
 				stats.pmd_out = stats.pmd_out + 1
@@ -904,10 +909,20 @@ end
 -------------------------------------------------------------------------------
 -- 4. World m_data keys (host -> clients)
 -------------------------------------------------------------------------------
+-- A value over MAX_VALUE goes in pieces (coop_mods_core.send_big, "mods.economy_wmd": "<key>\n<packed>"), up to that chunker's
+-- 256 KiB (TZ v2 6.4 row 6, 2026-11-18: Hideout Furniture's lists over 12 KB never reached the clients again, silently).
+-- Round 2 (F4): wmd_sig is the value the clients were sent; a client a send failed for (still loading, a full queue) is owed
+-- the key (wmd_owed[key][peer]) and gets the current value again alone, after a wait that doubles from one look to WMD_WAIT_MAX.
+-- The others are not sent it again. A value that did not reach every client is logged once per key and value (the sends here
+-- are quiet: coop_economy_core.send would log every try).
 local world_keys = { "player_created_stashes", "workshop_stashes" }
 local wmd_sig = {}
 local wmd_seeded = false -- clients got the current values with the host's save
 local wmd_next_poll = 0
+local WMD_BIG = "economy_wmd"
+local wmd_unsent = {} -- key -> the packed value that was not sent (logged once per value)
+local wmd_owed = {} -- key -> peer -> { at = next try (ms), wait = ms }
+local WMD_WAIT_MAX = 60000
 
 function register_world_key(key)
 	if type(key) ~= "string" then return end
@@ -917,42 +932,113 @@ function register_world_key(key)
 	world_keys[#world_keys + 1] = key
 end
 
+-- Sends world key `key` = `packed` to client `peer`, quietly (no log line per try). -> true; else false, why.
+local function wmd_send_to(key, packed, peer)
+	if #packed <= MAX_VALUE then
+		local api = core.engine()
+		if not (api and api.send_event) then return false, "no engine" end
+		-- the event core.on("wmd") listens to (coop_economy_core.send without its line at every failed try)
+		local ok, sent, why = pcall(api.send_event, "economy.wmd", coop_main.encode({ k = key, d = packed }), peer)
+		if ok and sent == true then return true end
+		return false, tostring(ok and why or sent)
+	end
+	local mc = core.mod("coop_mods_core")
+	if not (mc and type(mc.send_big) == "function") then return false, "no chunker (coop_mods_core)" end
+	if mc.send_big(WMD_BIG, key .. "\n" .. packed, peer) then
+		stats.wmd_big = (stats.wmd_big or 0) + 1
+		return true
+	end
+	return false, "not sent in pieces (at most 256 KiB)"
+end
+
+-- Tries client `peer` with the current value of `key`: sent, he owes nothing; else he is tried again after a wait twice the last.
+local function wmd_try(key, packed, peer, now)
+	local owed = wmd_owed[key]
+	local sent, why = wmd_send_to(key, packed, peer)
+	if sent then
+		if owed then owed[peer] = nil end
+		return true
+	end
+	if not owed then
+		owed = {}
+		wmd_owed[key] = owed
+	end
+	local last = owed[peer]
+	local wait = last and math.min(last.wait * 2, WMD_WAIT_MAX) or WORLD_POLL_MS
+	owed[peer] = { at = now + wait, wait = wait }
+	if wmd_unsent[key] ~= packed then
+		wmd_unsent[key] = packed -- told once per key and value
+		stats.oversize = stats.oversize + 1
+		core.log("! world key %s (%d bytes) not sent to %s: %s; tried again for him alone, at growing waits", key, #packed,
+			tostring(core.nick_of(peer) or peer), tostring(why))
+	end
+	return false
+end
+
 local function wmd_poll()
 	local m = m_data()
 	if not m then return end
 	local silent = not wmd_seeded
 	wmd_seeded = true
+	local now = core.now()
+	local here = {}
+	for _, p in ipairs(core.players()) do
+		if not p.is_self then here[p.id] = true end
+	end
 	for _, key in ipairs(world_keys) do
 		local packed = core.pack(m[key])
-		if wmd_sig[key] ~= packed then
-			wmd_sig[key] = packed
-			if silent then
-				-- baseline
-			elseif #packed > MAX_VALUE then
-				stats.oversize = stats.oversize + 1
-			else
-				core.send_clients("wmd", { k = key, d = packed })
-				stats.wmd_out = stats.wmd_out + 1
+		local owed = wmd_owed[key]
+		if owed then
+			for peer in pairs(owed) do
+				if not here[peer] then owed[peer] = nil end -- he left: a new join gets the values with the host's save
 			end
 		end
+		if wmd_sig[key] ~= packed then
+			wmd_sig[key] = packed
+			if not silent then -- (the first look is the baseline)
+				-- a new value: every client is tried at once (one who still owes the old one keeps his growing wait on a failure)
+				stats.wmd_out = stats.wmd_out + 1
+				for peer in pairs(here) do wmd_try(key, packed, peer, now) end
+			end
+		elseif owed then
+			for peer, o in pairs(owed) do
+				if now >= o.at then wmd_try(key, packed, peer, now) end
+			end
+		end
+		if owed and next(owed) == nil then wmd_owed[key] = nil end
 	end
 end
 
-local function on_wmd(t, from)
-	if core.is_host() or from ~= 0 then return end
-	local key = type(t.k) == "string" and t.k or nil
-	local known = false
+local function wmd_known(key)
 	for _, k in ipairs(world_keys) do
-		if k == key then known = true break end
+		if k == key then return true end
 	end
-	if not (known and type(t.d) == "string") then return end
-	local v, err = core.unpack(t.d)
-	if err and t.d ~= "_" then return end
+	return false
+end
+
+-- Client: world key `key` = packed value `d` from the host.
+local function wmd_apply(key, d)
+	if not (type(key) == "string" and wmd_known(key) and type(d) == "string") then return end
+	local v, err = core.unpack(d)
+	if err and d ~= "_" then return end
 	local m = m_data()
 	if m then
 		m[key] = v
 		stats.wmd_in = stats.wmd_in + 1
 	end
+end
+
+local function on_wmd(t, from)
+	if core.is_host() or from ~= 0 then return end
+	wmd_apply(t.k, t.d)
+end
+
+-- The pieces of a big value, put together by coop_mods_core (side "client": from the host only).
+local function on_wmd_big(str, from)
+	if core.is_host() or from ~= 0 or type(str) ~= "string" then return end
+	local cut = str:find("\n", 1, true)
+	if not cut then return end
+	wmd_apply(str:sub(1, cut - 1), str:sub(cut + 1))
 end
 
 -------------------------------------------------------------------------------
@@ -1326,7 +1412,11 @@ function print_status()
 		stats.se_out, stats.se_in, stats.se_refused, stats.se_pending, stats.se_held, #se_hold, #item_keys,
 		stats.imd_out, stats.imd_in, stats.imd_refused, stats.imd_held, #imd_hold, stats.clones, stats.pmd_out,
 		stats.pmd_in, stats.pmd_applied, stats.wmd_out, stats.wmd_in, stats.oversize, stats.errors)
+	if (stats.wmd_big or 0) > 0 then core.log("mdata: world keys sent in pieces %d", stats.wmd_big) end
 end
+
+-- Tests only.
+function _stats() return stats end
 
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an
 -- error here would skip all the scripts after this one, single player included (W5).
@@ -1342,6 +1432,10 @@ function on_game_start()
 	core.on("imd", on_imd)
 	core.on("pmd", on_pmd)
 	core.on("wmd", on_wmd)
+	start_step("big world keys", function()
+		local mc = core.mod("coop_mods_core")
+		if mc and type(mc.on_big) == "function" then mc.on_big(WMD_BIG, on_wmd_big, "client") end
+	end)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
 	for _, name in ipairs({ "actor_on_item_take", "actor_on_item_drop" }) do

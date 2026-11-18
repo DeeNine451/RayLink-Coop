@@ -118,7 +118,8 @@ local CLIENT_FALSE_CONDITIONS = {
 	"recover_mutant_data_precondition", "all_attackers_dead",
 }
 
-local stats = { suppressed = 0, shared = 0, forwarded = 0, fx_run = 0, guards = 0, helmets = 0, flash = 0, dao_handlers = 0 }
+local stats = { suppressed = 0, shared = 0, forwarded = 0, fx_run = 0, guards = 0, helmets = 0, flash = 0, dao_handlers = 0,
+	isg_again = 0 }
 
 local function ct() return rawget(_G, "coop_tasks") or coop_tasks end
 local function party() return qc.mod("coop_quests_party") end
@@ -361,17 +362,32 @@ local function host_fx(from, t)
 		return
 	end
 	local npc = tonumber(t.n) and level.object_by_id(tonumber(t.n)) or nil
-	if t.f == "isg_companion_squad" then -- nothing on the host stops a repeat of this client's dialog action
-		if isg_squad_made then return end
-		isg_squad_made = true
-	end
-	stats.fx_run = stats.fx_run + 1
-	local tasks = t.f == "isg_companion_squad" and qc.mod("coop_tasks") -- a companion follows the one who talked
-	if tasks then
-		tasks.with_recipient(from, f, db.actor, npc, params_of(t))
+	-- TZ v2 6.4 row 3: a quest item of the white list is made once per world, the other things it makes once per world or per run
+	-- of their task (coop_quests_trust; the host's save keeps the list). Noted after the effect returned without an error.
+	local qt = qc.mod("coop_quests_trust")
+	local isg = t.f == "isg_companion_squad"
+	-- nothing on the host stops a repeat of this client's dialog action: never twice, also while the check only logs. Asked
+	-- before the check (round 3, R2-S4), so the check writes no "let through" line for what is refused here anyway.
+	if isg and (isg_squad_made or (qt and qt.was_made("isg_companion_squad"))) then
+		stats.isg_again = stats.isg_again + 1
+		if stats.isg_again <= 8 or stats.isg_again % 64 == 0 then
+			qc.log(TAG, "! isg_companion_squad (Crossfire's companions) asked again by %s (#%s): made once already, refused (%d)",
+				tostring(qc.nick_of and qc.nick_of(from)), tostring(from), stats.isg_again)
+		end
 		return
 	end
-	f(db.actor, npc, params_of(t))
+	local pass, ticket = true, nil
+	if qt then pass, ticket = qt.check_spawn(from, t.f, t) end
+	if not pass then return end
+	stats.fx_run = stats.fx_run + 1
+	local tasks = isg and qc.mod("coop_tasks") -- a companion follows the one who talked
+	if tasks then
+		tasks.with_recipient(from, f, db.actor, npc, params_of(t))
+	else
+		f(db.actor, npc, params_of(t))
+	end
+	if isg then isg_squad_made = true end
+	if qt then qt.note_spawn(ticket) end
 end
 
 -------------------------------------------------------------------------------

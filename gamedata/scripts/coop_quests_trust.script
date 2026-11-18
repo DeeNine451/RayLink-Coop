@@ -1,0 +1,616 @@
+--[[
+	Anomaly Coop - the host's checks of a client's quest actions (gamedata\scripts\coop_quests_trust.script).
+	TZ v2 section 6.4 rows 2, 3, 4 (owner 2026-11-18: the Lua channels stay, every place where the host believes a client on his
+	word is closed). Each verdict goes through coop_trust (configs\mod_system_coop_trust.ltx: "log" in build 57, "refuse" later).
+
+	Layer: the Core. It runs where the request is decided (the host of a co-op, the world server of a server) and asks no mode:
+	every fact it reads is either there (then it decides) or not (then the verdict is ok: no refusal for lack of knowledge).
+
+	Checks (coop_trust names):
+	  quest_take            quests.act "take" (coop_quests_party.host_take): the section is asked for by a running task the player
+	                        sees, and the number is not more than the task still lacks. "Asked for" (host's task manager and the host's
+	                        actor pstor, the same on the world server of a server, which keeps the tasks):
+	                          - a fetch task's item: pstor "<task>_fetch" = section, "<task>_fetch_count" = how many (tasks_fetch);
+	                          - a delivery's parcel: pstor "<task>" = { item_1_sec } (tasks_delivery), one;
+	                          - the task's own ini lines ask for it (condlists of misc\task\tm_*.ltx: "remove_item(sec[:n])" of
+	                            on_complete, "actor_has_item(sec)" of a target / title, "actor_has_item_amount(sec:n)"), n or one;
+	                          - DIALOG_TAKES: a stock dialog takes it and no task line names it. Only while the info that opens the
+	                            dialog is held, and at most its number for each player (his character); the count is in the save.
+	                        "Still lacks": what this check let the group give up for that task before (kept per task object,
+	                        so a new give of the same id starts at zero). Only what the check itself let through is counted, so a
+	                        "log" build writes exactly the lines a "refuse" build would refuse.
+	  quest_give_npc        quests.act "give_npc" (coop_quests_party.host_give_npc): a dialog hands the group's items to an NPC
+	                        because its speaker lacks them (patch_client_relocate, the Agroprom documents). The verdict and the
+	                        ledger of quest_take, under its own name.
+	  quest_spawn_once      quests.act "fx" of a quest item spawn (coop_quests_story.host_fx): this item (the effect and, for the
+	                        effects that take one, its section) was not made for this world yet by a client's ask. A counted
+	                        effect without its parameter (missing, empty, over 64 characters) is refused. The list is the host's
+	                        m_data.coop_quest_spawns (save_state / load_state): it is in the host's save of a co-op and in the world
+	                        server's save of a server, and comes back with a load; a save without it means nothing was made. A key
+	                        is noted only after the effect returned without an error: a failed spawn can be asked again.
+	                        spawn_item_at_pos counts only the 10 sections it makes (xr_effects pos_itms); an ask of any other
+	                        section makes nothing and is neither counted nor kept. The list is capped (1024 keys, 192 of them
+	                        from a client's parameter) for the save's sake; a new key that cannot be kept is refused, never let
+	                        through unrecorded. Honest play keeps a few dozen keys.
+	  quest_effect_once     quests.act "fx" of the rest of the white list that makes things (EFFECT_ONCE): Hidden Threat's ambush
+	                        mine, the Jupiter b219 gate, Crossfire's companion squad, once per world (the same saved list); the
+	                        barrier's first wave once per run of its task, and only while that task runs. Not counted, they repeat
+	                        in honest play: the Red Forest bridge (bridge_down / _up / _stop, the tutorial's lever) moves the bridge
+	                        as often as the player uses it and makes nothing.
+	  quest_scene_place     quests.act "oso_decline" (coop_quests_scenes.host_oso_decline): the player stands within 15 m of
+	                        Osoznanie (story id "osoznanie") and talked to him a moment ago, or within 15 m of the jump point
+	                        his own dialog put him on (the decline moves him first, then asks). 15 m and 5 s: coop_quests_missions
+	                        talk_partner. Co-op: the host's objects. Server: the far view's stand-ins (the ALife records) and the map
+	                        server's word on his talk (coop.levels.talking); a point the world server cannot read is not used.
+	  quest_delivery_place  quests.act "delivery" (coop_quests_missions.host_delivery, after talk_partner): the NPC is the target
+	                        (var.target_id) of a running delivery task. The host's (world server's) task manager and pstor.
+
+	A task runs while its object is in task_info and has not ended: a task with a repeat timeout keeps its object there after its end
+	(task_manager.task_callback: stage 255, status "completed" / "fail"). One that ended in the last 10 s still counts: a dialog
+	phrase gives the info that ends the task and takes its item in the same breath (dialogs_lostzone_ll.xml stalker_strelok_doctor),
+	and the info may reach the host first. The end is noted from the host's task_manager.task_callback (the engine calls it on the
+	host and on the world server alike) and by a look once a second, so a task given and ended between two looks keeps its window,
+	also on a process without actor updates.
+--]]
+
+local tostring, tonumber, type, pairs, ipairs, pcall, next, setmetatable = tostring, tonumber, type, pairs, ipairs, pcall, next,
+	setmetatable
+local math_floor, math_max, math_sqrt = math.floor, math.max, math.sqrt
+
+local REACH_SQR = 225 -- 15 m (coop_quests_missions MAX_DIST_SQR: the dialog was face to face)
+local TALK_MS = 5000 -- coop_quests_missions TALK_MS: the talk window may have closed when the request arrives
+local MAX_MADE = 1024 -- keys kept in all: the fixed ones are a handful, the dialog takes a few per character
+local MAX_FREE = 192 -- keys made from a client's own parameter (a section, a set's name): a flood of made-up names is not kept
+local PARAM_MAX = 64 -- a section name is no longer
+local OSO_STORY = "osoznanie" -- spawn_sections_warlab.ltx [osoznanie] story_id
+
+-- Stock dialogs that take an item no task line names: at most `n` for each player, while the info that opens the dialog is held
+-- (its <has_info>: the dialog was open before the take, so the info is on the host already; the infos its later phrases give may
+-- arrive after the take and are not asked).
+local DIALOG_TAKES = {
+	-- dialogs_lostzone_oa.xml *_operation_afterglow_transmission_report: xr_effects.lttz_oa_take_decryption_radio
+	decryption_radio = { n = 1, info = "degtyarev_rally_point_pda" },
+	-- dialogs_lostzone_oa.xml stalker_rogue_dialog_oa_heal_psycho: xr_effects.lttz_oa_take_drug_psy_blockade
+	drug_psy_blockade = { n = 1, info = "stalker_rogue_dialog_oa_help_psycho" },
+	-- dialogs_agroprom_underground.xml dm_agr_u_bandit_boss_give_docs: dialogs_agr_u.take_agr_u_docs (coop_quests_party: the case
+	-- another player holds goes to the boss through give_npc)
+	main_story_1_quest_case = { n = 1, info = "agr_u_bandit_boss_ask" },
+}
+-- The calls of a task's condlists that ask for an item (sec[:count]); every one the task files of the build use
+-- (misc\task\tm_*.ltx, stock and G.A.M.M.A.). A reward (reward_item, reward_random_item) is no ask.
+local ASK_CALLS = { remove_item = true, actor_has_item = true, actor_has_item_amount = true }
+
+-- The fx effects that make a quest item (coop_quests_story HOST_EFFECTS and its extras): true = one item, "name" = its first
+-- parameter names a set of items (mlr_utils.spawn_item: a key of its SPWN table; a name outside it raises, so nothing is kept),
+-- a table = its first parameter is the section, and the effect makes only the sections of the table.
+local SPAWN_ITEMS = {
+	-- xr_effects.spawn_item_at_pos makes the sections of its pos_itms table and only prints an error for any other (merged
+	-- G.A.M.M.A. corpus = G.A.M.M.A. Quests Rebalance = the stand, 2026-11-18): any other section makes nothing and is not counted
+	spawn_item_at_pos = { drx_x8_documents = true, drx_x16_documents = true, drx_x18_documents = true, drx_x19_documents = true,
+		drx_agr_u_documents = true, drx_jup_u_documents = true, lx8_history_documents = true, lx8_history_2_documents = true,
+		lx8_history_3_documents = true, wpn_gauss_quest = true },
+	mlr_spawn_item = "name",
+	spawn_strelok_notes = true, spawn_x8_documents = true, spawn_monolith_shard = true, spawn_stitch_decoder = true,
+	spawn_contact_lost_pda = true, spawn_jupiter_documents = true, fanat_training_2 = true,
+	ht_init_second_task_2 = true, -- utils_slht: the quest package sl_ht_spooner_quest_package and a dead courier
+}
+-- The rest of the white list that makes things: true = once per world; a table = once per run of a task, the parameter picks it.
+local EFFECT_ONCE = {
+	ht_add_mine = true, -- utils_slht: the ambush mine tch_ht_quest_mine_blow beside a player
+	jup_b219_restore_gate = true, -- xr_effects: the gate at its saved place, each call one more
+	isg_companion_squad = true, -- dialogs_lostzone.spawn_pass_hall_isg_companion_squad: Crossfire's companions
+	-- tasks_defense: STARTING_SQUADS attacker squads of barrier_defense_<monolith|zombie> (its task's condlist_2, on the host)
+	barrier_defense_first_spawn = { monolith = "barrier_defense_monolith", zombie = "barrier_defense_zombie" },
+}
+
+local ENDED_MS = 10000 -- a task that ended this long ago still counts: the dialog that ends it may take the item a moment later
+local LOOK_MS = 1000
+
+local taken = setmetatable({}, { __mode = "k" }) -- task object -> { [section] = items given up for it }
+local made_for = setmetatable({}, { __mode = "k" }) -- task object -> { [effect key] = true }: made for this run of the task
+local seen = {} -- task id -> task object, running at the last look
+local ended = {} -- task id -> { tsk, till }: tasks that were running a moment ago
+local next_look = 0
+local lines_of = {} -- task id -> its ini lines (the ini does not change in a game)
+local made = {} -- key -> true: quest spawns, things made once per world, dialog takes
+local made_n, free_n = 0, 0
+
+local function qc() return rawget(_G, "coop_quests_core") or coop_quests_core end
+
+local function nick(peer)
+	local core = qc()
+	local ok, n = pcall(function() return core.nick_of(peer) end)
+	return ok and n or ("#" .. tostring(peer))
+end
+
+local function task_info()
+	local tmm = rawget(_G, "task_manager") or task_manager
+	local ok, tm = pcall(function() return tmm.get_task_manager() end)
+	return ok and tm and tm.task_info or nil
+end
+
+local function actor_var(key)
+	local a = db and db.actor
+	if not a then return nil end
+	local ok, v = pcall(load_var, a, key)
+	return ok and v or nil
+end
+
+local function now_ms()
+	local ok, t = pcall(time_global)
+	return ok and tonumber(t) or 0
+end
+
+-- Can key `key` go into the made list (or is it there)? A key with ":" holds a client's parameter: those are capped on their own.
+-- The caps bound the save and the memory only: honest play keeps a handful of keys (10 sections of spawn_item_at_pos, the 14
+-- sets of mlr_utils, a dozen fixed keys, 3 dialog takes per character). A key that cannot be kept is refused by its check
+-- (round 3, R2-B1: a full list used to let every new key through, made and unrecorded).
+local function room_for(key)
+	if made[key] then return true end
+	if made_n >= MAX_MADE then return false end
+	return key:find(":", 1, true) == nil or free_n < MAX_FREE
+end
+
+-- A key goes into the made list, when there is room for it.
+local function note_made(key)
+	if type(key) ~= "string" or made[key] or not room_for(key) then return end
+	made[key] = true
+	made_n = made_n + 1
+	if key:find(":", 1, true) then free_n = free_n + 1 end
+end
+
+local FULL = "the list of things made for this world is full (%d kept, %d of them from a client's parameter): nothing new is made"
+local function full_text() return string.format(FULL, made_n, free_n) end
+
+-- A task object of the game is a luabind userdata (task_objects.CGeneralTask), a client's stub a table: both are weak keys.
+local function keyable(tsk)
+	local k = type(tsk)
+	return k == "userdata" or k == "table"
+end
+
+-- The object of a task that ended and waits in task_info for its repeat timeout.
+local function is_over(tsk)
+	local ok, over = pcall(function() return tsk.stage == 255 or tsk.status == "completed" or tsk.status == "fail" end)
+	return ok and over == true
+end
+
+-- Notes the tasks that ended since the last look. A dialog phrase that gives the info ending a task can take the task's item in its
+-- action: the info may reach the host's task update before the take arrives (another channel), and the task is gone.
+local function look(info)
+	local now = now_ms()
+	for id, tsk in pairs(seen) do
+		local cur = info[id]
+		local was = ended[id]
+		if (cur == nil or is_over(cur)) and not (was and was.till >= now) then ended[id] = { tsk = tsk, till = now + ENDED_MS } end
+	end
+	seen = {}
+	for id, tsk in pairs(info) do
+		if type(id) == "string" and not is_over(tsk) then seen[id] = tsk end
+	end
+	for id, e in pairs(ended) do
+		if e.till < now or seen[id] ~= nil then ended[id] = nil end
+	end
+end
+
+-- Every task of the check: id -> task object, the running ones and those that ended a moment ago. nil: no task manager here.
+local function tasks_now()
+	local info = task_info()
+	if not info then return nil end
+	look(info)
+	local out = {}
+	for id, e in pairs(ended) do out[id] = e.tsk end
+	for id, tsk in pairs(seen) do out[id] = tsk end
+	return out
+end
+
+-- The running tasks only (id -> object), nil: no task manager here.
+local function running_now()
+	local info = task_info()
+	if not info then return nil end
+	look(info)
+	return seen
+end
+
+local function on_update()
+	local core = qc()
+	if not (core and core.is_host and core.is_host()) then return end
+	local now = now_ms()
+	if now < next_look then return end
+	next_look = now + LOOK_MS
+	local info = task_info()
+	if info then look(info) end
+end
+
+-- task_manager.task_callback(tsk, state): the engine ends a task. Called before the stock callback drops the object from task_info
+-- (or marks it stage 255). On a client it notes his own tasks only, which nobody asks.
+local function on_task_end(tsk, state)
+	local okid, id = pcall(function() return tsk:get_id() end)
+	if not (okid and type(id) == "string") then return end
+	local okst, over = pcall(function() return state == task.completed or state == task.fail end)
+	if not (okst and over) then return end
+	local info = task_info()
+	local obj = info and info[id]
+	if obj == nil then return end
+	ended[id] = { tsk = obj, till = now_ms() + ENDED_MS }
+	seen[id] = nil
+end
+
+-- May player `peer` see task `id`? No audience record (every task outside a split-levels world): yes.
+local function sees(id, peer)
+	local core = qc()
+	local aud = core and core.mod("coop_task_audience")
+	if type(aud) ~= "table" or type(aud.sees_character) ~= "function" then return true end
+	local ct = core.mod("coop_tasks")
+	local c = ct and type(ct.character_of) == "function" and ct.character_of(peer)
+	local ok, r = pcall(aud.sees_character, id, c)
+	return not ok or r == true
+end
+
+local function ini_lines(id)
+	local got = lines_of[id]
+	if got then return got end
+	got = {}
+	local tmm = rawget(_G, "task_manager") or task_manager
+	local ini = tmm and tmm.task_ini
+	pcall(function()
+		if not ini:section_exist(id) then return end
+		for i = 0, ini:line_count(id) - 1 do
+			local _, key, value = ini:r_line_ex(id, i)
+			if type(value) == "string" then got[#got + 1] = value end
+			if type(key) == "string" then got[#got + 1] = key end
+		end
+	end)
+	lines_of[id] = got
+	return got
+end
+
+-- How many of `sec` task `id` asks for, nil: it does not ask for it.
+local function need_of(id, sec)
+	if actor_var(id .. "_fetch") == sec then return math_max(1, tonumber(actor_var(id .. "_fetch_count")) or 1) end
+	local var = actor_var(id)
+	if type(var) == "table" and var.item_1_sec == sec then return 1 end
+	local need = nil
+	for _, line in ipairs(ini_lines(id)) do
+		for name, args in line:gmatch("([%w_]+)%(([^%)]*)%)") do
+			if ASK_CALLS[name] then
+				local first, count = args:match("^%s*([^:%s]+)%s*:?%s*(%d*)")
+				if first == sec then need = math_max(need or 0, tonumber(count) or 1) end
+			end
+		end
+	end
+	return need
+end
+
+-------------------------------------------------------------------------------
+-- quest_take, quest_give_npc
+-------------------------------------------------------------------------------
+-- The best task for this take: { tsk, id, need, left }, or nil.
+local function take_task(peer, sec)
+	local info = tasks_now()
+	if not info then return nil, false end
+	local best = nil
+	for id, tsk in pairs(info) do
+		if sees(id, peer) then
+			local need = need_of(id, sec)
+			if need then
+				local t = keyable(tsk) and taken[tsk]
+				local left = need - (t and t[sec] or 0)
+				if not best or left > best.left then best = { tsk = tsk, id = id, need = need, left = left } end
+			end
+		end
+	end
+	return best, true
+end
+
+-- Whose dialog takes these are: the player's character (the same in every session of this world), else his peer.
+local function player_key(peer)
+	local core = qc()
+	local ct = core and core.mod("coop_tasks")
+	local ok, c = pcall(function() return ct.character_of(peer) end)
+	if ok and type(c) == "number" then return "c" .. tostring(c) end
+	return "p" .. tostring(peer)
+end
+
+local function dialog_key(sec, who, i) return "dialog_take|" .. sec .. "|" .. who .. "|" .. tostring(i) end
+
+local function dialog_used(sec, who, most)
+	local n = 0
+	for i = 1, most do
+		if made[dialog_key(sec, who, i)] then n = n + 1 end
+	end
+	return n
+end
+
+-- The world's info portion: true / false, nil when it cannot be read here.
+local function has_info(name)
+	local f = rawget(_G, "has_alife_info")
+	if type(f) ~= "function" then return nil end
+	local ok, yes = pcall(f, name)
+	if not ok then return nil end
+	return yes == true
+end
+
+-- A stock dialog's take of `n` x `sec` by player `peer`: ok, why, and the ticket note_take counts (only when ok).
+local function dialog_verdict(peer, sec, n)
+	local d = DIALOG_TAKES[sec]
+	local who = player_key(peer)
+	local used = dialog_used(sec, who, d.n)
+	if has_info(d.info) == false then
+		return false, string.format("the stock dialog that takes it is not open (no info %s)", d.info)
+	end
+	if used + n > d.n then
+		return false, string.format("a stock dialog takes %d of it from each player, %d taken from him already", d.n, used)
+	end
+	-- its count must be kept, or the take could be asked again and again (round 3, R2-B1)
+	if not room_for(dialog_key(sec, who, used + n)) then return false, full_text() end
+	return true, string.format("a stock dialog takes %d of it from each player", d.n), { dialog = sec, who = who, most = d.n }
+end
+
+local TAKE_LINE = {
+	quest_take = "player %s (#%s) asked to take %d x %s from the group: %s",
+	quest_give_npc = "player %s (#%s) asked to hand %d x %s of the group to an NPC: %s",
+}
+
+-- Host: may player `peer` take `n` of `sec` from the group (name "quest_take"), or have them handed to an NPC ("quest_give_npc")?
+-- Returns pass (coop_trust's word) and the ticket note_take counts; no ticket when the check itself said no.
+function check_take(peer, sec, n, name)
+	name = TAKE_LINE[name] and name or "quest_take"
+	local best, known = take_task(peer, sec)
+	local ok, why, ticket = false, "no running task he sees asks for it", nil
+	if not known then
+		ok, why = true, "no task manager here"
+	else
+		if best then
+			ok = n <= best.left
+			why = string.format("task %s asks for %d, %d given up for it already", best.id, best.need, best.need - best.left)
+			if ok then ticket = best end
+		end
+		if not ok and DIALOG_TAKES[sec] then
+			local dok, dwhy, dticket = dialog_verdict(peer, sec, n)
+			if dok or not best then ok, why, ticket = dok, dwhy, dticket end
+		end
+	end
+	return coop_trust.pass(name, ok, TAKE_LINE[name], nick(peer), tostring(peer), n, sec, why), ticket
+end
+
+-- Host: `got` items of `sec` left the group under the ticket check_take gave.
+function note_take(ticket, sec, got)
+	got = tonumber(got) or 0
+	if type(ticket) ~= "table" or got <= 0 then return end
+	if ticket.dialog then
+		local i = dialog_used(ticket.dialog, ticket.who, ticket.most)
+		for _ = 1, got do
+			if i >= ticket.most then break end
+			i = i + 1
+			note_made(dialog_key(ticket.dialog, ticket.who, i))
+		end
+		return
+	end
+	if not keyable(ticket.tsk) then return end
+	local t = taken[ticket.tsk]
+	if not t then
+		t = {}
+		taken[ticket.tsk] = t
+	end
+	t[sec] = (t[sec] or 0) + got
+end
+
+-------------------------------------------------------------------------------
+-- quest_spawn_once, quest_effect_once
+-------------------------------------------------------------------------------
+-- The parameter of an effect: the client's text, nil when missing, empty or longer than a section name may be.
+local function param_of(t)
+	local p = type(t) == "table" and t.p1
+	if p == nil or p == false then return nil end
+	p = tostring(p)
+	if p == "" or #p > PARAM_MAX then return nil end
+	return p
+end
+
+-- What a client's ask of effect `f` (parameters t) counts as: check name, key, the id of the task the thing belongs to (nil: the
+-- world), and the text of a refusing verdict for a counted effect without its parameter. No name: not counted.
+local function count_of(f, t)
+	if type(f) ~= "string" then return nil end
+	local kind = SPAWN_ITEMS[f]
+	if kind == true then return "quest_spawn_once", f end
+	if kind then
+		local sec = param_of(t)
+		if not sec then return "quest_spawn_once", nil, nil, "its parameter is missing or longer than 64 characters" end
+		-- a section the effect does not make: it makes nothing, nothing is counted or kept (round 3, R2-B1)
+		if type(kind) == "table" and not kind[sec] then return nil end
+		return "quest_spawn_once", f .. ":" .. sec
+	end
+	local once = EFFECT_ONCE[f]
+	if once == true then return "quest_effect_once", f end
+	if type(once) == "table" then
+		local p = param_of(t)
+		local tid = p and once[p]
+		if not tid then return "quest_effect_once", nil, nil, "its parameter names no task of it" end
+		return "quest_effect_once", f .. ":" .. p, tid
+	end
+	return nil
+end
+
+-- Host: may player `peer` have effect `f` (params t) run? Returns pass and the ticket note_spawn takes once the effect has run.
+function check_spawn(peer, f, t)
+	local name, key, tid, bad = count_of(f, t)
+	if not name then return true, nil end
+	if bad then
+		return coop_trust.pass(name, false, "player %s (#%s) asked for %s: %s", nick(peer), tostring(peer), f, bad), nil
+	end
+	if tid then
+		local run = running_now()
+		local tsk = run and run[tid]
+		local ok, why = true, "no task manager here"
+		if run and tsk == nil then
+			ok, why = false, "its task " .. tid .. " does not run"
+		elseif tsk ~= nil and keyable(tsk) then
+			local done = made_for[tsk]
+			ok, why = not (done and done[key]), "made for this run of " .. tid .. " already"
+		end
+		local ticket = ok and tsk ~= nil and keyable(tsk) and { tsk = tsk, key = key } or nil
+		return coop_trust.pass(name, ok, "player %s (#%s) asked for %s: %s", nick(peer), tostring(peer), key, why), ticket
+	end
+	-- once per world: not made yet, and its key can be kept (a full list refuses, it never lets a key through unrecorded)
+	local why = made[key] and "made for this world already" or (not room_for(key) and full_text()) or nil
+	if name == "quest_effect_once" then
+		return coop_trust.pass(name, why == nil, "player %s (#%s) asked for %s: %s", nick(peer), tostring(peer), key, tostring(why)),
+			key
+	end
+	return coop_trust.pass(name, why == nil, "player %s (#%s) asked for the quest spawn %s: %s", nick(peer), tostring(peer), key,
+		tostring(why)), key
+end
+
+-- Host: the effect check_spawn let through has run without an error.
+function note_spawn(ticket)
+	if type(ticket) == "table" then
+		if keyable(ticket.tsk) and type(ticket.key) == "string" then
+			local done = made_for[ticket.tsk] or {}
+			made_for[ticket.tsk] = done
+			done[ticket.key] = true
+		end
+		return
+	end
+	note_made(ticket)
+end
+
+-- Was the thing of this ticket made for this world already?
+function was_made(ticket)
+	return type(ticket) == "string" and made[ticket] == true
+end
+
+local function save_state(m)
+	if type(m) ~= "table" then return end
+	local core = qc()
+	if core and core.is_host and not core.is_host() then return end
+	if next(made) == nil then
+		m.coop_quest_spawns = nil
+		return
+	end
+	local list = {}
+	for k in pairs(made) do list[#list + 1] = k end
+	table.sort(list)
+	m.coop_quest_spawns = list
+end
+
+local function load_state(m)
+	made, made_n, free_n = {}, 0, 0
+	local list = type(m) == "table" and m.coop_quest_spawns
+	if type(list) ~= "table" then return end
+	for _, k in ipairs(list) do note_made(k) end
+end
+
+-------------------------------------------------------------------------------
+-- Places
+-------------------------------------------------------------------------------
+local function pos_of(obj)
+	if not obj then return nil end
+	local ok, p = pcall(function() return obj:position() end)
+	return ok and p or nil
+end
+
+local function dist_sqr(a, b)
+	local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
+	return dx * dx + dy * dy + dz * dz
+end
+
+local function dist_text(a, b) return a and b and string.format("%.0f m", math_sqrt(dist_sqr(a, b))) or "?" end
+
+-- Did player `peer` talk to object `id` a moment ago? The talk lock of a player on a map server's level is that server's word.
+local function talked(peer, id)
+	local core = qc()
+	local api = rawget(_G, "coop")
+	if core and core.is_far_peer and core.is_far_peer(peer) then
+		local l = api and api.levels
+		return l == nil or l.talking == nil or l.talking(peer) == true
+	end
+	local recent = api and api.talk_recent
+	if type(recent) ~= "function" then return true end -- an engine without the talk locks: the place alone
+	return recent(peer, id, TALK_MS) == true
+end
+
+local function story_id(sid)
+	local f = rawget(_G, "get_story_object_id")
+	if type(f) == "function" then
+		local ok, id = pcall(f, sid)
+		if ok and type(id) == "number" then return id end
+	end
+	local so = rawget(_G, "story_objects")
+	local t = type(so) == "table" and so.object_id_by_story_id
+	return type(t) == "table" and tonumber(t[sid]) or nil
+end
+
+-- The verdict of quest_scene_place for Osoznanie: ok, why. Exported for the tests.
+function oso_verdict(peer, walk_path)
+	local core = qc()
+	local who = core and core.avatar_obj and core.avatar_obj(peer)
+	local at = pos_of(who)
+	if not at then return true, "his place is not known here" end
+	local oid = story_id(OSO_STORY)
+	local oso = oid and level.object_by_id(oid)
+	local oso_at = pos_of(oso)
+	local jump = nil
+	pcall(function()
+		if level.patrol_path_exists(walk_path) then jump = patrol(walk_path):point(0) end
+	end)
+	if not (oso_at or jump) then return true, "neither Osoznanie nor the jump point is known here" end
+	if jump and dist_sqr(at, jump) <= REACH_SQR then return true, "at the jump point" end
+	if oso_at and dist_sqr(at, oso_at) <= REACH_SQR then
+		if talked(peer, oid) then return true, "before Osoznanie" end
+		return false, string.format("%s from Osoznanie, but no talk with him a moment ago", dist_text(at, oso_at))
+	end
+	return false, string.format("%s from Osoznanie, %s from the jump point", dist_text(at, oso_at), dist_text(at, jump))
+end
+
+function check_oso(peer, walk_path)
+	local ok, why = oso_verdict(peer, walk_path)
+	return coop_trust.pass("quest_scene_place", ok, "player %s (#%s) declined Osoznanie for the group: %s", nick(peer), tostring(peer),
+		tostring(why))
+end
+
+-- The verdict of quest_delivery_place: ok, why.
+function delivery_verdict(peer, npc)
+	local nid = npc and npc.id and npc:id()
+	if type(nid) ~= "number" then return true, "no NPC" end
+	local info = tasks_now()
+	if not info then return true, "no task manager here" end
+	for id in pairs(info) do
+		local var = actor_var(id)
+		if type(var) == "table" and var.target_id == nid then return true, "the target of " .. id end
+	end
+	return false, "no running delivery is for him"
+end
+
+function check_delivery(peer, npc)
+	local ok, why = delivery_verdict(peer, npc)
+	local nid = npc and npc.id and npc:id()
+	return coop_trust.pass("quest_delivery_place", ok, "player %s (#%s) handed a delivery over to NPC %s: %s", nick(peer),
+		tostring(peer), tostring(nid), tostring(why))
+end
+
+-------------------------------------------------------------------------------
+-- Start
+-------------------------------------------------------------------------------
+-- The engine ends a task through task_manager.task_callback on the process that keeps the tasks (the host of a co-op, the world
+-- server of a server): the end is noted there, before the stock callback drops the object.
+local function wrap_task_callback()
+	local tmm = rawget(_G, "task_manager") or task_manager
+	local orig = type(tmm) == "table" and tmm.task_callback
+	if type(orig) ~= "function" then return end
+	tmm.task_callback = function(tsk, state, ...)
+		local ok, err = pcall(on_task_end, tsk, state)
+		if not ok then printf("! [coop_quests_trust] task end: %s", tostring(err)) end
+		return orig(tsk, state, ...)
+	end
+end
+
+function on_game_start()
+	RegisterScriptCallback("actor_on_update", function()
+		local ok, err = pcall(on_update)
+		if not ok then printf("! [coop_quests_trust] update: %s", tostring(err)) end
+	end)
+	RegisterScriptCallback("save_state", save_state)
+	RegisterScriptCallback("load_state", load_state)
+	local ok, err = pcall(wrap_task_callback)
+	if not ok then printf("! [coop_quests_trust] task callback: %s", tostring(err)) end
+end

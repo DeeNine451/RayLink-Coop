@@ -516,6 +516,9 @@ end
 -- Host: the target's squad was kept out of offline combat for the delivery (tasks_delivery.script)
 local function host_delivery(from, t)
 	local npc = talk_partner(from, tonumber(t.n), "delivery")
+	-- TZ v2 6.4 row 4: the NPC is the target of a running delivery (coop_quests_trust)
+	local qt = npc and qc.mod("coop_quests_trust")
+	if qt and not qt.check_delivery(from, npc) then return end
 	local squad = npc and get_object_squad(npc)
 	local soc = qc.mod("sim_offline_combat")
 	if squad and soc and type(soc.task_squads) == "table" then soc.task_squads[squad.id] = nil end

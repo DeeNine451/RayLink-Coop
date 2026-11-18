@@ -153,4 +153,13 @@
 	<string id="st_coop_news_sl_mm_on">
 		<text>The Miracle Machine is on again: another faction moved its main story on.</text>
 	</string>
+	<string id="st_coop_task_only_taker_caption">
+		<text>Task not cancelled</text>
+	</string>
+	<string id="st_coop_task_only_taker">
+		<text>Only %s can cancel this task.</text>
+	</string>
+	<string id="st_coop_task_only_taker_anon">
+		<text>Only the player who took this task can cancel it.</text>
+	</string>
 </string_table>

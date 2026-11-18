@@ -367,9 +367,11 @@ C.env.db.actor._pos = vec(10, 0, 0)
 proxy._pos = vec(10, 0, 0)
 QUEUE = {}
 C.env.txr_mines.plant_bomb(item, 1, 10)
-check(not C.stock_plant and C.item_fx == "mine" and C.released == 777, "client: plant sent to the host, item released, effect played")
+-- TZ v2 6.4 row 5: the item stays until the host answers (test_npc_mine_trust.lua has the rest)
+check(not C.stock_plant and C.item_fx == "mine" and C.released == nil, "client: plant sent to the host, effect played, item kept for the answer")
 H.game_ms = 0
 pump()
+check(C.released == 777, "the host does not have the item: it answered \"left\", the client released its copy")
 local armed
 for id, m in pairs(WH._mines()) do armed = { id = id, m = m } end
 check(armed and created[1] == "mine_new_blow" and armed.m.mode == 1 and armed.m.planter == 500, "host created and armed a timer charge for the client")

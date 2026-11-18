@@ -121,6 +121,9 @@ end
 
 local function host_oso_decline(from)
 	if not level.patrol_path_exists(OSO_WALK) then return end
+	-- TZ v2 6.4 row 4: he stands before Osoznanie, or where his own decline put him (coop_quests_trust)
+	local qt = qc.mod("coop_quests_trust")
+	if qt and not qt.check_oso(from, OSO_WALK) then return end
 	move_here()
 	logic().relay_to_all("teleport_actor", OSO_ARGS, from)
 end

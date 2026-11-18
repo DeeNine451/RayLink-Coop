@@ -43,6 +43,9 @@
 	Events:
 		economy.tp     mover -> host -> others   { x, y, z, h (optional), ox, oy, oz, r, l = level, k = kind, n = nick,
 		                                           q = 1: an offer (every player of the level is asked; r is 0) }
+		               the host's checks (coop_trust): story_teleport_point for a move without q (none is honest while
+		               coop_npc_logic routes the story teleports), travel_offer_level for an offer (l is the level the session
+		               lists the mover on, when it lists one)
 		economy.route  any -> host -> others     { a, b }  (txr_routes short level names)
 --]]
 
@@ -58,6 +61,23 @@ local MAX_RADIUS = 200
 local ARRIVE_EPS = 3.0 -- m: a player already this close to the destination stays put
 local SPREAD = 1.0 -- m: arrivals are spread a little so the group does not stack
 local OFFER = -1 -- in place of a radius: no radius, every other player of the level is asked whether he comes along
+-- TZ v2 6.4 row 7: the patrol paths a story teleport puts the actor on (point 0 of `walk`; xr_effects.teleport_actor). Read
+-- from the callers in the build (temp\f2\story_points.py over the stock and G.A.M.M.A. configs): every "=teleport_actor(walk[:look])"
+-- of a condlist, and every [sr_cutscene] "point" (sr_cutscene.script:269 teleports there). A mod's new story teleport is added
+-- here when the hosts' logs show it (the check runs in "log" first). Only an install without coop_npc_logic reads them: with it
+-- no honest client sends a story teleport at all (routed_by_npc_group), see story_point_verdict.
+local STORY_POINTS = {
+	"kat_teleport_to_dark_city_position", -- agroprom_underground\level_prefix_space_restrictor_0000.ltx
+	"lx8_actor_walk", -- labx8\lx8_lift_button.ltx
+	"oso_actor_walk", -- warlab\mon_monolith_proektor_restr.ltx
+	"pri_b306_actor_lc_walk", -- pripyat\pri_b306_ph_button.ltx
+	"warlab_jump_gen_walk", -- warlab\warlab_deactivate_generators.ltx
+	"mar_intro_scene_2_actor_walk", -- marsh\mar_intro_camera.ltx (sr_cutscene)
+	"pri_a28_actor_hide_walk", -- evac\pri_a28_sr_evac.ltx (sr_cutscene)
+	"t_way", -- bar\bar_arena_triger.ltx (sr_cutscene)
+	"zat_b5_smart_terrain_actor_after_stalker_cutscene_walk", -- zaton\zat_b5_check_for_start_stalker_quest.ltx (sr_cutscene)
+}
+local STORY_POINT_REACH = 10 -- m: the mover reads his place after the call (a delayed teleport: up to WATCH_MS later)
 
 local installed = false
 local watch = nil -- { kind, radius, heading, o = origin, l = level, until_ms }
@@ -94,7 +114,7 @@ local function read_tp(t)
 		x = core.num(t.x, -1e5, 1e5), y = core.num(t.y, -1e5, 1e5), z = core.num(t.z, -1e5, 1e5),
 		ox = core.num(t.ox, -1e5, 1e5), oy = core.num(t.oy, -1e5, 1e5), oz = core.num(t.oz, -1e5, 1e5),
 		r = core.num(t.r, 0, MAX_RADIUS), h = t.h ~= nil and core.num(t.h, -100, 100) or nil,
-		l = type(t.l) == "string" and t.l or nil, k = core.word(t.k, 16) or "travel",
+		l = core.word(t.l, 64), k = core.word(t.k, 16) or "travel",
 		q = t.q == 1 or t.q == true,
 	}
 	if not (p.x and p.y and p.z and p.ox and p.oy and p.oz and p.r and p.l) then return nil end
@@ -200,6 +220,65 @@ function group_teleport(dest, heading, origin, radius, kind)
 	return true
 end
 
+-- The level the session lists player `peer` on (coop.players: `level`, a game graph level id), as a level name; nil when the list
+-- says nothing of it here. Co-op: the one level of everybody. Server: the level the world server's table has him on.
+local function listed_level(peer)
+	local api = rawget(_G, "coop")
+	local ok, list = pcall(function() return api.players() end)
+	if not (ok and type(list) == "table") then return nil end
+	for _, row in ipairs(list) do
+		if type(row) == "table" and row.id == peer then
+			local lid = row.level
+			if type(lid) == "string" then return lid ~= "" and lid or nil end
+			if type(lid) ~= "number" then return nil end
+			local got, name = pcall(function() return alife():level_name(lid) end)
+			return (got and type(name) == "string" and name ~= "") and name or nil
+		end
+	end
+	return nil
+end
+
+-- The level a move of player `from` names is the level he stands on: ok, why. Not known here: ok.
+local function level_verdict(p, from)
+	local his = listed_level(from)
+	if his == nil or his == p.l then return true, "his level" end
+	return false, "he stands on " .. his
+end
+
+-- True while the NPC group's restrictor logic sends the story teleports (coop_npc_logic.deliver): every client then lets
+-- teleport_actor run alone (routed_by_npc_group), so no honest client sends a forced move. Both ends run the same package.
+local function npc_group_routes()
+	local nl = rawget(_G, "coop_npc_logic")
+	return nl ~= nil and type(nl.deliver) == "function"
+end
+
+-- The verdict of story_teleport_point for a client's forced move to p (a story teleport): ok, why. With the NPC group's routing no
+-- honest client sends one. Without it (an install with no coop_npc_logic) the move must name the level he stands on and end at a
+-- story point of it; the patrol paths are those of the level this process stands on, so a move of another level, or a process that
+-- reads no path (the world server of a server has no level), knows nothing of the point: ok.
+function story_point_verdict(p, from)
+	if npc_group_routes() then
+		return false, "the NPC group routes the story teleports: a client sends none"
+	end
+	local lok, lwhy = level_verdict(p, from)
+	if not lok then return false, lwhy end
+	if p.l ~= level_name() then return true, "not this process's level" end
+	local got, exists = pcall(function() return level.patrol_path_exists end)
+	if not (got and type(exists) == "function") then return true, "no patrol paths here" end
+	local best, best_d, known = nil, nil, false
+	for _, name in ipairs(STORY_POINTS) do
+		local ok, pt = pcall(function() return exists(name) and patrol(name):point(0) or nil end)
+		if ok and pt then
+			known = true
+			local d = core.dist(vec_of(pt), p)
+			if not best_d or d < best_d then best, best_d = name, d end
+		end
+	end
+	if not known then return true, "no story point of this level can be read here" end
+	if best_d <= STORY_POINT_REACH then return true, best end
+	return false, string.format("nearest story point %s is %.0f m away", best, best_d)
+end
+
 -- Host: a client moved; follow if close, and tell the other clients.
 local function host_on_tp(t, from)
 	local p = read_tp(t)
@@ -211,6 +290,24 @@ local function host_on_tp(t, from)
 	if not (at and (core.dist(at, { x = p.ox, y = p.oy, z = p.oz }) <= 30 or core.dist(at, p) <= 30)) then
 		stats.refused = (stats.refused or 0) + 1
 		return
+	end
+	-- TZ v2 6.4 row 7: a move nobody is asked about (a story teleport) only to a point the story teleports to, and none while the
+	-- NPC group routes them; an offer only on the level the player stands on (its window opens for the players of that level)
+	local trust = core.mod("coop_trust")
+	if trust and not p.q then
+		local ok, why = story_point_verdict(p, from)
+		if not trust.pass("story_teleport_point", ok, "player %s (#%s) moved the players within %.0f m of him to %.1f %.1f %.1f on %s: %s",
+			core.nick_of(from), tostring(from), p.r, p.x, p.y, p.z, tostring(p.l), tostring(why)) then
+			stats.refused = (stats.refused or 0) + 1
+			return
+		end
+	elseif trust then
+		local ok, why = level_verdict(p, from)
+		if not trust.pass("travel_offer_level", ok, "player %s (#%s) offered the players of %s a trip to %.1f %.1f %.1f: %s",
+			core.nick_of(from), tostring(from), tostring(p.l), p.x, p.y, p.z, tostring(why)) then
+			stats.refused = (stats.refused or 0) + 1
+			return
+		end
 	end
 	t.n = core.nick_of(from)
 	if p.q then offer_tp(p, t.n) else apply_tp(p, t.n) end

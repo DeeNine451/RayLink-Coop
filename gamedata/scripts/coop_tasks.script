@@ -133,6 +133,9 @@ local stats = {
 	req_out = 0, req_in = 0, refused = 0, state_out = 0, state_in = 0, lists = 0, syncs = 0,
 	rewards_routed = 0, rewards_in = 0, party_moves = 0, party_releases = 0, stage_by_party = 0, errors = 0,
 	news_out = 0, news_in = 0, news_swallowed = 0, news_limited = 0,
+	-- host (TZ 6.4 #1 round 3, R2-B2): ends of tasks a player did not take that his own stock logic sent (check task_auto_end),
+	-- counted without a line each; how many of them it refused
+	auto_end = 0, auto_end_refused = 0,
 }
 
 local function report(what, err)
@@ -1078,6 +1081,14 @@ function _spoke_to(from, nid)
 	return recent(from, nid, 15000) == true
 end
 
+-- Host (round 3, R2-S3): true when _spoke_to's answer for player `from` names no partner. The talk of a player on a map server's
+-- level is that server's word "he is in some dialog" (LevelBodyFacts.talking, one byte in coop_levels_wire.h): naming the NPC
+-- needs a field there, a change of the protocol.
+function _talk_vague(from)
+	local qc = rawget(_G, "coop_quests_core")
+	return type(qc) == "table" and type(qc.is_far_peer) == "function" and qc.is_far_peer(from) == true
+end
+
 function ops.give(tm, id, t, from)
 	if tm.task_info[id] ~= nil and engine_task_running(id) then return false end
 	-- split levels: a main story belongs to the faction that started it, and a player holds one change-faction task at a time
@@ -1162,14 +1173,219 @@ function ops.stage(tm, id, t, from)
 	local st = tonumber(t.st)
 	-- a stage is a byte of the task object; 255 is the repeat timeout the host itself sets
 	if tsk == nil or not st or st < 0 or st >= 255 or st ~= math_floor(st) then return false end
+	-- TZ 6.4 #1 round 2 (F2): a dialog moves a stage on, one step at a time (aysd: stage + 1); the host's status functors
+	-- move it any way they like on the host itself, which is no request. A map server's (its level's logic, the facts are
+	-- there): not judged here.
+	-- Round 3 (R2-S2): a step also needs his talk a moment ago with the task's giver or with the NPC the task points to now
+	-- (host.stage_talk). The same stage again changes nothing and needs none.
+	local cur = tonumber(tsk.stage) or 0
+	local bridge = (tonumber(host.req_from) or 0) >= 0x100
+	local ok, why = st == cur, "a stage goes only up, one step at a time"
+	if st == cur + 1 then ok, why = host.stage_talk(id, tsk, from, t.sp) end
+	if not bridge and not host.trust("task_stage", ok, "player %s (#%s), task %s: stage %d asked, the host's is %d: %s",
+		host.nick(from), tostring(from), id, st, cur, tostring(why)) then
+		return false
+	end
 	tsk.stage = st
 	return true
+end
+
+-- Round 3 (R2-S2): may player `from` move task `id` (object tsk) one stage on in his talk with NPC `sp` (host numbering)? The
+-- honest steps are a dialog's: aysd (Ashot and Yar) moves +1 in a talk with Ashot while the task points to Ashot's squad, and
+-- with Yar, its giver, while it points to Yar's. So the NPC is the task's giver or the target it points to now (the NPC, or his
+-- squad), and the host saw the talk a moment ago. A task with neither a giver nor a target takes the NPC of his talk. Where the
+-- task points now is its target functor's word (the host's own look runs every 0.5-1 s: right after a step it still points to
+-- the last NPC); without one, the host's last look (current_target). -> ok, why not.
+-- Server: the map server says "in some dialog" and names no partner (_talk_vague): the NPC named is taken as his partner, a known
+-- limit until the map server reports the partner (a field in LevelBodyFacts, a protocol change). Not refused there: aysd's
+-- honest steps would be refused with it.
+function host.stage_talk(id, tsk, from, sp)
+	sp = tonumber(sp)
+	if not sp or sp <= 0 or sp >= 65535 or sp ~= math_floor(sp) then return false, "a step, and no talk named" end
+	if _spoke_to(from, sp) ~= true then return false, string_format("a step in a talk with NPC %d the host did not see", sp) end
+	local okg, giver = pcall(function() return tonumber(tsk.task_giver_id) end)
+	if not (okg and giver and giver > 0 and giver < 65535) then giver = nil end
+	if giver == sp then return true end
+	local target = host.target_now(id, tsk)
+	if target == nil and giver == nil then return true end
+	if target ~= nil then
+		if target == sp then return true end
+		local f = rawget(_G, "alife_object")
+		local oks, se = pcall(function() return type(f) == "function" and f(sp) or nil end)
+		local okq, squad = pcall(function() return oks and se and se.group_id or nil end)
+		if okq and squad == target then return true end
+	end
+	return false, string_format("a step in a talk with NPC %d, who is neither its giver (%s) nor where it points (%s)", sp,
+		tostring(giver), tostring(target))
+end
+
+-- Round 3 (R2-S2): where task `id` points now (an object id: an NPC, a squad, a place), nil: nowhere.
+function host.target_now(id, tsk)
+	local tf = rawget(_G, "task_functor")
+	local okf, name = pcall(function() return tsk.target_functor end)
+	local f = okf and type(tf) == "table" and type(name) == "string" and tf[name]
+	if type(f) == "function" then
+		local ok, t = pcall(function() return f(id, "target", tsk.target, tsk) end)
+		if ok then return tonumber(t) end
+	end
+	local okc, cur = pcall(function() return tsk.current_target end)
+	return okc and tonumber(cur) or nil
 end
 
 -- A client's active task (C8): check_level below brings the guide marker of his task.
 function ops.active(tm, id, t, from)
 	host.active[from] = not t.off and id or nil
 	return "pending"
+end
+
+-------------------------------------------------------------------------------
+-- Host: checks of a client's word (TZ 6.4 #1, owner 2026-11-18), verdicts through coop_trust. In "log" (build 57) a failed
+-- check is logged and the request goes on exactly as before. Functions of `host`, not locals: the chunk is at 200 locals.
+-------------------------------------------------------------------------------
+-- coop_trust.pass(name, ok, fmt, ...); no coop_trust: through.
+function host.trust(name, ok, fmt, ...)
+	local okm, t = pcall(function() return coop_trust end)
+	if not (okm and type(t) == "table" and type(t.pass) == "function") then return true end
+	local good, res = pcall(t.pass, name, ok, fmt, ...)
+	return not good or res ~= false
+end
+
+-- coop_trust's setting of check `name` ("log" | "refuse" | "off"); no coop_trust: "log".
+function host.trust_mode(name)
+	local okm, t = pcall(function() return coop_trust end)
+	if not (okm and type(t) == "table" and type(t.mode_of) == "function") then return "log" end
+	local good, mode = pcall(t.mode_of, name)
+	return good and (mode == "refuse" or mode == "off") and mode or "log"
+end
+
+function host.nick(peer)
+	for _, p in ipairs(players()) do
+		if p.id == peer then return tostring(p.nick or "?") end
+	end
+	return peer == 0 and "host" or "?"
+end
+
+-- Did player `peer` take task `id`? The taker's character (host.taker_char: written at the give, kept in the host's save, a
+-- reconnect keeps it) against the requester's. No verdict without knowledge, true: no record (a save from before it), a
+-- record of the host's character on a seat that plays none (a world server's), a requester whose character is unknown.
+-- Second value: the taker's character, for the log.
+function host.is_taker(id, peer)
+	local want = host.taker_char[id]
+	if want == nil then return true, nil end
+	if want == 0 then
+		local plays = false
+		for _, p in ipairs(players()) do if p.is_self then plays = true end end
+		if not plays then return true, want end
+	end
+	local have = character_of(peer)
+	if have == nil then return true, want end
+	return have == want, want
+end
+
+-- The text of a taker for the log: "nick (#peer, character c)".
+function host.taker_text(id, want)
+	local tp = host.taker[id]
+	return string_format("%s (#%s, character %s)", tp ~= nil and host.nick(tp) or "?", tostring(tp), tostring(want))
+end
+
+-- Round 2 (F5): did player `from` talk a moment ago to NPC `sp` (host numbering), the one his request names, and is that NPC the
+-- task's giver? A task with no giver (a story task of dialogs_lostzone.give_task) takes the NPC of his dialog: the crossfire
+-- of the Hidden Base is given by Hernandez and failed at Strelok. The talk is the host's word (_spoke_to: its talk locks; a
+-- player on a map server's level, that server's).
+function host.talked_for(id, from, sp)
+	sp = tonumber(sp)
+	if not sp or sp <= 0 or sp >= 65535 or sp ~= math_floor(sp) then return false end
+	local tm = tmgr()
+	local tsk = tm and tm.task_info and tm.task_info[id]
+	local ok, giver = pcall(function() return is_task(tsk) and tonumber(tsk.task_giver_id) or nil end)
+	giver = ok and giver or nil
+	local has_giver = giver ~= nil and giver > 0 and giver < 65535
+	if has_giver and giver ~= sp then return false end
+	-- Server (round 3, R2-S3): his map server says only "he is in some dialog", any dialog: for a task with a giver that cannot
+	-- tell the giver's talk from another, so the exception holds only for a task without a giver
+	if has_giver and _talk_vague(from) then return false end
+	return _spoke_to(from, sp) == true
+end
+
+-- Round 2 (F5): an end of task `id` that the stock logic of a player's own machine sends for tasks he did not take: a faction
+-- change cancels every DRX task there (xr_effects.drx_sl_cancel_questlines writes forced_status "fail" and cancelled_by_actor:
+-- a fail and a cancel per task), and surge_manager's level change cancels faction_base_defense.
+function host.auto_end(id)
+	return type(id) == "string" and (id:sub(1, 7) == "drx_sl_" or id == "faction_base_defense")
+end
+
+-- Round 2 (F5): the refused player's news line "only <taker> can cancel this task" (the text is his machine's: the nick goes
+-- only as an argument, never as the format).
+function host.tell_only_taker(peer, id)
+	if type(peer) ~= "number" or peer <= 0 or peer >= 0x100 then return end
+	local tp = host.taker[id]
+	local nick = tp ~= nil and host.nick(tp) or nil
+	send(EV_REWARD, pack({ k = "only", n = nick ~= "?" and nick or nil, t = id }), peer)
+end
+
+-- Fail / cancel of a running task only by the player who took it. `from` is the transport's sender; one of a map server
+-- (>= 0x100) is its level's logic (a timer, a target that died there), no player: ok. `t`: the request (Lua path), with the
+-- NPC of his talk (sp).
+function host.may_end(op, id, from, why, t)
+	local ok, want = true, nil
+	if from < 0x100 then ok, want = host.is_taker(id, from) end
+	-- round 2 (F5): his choice in a dialog with the task's giver, a moment ago (dialogs.npc_cancel_task, a story fail phrase)
+	if not ok and type(t) == "table" and host.talked_for(id, from, t.sp) then ok = true end
+	if not ok and host.auto_end(id) then
+		-- his own machine's stock logic (round 3, R2-B2): its own check "task_auto_end", counted without a line each (a faction
+		-- change sends a fail and a cancel for every DRX task). "log": through, exactly as before round 1; "refuse": refused, the
+		-- requester gets the host's state back; "off": through, not counted. Not a task_fail / task_cancel failure.
+		local mode = host.trust_mode("task_auto_end")
+		if mode == "off" then return true end
+		stats.auto_end = stats.auto_end + 1
+		if mode ~= "refuse" then return true end
+		stats.auto_end_refused = stats.auto_end_refused + 1
+		return false
+	end
+	local pass = host.trust("task_" .. op, ok, "player %s (#%s), task %s: %s by a player who did not take it; taker %s",
+		host.nick(from), tostring(from), id, why or op, host.taker_text(id, want))
+	if not pass then host.tell_only_taker(from, id) end
+	return pass
+end
+
+-- Round 2 (F2): what the host's own check of task `id` says (the stock CRandomTask:task_complete reads the same fields): nil
+-- when it found the task complete (last_check_task) or a turn-in on the host forced it; else why it is still running.
+function host.still_running(tm, id)
+	local tsk = tm.task_info[id]
+	local ok, done = pcall(function() return tsk.last_check_task == "complete" or tsk.forced_status == "complete" end)
+	if not ok or done then return nil end
+	return "the host's own check of the task says it is still running"
+end
+
+-- Why player `who` cannot turn in task `id` now (the checks of ops.complete: money, items), or nil.
+function host.turn_in_short(tm, id, who)
+	if money_short(tm, id, who) then
+		return string_format("not enough money: has %s, the task asks %s", tostring(ledger_money(who)),
+			tostring(load_var(db.actor, id .. "_fetch", 0)))
+	end
+	return host.item_short(tm, id)
+end
+
+-- Called by the engine (coop_story.cpp host_on_task_state, lua_task_state_ok) on the host for a client's TaskReqState, before
+-- it notes the finisher or changes the task, whether the request is "explicit" or not. st: 2 completed, 0 failed. `from` is the
+-- transport's sender, bridge: it is a map server. timed_out: the host's own clock says the task's time ran out (the engine's
+-- fail of a task with a time limit). explicit: a script's set_task_state (else the client's own task check). False: refuse.
+-- Round 2 (F2): a turn-in also needs the host's own check of the task to say it is done (host.still_running), explicit or not:
+-- no honest flow completes a group task through the engine (a client's task functors answer false for them). A map server's
+-- turn-in is its level's logic, whose facts the world server has not: not judged by the world server's own check.
+function host_state_verdict(id, st, from, bridge, timed_out, explicit)
+	if not is_host() or type(id) ~= "string" or type(from) ~= "number" then return true end
+	local tm = tmgr()
+	if not (tm and tm.task_info and tm.task_info[id] ~= nil) then return true end -- no Lua task: nothing of ops.complete to ask
+	if st == 2 then
+		local who = player_of_request(from, id)
+		local short = host.turn_in_short(tm, id, who)
+		if short == nil and bridge ~= true then short = host.still_running(tm, id) end
+		return host.trust("task_complete", short == nil, "player %s (#%s), task %s: turned in through the engine (%s), %s",
+			host.nick(who), tostring(who), id, explicit == true and "a script's set_task_state" or "his task check", tostring(short))
+	end
+	if bridge == true or timed_out == true then return host.trust("task_fail", true) end
+	return host.may_end("fail", id, from, "failed through the engine")
 end
 
 local function host_on_request(payload, from)
@@ -1196,8 +1412,16 @@ local function host_on_request(payload, from)
 		stats.state_out = stats.state_out + 1
 		return
 	end
+	-- TZ 6.4 #1: a running group task is failed or cancelled only by the player who took it
+	if (op == "fail" or op == "cancel") and tm.task_info[id] ~= nil and engine_task_running(id)
+		and not host.may_end(op, id, from, nil, t) then
+		stats.refused = stats.refused + 1
+		host_send_state(id, from) -- his view back
+		return
+	end
 	local who = player_of_request(from, id)
 	host.exec_peer = who
+	host.req_from = from -- the transport's sender (ops.stage: a map server's is not judged)
 	local qc = rawget(_G, "coop_quests_core")
 	local ok, res
 	if qc and qc.with_level_of then
@@ -1206,6 +1430,7 @@ local function host_on_request(payload, from)
 		ok, res = pcall(fn, tm, id, t, who)
 	end
 	host.exec_peer = nil
+	host.req_from = nil
 	if not ok then report("request " .. op .. " " .. id, res) end
 	if not ok or not res then
 		stats.refused = stats.refused + 1
@@ -2495,6 +2720,34 @@ function _client_not_given(id, data)
 	end
 end
 
+-- Client: the NPC this player talks to now, in host numbering, or nil.
+function _talk_partner()
+	if not (db.actor and db.actor:is_talking() and type(rawget(_G, "get_speaker")) == "function") then return nil end
+	local ok, npc = pcall(get_speaker)
+	local sid = ok and npc and npc.id and npc:id() or nil
+	if type(sid) ~= "number" or sid == 0 then return nil end
+	return to_host_id(sid)
+end
+
+-- Client (TZ 6.4 #1 round 2, F5): the host refused this player's fail / cancel of a task another player took. The news line
+-- names who can. The format is this machine's text; the nick from the network goes in only as an argument.
+function _client_only_taker(t)
+	local nick = type(t.n) == "string" and t.n:gsub("%c", ""):sub(1, 64) or ""
+	local id = nick ~= "" and "st_coop_task_only_taker" or "st_coop_task_only_taker_anon"
+	local text = game.translate_string(id)
+	if nick ~= "" then
+		local ok, line = pcall(string_format, text, nick)
+		text = ok and line or text
+	end
+	local caption = game.translate_string("st_coop_task_only_taker_caption")
+	log("! the host refused our end of task '%s': only %s may end it", tostring(t.t), nick ~= "" and nick or "its taker")
+	local ok = pcall(function() db.actor:give_game_news(caption, text, "ui_iconsTotal_storyline", 0, 6000) end)
+	if not ok then
+		local am = rawget(_G, "actor_menu")
+		if type(am) == "table" and type(am.set_msg) == "function" then am.set_msg(1, text, 6) end
+	end
+end
+
 local function client_apply_state(s)
 	local rec = unpack_payload(s)
 	local id = rec.i
@@ -2636,6 +2889,9 @@ client_request = function(op, id, extra)
 	if type(id) ~= "string" then return false end
 	local t = extra or {}
 	t.op, t.i = op, id
+	-- TZ 6.4 #1 round 2 (F5): a fail / cancel names the NPC this player talks to (the host lets a choice in a dialog with the
+	-- task's giver through, after its own look at the talk); round 3 (R2-S2): a stage write too (a step is a dialog's)
+	if (op == "fail" or op == "cancel" or op == "stage") and t.sp == nil then t.sp = _talk_partner() end
 	local ok = send(EV_REQ, pack(t), 0)
 	if ok then stats.req_out = stats.req_out + 1 end
 	return ok
@@ -2786,6 +3042,8 @@ local function client_on_reward(payload, from)
 		if n ~= 0 then news_manager.relocate_money(db.actor, n > 0 and "in" or "out", n > 0 and n or -n) end
 	elseif t.k == "news" and type(t.s) == "string" then
 		news_manager.relocate_item(db.actor, t.ty == "out" and "out" or "in", t.s, tonumber(t.n) or 1)
+	elseif t.k == "only" then
+		_client_only_taker(t)
 	elseif t.k == "away" then
 		-- what the group's rewards brought while this player was out of the game (coop_reward_group)
 		local nw, rg = news_mod(), reward_group()
@@ -3553,6 +3811,9 @@ function print_status()
 		stats.stage_by_party, stats.errors)
 	log("task lines: sent %d, received %d, own engine lines dropped %d, limited %d", stats.news_out, stats.news_in,
 		stats.news_swallowed, stats.news_limited)
+	log("task_auto_end [%s]: %d, refused %d (ends of tasks a player did not take that his own stock logic sent: DRX tasks at a "
+		.. "faction change, the base defense at a level change; no line each)", host.trust_mode("task_auto_end"), stats.auto_end,
+		stats.auto_end_refused)
 	if is_host() then
 		for id, peer in pairs(host.taker) do
 			if peer ~= 0 and tm and tm.task_info and tm.task_info[id] then log("  '%s' taken by #%s", id, tostring(peer)) end

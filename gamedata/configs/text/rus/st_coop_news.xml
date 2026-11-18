@@ -153,4 +153,13 @@
 	<string id="st_coop_news_sl_mm_on">
 		<text>Чудо-машина снова работает: чужая фракция продвинула свою главную историю.</text>
 	</string>
+	<string id="st_coop_task_only_taker_caption">
+		<text>Задание не отменено</text>
+	</string>
+	<string id="st_coop_task_only_taker">
+		<text>Отменить это задание может только %s.</text>
+	</string>
+	<string id="st_coop_task_only_taker_anon">
+		<text>Отменить это задание может только тот, кто его взял.</text>
+	</string>
 </string_table>

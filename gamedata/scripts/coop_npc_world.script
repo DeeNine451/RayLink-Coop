@@ -10,6 +10,14 @@
 	  - A client's "plant" goes to the host (npc.mine): the host creates the charge where the client stands
 	    and arms it (proximity or timer). Stock plant_bomb on a client would fail (a client's alife create
 	    returns no object) and leave the charge unarmed on the host.
+	  - TZ v2 6.4 row 5 (2026-11-18): the request names the mine item (i). The host checks it is this player's: in his
+	    inventory, or on the ground at his feet (Interaction Dot Marks plants a mine lying there), of the planted kind
+	    (coop_trust "mine_item"), removes it itself and answers (npc.mine_ok): "took" = the host removed it, "left" = the
+	    client removes its own copy as build 56 did (a check that failed in "log", a charge the host did not create), "no" =
+	    refused, the client keeps it. No answer in 15 s (a host of build 56): the client removes it itself. A request with
+	    no id (a client of build 56, which removes its item itself) goes through as before (coop_trust "mine_item_id").
+	    Facts: Co-op - the host's ALife and his copy of the player's character; Server - the map server of the player's
+	    level runs the handler (the world server passes it on) with the same facts of its level.
 	  - Proximity charges trigger on the clients' proxies too (the stock check only sees db.actor, NPCs and
 	    monsters). A client's charge blames that client: its blast hits NPCs "from" the client's proxy.
 	  - On the host every charge goes off as its planter (coop.explode_as; the host's own stock charges as the
@@ -31,7 +39,8 @@
 	  are alerted (stock: only for db.actor).
 
 	Events (ids in host numbering):
-	  npc.mine   client -> host  { s = item section, m = mode, d = delay, x, y, z, lv, gv }
+	  npc.mine   client -> host  { s = item section, m = mode, d = delay, x, y, z, lv, gv, i = mine item (build 57) }
+	  npc.mine_ok host -> client { i = mine item, r = "took" | "left" | "no" }
 	  npc.pulse  host -> client  { x, y, z }
 	  npc.fire   client -> host  { i = campfire object, on = bool }
 	  npc.isnd   any -> all      { p = sound path, a = player's character }
@@ -49,6 +58,7 @@ local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err) P.report(TAG, what, err) end
 
 local EV_MINE, EV_PULSE, EV_FIRE, EV_ISND = "npc.mine", "npc.pulse", "npc.fire", "npc.isnd"
+local EV_MINE_OK = "npc.mine_ok"
 
 local installed = false
 local host_on = false
@@ -68,6 +78,12 @@ local TRIGGER_RADIUS = 2.5
 local FUSE = 5
 
 local mines = {} -- host: planted id -> { exp, mode, planter = proxy id, active }
+-- The mine item a client asked to plant (TZ v2 6.4 row 5): client, waiting for the host's answer (waiting) and the items the
+-- host took whose removal has not reached us yet (spent): neither is planted again (round 2, F3: one item, one charge).
+-- Host: the check's reach, and the container each player opened last (round 2, F9: a mine taken from a box a moment ago is
+-- still in the box on the host when the take comes after the plant).
+local mine_item = { waiting = {}, spent = {}, ACK_MS = 15000, GROUND_REACH_SQR = 25,
+	opened = {}, OPEN_MS = 10000, OPEN_REACH_SQR = 100, BOX_NEAR_SQR = 4 }
 
 local function tss() return game.get_game_time():diffSec(level.get_start_time()) end
 
@@ -85,32 +101,192 @@ end
 local function client_plant(obj, mode, delay)
 	local sec = obj:section()
 	if not PLANTED[sec] then return orig.plant(obj, mode, delay) end
+	local id = obj:id()
+	-- F3: an item already asked for (no answer yet, or taken by the host and not removed here yet), or gone: no second charge
+	if mine_item.waiting[id] or mine_item.spent[id] or not level.object_by_id(id) then return end
 	if FX[sec] and actor_effects then pcall(actor_effects.play_item_fx, FX[sec]) end
 	local a = db.actor
 	local pos = a:position()
 	local sent = P.send(EV_MINE, { s = sec, m = tonumber(mode) or MODE_PROX, d = tonumber(delay) or FUSE,
-		x = pos.x, y = pos.y, z = pos.z, lv = a:level_vertex_id(), gv = a:game_vertex_id() }, 0)
+		x = pos.x, y = pos.y, z = pos.z, lv = a:level_vertex_id(), gv = a:game_vertex_id(), i = P.to_host(id) }, 0)
 	if sent then
 		stats.mines_out = stats.mines_out + 1
-		alife_release_id(obj:id()) -- the host releases the item from our character
+		-- the host removes the item or tells us to; no answer (a host of build 56): we remove it, as build 56 did at once
+		mine_item.waiting[id] = time_global() + mine_item.ACK_MS
 	end
+end
+
+-- Client: removes our copy of a mine item the host did not take (what build 56 did right after the request).
+local function client_drop_item(id)
+	mine_item.waiting[id] = nil
+	if level.object_by_id(id) then alife_release_id(id) end
+end
+
+local function client_on_mine_ok(t)
+	local id = P.to_local(tonumber(t.i))
+	if not (type(id) == "number" and mine_item.waiting[id]) then return end -- not ours, or answered already
+	if t.r == "left" then
+		client_drop_item(id)
+	else
+		mine_item.waiting[id] = nil -- "took": the host's removal reaches us; "no": refused, the item stays
+		if t.r == "no" then
+			log("! the host refused the mine of item %d: the item stays", id)
+		else
+			mine_item.spent[id] = time_global() + mine_item.ACK_MS -- not planted again before the host's removal arrives
+		end
+	end
+end
+
+local function client_mines_tick(now)
+	for id, deadline in pairs(mine_item.waiting) do
+		if now >= deadline then
+			log("no answer to the mine of item %d in %d s: removed here (a host of build 56?)", id, mine_item.ACK_MS / 1000)
+			client_drop_item(id)
+		end
+	end
+	for id, deadline in pairs(mine_item.spent) do
+		if now >= deadline then mine_item.spent[id] = nil end
+	end
+end
+
+local function nick_of(peer)
+	local ok, p = pcall(P.player, peer)
+	return ok and p and p.nick or "?"
+end
+
+-- Host: where object `id` is now: the online object's place (an item on the ground may have rolled since its entity was
+-- written), else its server entity's.
+local function place_of(id, se)
+	local o = level.object_by_id(id)
+	if o then return o:position() end
+	se = se or alife_object(id)
+	return se and se.position or nil
+end
+
+-- Host (F9): a container (a box, a stash, a dead body) the mine may have come from a moment ago. A living holder (another
+-- player, a trader) is none.
+local function is_container(id)
+	local o = level.object_by_id(id)
+	if not o then return false end
+	local box = rawget(_G, "IsInvbox")
+	if type(box) == "function" and box(o) == true then return true end
+	-- a dead body (alive() of something that is no creature writes a script error: asked of creatures only)
+	local creature = false
+	for _, name in ipairs({ "IsStalker", "IsMonster" }) do
+		local f = rawget(_G, name)
+		if type(f) == "function" and f(o) then creature = true end
+	end
+	if not creature then return false end
+	local ok, alive = pcall(function() return o:alive() end)
+	return ok and alive == false
+end
+
+-- Host (round 3, R2-S5): is container `id` (object o) a player's personal stash that is not player `from`'s own? A backpack stash
+-- (coop_mods_items books it in m_data.player_created_stashes, no owner kept), a Hideout Furniture stash (placeable_type = stash)
+-- or a fallen player's bag (coop_death_stash, its owner's nick in its custom data). Only a bag that names him is his own; a
+-- stash that keeps no owner counts as another's. Such a stash is no container of the 2 m rule: a take from it needs his own
+-- opening of it (the host's fact), as every honest take from a stash does. -> true, what it is (for the log line)
+local function others_stash(id, o, from)
+	local sec = o:section()
+	local okb, book = pcall(function() return alife_storage_manager.get_state().player_created_stashes end)
+	if okb and type(book) == "table" and book[id] ~= nil then return true, "a player's backpack stash" end
+	local okp, kind = pcall(function() return ini_sys:r_string_ex(sec, "placeable_type") end)
+	if okp and kind == "stash" then return true, "a Hideout Furniture stash" end
+	if sec ~= "coop_death_stash" then return false end
+	local okn, owner = pcall(function()
+		local ini = o:spawn_ini()
+		if ini and ini:section_exist(sec) and ini:line_exist(sec, "nick") then return ini:r_string(sec, "nick") end
+	end)
+	owner = okn and type(owner) == "string" and (owner:match('^"(.*)"$') or owner) or nil
+	if owner ~= nil and owner ~= "" and owner == nick_of(from) then return false end
+	return true, "a fallen player's bag of " .. tostring(owner or "?")
+end
+
+-- Host: is mine item `iid` this player's (in his inventory, or on the ground at his feet) and of section `sec`?
+-- -> ok, what is wrong (for the log line)
+local function mine_item_check(iid, sec, who, from)
+	local se = iid and iid > 0 and iid < 65535 and iid == math.floor(iid) and alife_object(iid)
+	if not se then return false, "no such item here" end
+	local have = se:section_name()
+	if have ~= sec then return false, string.format("the item is %s", tostring(have)) end
+	local root, parent = iid, se.parent_id
+	for _ = 1, 8 do
+		if not parent or parent == 65535 then break end
+		root = parent
+		local p = alife_object(parent)
+		parent = p and p.parent_id or nil
+	end
+	local at = who:position()
+	if root == iid then -- on the ground (Interaction Dot Marks): at his feet
+		local pos = place_of(iid, se)
+		local d = pos and at:distance_to_sqr(pos)
+		if d and d <= mine_item.GROUND_REACH_SQR then return true end
+		return false, string.format("on the ground %.1f m from him", d and math.sqrt(d) or -1)
+	end
+	if root == who:id() then return true end
+	-- F9: taken from a container a moment ago, the take not here yet: a container within 2 m of him, or the one he opened in the
+	-- last OPEN_MS within OPEN_REACH of him
+	local pos = is_container(root) and place_of(root) or nil
+	local d = pos and at:distance_to_sqr(pos)
+	-- round 3 (R2-S5): another player's personal stash only through his own opening of it
+	local stash, what = false, nil
+	if pos then stash, what = others_stash(root, level.object_by_id(root), from) end
+	if d and d <= mine_item.BOX_NEAR_SQR and not stash then return true end
+	local o = mine_item.opened[from]
+	if d and o and o.id == root and time_global() - o.at <= mine_item.OPEN_MS and d <= mine_item.OPEN_REACH_SQR then return true end
+	return false, string.format("held by %d (%s%s), his character is %d", root,
+		d and string.format("%.1f m from him", math.sqrt(d)) or "no container near him",
+		stash and ("; " .. tostring(what) .. " he did not open") or "", who:id())
+end
+
+-- Host: the engine says player `peer` opened container `id` (a box or a dead body: coop_on_container_opened).
+local function on_container_opened(peer, id)
+	peer, id = tonumber(peer), tonumber(id)
+	if peer and id and P.is_host() then mine_item.opened[peer] = { id = id, at = time_global() } end
+end
+
+-- coop_trust.pass; without that script (an older install) the request goes through as before.
+local function trust_pass(name, ok, fmt, ...)
+	local found, trust = pcall(function() return _G.coop_trust end)
+	if not (found and type(trust) == "table" and type(trust.pass) == "function") then return true end
+	return trust.pass(name, ok, fmt, ...)
 end
 
 local function host_on_mine(t, from)
 	local planted = type(t.s) == "string" and PLANTED[t.s]
 	local who = P.object_of_peer(from)
 	if not (planted and who) then return end
+	local iid = tonumber(t.i)
+	local item_ok = false
+	if t.i == nil then
+		-- a client of build 56: he removes the item himself
+		if not trust_pass("mine_item_id", false, "player %s (peer %d) planted %s without the item's id (a build 56 client?)",
+			nick_of(from), from, t.s) then return end
+	else
+		local why
+		item_ok, why = mine_item_check(iid, t.s, who, from)
+		if not trust_pass("mine_item", item_ok, "player %s (peer %d) planted %s with item %s: %s", nick_of(from), from, t.s,
+			tostring(iid), tostring(why)) then
+			if iid then P.send(EV_MINE_OK, { i = iid, r = "no" }, from) end
+			return
+		end
+	end
+	local function answer(took)
+		if iid then P.send(EV_MINE_OK, { i = iid, r = took and "took" or "left" }, from) end
+	end
 	local x, y, z = tonumber(t.x), tonumber(t.y), tonumber(t.z)
-	if not (x and y and z) then return end
+	if not (x and y and z) then return answer(false) end
 	local pos = vec(x, y, z)
-	if not (who:position():distance_to_sqr(pos) <= 25) then return end -- planted where the player stands (NaN too)
+	if not (who:position():distance_to_sqr(pos) <= 25) then return answer(false) end -- planted where the player stands (NaN too)
 	-- graph vertices of the planter's own character, never from the network (a bad lvid crashes the engine, W5)
 	local se = alife_create(planted, pos, who:level_vertex_id(), who:game_vertex_id())
-	if not se then return end
+	if not se then return answer(false) end
 	local mode = (t.m == MODE_TIMER) and MODE_TIMER or MODE_PROX
 	local delay = math.max(1, math.min(120, tonumber(t.d) or FUSE))
 	mines[se.id] = { exp = tss() + delay * level.get_time_factor(), mode = mode, planter = who:id(), active = true }
 	stats.mines_in = stats.mines_in + 1
+	if item_ok then alife_release_id(iid) end -- his item, checked above: spent here, for everybody
+	answer(item_ok)
 end
 
 local function blast(id)
@@ -553,6 +729,10 @@ local function actor_on_update()
 	local now = time_global()
 	if now < next_tick then return end
 	next_tick = now + 250
+	if next(mine_item.waiting) ~= nil or next(mine_item.spent) ~= nil then
+		local ok, err = pcall(client_mines_tick, now)
+		if not ok then report("mine answers", err) end
+	end
 	host_on = installed and P.host_with_clients()
 	if host_on then
 		local ok, err = pcall(host_mines_tick)
@@ -606,6 +786,7 @@ function on_game_start()
 		installed = true
 	end
 	P.on(EV_MINE, host_on_mine, "host", TAG)
+	P.on(EV_MINE_OK, client_on_mine_ok, "client", TAG)
 	P.on(EV_FIRE, host_on_fire, "host", TAG)
 	P.on(EV_PULSE, client_on_pulse, "client", TAG)
 	P.on(EV_ISND, on_isnd, nil, TAG)
@@ -619,6 +800,7 @@ function on_game_start()
 	RegisterScriptCallback("monster_on_update", guard("monster update", near_mine))
 	RegisterScriptCallback("save_state", save_state)
 	RegisterScriptCallback("load_state", load_state)
+	RegisterScriptCallback("coop_on_container_opened", guard("container opened", on_container_opened)) -- coop_main names it
 end
 
 function _set_host_on(v) host_on = v end

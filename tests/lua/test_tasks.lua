@@ -955,6 +955,411 @@ H.give_item(proxy_on_host, "q_item")
 H.env.xr_effects.remove_item(H.actor, nil, { "q_item", 1 })
 check(proxy_on_host:object("q_item") == nil, "host took the quest item from the client's character")
 
+-- ---------------------------------------------------------------- TZ 6.4 #1: who may end a task, the engine's turn-in
+print("== TZ 6.4 #1: fail / cancel only by the taker; the engine's turn-in through the host's checks (coop_trust)")
+do
+	local trust = setmetatable({}, { __index = H.env })
+	local fh = assert(io.open("gamedata/scripts/coop_trust.script", "r"))
+	local tsrc = fh:read("*a")
+	fh:close()
+	local tf = assert(loadstring(tsrc, "@coop_trust.script"))
+	setfenv(tf, trust)
+	tf()
+	H.env.coop_trust = trust
+	trust.reset_for_test({ default = "log" })
+	local function lines(name)
+		local n = 0
+		for _, l in ipairs(H.log) do if l:find("[coop-trust] ! " .. name .. ":", 1, true) then n = n + 1 end end
+		return n
+	end
+	local function last_line()
+		for i = #H.log, 1, -1 do if H.log[i]:find("[coop-trust]", 1, true) then return H.log[i] end end
+		return ""
+	end
+	-- a second client (peer 2, character 600) who did not take bounty_1 (client 1 took it, character 500)
+	local C2 = machine("client", 2)
+	H.new_obj(600)
+	H.players[#H.players + 1] = { id = 2, is_self = false, avatar_id = 600, nick = "two" }
+	H.players[2].nick = "one"
+	C2.players = { { id = 2, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 500 } }
+	local function req(m, op, id) m.env.coop.send_event("coop_tq", "op=s" .. op .. ";i=s" .. id, 0); pump() end
+	local bt = H.tm.task_info.bounty_1
+	check(bt ~= nil and H.mod.taker("bounty_1") == 1, "bounty_1 runs, client 1 took it")
+
+	-- log: the request of a player who did not take it goes through as today, the host's log says what it would refuse
+	req(C2, "fail", "bounty_1")
+	check(bt.forced_status == "fail", "log: a fail by another player still goes through")
+	check(lines("task_fail") == 1 and last_line():find("two", 1, true) and last_line():find("bounty_1", 1, true)
+		and last_line():find("one", 1, true), "log: one task_fail line naming the requester, the task and its taker")
+	bt.forced_status = nil
+	req(C2, "cancel", "bounty_1")
+	check(bt.cancelled_by_actor == true and lines("task_cancel") == 1, "log: a cancel by another player goes through, task_cancel logged")
+	bt.forced_status, bt.cancelled_by_actor = nil, nil
+
+	-- refuse: nothing changes, the requester gets the host's view back
+	trust.reset_for_test({ default = "log", task_fail = "refuse", task_cancel = "refuse" })
+	local function to_two()
+		local n = 0
+		for _, e in ipairs(H.sent) do if e.name == "coop_tl" and e.target == 2 then n = n + 1 end end
+		return n
+	end
+	local sent0 = to_two()
+	req(C2, "fail", "bounty_1")
+	req(C2, "cancel", "bounty_1")
+	check(bt.forced_status == nil and bt.cancelled_by_actor == nil, "refuse: a fail / cancel by another player changes nothing")
+	check(to_two() >= sent0 + 2, "refuse: the requester is sent the host's state of the task")
+	-- the save keeps who took it
+	local saved = {}
+	H.mod.save_effects(saved)
+	H.mod.load_effects(saved)
+	req(C2, "fail", "bounty_1")
+	check(bt.forced_status == nil, "after the host's save and load the taker is still known")
+	-- a map server's logic (a timer, a target that died on its level) is no player: it is not asked who took it
+	local n0 = lines("task_fail")
+	H.handlers.coop_tq("op=sfail;i=sbounty_1", 0x100)
+	check(bt.forced_status == "fail" and lines("task_fail") == n0, "a map server's fail goes through, no line")
+	bt.forced_status = nil
+	-- the taker himself
+	req(C, "fail", "bounty_1")
+	check(bt.forced_status == "fail" and lines("task_fail") == n0, "the taker's own fail goes through, no line")
+	bt.forced_status = nil
+	-- a task with no recorded taker (a save from before the record): nobody to compare with, ok
+	local keep = {}
+	H.mod.save_effects(keep) -- (load_effects takes its record out of m_data)
+	local s2 = {}
+	H.mod.save_effects(s2)
+	s2.coop_task_fx.takers, s2.coop_task_fx.taker_char = {}, {}
+	H.mod.load_effects(s2)
+	req(C2, "fail", "bounty_1")
+	check(bt.forced_status == "fail" and lines("task_fail") == n0, "no recorded taker: ok")
+	bt.forced_status = nil
+	H.mod.load_effects(keep)
+
+	-- the engine's request (TaskReqState): coop_story.cpp asks coop_tasks.host_state_verdict before it finishes the task
+	check(type(H.mod.host_state_verdict) == "function", "host_state_verdict exported for the engine")
+	local V = H.mod.host_state_verdict or function() return nil end
+	trust.reset_for_test({ default = "log", task_complete = "refuse", task_fail = "refuse" })
+	H.env.db.storage[0].pstor["bounty_1_fetch"] = "vodka"
+	H.env.db.storage[0].pstor["bounty_1_fetch_count"] = 1
+	check(V("bounty_1", 2, 1, false, false) == false, "engine complete: the group holds no vodka, refused")
+	check(lines("task_complete") == 1 and last_line():find("0 of 1", 1, true), "task_complete line says what is missing")
+	local vodka = H.give_item(proxy_on_host, "vodka")
+	bt.last_check_task = "complete" -- (round 2, F2: the host's own check of the task found it complete as well)
+	check(V("bounty_1", 2, 1, false, false) == true and lines("task_complete") == 1, "engine complete with the vodka in the group: ok")
+	H.env.alife_release_id(vodka._id)
+	bt.status_functor = "drx_sl_money_task_status"
+	H.env.db.storage[0].pstor["bounty_1_fetch"] = 5000
+	local stock_money_of = H.env.coop.money_of
+	H.env.coop.money_of = function(p) return p == 1 and 1200 or nil end
+	check(V("bounty_1", 2, 1, false, false) == false and last_line():find("1200", 1, true), "engine complete of a money task he cannot pay: refused, balance logged")
+	H.env.coop.money_of = function(p) return p == 1 and 9000 or nil end
+	check(V("bounty_1", 2, 1, false, false) == true, "engine complete of a money task he can pay: ok")
+	bt.last_check_task = nil
+	H.env.coop.money_of = stock_money_of
+	bt.status_functor = "actor_has_fetch_item"
+	H.env.db.storage[0].pstor["bounty_1_fetch"] = nil
+	H.env.db.storage[0].pstor["bounty_1_fetch_count"] = nil
+	-- engine fail: by the taker, a map server, or a timer the host sees run out too
+	check(V("bounty_1", 0, 2, false, false) == false and lines("task_fail") > n0, "engine fail by another player: refused")
+	check(V("bounty_1", 0, 2, false, true) == true, "engine fail by another player whose timer ran out (the host sees it): ok")
+	check(V("bounty_1", 0, 0x100, true, false) == true, "engine fail by a map server: ok")
+	check(V("bounty_1", 0, 1, false, false) == true, "engine fail by the taker: ok")
+	trust.reset_for_test({ default = "log" })
+	check(V("bounty_1", 0, 2, false, false) == true, "log: the engine fail of another player is let through")
+	check(V("nope", 2, 2, false, false) == true, "a task the Lua manager does not run: nothing to check, ok")
+	check(bt.forced_status == nil, "the verdict itself changes no task")
+
+	-- the engine's handler asks before it notes the finisher or changes the task, on both branches (explicit or not)
+	local ef = io.open("engine/src/xrGame/coop/coop_story.cpp", "r")
+	local esrc = ef and ef:read("*a") or ""
+	if ef then ef:close() end
+	local body = esrc:match("void host_on_task_state%(PeerId from, Reader& r%)(.-)\n}\n") or ""
+	local ask = body:find("lua_task_state_ok(", 1, true)
+	local fin = body:find("g_finisher[id] = from", 1, true)
+	check(ask ~= nil and fin ~= nil and ask < fin, "coop_story.cpp host_on_task_state asks lua_task_state_ok before the finisher note")
+	H.players[#H.players] = nil
+	H.env.coop_trust = nil
+	for i = #MACHINES, 1, -1 do if MACHINES[i] == C2 then table.remove(MACHINES, i) end end
+end
+
+-- ---------------------------------------------------------------- TZ 6.4 #1, round 2
+print("== TZ 6.4 #1 round 2: the ends a player's own stock logic sends (F5), a talk (F5), the host's own reckoning (F2)")
+do
+	local trust = setmetatable({}, { __index = H.env })
+	local fh = assert(io.open("gamedata/scripts/coop_trust.script", "r"))
+	local tf = assert(loadstring(fh:read("*a"), "@coop_trust.script"))
+	fh:close()
+	setfenv(tf, trust)
+	tf()
+	H.env.coop_trust = trust
+	trust.reset_for_test({ default = "log" })
+	local function lines(name)
+		local n = 0
+		for _, l in ipairs(H.log) do if l:find("[coop-trust] ! " .. name .. ":", 1, true) then n = n + 1 end end
+		return n
+	end
+	local function failed(name) return (trust.status()[name] or { failed = 0 }).failed end
+	local function mentions(m, text)
+		local n = 0
+		for _, l in ipairs(m.log) do if l:find(text, 1, true) then n = n + 1 end end
+		return n
+	end
+	local function status_line(m, text)
+		local keep = #m.log
+		m.mod.print_status()
+		local found = nil
+		for i = keep + 1, #m.log do if m.log[i]:find(text, 1, true) then found = m.log[i] end end
+		return found
+	end
+	-- a second client (peer 2, character 600) who takes nothing
+	local C2 = machine("client", 2)
+	H.new_obj(600)
+	H.players[#H.players + 1] = { id = 2, is_self = false, avatar_id = 600, nick = "two" }
+	H.players[2].nick = "one"
+	C2.players = { { id = 2, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 500 } }
+	C2.mod.on_game_start()
+	for _, m in ipairs({ H, C, C2 }) do
+		local ti = m.env.task_manager.task_ini
+		local known = ti.section_exist
+		ti.section_exist = function(s, id)
+			return id == "drx_sl_x" or id == "faction_base_defense" or id == "cord_2" or id == "story_2" or known(s, id)
+		end
+	end
+	local function req(m, op, id, extra)
+		m.env.coop.send_event("coop_tq", "op=s" .. op .. ";i=s" .. id .. (extra or ""), 0)
+		pump()
+	end
+	-- client 1 takes them: a DRX task, the surge's base defense, a task of NPC 777, a story task with no giver
+	for _, g in ipairs({ { "drx_sl_x", 777 }, { "faction_base_defense", 778 }, { "cord_2", 777 }, { "story_2" } }) do
+		C.tm:give_task(g[1], g[2])
+		pump()
+	end
+	local drx, def, cord, story = H.tm.task_info.drx_sl_x, H.tm.task_info.faction_base_defense, H.tm.task_info.cord_2,
+		H.tm.task_info.story_2
+	check(drx and def and cord and story and H.mod.taker("drx_sl_x") == 1, "client 1 took the four tasks")
+
+	-- F5 (a): a faction change cancels every DRX task on that machine (xr_effects.drx_sl_cancel_questlines: a fail and a cancel
+	-- per task); (d) surge_manager's level change cancels faction_base_defense. From a player who did not take them: round 3
+	-- (R2-B2), their own check "task_auto_end" through coop_trust. "log" (build 57): they go through exactly as before round 1,
+	-- counted in coop_status, no trust line each and no task_fail / task_cancel failure.
+	local function trust_said(from)
+		local n = 0
+		for i = from + 1, #H.log do if H.log[i]:find("[coop-trust]", 1, true) then n = n + 1 end end
+		return n
+	end
+	local logs0 = #H.log
+	for _ = 1, 10 do
+		req(C2, "fail", "drx_sl_x")
+		req(C2, "cancel", "drx_sl_x")
+	end
+	req(C2, "cancel", "faction_base_defense")
+	check(drx.forced_status == "fail" and drx.cancelled_by_actor == true and def.cancelled_by_actor == true,
+		"log mode: another player's DRX / base defense ends from his own stock logic go through as before round 1")
+	check(failed("task_fail") == 0 and failed("task_cancel") == 0, "not counted as a task_fail / task_cancel failure")
+	check(trust_said(logs0) == 0, "no coop-trust line for each (" .. trust_said(logs0) .. ")")
+	local sl = status_line(H, "task_auto_end")
+	check(sl ~= nil and sl:find("21", 1, true) ~= nil and sl:find("[log]", 1, true) ~= nil and sl:find("refused 0", 1, true) ~= nil,
+		"coop_status counts them under task_auto_end [log]: " .. tostring(sl))
+	drx.forced_status, drx.cancelled_by_actor, def.forced_status, def.cancelled_by_actor = nil, nil, nil, nil
+	-- the owner switches task_auto_end to "refuse" later: then they change nothing, still without a line each
+	trust.reset_for_test({ default = "log", task_auto_end = "refuse" })
+	logs0 = #H.log
+	req(C2, "fail", "drx_sl_x")
+	req(C2, "cancel", "drx_sl_x")
+	req(C2, "cancel", "faction_base_defense")
+	check(drx.forced_status == nil and drx.cancelled_by_actor == nil and def.cancelled_by_actor == nil,
+		"task_auto_end = refuse: they change nothing")
+	check(trust_said(logs0) == 0 and failed("task_fail") == 0 and failed("task_cancel") == 0, "refuse: still no line each")
+	sl = status_line(H, "task_auto_end")
+	check(sl ~= nil and sl:find("24", 1, true) ~= nil and sl:find("[refuse]", 1, true) ~= nil and sl:find("refused 3", 1, true) ~= nil,
+		"coop_status: 24 counted, 3 refused: " .. tostring(sl))
+	trust.reset_for_test({ default = "log", task_auto_end = "off" })
+	req(C2, "cancel", "faction_base_defense")
+	check(def.cancelled_by_actor == true and (status_line(H, "task_auto_end") or ""):find("24", 1, true) ~= nil,
+		"task_auto_end = off: through, not counted")
+	def.forced_status, def.cancelled_by_actor = nil, nil
+	trust.reset_for_test({ default = "log" })
+	-- the taker's own machine ends them as before
+	req(C, "fail", "drx_sl_x")
+	check(drx.forced_status == "fail", "the taker's own DRX fail goes through")
+	drx.forced_status = nil
+
+	-- F5 (b, c): a player who did not take it talks to its giver a moment ago (dialogs.npc_cancel_task at the giver), or, for a
+	-- task with no giver, to the NPC of the dialog (dialogs_lostzone.fail_task_lttz_hb_4_1_crossfire): his choice, it goes through
+	trust.reset_for_test({ default = "log", task_fail = "refuse", task_cancel = "refuse" })
+	local npc777, npc779 = C2.new_obj(777), C2.new_obj(779)
+	local speaker = npc777
+	C2.env.get_speaker = function() return speaker end
+	H.env.coop.talk_recent = function(peer, npc, ms) return peer == 2 and (npc == 777 or npc == 779) and ms <= 60000 end
+	C2.talking = true
+	C2.tm:set_task_cancelled("cord_2")
+	pump()
+	check(cord.cancelled_by_actor == true and failed("task_cancel") == 0, "a cancel at the task's giver he talks to: goes through")
+	cord.forced_status, cord.cancelled_by_actor = nil, nil
+	speaker = npc779
+	C2.tm:set_task_failed("story_2")
+	pump()
+	check(story.forced_status == "fail" and failed("task_fail") == 0, "a story fail in a dialog (a task with no giver): goes through")
+	story.forced_status = nil
+	-- the giver is known and he talks to somebody else: refused, and he is told who can (the texts of the mod's eng file)
+	local told = {}
+	C2.actor.give_game_news = function(_, caption, text) told[#told + 1] = text end
+	local texts = {}
+	local xf = assert(io.open("gamedata/configs/text/eng/st_coop_news.xml", "r"))
+	for sid, text in xf:read("*a"):gmatch('<string id="([%w_]+)">%s*<text>(.-)</text>') do texts[sid] = text end
+	xf:close()
+	check(texts.st_coop_task_only_taker and texts.st_coop_task_only_taker:find("%s", 1, true)
+		and texts.st_coop_task_only_taker_anon and texts.st_coop_task_only_taker_caption, "the texts of the line are in the eng file")
+	C2.env.game = { translate_string = function(s) return texts[s] or s end }
+	C2.tm:set_task_cancelled("cord_2")
+	pump()
+	check(cord.cancelled_by_actor == nil and failed("task_cancel") == 1, "a cancel of a task of NPC 777 while talking to 779: refused")
+	check(#told == 1 and told[1]:find("one", 1, true) ~= nil, "the refused player is told who can: " .. tostring(told[1]))
+	-- not talking: refused, told
+	C2.talking = false
+	C2.tm:set_task_cancelled("cord_2")
+	pump()
+	check(cord.cancelled_by_actor == nil and #told == 2, "no talk: refused and told")
+	-- the host did not see the talk (a claim of a speaker): refused
+	H.env.coop.talk_recent = function() return false end
+	C2.talking = true
+	speaker = npc777
+	C2.tm:set_task_cancelled("cord_2")
+	pump()
+	check(cord.cancelled_by_actor == nil and #told == 3, "a talk the host did not see: refused")
+	C2.talking = false
+	H.env.coop.talk_recent = nil
+	-- log mode: a failed check goes through as round 1, and nobody is told
+	trust.reset_for_test({ default = "log" })
+	req(C2, "cancel", "cord_2")
+	check(cord.cancelled_by_actor == true and #told == 3, "log mode: let through, nobody told")
+	cord.forced_status, cord.cancelled_by_actor = nil, nil
+	-- a nick that came over the network never becomes the format of the line
+	local stock_nick = H.players[2].nick
+	H.players[2].nick = "%s%n%d"
+	trust.reset_for_test({ default = "log", task_cancel = "refuse" })
+	req(C2, "cancel", "cord_2")
+	check(#told == 4 and told[4]:find("%s%n%d", 1, true) ~= nil, "a nick with % signs is shown as it is: " .. tostring(told[4]))
+	H.players[2].nick = stock_nick
+
+	-- round 3 (R2-S3), Server: a player on a map server's level is judged by that server's word "he is in some dialog", which
+	-- names no partner. The dialog's exception then holds only for a task without a giver.
+	trust.reset_for_test({ default = "log", task_fail = "refuse", task_cancel = "refuse" })
+	H.env.coop_quests_core = { is_far_peer = function(p) return p == 2 end }
+	H.env.coop.levels = { talking = function(p) return p == 2 end }
+	H.env.coop.talk_recent = function() return false end -- (the world server has no talk lock of his: he is on another level)
+	C2.talking = true
+	speaker = npc777
+	local refused0 = failed("task_cancel")
+	C2.tm:set_task_cancelled("cord_2")
+	pump()
+	check(cord.cancelled_by_actor == nil and failed("task_cancel") == refused0 + 1,
+		"Server: a cancel naming the task's giver while 'in some dialog': refused (his partner is not known there)")
+	speaker = npc779
+	C2.tm:set_task_failed("story_2")
+	pump()
+	check(story.forced_status == "fail" and failed("task_fail") == 0,
+		"Server: a story fail in some dialog (a task without a giver): goes through")
+	story.forced_status = nil
+	H.env.coop.levels.talking = function() return false end
+	C2.tm:set_task_failed("story_2")
+	pump()
+	check(story.forced_status == nil and failed("task_fail") == 1, "Server: the same while in no dialog: refused")
+	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_recent = nil, nil, nil
+	C2.talking = false
+	trust.reset_for_test({ default = "log" })
+
+	-- F2: the engine's turn-in of a task the host runs: refused while the host's own check says it is still running
+	trust.reset_for_test({ default = "log", task_complete = "refuse" })
+	local V = H.mod.host_state_verdict
+	local n0 = lines("task_complete")
+	check(V("cord_2", 2, 1, false, false, true) == false, "explicit engine complete of a task still running by the host's check: refused")
+	check(lines("task_complete") == n0 + 1 and H.log[#H.log]:find("running", 1, true) ~= nil, "the line says the host's check: running")
+	check(V("cord_2", 2, 1, false, false, false) == false, "the same by the client's own task check (not explicit): refused")
+	cord.last_check_task = "complete"
+	check(V("cord_2", 2, 1, false, false, true) == true, "the host's check found it complete: ok")
+	cord.last_check_task = nil
+	cord.forced_status = "complete" -- a turn-in on the host is on its way
+	check(V("cord_2", 2, 1, false, false, true) == true, "a turn-in the host forced: ok")
+	cord.forced_status = nil
+	check(V("cord_2", 2, 0x100, true, false, true) == true,
+		"a map server's turn-in: the facts of the task are on its level, the world server does not judge them (ok)")
+	-- the engine passes the explicit flag
+	local ef = io.open("engine/src/xrGame/coop/coop_story.cpp", "r")
+	local esrc = ef and ef:read("*a") or ""
+	if ef then ef:close() end
+	check(esrc:find("local id, st, peer, bridge, timed_out, explicit = ...", 1, true) ~= nil
+		and esrc:find("m.host_state_verdict, id, st, peer, bridge, timed_out, explicit)", 1, true) ~= nil
+		and esrc:find("lua_pushboolean(L, explicit_call ? 1 : 0);", 1, true) ~= nil
+		and esrc:find("lua_pcall(L, 6, 1, 0)", 1, true) ~= nil
+		and esrc:find("task_time_ran_out(t), explicit_call))", 1, true) ~= nil,
+		"coop_story.cpp gives host_state_verdict the explicit flag")
+
+	-- F2: a stage goes only up, one step at a time (check task_stage). Round 3 (R2-S2): a step also needs his talk a moment ago,
+	-- which the host saw, with the task's giver or with the NPC the task points to now (its target, the NPC or his squad):
+	-- aysd (Ashot and Yar) steps +1 in a talk with Ashot while the task points to Ashot's squad, with Yar (its giver) while it
+	-- points to Yar's.
+	trust.reset_for_test({ default = "log", task_stage = "refuse" })
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and (npc == 777 or npc == 779 or npc == 780) end
+	cord.stage = 1
+	req(C, "stage", "cord_2", ";st=n2;sp=n777")
+	check(cord.stage == 2 and failed("task_stage") == 0, "one step up in a talk with its giver: ok")
+	req(C, "stage", "cord_2", ";st=n2")
+	check(cord.stage == 2 and failed("task_stage") == 0, "the same stage again: ok (nothing changes, no talk asked)")
+	req(C, "stage", "cord_2", ";st=n3")
+	check(cord.stage == 2 and failed("task_stage") == 1, "one step up, no talk named: refused")
+	req(C, "stage", "cord_2", ";st=n3;sp=n779")
+	local stage_line = ""
+	for i = #H.log, 1, -1 do
+		if H.log[i]:find("[coop-trust] ! task_stage:", 1, true) then stage_line = H.log[i] break end
+	end
+	check(cord.stage == 2 and failed("task_stage") == 2 and stage_line:find("779", 1, true) ~= nil,
+		"one step up in a talk with an NPC that is neither its giver nor its target: refused, the line names him")
+	H.env.alife_object = function(id) if id == 779 then return { id = 779, group_id = 7790 } end end
+	cord.current_target = 7790 -- the host's last look: the task points to 779's squad
+	req(C, "stage", "cord_2", ";st=n3;sp=n779")
+	check(cord.stage == 3 and failed("task_stage") == 2, "a step in a talk with a member of the squad the task points to: ok")
+	-- where the task points now is its target functor's word (the host's last look may be a second old): aysd's alternates
+	H.env.task_functor = { tf_cord = function(id, field, p, tsk) return tsk.stage % 2 == 0 and 7790 or 777 end }
+	cord.target_functor = "tf_cord"
+	req(C, "stage", "cord_2", ";st=n4;sp=n779")
+	check(cord.stage == 3 and failed("task_stage") == 3,
+		"a second step at the same NPC: refused (at stage 3 the task points to its giver, the last look still said 779's squad)")
+	req(C, "stage", "cord_2", ";st=n4;sp=n777")
+	check(cord.stage == 4 and failed("task_stage") == 3, "the step at its giver: ok")
+	req(C, "stage", "cord_2", ";st=n6;sp=n779")
+	check(cord.stage == 4 and failed("task_stage") == 4, "two steps up in a talk: refused")
+	req(C, "stage", "cord_2", ";st=n0;sp=n777")
+	check(cord.stage == 4 and failed("task_stage") == 5, "down: refused")
+	H.env.coop.talk_recent = function() return false end
+	req(C, "stage", "cord_2", ";st=n5;sp=n779")
+	check(cord.stage == 4 and failed("task_stage") == 6, "a talk the host did not see: refused")
+	-- the client's stage write in a dialog names the NPC of the talk (as a fail or a cancel does)
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and npc == 779 end
+	local npc779c = C.new_obj(779)
+	C.env.get_speaker = function() return npc779c end
+	C.talking = true
+	C.tm.task_info.cord_2.stage = 5
+	pump()
+	check(cord.stage == 5 and failed("task_stage") == 6, "a dialog's stage write on the client names his partner: ok")
+	C.talking = false
+	H.env.task_functor, H.env.alife_object, H.env.coop.talk_recent = nil, nil, nil
+	cord.target_functor, cord.current_target = nil, nil
+	trust.reset_for_test({ default = "log" })
+	req(C, "stage", "cord_2", ";st=n9")
+	check(cord.stage == 9 and lines("task_stage") >= 1, "log mode: a jump goes through, logged")
+
+	for _, id in ipairs({ "drx_sl_x", "faction_base_defense", "cord_2", "story_2" }) do
+		H.tm.task_info[id] = nil
+		H.engine_tasks[id] = nil
+	end
+	tick(H)
+	pump()
+	H.players[#H.players] = nil
+	H.env.coop_trust = nil
+	for i = #MACHINES, 1, -1 do if MACHINES[i] == C2 then table.remove(MACHINES, i) end end
+end
+
 -- ---------------------------------------------------------------- single player untouched
 print("== no session")
 H.env.coop.is_active = function() return false end

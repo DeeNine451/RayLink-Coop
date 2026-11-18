@@ -7,7 +7,8 @@
 	A client runs the player's half (placement preview, dialogs, tool and fuel use from its own inventory) and
 	asks the host for the world half:
 
-	  mods.hf_place    client -> host  { i item, s section, x y z, ax ay az, d data }  place an item
+	  mods.hf_place    client -> host  { i item, s section, x y z, ax ay az, d data }  place an item (the host builds the data
+	                                                           itself since round 3: d is for a host of build 56)
 	  mods.hf_pickup   client -> host  { o object }            pack furniture up (the mod's own pickup, run with
 	                                                           the requester's character as the actor)
 	  mods.hf_lamp     client -> host  { o, on }               lamp on/off (tools already used by the client)
@@ -53,6 +54,164 @@ local function wrapper_of(id)
 	if not f then return nil end
 	local ok, w = pcall(f, id)
 	return ok and w or nil
+end
+
+local function wrapper_fuel(lamp_id)
+	local w = wrapper_of(lamp_id)
+	if w then w.fuel = 1.0 end -- the binder keeps fuel in itself, on every machine
+end
+
+-------------------------------------------------------------------------------
+-- Lamp tools and fuel (TZ v2 6.4, round 2, 2026-11-18): the host checks and spends them
+-------------------------------------------------------------------------------
+-- A light names the tool (i, host numbering), a refuel the fuel item. The host checks it is this player's and of the kind the
+-- lamp needs (coop_trust "hf_lamp_tool", "hf_refuel_item"), spends what the mod spends and answers mods.hf_item_r { i, r }:
+--   "took" the host removed it: a plain item (the mod's discharge removes it), the last use of a multi-use one, a tool at its
+--          last step of condition (the mod's degrade removes it);
+--   "left" the player's machine spends it as the mod does: a use of a multi-use item or a step of condition (the state of an
+--          item a player carries is his machine's, coop_items WP9; the host checks it went down at the next request with that
+--          item), or a check that failed in "log" (his copy, as build 56 did);
+--   "no"   refused: nothing spent, the lamp unchanged.
+-- No answer in 15 s (a host of build 56): the client spends it as build 56 did. A request without the id (a client of build 56)
+-- goes through as before: a refuel is logged ("hf_refuel_item_id"), a light's tool is looked for among his items.
+-- Facts: Co-op, the host's copy of the player's character and his items; Server, the map server of his level (C().on "host"
+-- passes the request there) with the same facts.
+-- wait: client, item -> { at, kind, lamp }; done: client, item -> until (the host took it, its removal is on its way); left: host
+local spend = { wait = {}, done = {}, left = {}, ACK_MS = 15000, TOOL_STEP = 0.05 }
+
+local function trust(name, ok, fmt, ...)
+	local found, t = pcall(function() return _G.coop_trust end)
+	if not (found and type(t) == "table" and type(t.pass) == "function") then return true end
+	local good, res = pcall(t.pass, name, ok, fmt, ...)
+	return not good or res ~= false
+end
+
+-- The tools a lamp needs (ui_furniture_light.toggle_light): its require_tool list, and matches for the old require_matches.
+local function lamp_tools(sec)
+	local tools = sec and parse_list and parse_list(ini_sys, sec, "require_tool") or {}
+	if sec and ini_sys:r_bool_ex(sec, "require_matches", false) then
+		tools[#tools + 1] = "matches"
+		tools[#tools + 1] = "box_matches"
+	end
+	return tools
+end
+
+-- What the mod's spend changes on item `obj` ("tool": degrade or discharge; "fuel": itms_manager.relocate_item_from_actor, one
+-- use): "u" and the uses of a multi-use item, "c" and the condition of a degradable tool, nil for a plain item.
+local function spend_state(obj, kind)
+	local sec = obj:section()
+	if IsItem("multiuse", sec) then return "u", obj:get_remaining_uses() end
+	if kind == "tool" and utils_item.is_degradable(obj) then return "c", obj:condition() end
+	return nil
+end
+
+-- Client: spends `obj` here as the mod does.
+local function spend_here(obj, kind)
+	if not obj then return end
+	if kind == "tool" and utils_item.is_degradable(obj) then utils_item.degrade(obj, spend.TOOL_STEP) else utils_item.discharge(obj) end
+end
+
+-- Host: is item `iid` (host numbering) carried by `who` and of one of `sections`? -> the item, or nil and why
+local function carried(iid, who, sections)
+	local id = type(iid) == "number" and iid > 0 and iid < 65535 and iid == math.floor(iid) and C().lid(iid) or nil
+	local se = type(id) == "number" and alife_object(id)
+	if not se then return nil, "no such item here" end
+	local sec = se:section_name()
+	local fits = false
+	for _, s in ipairs(sections) do
+		if s == sec then fits = true end
+	end
+	if not fits then return nil, string.format("the item is %s, the lamp takes %s", tostring(sec), table.concat(sections, ", ")) end
+	local root = C().root_of(id)
+	if root ~= who:id() then return nil, string.format("held by %s, his character is %d", tostring(root), who:id()) end
+	local obj = level.object_by_id(id)
+	if not obj then return nil, "the item is not online here" end
+	return obj
+end
+
+-- Host: the use or the step left to his machine at the last request with this item went (its state on the host, which his
+-- machine reports, is lower now). -> ok, why
+local function spent_since(obj, kind)
+	local w = spend.left[obj:id()]
+	if not w then return true end
+	local k, v = spend_state(obj, kind)
+	if k == w.k and v ~= nil and v >= w.v then
+		return false, string.format("the use left to his machine at the last request was not spent (%s still %s)",
+			k == "u" and "uses" or "condition", tostring(v))
+	end
+	spend.left[obj:id()] = nil
+	return true
+end
+
+-- Host: spends what the mod spends. -> "took" (removed here) | "left" (his machine spends it)
+local function host_spend(obj, kind)
+	local k, v = spend_state(obj, kind)
+	if k == nil or v == nil or (k == "u" and v <= 1) or (k == "c" and v <= spend.TOOL_STEP) then
+		alife_release_id(obj:id())
+		return "took"
+	end
+	spend.left[obj:id()] = { k = k, v = v }
+	return "left"
+end
+
+-- Client: asks the host with item `obj` and waits for its answer. False: asked already (no second request), the host took it
+-- and its removal is not here yet (round 3, R2-S1: one item, one use), or not sent.
+local function client_ask(verb, t, obj, kind, lamp_id)
+	local id = obj:id()
+	if spend.wait[id] or spend.done[id] then return false end
+	t.i = C().hid(id)
+	if not C().to_host(verb, t) then return false end
+	spend.wait[id] = { at = time_global() + spend.ACK_MS, kind = kind, lamp = lamp_id }
+	return true
+end
+
+-- Client (round 3, R2-S1): an item of `sec` in this player's inventory that neither waits for the host's answer nor was taken by
+-- the host, so that a second honest light or refuel uses another one. Second value: he holds one of `sec`, but it is busy.
+function spend.free_item(sec)
+	local found, busy = nil, false
+	db.actor:iterate_inventory(function(_, it)
+		if found or it:section() ~= sec then return end
+		local id = it:id()
+		if spend.wait[id] or spend.done[id] then busy = true else found = it end
+	end, db.actor)
+	return found, busy
+end
+
+-- Client: what the host did with the item we named.
+local function client_item_answer(t)
+	local id = C().lid(tonumber(t.i))
+	local w = type(id) == "number" and spend.wait[id]
+	if not w then return end -- not ours, or answered (timed out) already
+	spend.wait[id] = nil
+	if t.r == "left" then
+		spend_here(level.object_by_id(id), w.kind)
+	elseif t.r == "no" then
+		log("the host refused the %s of item %d: nothing spent", w.kind == "fuel" and "refuel" or "light", id)
+		return
+	else
+		-- "took": the host's removal (an entity release) and this answer (a Lua event) take separate channels; until the removal
+		-- is here the item is still in this inventory and must not be named again (round 3, R2-S1, as the mine's spent)
+		spend.done[id] = time_global() + spend.ACK_MS
+	end
+	if w.kind == "fuel" then wrapper_fuel(w.lamp) end
+end
+
+-- Client: no answer in ACK_MS (a host of build 56 lit or refuelled on our word): spent here, as build 56 did. An item the host
+-- took is forgotten once its removal is here, or after ACK_MS.
+local function client_spend_tick()
+	if next(spend.wait) == nil and next(spend.done) == nil then return end
+	local now = time_global()
+	for id, till in pairs(spend.done) do
+		if now >= till or not level.object_by_id(id) then spend.done[id] = nil end
+	end
+	for id, w in pairs(spend.wait) do
+		if now >= w.at then
+			spend.wait[id] = nil
+			log("no answer to the %s of item %d in %d s: spent here (a host of build 56?)", w.kind, id, spend.ACK_MS / 1000)
+			spend_here(level.object_by_id(id), w.kind)
+			if w.kind == "fuel" then wrapper_fuel(w.lamp) end
+		end
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -258,9 +417,22 @@ local function host_place(t, from)
 	local ok, res = pcall(orig_create, section, pos, ang, who:level_vertex_id(), who:game_vertex_id())
 	local obj_id = ok and (type(res) == "number" and res or (res and res.id)) or nil
 	if not obj_id then return refuse("hf_place", from, "the mod did not create " .. section .. " (" .. tostring(res) .. ")") end
+	-- Round 3 (R2-B3): the furniture's data is built here, as the mod's placeable_furniture.transfer_item_data does: the host's own
+	-- data of the item, then the item's condition when it is online. Nothing of the client's text (t.d, which a build 57 client
+	-- still sends): bind_light_furniture reads condition as the fuel, is_world_obj as endless fuel and is_on as lit, so a forged
+	-- table made a lit lamp with endless fuel past hf_lamp_tool and hf_refuel_item. is_world_obj is the map's (hf_map_objects sets
+	-- it on the host) and a lamp is lit only through hf_lamp: neither ever comes with an item. The condition is the host's copy of
+	-- his item, which his machine reports (coop_items WP9).
 	local hm = C().mod("hf_obj_manager")
-	local data = scalar_table(C().deser(t.d))
-	if data and next(data) and hm and hm.update_data then pcall(hm.update_data, obj_id, data) end
+	local get = hm and C().fn(hm, "get_data")
+	local okd, own = false, nil
+	if get then okd, own = pcall(get, item_id) end
+	local data = okd and scalar_table(own) or {}
+	data.is_world_obj, data.is_on = nil, nil
+	local item = level.object_by_id(item_id)
+	local okc, cond = pcall(function() return item and item:condition() end)
+	if okc and type(cond) == "number" and cond == cond then data.condition = math.max(0, math.min(1, cond)) end
+	if next(data) and hm and hm.update_data then pcall(hm.update_data, obj_id, data) end
 	if hm and hm.delete_data then pcall(hm.delete_data, item_id) end
 	alife_release_id(item_id)
 	st.place = st.place + 1
@@ -409,28 +581,24 @@ local function install_furniture()
 					local d = hm and hm.get_data and hm.get_data(obj_id)
 					local turning_on = not (type(d) == "table" and d.is_on)
 					if turning_on then
-						-- Tools and matches the lamp needs come from this player's inventory.
+						-- Tools and matches the lamp needs come from this player's inventory: the first one he holds, as the mod
+						-- picks it. The host checks and spends it (round 2): nothing is spent here before its answer.
 						local se = alife_object(obj_id)
-						local sec = se and se:section_name()
-						local tools = sec and parse_list and parse_list(ini_sys, sec, "require_tool") or {}
-						if sec and ini_sys:r_bool_ex(sec, "require_matches", false) then
-							tools[#tools + 1] = "matches"
-							tools[#tools + 1] = "box_matches"
-						end
+						local tools = lamp_tools(se and se:section_name())
 						if #tools > 0 then
-							local used = false
+							-- round 3 (R2-S1): one he holds that waits for no answer and was not taken by the host already
+							local busy = false
 							for _, tool in ipairs(tools) do
-								local it = db.actor:object(tool)
+								local it, b = spend.free_item(tool)
 								if it then
-									if utils_item.is_degradable(it) then utils_item.degrade(it, 0.05) else utils_item.discharge(it) end
-									used = true
-									break
+									client_ask("hf_lamp", { o = C().hid(obj_id), on = true }, it, "tool", obj_id)
+									return
 								end
+								busy = busy or b
 							end
-							if not used then
-								C().hud("st_ui_campfire_prereq", "You need a tool to light this.")
-								return
-							end
+							-- his only tool is on its way to the host's answer or its removal: nothing (as a second click did before)
+							if not busy then C().hud("st_ui_campfire_prereq", "You need a tool to light this.") end
+							return
 						end
 					end
 					C().to_host("hf_lamp", { o = C().hid(obj_id), on = turning_on })
@@ -442,7 +610,35 @@ local function install_furniture()
 			local id = C().lid(tonumber(t.o))
 			local obj = type(id) == "number" and level.object_by_id(id)
 			local who = C().avatar(from)
-			if not (obj and who and near(obj, who)) then return refuse("hf_lamp", from, "unknown or far lamp") end
+			local iid = tonumber(t.i)
+			local function answer(r)
+				if iid and r then C().to_peer(from, "hf_item_r", { i = iid, r = r }) end
+			end
+			if not (obj and who and near(obj, who)) then
+				answer("no")
+				return refuse("hf_lamp", from, "unknown or far lamp")
+			end
+			local r = nil
+			local tools = t.on == true and lamp_tools(obj:section()) or {}
+			if #tools > 0 then
+				-- round 2: the tool the lamp needs is this player's (named; a build 56 client names none: one among his items)
+				local item, why = nil, nil
+				local ok = false
+				if iid then
+					item, why = carried(iid, who, tools)
+					if item then ok, why = spent_since(item, "tool") end
+				else
+					why = "he holds none of " .. table.concat(tools, ", ")
+					for _, tool in ipairs(tools) do
+						if who:object(tool) then ok, why = true, nil break end
+					end
+				end
+				if not trust("hf_lamp_tool", ok, "player %s (#%s) lit lamp %s with item %s: %s", tostring(C().nick_of(from)),
+					tostring(from), tostring(id), tostring(iid), tostring(why)) then
+					return answer("no")
+				end
+				r = (ok and item) and host_spend(item, "tool") or "left" -- a failed check in "log": his copy, as build 56
+			end
 			local hm = C().mod("hf_obj_manager")
 			if hm and hm.update_data then
 				hm.update_data(id, { is_on = t.on == true })
@@ -450,19 +646,18 @@ local function install_furniture()
 				C().as_player(who, orig_toggle, id)
 			end
 			st.lamp = st.lamp + 1
+			answer(r)
 		end, "host")
 
 		C().wrap(light.UIFurnitureLight, "Refuel", "ui_furniture_light.UIFurnitureLight.Refuel", function(orig)
 			return function(self, ...)
 				if not C().is_client() then return orig(self, ...) end
 				local fuel = ini_sys:r_string_ex(self.section or "", "fuel_section") or "charcoal"
-				local item = db.actor:object(fuel)
+				local item, busy = spend.free_item(fuel) -- round 3 (R2-S1): not one that waits or that the host took already
 				if item then
-					alife_release(item) -- this player's own item: the host removes it for everybody
-					C().to_host("hf_refuel", { o = C().hid(self.light_id) })
-					local w = wrapper_of(self.light_id)
-					if w then w.fuel = 1.0 end -- the binder keeps fuel in itself
-				else
+					-- round 2: the host checks and spends the fuel and answers; the lamp is full here at its answer
+					client_ask("hf_refuel", { o = C().hid(self.light_id) }, item, "fuel", self.light_id)
+				elseif not busy then
 					C().hud("st_coop_mods_hf_no_fuel", "I don't have any fuel for this.")
 				end
 				pcall(function() self:Close() end)
@@ -472,11 +667,39 @@ local function install_furniture()
 			local id = C().lid(tonumber(t.o))
 			local obj = type(id) == "number" and level.object_by_id(id)
 			local who = C().avatar(from)
-			if not (obj and who and near(obj, who)) then return refuse("hf_refuel", from, "unknown or far lamp") end
+			local iid = tonumber(t.i)
+			local function answer(r)
+				if iid and r then C().to_peer(from, "hf_item_r", { i = iid, r = r }) end
+			end
+			if not (obj and who and near(obj, who)) then
+				answer("no")
+				return refuse("hf_refuel", from, "unknown or far lamp")
+			end
+			local r = nil
+			if t.i == nil then
+				-- a client of build 56: he removed the fuel himself
+				if not trust("hf_refuel_item_id", false, "player %s (#%s) refuelled lamp %s without the fuel item's id (a build 56 "
+					.. "client?)", tostring(C().nick_of(from)), tostring(from), tostring(id)) then
+					return
+				end
+			else
+				local fuel = ini_sys:r_string_ex(obj:section(), "fuel_section") or "charcoal"
+				local item, why = carried(iid, who, { fuel })
+				local ok = false
+				if item then ok, why = spent_since(item, "fuel") end
+				if not trust("hf_refuel_item", ok, "player %s (#%s) refuelled lamp %s with item %s: %s", tostring(C().nick_of(from)),
+					tostring(from), tostring(id), tostring(iid), tostring(why)) then
+					return answer("no")
+				end
+				r = ok and host_spend(item, "fuel") or "left" -- a failed check in "log": his copy, as build 56
+			end
 			local w = wrapper_of(id)
 			local hm = C().mod("hf_obj_manager")
 			if w then w.fuel = 1.0 elseif hm and hm.update_data then hm.update_data(id, { condition = 1.0 }) end
+			answer(r)
 		end, "host")
+		C().on("hf_item_r", client_item_answer, "client")
+		RegisterScriptCallback("actor_on_update", client_spend_tick)
 		C().set_limit("hf_lamp", 6, 2)
 	end
 
