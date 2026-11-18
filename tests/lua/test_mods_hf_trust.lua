@@ -165,19 +165,46 @@ local m2 = held("matches")
 light(l1, m2)
 check(HF_DATA[l1:id()].is_on == true and released(m2:id()), "an honest light still goes")
 
-print("== a client of build 56 (no id): his matches are looked for among his items")
+-- Round 4 (blocker 2 of the round 3 review): a light without the tool's id is its own check, hf_lamp_tool_id, that always
+-- fails (as hf_refuel_item_id and mine_item_id): "log" lights it as today, "refuse" lights nothing. Mixed builds cannot connect
+-- (the content manifest), so no honest client sends one; the build 56 branch passed hf_lamp_tool and spent nothing anywhere.
+print("== a light without the tool's id (a client of build 56): its own check hf_lamp_tool_id")
 T.reset_for_test({ default = "log" })
 off(l1)
 local before = answers()
 local m3 = held("matches")
 light(l1, nil)
-check(HF_DATA[l1:id()].is_on == true and counter("hf_lamp_tool").failed == 0 and answers() == before,
-	"he holds matches: lit, nothing answered (his machine spent them, as build 56 did)")
-check(not released(m3:id()), "the host removes nothing for a build 56 client")
+check(HF_DATA[l1:id()].is_on == true and answers() == before,
+	"log mode: lit as today, nothing answered (his machine spent them, as build 56 did)")
+check(counter("hf_lamp_tool_id").failed == 1 and counter("hf_lamp_tool").checked == 0
+	and (trust_line("hf_lamp_tool_id") or ""):find("without", 1, true) ~= nil,
+	"logged under hf_lamp_tool_id (not passed through hf_lamp_tool): " .. tostring(trust_line("hf_lamp_tool_id")))
+check(not released(m3:id()), "the host removes nothing for a request without an id")
 release_id(m3:id())
 off(l1)
 light(l1, nil)
-check(counter("hf_lamp_tool").failed == 1 and HF_DATA[l1:id()].is_on == true, "no tool among his items: logged, lit as today")
+check(counter("hf_lamp_tool_id").failed == 2 and HF_DATA[l1:id()].is_on == true, "no tool among his items either: logged, lit as today")
+off(l1)
+from_client("hf_lamp", { o = l1:id(), on = true, i = "a match" })
+check(counter("hf_lamp_tool_id").failed == 3 and counter("hf_lamp_tool").checked == 0 and HF_DATA[l1:id()].is_on == true,
+	"an id that is no number: the same check, log mode lights it")
+-- the review's probe: one box of matches with 2 uses, ten lights without the id, refuse
+T.reset_for_test({ default = "log", hf_lamp_tool_id = "refuse" })
+local bm2 = held("box_matches", 500, { _uses = 2 })
+local lit = 0
+for _ = 1, 10 do
+	off(l1)
+	light(l1, nil)
+	if HF_DATA[l1:id()].is_on == true then lit = lit + 1 end
+end
+check(lit == 0 and counter("hf_lamp_tool_id").refused == 10 and bm2._uses == 2 and not released(bm2:id()),
+	"refuse: ten lights without the id light nothing (lit " .. lit .. ", refused " .. counter("hf_lamp_tool_id").refused .. ")")
+off(l1)
+from_client("hf_lamp", { o = l1:id(), on = true, i = "a match" })
+check(HF_DATA[l1:id()].is_on == false and counter("hf_lamp_tool_id").refused == 11, "refuse: an id that is no number lights nothing")
+light(l1, bm2)
+check(HF_DATA[l1:id()].is_on == true and last_answer() == "left", "refuse: an honest light with the id still goes")
+release_id(bm2:id())
 
 print("== a lamp that needs no tool, a far lamp")
 T.reset_for_test({ default = "log" })

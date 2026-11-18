@@ -161,6 +161,8 @@ check(placed ~= nil and SE[item.id] == nil, "place: object created, the player's
 check(HF_DATA[placed] and HF_DATA[placed].condition == 0.7 and HF_DATA[placed].is_on == nil and HF_DATA[placed].evil == nil,
 	"place: the data is the host's (its item's condition), nothing of the client's (round 3, R2-B3)")
 check(sent("mods.hf_data") ~= nil, "place: furniture data published to clients")
+local function owners() return alife_storage_manager.get_state().coop_stash_owner or {} end
+check(owners()[placed] == 500, "place: its owner is booked, his character (round 4, S5: a mine from his own stash or workbench)")
 local foreign = spawn("furn_item", vec3(0, 0, 0), 0) -- the host's own item
 from_client("hf_place", { i = foreign.id, s = "furn_obj", x = 21, y = 0, z = 0, lv = 1, gv = 2, d = "" })
 check(SE[foreign.id] ~= nil, "place: item of another player refused")
@@ -176,6 +178,7 @@ from_client("hf_pickup", { o = placed })
 check(SE[placed] == nil and CREATED[1] and CREATED[1].sec == "furn_item" and CREATED[1].parent == 500,
 	"pickup: the mod's pickup ran with the player's character as the actor (item into its inventory)")
 check(db.actor:id() == 0, "pickup: identity restored")
+check(owners()[placed] == nil, "pickup: its owner is forgotten")
 
 local _, wb = spawn("furn_obj", vec3(21, 0, 0))
 SENT = {}

@@ -357,5 +357,48 @@ plant(it)
 pump() pump()
 check(#H.created == 3 and has(H.released, 815) and counters(H, "mine_item").failed == 3, "an ordinary box at his feet: accepted as before")
 
+-- Round 4 (S5 of the round 3 review): the owner of a backpack stash, a Hideout Furniture stash and a workbench is booked when it is
+-- made (coop_mods_items, coop_mods_hf: m_data.coop_stash_owner, his character). His own is a container of the 2 m rule; another
+-- player's needs his own opening of it; a stash with no owner booked (made before build 57) as in round 3; a workbench box with no
+-- owner booked is an ordinary box, as before.
+print("== S5: a mine in his own stash, by its booked owner")
+box_setup({ default = "log", mine_item = "refuse" })
+local md = { player_created_stashes = { [720] = "itm_backpack", [721] = "itm_backpack" },
+	coop_stash_owner = { [720] = 500, [721] = 600, [722] = 500, [723] = 600, [730] = 500, [732] = 600 },
+	workshop_stashes = { [730] = 731, [732] = 733, [734] = 735 } }
+H.env.alife_storage_manager = { get_state = function() return md end }
+H.env.ini_sys = { r_string_ex = function(_, sec, key)
+	if sec == "hf_stash" and key == "placeable_type" then return "stash" end
+end }
+local function at_feet(id, sec) H.add(make_obj(id, 11, 0, 1, { _section = sec or "inv_box", _box = true })) end
+local function mine_from(holder, iid)
+	it = item(iid, "mine_new", holder)
+	plant(it)
+	pump() pump()
+	return has(H.released, iid)
+end
+at_feet(720)
+check(mine_from(720, 820) and counters(H, "mine_item").failed == 0,
+	"his own backpack stash at his feet, never opened (more than 10 s after he did): accepted")
+at_feet(721)
+check(not mine_from(721, 821) and counters(H, "mine_item").failed == 1
+	and (trust_log(H, "stash") or ""):find("721", 1, true) ~= nil, "another player's backpack stash at his feet: refused")
+at_feet(722, "hf_stash")
+check(mine_from(722, 822) and counters(H, "mine_item").failed == 1, "his own Hideout Furniture stash at his feet: accepted")
+at_feet(723, "hf_stash")
+check(not mine_from(723, 823) and counters(H, "mine_item").failed == 2, "another player's Hideout Furniture stash: refused")
+at_feet(731)
+check(mine_from(731, 831) and counters(H, "mine_item").failed == 2, "the box of his own workbench at his feet: accepted")
+at_feet(733)
+check(not mine_from(733, 833) and counters(H, "mine_item").failed == 3
+	and (trust_log(H, "workbench") or ""):find("733", 1, true) ~= nil, "the box of another player's workbench at his feet: refused")
+at_feet(735)
+check(mine_from(735, 835) and counters(H, "mine_item").failed == 3, "the box of a workbench with no owner booked: an ordinary box, as before")
+H.fire("coop_on_container_opened", 1, 733)
+check(mine_from(733, 836) and counters(H, "mine_item").failed == 3, "another player's workbench box he opened a moment ago: accepted")
+md.player_created_stashes[724] = "itm_backpack"
+at_feet(724)
+check(not mine_from(724, 824) and counters(H, "mine_item").failed == 4, "a backpack stash with no owner booked: as in round 3, refused")
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

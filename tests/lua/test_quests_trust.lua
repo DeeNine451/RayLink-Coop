@@ -67,7 +67,15 @@ local function setup_world(M)
 	e.mlr_utils = { spawn_item = function(name) M.spawned[#M.spawned + 1] = name end }
 	-- the rest of the white list that makes things (utils_slht, xr_effects, tasks_defense, the bridge tutorial, Crossfire)
 	M.made_fx = {}
-	local function made(name) return function() M.made_fx[name] = (M.made_fx[name] or 0) + 1 end end
+	local function made(name)
+		return function()
+			M.made_fx[name] = (M.made_fx[name] or 0) + 1
+			if M.fx_raise == name then -- what it made stays: an error after it (Crossfire: add_task_companion after create_squad)
+				M.fx_raise = nil
+				error("an error after " .. name .. " was made")
+			end
+		end
+	end
 	e.xr_effects.ht_init_second_task_2 = made("ht_init_second_task_2")
 	e.xr_effects.ht_add_mine = made("ht_add_mine")
 	e.xr_effects.jup_b219_restore_gate = made("jup_b219_restore_gate")
@@ -665,6 +673,255 @@ do
 		"2 uses short: the group gives 2, the task asks for them (no line)")
 	Hm.tm.task_info.vodka_t = nil
 	Cm.env.IsItem = function() return nil end
+end
+
+-------------------------------------------------------------------------------
+-- Round 4 (blocker 3 of the round 3 review): coop_tvd lets a client write host pstor keys of the shared prefixes (drx_sl_, ...).
+-- need_of and delivery_verdict read a fact only where its value is one the host itself wrote: its own logic (the offers it
+-- makes, on_init, status functors) or a give it ran with the taker's vars; a client's coop_tvd write never makes one. A client's
+-- write of a fetch / target key of a running task he did not take is its own check, task_var_write.
+-------------------------------------------------------------------------------
+local function var_from_client(k, v)
+	Cm.env.save_var(Cm.actor, k, v) -- the client's own save_var: coop_tasks routes a shared key to the host (coop_tvd)
+	pump()
+end
+local function hps() return Hm.env.db.storage[0].pstor end
+
+print("== B3: a running DRX task's fetch written by a client does not make it ask for rifles (the review's probe)")
+do
+	fresh()
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse" })
+	Hm.tm.task_info.drx_sl_probe_task = { id = "drx_sl_probe_task", stage = 0 } -- any running DRX task he sees
+	Hm.actor._inv = {}
+	for _ = 1, 5 do Hm.give_item(Hm.actor, "wpn_gauss") end
+	ask("take", { s = "wpn_gauss", n = 5 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 5, "before the write: refused")
+	var_from_client("drx_sl_probe_task_fetch", "wpn_gauss")
+	var_from_client("drx_sl_probe_task_fetch_count", 1000)
+	check(hps().drx_sl_probe_task_fetch == "wpn_gauss" and hps().drx_sl_probe_task_fetch_count == 1000,
+		"(the write reached the host's pstor: task_var_write is on log, and nobody is known to have taken this task)")
+	ask("take", { s = "wpn_gauss", n = 5 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 5, "refuse: a fetch a client wrote makes no task ask for the rifles (5 left)")
+	Hm.tm.task_info.drx_sl_probe_task = nil
+end
+
+print("== B3: task_var_write, a client's write of a fetch key of a running task another player took")
+do
+	fresh()
+	Hm.ini.drx_sl_host_t = {}
+	Cm.ini.drx_sl_host_t = {}
+	Hm.talking = true -- the host's own dialog gives it: his task
+	Hm.tm:give_task("drx_sl_host_t", 750)
+	Hm.talking = false
+	Hm.env.save_var(Hm.actor, "drx_sl_host_t_fetch", "bread") -- what the host's own offer made
+	Hm.env.save_var(Hm.actor, "drx_sl_host_t_fetch_count", 1)
+	var_from_client("drx_sl_host_t_fetch", "wpn_gauss")
+	local line = last_trust(Hm, "task_var_write")
+	check(trust_lines(Hm, "task_var_write") == 1 and line:find("anna", 1, true) and line:find("drx_sl_host_t_fetch", 1, true)
+		and line:find("would be refused", 1, true), "logged under task_var_write, names the player and the key: " .. line)
+	check(hps().drx_sl_host_t_fetch == "wpn_gauss", "log mode: written as before")
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse" })
+	Hm.actor._inv = {}
+	Hm.give_item(Hm.actor, "wpn_gauss")
+	ask("take", { s = "wpn_gauss", n = 1 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 1, "quest_take refuse: the rifle it wrote is no fact of the task")
+	Hm.env.save_var(Hm.actor, "drx_sl_host_t_fetch", "bread")
+	Hm.env.coop_trust.reset_for_test({ default = "log", task_var_write = "refuse" })
+	var_from_client("drx_sl_host_t_fetch", "wpn_gauss")
+	var_from_client("drx_sl_host_t_fetch_count", 50)
+	check(hps().drx_sl_host_t_fetch == "bread" and hps().drx_sl_host_t_fetch_count == 1,
+		"task_var_write refuse: the host's pstor keeps its own values")
+	-- not a fact key, a key of no running task, a counter of the givers: no check
+	local before = counted("task_var_write")
+	var_from_client("drx_sl_host_t_note", 1)
+	var_from_client("drx_sl_other_task_fetch", "salt")
+	var_from_client("drx_sl_task_giver_750", 2)
+	check(counted("task_var_write") == before and hps().drx_sl_other_task_fetch == "salt" and hps().drx_sl_host_t_note == 1,
+		"another key of the task, a task that does not run, a giver counter: not judged, written")
+	Hm.env.coop_trust.reset_for_test(nil)
+	Hm.tm.task_info.drx_sl_host_t = nil
+end
+
+print("== B3: the honest writers keep their facts (a client's give with its vars, DRX local offers)")
+do
+	fresh()
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse", task_var_write = "refuse" })
+	-- a client's give carries the vars his dialog prepared (the host's offer, or the stock local generation): the host's give writes them
+	for _, id in ipairs({ "fetch_c", "drx_sl_local_t", "drx_sl_nofetch_t" }) do
+		Hm.ini[id] = {}
+		Cm.ini[id] = {}
+	end
+	Cm.env.save_var(Cm.actor, "fetch_c_fetch", "medkit")
+	Cm.env.save_var(Cm.actor, "fetch_c_fetch_count", 2)
+	pump()
+	check(hps().fetch_c_fetch == nil, "(a key of no shared prefix stays on the client until the give)")
+	Cm.tm:give_task("fetch_c", 750)
+	pump()
+	check(Hm.tm.task_info.fetch_c ~= nil and hps().fetch_c_fetch == "medkit", "the give ran on the host with his vars")
+	Hm.actor._inv = {}
+	for _ = 1, 2 do Hm.give_item(Hm.actor, "medkit") end
+	ask("take", { s = "medkit", n = 2 })
+	check(Hm.count(Hm.actor, "medkit") == 0 and trust_lines(Hm, "quest_take") == 0, "refuse: the medkits his give asks for are taken")
+	-- DRX's local offer: the client's dialog writes the shared fetch through coop_tvd before the give, the give carries it again
+	var_from_client("drx_sl_local_t_fetch", "vodka")
+	var_from_client("drx_sl_local_t_fetch_count", 1)
+	check(counted("task_var_write") == 0, "the offer's write of a task not running yet: not judged")
+	Cm.tm:give_task("drx_sl_local_t", 750)
+	pump()
+	Hm.give_item(Hm.actor, "vodka")
+	ask("take", { s = "vodka", n = 1 })
+	check(Hm.count(Hm.actor, "vodka") == 0 and trust_lines(Hm, "quest_take") == 0, "refuse: the vodka of a DRX offer he took is taken")
+	-- a fetch written only by a client's coop_tvd, then the task given by the host's own dialog with no fetch of its own
+	var_from_client("drx_sl_nofetch_t_fetch", "wpn_gauss")
+	var_from_client("drx_sl_nofetch_t_fetch_count", 10)
+	Hm.talking = true
+	Hm.tm:give_task("drx_sl_nofetch_t", 750)
+	Hm.talking = false
+	Hm.give_item(Hm.actor, "wpn_gauss")
+	ask("take", { s = "wpn_gauss", n = 1 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 1 and trust_lines(Hm, "quest_take") == 1,
+		"refuse: a fetch that only a client's coop_tvd wrote is no fact of the host's task")
+	-- the host's save keeps which values are its own: after a load the client's value is still none of its facts
+	local m = {}
+	fire(Hm, "save_state", m)
+	local listed = {}
+	for _, k in ipairs(m.coop_task_facts or {}) do listed[k] = true end
+	check(listed.fetch_c_fetch and listed.drx_sl_local_t_fetch and not listed.drx_sl_nofetch_t_fetch,
+		"the host's save lists its own facts (m_data.coop_task_facts), not the client's")
+	load_script(Hm, "coop_quests_trust").on_game_start()
+	fire(Hm, "load_state", m)
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse" })
+	ask("take", { s = "wpn_gauss", n = 1 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 1, "after the host's load: the client's fetch is still no fact")
+	Hm.actor._inv = {} -- (the harness's alife_release_id compares items with ==: the item taken is the first one)
+	Hm.give_item(Hm.actor, "vodka")
+	ask("take", { s = "vodka", n = 1 })
+	check(Hm.count(Hm.actor, "vodka") == 0 and trust_lines(Hm, "quest_take") == 2,
+		"after the load: the host's own fact holds, the vodka it asks for is taken (the ledger of a loaded task starts anew)")
+	Hm.give_item(Hm.actor, "wpn_gauss")
+	-- a save from before this build keeps no list: no knowledge, every value of its pstor counts
+	fire(Hm, "load_state", {})
+	ask("take", { s = "wpn_gauss", n = 1 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 0, "an old save without the list: its values count (no refusal for lack of knowledge)")
+	Hm.env.coop_trust.reset_for_test(nil)
+	for _, id in ipairs({ "fetch_c", "drx_sl_local_t", "drx_sl_nofetch_t" }) do Hm.tm.task_info[id] = nil end
+end
+
+print("== B3: a delivery's target written by a client is no target")
+do
+	fresh()
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_delivery_place = "refuse" })
+	Hm.tm.task_info.drx_sl_dlv_t = { id = "drx_sl_dlv_t", stage = 1, status_functor = "delivery_task" }
+	Hm.env.save_var(Hm.actor, "drx_sl_dlv_t", { item_1_sec = "parcel_x", target_id = 760 })
+	var_from_client("drx_sl_dlv_t", { item_1_sec = "parcel_x", target_id = 740 })
+	proxy._pos = vec(4, 0, 0)
+	Hm.env.sim_offline_combat.task_squads[741] = true
+	ask("delivery", { n = 740 })
+	check(Hm.env.sim_offline_combat.task_squads[741] == true and trust_lines(Hm, "quest_delivery_place") == 1,
+		"refuse: a hand-over to the NPC a client wrote in as the target is refused")
+	Hm.env.coop_trust.reset_for_test(nil)
+	Hm.tm.task_info.drx_sl_dlv_t = nil
+end
+
+-------------------------------------------------------------------------------
+-- Round 4 (S2 of the round 3 review): a counted effect the host's own logic runs (its condlists, the host player's dialog, an
+-- on_init) is noted as a client's ask is: a client cannot have the same thing made a second time.
+-------------------------------------------------------------------------------
+print("== S2: what the host's own logic made counts once per world")
+do
+	fresh()
+	fire(Hm, "load_state", {})
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_spawn_once = "refuse", quest_effect_once = "refuse" })
+	local n0 = #Hm.spawned
+	Hm.env.xr_effects.spawn_item_at_pos(Hm.actor, nil, { "wpn_gauss_quest" }) -- the host's own condlist runs it
+	check(#Hm.spawned == n0 + 1, "(the host's own logic made the Gauss rifle)")
+	ask("fx", { f = "spawn_item_at_pos", p1 = "wpn_gauss_quest" })
+	check(#Hm.spawned == n0 + 1 and trust_lines(Hm, "quest_spawn_once") == 1,
+		"a client's ask of the same rifle after it: refused, made once")
+	-- the host's own run that raised made nothing: not noted, a client's ask holds
+	Hm.spawn_raise = true
+	check(not pcall(Hm.env.xr_effects.spawn_item_at_pos, Hm.actor, nil, { "drx_x19_documents" }), "(the host's own run raised)")
+	ask("fx", { f = "spawn_item_at_pos", p1 = "drx_x19_documents" })
+	check(Hm.spawned[#Hm.spawned] == "drx_x19_documents" and trust_lines(Hm, "quest_spawn_once") == 1,
+		"the host's own run raised: nothing noted, a client's ask makes it")
+	-- an mlr set of the host player's dialog, an effect of the rest of the white list
+	Hm.env.mlr_utils.spawn_item("spawn_host_set")
+	ask("fx", { f = "mlr_spawn_item", p1 = "spawn_host_set" })
+	check(trust_lines(Hm, "quest_spawn_once") == 2, "an mlr set the host's own dialog made: a client's ask refused")
+	local mines = Hm.made_fx.ht_add_mine or 0
+	Hm.env.xr_effects.ht_add_mine(Hm.actor, nil, {})
+	ask("fx", { f = "ht_add_mine" })
+	check((Hm.made_fx.ht_add_mine or 0) == mines + 1 and trust_lines(Hm, "quest_effect_once") == 1,
+		"the ambush mine the host's own logic made: a client's ask refused")
+	-- a section the effect does not make is no key
+	Hm.env.xr_effects.spawn_item_at_pos(Hm.actor, nil, { "junk_of_the_host" })
+	local m = {}
+	fire(Hm, "save_state", m)
+	local listed = {}
+	for _, k in ipairs(m.coop_quest_spawns or {}) do listed[k] = true end
+	check(listed["spawn_item_at_pos:wpn_gauss_quest"] and listed["mlr_spawn_item:spawn_host_set"] and listed.ht_add_mine
+		and not listed["spawn_item_at_pos:junk_of_the_host"], "the host's save lists what its own logic made, not a section it cannot make")
+	fire(Hm, "load_state", {})
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+-------------------------------------------------------------------------------
+-- Round 4 (S3 of the round 3 review): Crossfire's companion squad. The guard of this Lua state (before round 1) stays hard; the
+-- saved list's refusal after a load follows coop_trust (quest_effect_once): "log" lets it through and logs it, as before round 1,
+-- whose guard a load reset; "refuse" refuses it. The guard closes before the squad is made: an error after it exists closes it.
+-------------------------------------------------------------------------------
+-- a new Lua state of the host (a load): coop_quests_story anew, its guard open
+local function story_anew()
+	local s = load_script(Hm, "coop_quests_story")
+	s.on_game_start()
+	local cbs = Hm.callbacks.actor_on_first_update
+	cbs[#cbs]() -- its install
+	return s
+end
+print("== S3: after a load the squad made before is refused by the check, in its mode")
+do
+	fresh()
+	story_anew()
+	fire(Hm, "load_state", { coop_quest_spawns = { "isg_companion_squad" } })
+	local n0 = Hm.made_fx.isg_companion_squad or 0
+	Cm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad()
+	pump()
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1 and trust_lines(Hm, "quest_effect_once") == 1
+		and last_trust(Hm, "quest_effect_once"):find("let through", 1, true) ~= nil,
+		"log: made again after the load, as before round 1, and logged as one the check would refuse")
+	Cm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad()
+	pump()
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1 and trust_lines(Hm, "quest_effect_once") == 1,
+		"a second ask in the same Lua state: the hard guard, no squad and no 'let through' line")
+	story_anew()
+	fire(Hm, "load_state", { coop_quest_spawns = { "isg_companion_squad" } })
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_effect_once = "refuse" })
+	Cm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad()
+	pump()
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1 and trust_lines(Hm, "quest_effect_once") == 2
+		and last_trust(Hm, "quest_effect_once"):find("refused", 1, true) ~= nil, "refuse: after the load, refused by the check")
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+print("== S3: an error after the squad exists still closes the guard and notes it")
+do
+	fresh()
+	story_anew()
+	fire(Hm, "load_state", {})
+	local n0 = Hm.made_fx.isg_companion_squad or 0
+	Hm.fx_raise = "isg_companion_squad"
+	Cm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad()
+	pump()
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1 and Hm.fx_raise == nil, "(the squad was made, then the effect raised)")
+	Cm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad()
+	pump()
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1, "a second ask: refused by the guard, no second squad")
+	local m = {}
+	fire(Hm, "save_state", m)
+	local listed = {}
+	for _, k in ipairs(m.coop_quest_spawns or {}) do listed[k] = true end
+	check(listed.isg_companion_squad == true, "the host's save keeps it: a load does not open it either")
+	fire(Hm, "load_state", {})
 end
 
 print(string.format("== %d passed, %d failed", PASSES, FAILS))

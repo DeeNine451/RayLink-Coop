@@ -296,13 +296,28 @@ local function npc_host_id(actor, npc)
 	return nil
 end
 
+-- Round 4 (S2 of the round 3 review): `fn` run by this process's own logic (not a client's ask: host_fx runs fx_orig): a counted
+-- effect that returned without an error is noted (coop_quests_trust.note_run), so a client cannot have it made again.
+local function noted_run(name, fn)
+	local function after(p, ...)
+		local qt = qc.mod("coop_quests_trust")
+		if qt and type(qt.note_run) == "function" then
+			local ok, err = pcall(qt.note_run, name, params_flat(p))
+			if not ok then qc.report(TAG, "note " .. name, err) end
+		end
+		return ...
+	end
+	return function(actor, npc, p, ...) return after(p, fn(actor, npc, p, ...)) end
+end
+
 local function patch_host_effects()
 	local xe = qc.mod("xr_effects")
 	if not xe then return end
 	for _, name in ipairs(HOST_EFFECTS) do
-		local orig = xe[name]
-		if type(orig) == "function" then
-			fx_orig[name] = orig
+		local raw = xe[name]
+		if type(raw) == "function" then
+			fx_orig[name] = raw
+			local orig = noted_run(name, raw)
 			xe[name] = function(actor, npc, p, ...)
 				if not qc.is_client() then return orig(actor, npc, p, ...) end
 				if qc.in_condlist() then return end -- the host's logic makes it
@@ -316,8 +331,10 @@ local function patch_host_effects()
 
 	local mu = qc.mod("mlr_utils")
 	if type(mu) == "table" and type(mu.spawn_item) == "function" then
-		local orig = mu.spawn_item
-		fx_orig.mlr_spawn_item = function(_, _, p) return orig(p[1]) end
+		local raw = mu.spawn_item
+		fx_orig.mlr_spawn_item = function(_, _, p) return raw(p[1]) end
+		local own = noted_run("mlr_spawn_item", function(_, _, p, ...) return raw(p[1], ...) end)
+		local function orig(name, ...) return own(nil, nil, { name }, ...) end
 		mu.spawn_item = function(name, ...)
 			if not qc.is_client() then return orig(name, ...) end
 			if qc.in_condlist() then return end
@@ -330,8 +347,10 @@ local function patch_host_effects()
 
 	local dm = qc.mod("dialogs_mlr")
 	if type(dm) == "table" and type(dm.give_task_fanat_training_2) == "function" then
-		local orig = dm.give_task_fanat_training_2
-		fx_orig.fanat_training_2 = function() return orig() end
+		local raw = dm.give_task_fanat_training_2
+		fx_orig.fanat_training_2 = function() return raw() end
+		local own = noted_run("fanat_training_2", function(_, _, _, ...) return raw(...) end)
+		local function orig(...) return own(nil, nil, nil, ...) end
 		dm.give_task_fanat_training_2 = function(...)
 			if not qc.client_live() then return orig(...) end
 			-- the task and the artefact in Fanatic's stash: the host does both, the task is this player's
@@ -342,8 +361,10 @@ local function patch_host_effects()
 
 	local dl = qc.mod("dialogs_lostzone")
 	if type(dl) == "table" and type(dl.spawn_pass_hall_isg_companion_squad) == "function" then
-		local orig = dl.spawn_pass_hall_isg_companion_squad
-		fx_orig.isg_companion_squad = function() return orig() end
+		local raw = dl.spawn_pass_hall_isg_companion_squad
+		fx_orig.isg_companion_squad = function() return raw() end
+		local own = noted_run("isg_companion_squad", function(_, _, _, ...) return raw(...) end)
+		local function orig(...) return own(nil, nil, nil, ...) end
 		dl.spawn_pass_hall_isg_companion_squad = function(...)
 			if not qc.client_live() then return orig(...) end
 			-- Crossfire (dialogs_lostzone_hb.xml): the squad is the host's to make, nothing retries a refused one
@@ -366,9 +387,12 @@ local function host_fx(from, t)
 	-- of their task (coop_quests_trust; the host's save keeps the list). Noted after the effect returned without an error.
 	local qt = qc.mod("coop_quests_trust")
 	local isg = t.f == "isg_companion_squad"
-	-- nothing on the host stops a repeat of this client's dialog action: never twice, also while the check only logs. Asked
-	-- before the check (round 3, R2-S4), so the check writes no "let through" line for what is refused here anyway.
-	if isg and (isg_squad_made or (qt and qt.was_made("isg_companion_squad"))) then
+	-- nothing on the host stops a repeat of this client's dialog action: never twice in this Lua state, also while the check only
+	-- logs (the guard from before round 1). Asked before the check (round 3, R2-S4), so the check writes no "let through" line for
+	-- what is refused here anyway. Round 4 (S3 of the round 3 review): after a load the squad made before is the saved list's
+	-- (coop_quests_trust), and refusing it is the check's, quest_effect_once: "log" lets it through and logs it (as before round 1,
+	-- whose guard a load reset), "refuse" refuses it.
+	if isg and isg_squad_made then
 		stats.isg_again = stats.isg_again + 1
 		if stats.isg_again <= 8 or stats.isg_again % 64 == 0 then
 			qc.log(TAG, "! isg_companion_squad (Crossfire's companions) asked again by %s (#%s): made once already, refused (%d)",
@@ -380,14 +404,20 @@ local function host_fx(from, t)
 	if qt then pass, ticket = qt.check_spawn(from, t.f, t) end
 	if not pass then return end
 	stats.fx_run = stats.fx_run + 1
-	local tasks = isg and qc.mod("coop_tasks") -- a companion follows the one who talked
-	if tasks then
-		tasks.with_recipient(from, f, db.actor, npc, params_of(t))
-	else
-		f(db.actor, npc, params_of(t))
-	end
+	-- round 4 (S3): the squad's guard closes before the squad is made (as before round 1), and its key is noted even when the
+	-- effect raises: an error after the squad exists (add_task_companion after create_squad) must not leave it open. Any other
+	-- effect is noted only when it returned without an error (a failed spawn can be asked again).
 	if isg then isg_squad_made = true end
-	if qt then qt.note_spawn(ticket) end
+	local tasks = isg and qc.mod("coop_tasks") -- a companion follows the one who talked
+	local ok, err = pcall(function()
+		if tasks then
+			tasks.with_recipient(from, f, db.actor, npc, params_of(t))
+		else
+			f(db.actor, npc, params_of(t))
+		end
+	end)
+	if qt and (ok or isg) then qt.note_spawn(ticket) end
+	if not ok then error(err, 0) end
 end
 
 -------------------------------------------------------------------------------
@@ -494,9 +524,10 @@ local function patch_new_storylines()
 		end
 	end
 	local client_side = xe.ht_add_mine
+	local own_mine = noted_run("ht_add_mine", mine) -- round 4 (S2): the host's own mine counts once per world
 	xe.ht_add_mine = function(actor, npc, p, ...)
 		if qc.is_client() then return client_side(actor, npc, p, ...) end
-		return mine(actor, npc, p)
+		return own_mine(actor, npc, p)
 	end
 end
 

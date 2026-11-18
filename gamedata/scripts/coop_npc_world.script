@@ -181,17 +181,37 @@ local function is_container(id)
 	return ok and alive == false
 end
 
--- Host (round 3, R2-S5): is container `id` (object o) a player's personal stash that is not player `from`'s own? A backpack stash
--- (coop_mods_items books it in m_data.player_created_stashes, no owner kept), a Hideout Furniture stash (placeable_type = stash)
--- or a fallen player's bag (coop_death_stash, its owner's nick in its custom data). Only a bag that names him is his own; a
--- stash that keeps no owner counts as another's. Such a stash is no container of the 2 m rule: a take from it needs his own
--- opening of it (the host's fact), as every honest take from a stash does. -> true, what it is (for the log line)
-local function others_stash(id, o, from)
+-- Host (round 3, R2-S5; round 4, S5 of the round 3 review): is container `id` (object o) a player's personal stash that is not
+-- player `from`'s own (`me`: his character's id here)? A backpack stash (m_data.player_created_stashes), a Hideout Furniture stash
+-- (placeable_type = stash), the box of a workbench (m_data.workshop_stashes: workbench -> box) or a fallen player's bag
+-- (coop_death_stash, its owner's nick in its custom data). The owner of a backpack stash, of placed furniture and so of its
+-- workbench box is booked when it is made (coop_mods_items, coop_mods_hf: m_data.coop_stash_owner, the character that made it):
+-- his own is no other's. A backpack or furniture stash with no owner booked (made before build 57) counts as another's (round 3);
+-- a workbench box with no owner booked is an ordinary box, as before. Another's stash is no container of the 2 m rule: a take
+-- from it needs his own opening of it (the host's fact), as every honest take from a stash does. -> true, what it is (the line)
+local function others_stash(id, o, from, me)
 	local sec = o:section()
-	local okb, book = pcall(function() return alife_storage_manager.get_state().player_created_stashes end)
-	if okb and type(book) == "table" and book[id] ~= nil then return true, "a player's backpack stash" end
+	local okm, md = pcall(function() return alife_storage_manager.get_state() end)
+	md = okm and type(md) == "table" and md or {}
+	local owners = type(md.coop_stash_owner) == "table" and md.coop_stash_owner or {}
+	local function whose(key, what)
+		local c = owners[key]
+		if c ~= nil and c == me then return false end
+		return true, c ~= nil and string.format("%s of character %s", what, tostring(c)) or what
+	end
+	local book = md.player_created_stashes
+	if type(book) == "table" and book[id] ~= nil then return whose(id, "a player's backpack stash") end
 	local okp, kind = pcall(function() return ini_sys:r_string_ex(sec, "placeable_type") end)
-	if okp and kind == "stash" then return true, "a Hideout Furniture stash" end
+	if okp and kind == "stash" then return whose(id, "a Hideout Furniture stash") end
+	local benches = md.workshop_stashes
+	if type(benches) == "table" then
+		for bench, box in pairs(benches) do
+			if box == id then
+				if owners[bench] == nil then return false end
+				return whose(bench, "the box of a workbench")
+			end
+		end
+	end
 	if sec ~= "coop_death_stash" then return false end
 	local okn, owner = pcall(function()
 		local ini = o:spawn_ini()
@@ -230,7 +250,7 @@ local function mine_item_check(iid, sec, who, from)
 	local d = pos and at:distance_to_sqr(pos)
 	-- round 3 (R2-S5): another player's personal stash only through his own opening of it
 	local stash, what = false, nil
-	if pos then stash, what = others_stash(root, level.object_by_id(root), from) end
+	if pos then stash, what = others_stash(root, level.object_by_id(root), from, who:id()) end
 	if d and d <= mine_item.BOX_NEAR_SQR and not stash then return true end
 	local o = mine_item.opened[from]
 	if d and o and o.id == root and time_global() - o.at <= mine_item.OPEN_MS and d <= mine_item.OPEN_REACH_SQR then return true end

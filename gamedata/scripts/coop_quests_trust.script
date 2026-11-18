@@ -27,7 +27,8 @@
 	                        effect without its parameter (missing, empty, over 64 characters) is refused. The list is the host's
 	                        m_data.coop_quest_spawns (save_state / load_state): it is in the host's save of a co-op and in the world
 	                        server's save of a server, and comes back with a load; a save without it means nothing was made. A key
-	                        is noted only after the effect returned without an error: a failed spawn can be asked again.
+	                        is noted only after the effect returned without an error: a failed spawn can be asked again. Round 4:
+	                        the host's own run of a counted effect (its condlists, its player's dialog) is noted too (note_run).
 	                        spawn_item_at_pos counts only the 10 sections it makes (xr_effects pos_itms); an ask of any other
 	                        section makes nothing and is neither counted nor kept. The list is capped (1024 keys, 192 of them
 	                        from a client's parameter) for the save's sake; a new key that cannot be kept is refused, never let
@@ -44,6 +45,9 @@
 	                        server's word on his talk (coop.levels.talking); a point the world server cannot read is not used.
 	  quest_delivery_place  quests.act "delivery" (coop_quests_missions.host_delivery, after talk_partner): the NPC is the target
 	                        (var.target_id) of a running delivery task. The host's (world server's) task manager and pstor.
+
+	The pstor facts (a fetch, its count, a delivery's parcel and target) count only with a value the host wrote itself (round 4,
+	"The task facts the host wrote itself" below): a client's coop_tvd write of a shared key never makes one.
 
 	A task runs while its object is in task_info and has not ended: a task with a repeat timeout keeps its object there after its end
 	(task_manager.task_callback: stage 255, status "completed" / "fail"). One that ended in the last 10 s still counts: a dialog
@@ -134,6 +138,67 @@ local function actor_var(key)
 	if not a then return nil end
 	local ok, v = pcall(load_var, a, key)
 	return ok and v or nil
+end
+
+-------------------------------------------------------------------------------
+-- The task facts the host wrote itself (round 4, blocker 3 of the round 3 review)
+-------------------------------------------------------------------------------
+-- coop_tvd (coop_tasks host_on_var) lets a client write the host's pstor keys of the shared prefixes (drx_sl_, ...), among them
+-- "<task>_fetch", "_fetch_count" and the task's own table (item_1_sec, target_id). The checks read such a fact only when its
+-- value is one this process wrote itself: through save_var, which coop_tasks reports here (note_own) for every value of the
+-- actor's pstor but a client's coop_tvd write (host_on_var writes the pstor itself). The host's own writes are its logic (the
+-- offers it makes for a client: tasks_fetch fetch_func, tasks_delivery on_job_descr; on_init, on_complete, status functors) and
+-- the gives it runs with the vars of the taker's request (ops.give: his dialog prepared them, from the host's offer or from the
+-- stock local generation). A value a client wrote stays no fact until the host writes the key again.
+-- The host's save lists the keys whose value is its own (m_data.coop_task_facts); a save without the list (before round 4)
+-- means no knowledge: every value of its pstor counts. Before the first look at them (a check, a client's write) the values
+-- loaded with the save are taken by that list.
+local own = {} -- fact key -> the value this process wrote last
+local own_saved = nil -- the keys of the save's list (nil: no list)
+local own_ready = false
+
+local function fact_key(k, v)
+	if type(k) ~= "string" then return false end
+	if k:sub(-6) == "_fetch" or k:sub(-12) == "_fetch_count" or k:sub(-10) == "_target_id" then return true end
+	return type(v) == "table" and (rawget(v, "item_1_sec") ~= nil or rawget(v, "target_id") ~= nil)
+end
+
+local function own_init()
+	if own_ready then return end
+	local a = db and db.actor
+	local st = a and db.storage and db.storage[a:id()]
+	if not st then return end
+	own_ready = true
+	for k, v in pairs(st.pstor or {}) do
+		if own[k] == nil and fact_key(k, v) and (own_saved == nil or own_saved[k]) then own[k] = v end
+	end
+end
+
+-- The facts are taken before a client's write can change one (coop_tasks host_on_var calls this first).
+function facts_ready()
+	own_init()
+end
+
+-- coop_tasks: this process's save_var of key `k` of the actor's pstor, `old` its value before. from_give: a var of a give this
+-- process runs (ops.give). A table saved again after a field of it changed (the stock delivery functor's item_1_id, a stash
+-- flag) keeps what it was: its own, or a client's.
+function note_own(k, v, old, from_give)
+	if not (fact_key(k, v) or fact_key(k, old)) then return end
+	own_init()
+	if v == nil then
+		own[k] = nil
+	elseif from_give or not (type(v) == "table" and rawequal(v, old)) then
+		own[k] = v
+	end
+end
+
+-- The value of fact `key` in the host's pstor, when the host wrote it itself; nil otherwise.
+local function fact(key)
+	local v = actor_var(key)
+	if v == nil then return nil end
+	own_init()
+	if rawequal(own[key], v) then return v end
+	return nil
 end
 
 local function now_ms()
@@ -264,10 +329,10 @@ local function ini_lines(id)
 	return got
 end
 
--- How many of `sec` task `id` asks for, nil: it does not ask for it.
+-- How many of `sec` task `id` asks for, nil: it does not ask for it. The pstor facts only as the host wrote them (fact).
 local function need_of(id, sec)
-	if actor_var(id .. "_fetch") == sec then return math_max(1, tonumber(actor_var(id .. "_fetch_count")) or 1) end
-	local var = actor_var(id)
+	if fact(id .. "_fetch") == sec then return math_max(1, tonumber(fact(id .. "_fetch_count")) or 1) end
+	local var = fact(id)
 	if type(var) == "table" and var.item_1_sec == sec then return 1 end
 	local need = nil
 	for _, line in ipairs(ini_lines(id)) do
@@ -474,6 +539,23 @@ function note_spawn(ticket)
 	note_made(ticket)
 end
 
+-- Round 4 (S2 of the round 3 review): this process's own logic ran counted effect `f` (parameters t: p1..) without an error,
+-- outside a client's request (a condlist, the host player's dialog, an on_init): its key is noted as a client's ask notes it, so a
+-- client cannot have the same thing made again. A section the effect does not make, a missing parameter: nothing. Noted on the
+-- process that ran it: the host of a co-op (its save keeps it), the world server of a server; a map server's own run stays on the
+-- map server, whose list the world server does not see.
+function note_run(f, t)
+	local name, key, tid, bad = count_of(f, t)
+	if not name or not key or bad then return end
+	if tid then
+		local run = running_now()
+		local tsk = run and run[tid]
+		if tsk ~= nil and keyable(tsk) then note_spawn({ tsk = tsk, key = key }) end
+		return
+	end
+	note_made(key)
+end
+
 -- Was the thing of this ticket made for this world already?
 function was_made(ticket)
 	return type(ticket) == "string" and made[ticket] == true
@@ -483,6 +565,14 @@ local function save_state(m)
 	if type(m) ~= "table" then return end
 	local core = qc()
 	if core and core.is_host and not core.is_host() then return end
+	-- round 4: the keys whose value is the host's own (an empty list too: it says no other value is)
+	own_init()
+	local facts = {}
+	for k, v in pairs(own) do
+		if rawequal(actor_var(k), v) then facts[#facts + 1] = k end
+	end
+	table.sort(facts)
+	m.coop_task_facts = facts
 	if next(made) == nil then
 		m.coop_quest_spawns = nil
 		return
@@ -495,6 +585,14 @@ end
 
 local function load_state(m)
 	made, made_n, free_n = {}, 0, 0
+	own, own_saved, own_ready = {}, nil, false
+	local facts = type(m) == "table" and m.coop_task_facts
+	if type(facts) == "table" then
+		own_saved = {}
+		for _, k in ipairs(facts) do
+			if type(k) == "string" then own_saved[k] = true end
+		end
+	end
 	local list = type(m) == "table" and m.coop_quest_spawns
 	if type(list) ~= "table" then return end
 	for _, k in ipairs(list) do note_made(k) end
@@ -575,7 +673,7 @@ function delivery_verdict(peer, npc)
 	local info = tasks_now()
 	if not info then return true, "no task manager here" end
 	for id in pairs(info) do
-		local var = actor_var(id)
+		local var = fact(id) -- round 4: a target only as the host wrote it
 		if type(var) == "table" and var.target_id == nid then return true, "the target of " .. id end
 	end
 	return false, "no running delivery is for him"

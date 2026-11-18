@@ -1301,6 +1301,10 @@ do
 	-- points to Yar's.
 	trust.reset_for_test({ default = "log", task_stage = "refuse" })
 	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and (npc == 777 or npc == 779 or npc == 780) end
+	-- (an engine without coop.talk_lock_of: the host cannot tell one talk from the next, the round 4 rule "one step per talk"
+	-- has no facts here and holds; it is tested below with the locks)
+	local stock_lock_of = H.env.coop.talk_lock_of
+	H.env.coop.talk_lock_of = nil
 	cord.stage = 1
 	req(C, "stage", "cord_2", ";st=n2;sp=n777")
 	check(cord.stage == 2 and failed("task_stage") == 0, "one step up in a talk with its giver: ok")
@@ -1343,11 +1347,174 @@ do
 	pump()
 	check(cord.stage == 5 and failed("task_stage") == 6, "a dialog's stage write on the client names his partner: ok")
 	C.talking = false
+
+	-- Round 4 (blocker 1 of the round 3 review). (a) The giver's talk counts only while the task points to the giver: the
+	-- review's probe, 30 steps asked in a talk with giver 777 while the task points to 779's squad on even stages.
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and (npc == 777 or npc == 779 or npc == 780) end
+	local f0 = failed("task_stage")
+	cord.stage = 10
+	for _ = 1, 30 do req(C, "stage", "cord_2", ";st=n" .. (cord.stage + 1) .. ";sp=n777") end
+	check(cord.stage == 10 and failed("task_stage") == f0 + 30,
+		"30 steps in a talk with the giver while the task points to another squad: none (stage " .. cord.stage .. ")")
+	-- (b) One step per talk the host saw (coop.talk_lock_of: the lock he holds; a new lock is a new talk). (Fresh counters: a
+	-- check writes its first 8 lines, then every 64th.)
+	trust.reset_for_test({ default = "log", task_stage = "refuse" })
+	local lock = {}
+	H.env.coop.talk_lock_of = function(peer) return lock[peer] end
+	H.env.task_functor.tf_fixed = function() return 7790 end
+	cord.target_functor = "tf_fixed" -- the task points to 779's squad whatever the stage
+	lock[1] = 779
+	f0 = failed("task_stage")
+	req(C, "stage", "cord_2", ";st=n11;sp=n779")
+	check(cord.stage == 11 and failed("task_stage") == f0, "a step in a new talk with 779: ok")
+	req(C, "stage", "cord_2", ";st=n12;sp=n779")
+	check(cord.stage == 11 and failed("task_stage") == f0 + 1, "a second step in the same talk: refused")
+	local said = ""
+	for i = #H.log, 1, -1 do
+		if H.log[i]:find("[coop-trust] ! task_stage:", 1, true) then said = H.log[i] break end
+	end
+	check(said:find("one step per talk", 1, true) ~= nil, "the line says one step per talk: " .. said)
+	lock[1] = nil
+	tick(H) -- the host's look: the talk ended
+	req(C, "stage", "cord_2", ";st=n12;sp=n779")
+	check(cord.stage == 11 and failed("task_stage") == f0 + 2,
+		"the talk ended a moment ago (talk_recent still says yes), no new one: refused")
+	lock[1] = 779
+	tick(H) -- a new talk with him
+	req(C, "stage", "cord_2", ";st=n12;sp=n779")
+	check(cord.stage == 12 and failed("task_stage") == f0 + 2, "a new talk with him: ok")
+	-- aysd's honest round trip: the task points to 779's squad on even stages, to its giver 777 on odd ones; each step in a talk
+	-- of its own, and a talk with 779 that a step used is not used again across the talk with 777
+	cord.target_functor = "tf_cord"
+	lock[1] = nil
+	tick(H)
+	lock[1] = 779
+	tick(H)
+	req(C, "stage", "cord_2", ";st=n13;sp=n779")
+	check(cord.stage == 13, "aysd: a step at Ashot's squad (even stage), in its own talk: ok")
+	lock[1] = 777
+	tick(H)
+	req(C, "stage", "cord_2", ";st=n14;sp=n777")
+	check(cord.stage == 14 and failed("task_stage") == f0 + 2, "aysd: the step back at the giver (odd stage), in its own talk: ok")
+	lock[1] = nil
+	tick(H)
+	req(C, "stage", "cord_2", ";st=n15;sp=n779")
+	check(cord.stage == 14 and failed("task_stage") == f0 + 3,
+		"the talk with 779 that a step used, recent again after the talk with 777: refused")
+	lock[1] = 779
+	tick(H)
+	req(C, "stage", "cord_2", ";st=n15;sp=n779")
+	check(cord.stage == 15 and failed("task_stage") == f0 + 3, "a new talk with 779: ok")
+	lock[1] = nil
+	tick(H)
+	-- (c) A task with neither a target nor a giver: only an NPC its own target condlist names, or nobody
+	f0 = failed("task_stage")
+	story.stage = 0
+	req(C, "stage", "story_2", ";st=n1;sp=n779")
+	check(story.stage == 0 and failed("task_stage") == f0 + 1, "no giver, no target, a condlist that names nobody: refused")
+	story.target = "{+story_2_info} story_npc_a, story_npc_b %=give_info(x)%"
+	H.env.get_story_object_id = function(sid) return ({ story_npc_a = 7700, story_npc_b = 779 })[sid] end
+	req(C, "stage", "story_2", ";st=n1;sp=n780")
+	check(story.stage == 0 and failed("task_stage") == f0 + 2, "an NPC its condlist does not name: refused")
+	req(C, "stage", "story_2", ";st=n1;sp=n779")
+	check(story.stage == 1 and failed("task_stage") == f0 + 2, "the NPC its condlist names (any branch): ok")
+	-- (d) Server: his map server says only "in some dialog". A step is judged ok only for a task with neither a giver nor a
+	-- target (the partner needs a field in LevelBodyFacts: a protocol change, the owner's decision); one step per dialog.
+	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end }
+	local talking = true
+	H.env.coop.levels = { talking = function(p) return p == 1 and talking end }
+	H.env.coop.talk_recent = function() return false end -- (the world server holds no talk lock of his)
+	trust.reset_for_test({ default = "log", task_stage = "refuse" })
+	f0 = failed("task_stage")
+	req(C, "stage", "cord_2", ";st=n16;sp=n779")
+	said = ""
+	for i = #H.log, 1, -1 do
+		if H.log[i]:find("[coop-trust] ! task_stage:", 1, true) then said = H.log[i] break end
+	end
+	check(cord.stage == 15 and failed("task_stage") == f0 + 1 and said:find("Server", 1, true) ~= nil,
+		"Server: a step of a task with a giver and a target: refused, the line says why: " .. said)
+	talking = false
+	tick(H)
+	talking = true
+	tick(H)
+	req(C, "stage", "story_2", ";st=n2;sp=n779")
+	check(story.stage == 2 and failed("task_stage") == f0 + 1, "Server: a task with neither, the NPC its condlist names, in a dialog: ok")
+	req(C, "stage", "story_2", ";st=n3;sp=n779")
+	check(story.stage == 2 and failed("task_stage") == f0 + 2, "Server: a second step in the same dialog: refused")
+	talking = false
+	tick(H)
+	req(C, "stage", "story_2", ";st=n3;sp=n779")
+	check(story.stage == 2 and failed("task_stage") == f0 + 3, "Server: in no dialog: refused")
+	talking = true
+	tick(H)
+	req(C, "stage", "story_2", ";st=n3;sp=n779")
+	check(story.stage == 3 and failed("task_stage") == f0 + 3, "Server: a new dialog: ok")
+	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_lock_of, H.env.get_story_object_id = nil, nil, stock_lock_of, nil
+	story.target, story.stage = nil, 0
 	H.env.task_functor, H.env.alife_object, H.env.coop.talk_recent = nil, nil, nil
 	cord.target_functor, cord.current_target = nil, nil
 	trust.reset_for_test({ default = "log" })
 	req(C, "stage", "cord_2", ";st=n9")
 	check(cord.stage == 9 and lines("task_stage") >= 1, "log mode: a jump goes through, logged")
+
+	-- Round 4 (S1 of the round 3 review): the Lua turn-in (ops.complete) checked money and items only. A talk with the giver alone
+	-- cannot be asked for: the honest turn-ins are a dialog's with the giver (axr_task_manager, DRX), with the NPC the task points to
+	-- (tasks_delivery complete_simulation_task: the parcel's receiver), or with an NPC of a task without a giver (dialogs_lostzone,
+	-- tasks_defense). Check task_complete_talk asks for that talk, which the host saw; Server: "in some dialog" (the partner is not
+	-- reported there). "log" in build 57.
+	trust.reset_for_test({ default = "log", task_complete_talk = "refuse" })
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and (npc == 777 or npc == 779 or npc == 780) end
+	local function turned(tsk)
+		local yes = tsk.forced_status == "complete"
+		tsk.forced_status = nil
+		return yes
+	end
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and failed("task_complete_talk") == 0, "a turn-in in a talk with its giver: ok")
+	req(C, "complete", "cord_2")
+	local tline = ""
+	for i = #H.log, 1, -1 do
+		if H.log[i]:find("[coop-trust] ! task_complete_talk:", 1, true) then tline = H.log[i] break end
+	end
+	check(not turned(cord) and failed("task_complete_talk") == 1 and tline:find("one", 1, true) ~= nil,
+		"a turn-in that names no talk: refused, the line names the player: " .. tline)
+	req(C, "complete", "cord_2", ";sp=n779")
+	check(not turned(cord) and failed("task_complete_talk") == 2, "in a talk with an NPC that is neither its giver nor its target: refused")
+	H.env.alife_object = function(id) if id == 779 then return { id = 779, group_id = 7790 } end end
+	cord.current_target = 7790 -- a delivery: the task points to the receiver (his squad)
+	req(C, "complete", "cord_2", ";sp=n779")
+	check(turned(cord) and failed("task_complete_talk") == 2, "in a talk with the NPC the task points to (a delivery's receiver): ok")
+	cord.current_target = nil
+	req(C, "complete", "story_2", ";sp=n780")
+	check(turned(story) and failed("task_complete_talk") == 2, "a task without a giver, in a talk with any NPC: ok")
+	H.env.coop.talk_recent = function() return false end
+	req(C, "complete", "story_2", ";sp=n780")
+	check(not turned(story) and failed("task_complete_talk") == 3, "a talk the host did not see: refused")
+	-- Server: his map server's word "in some dialog"
+	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end }
+	local in_dialog = true
+	H.env.coop.levels = { talking = function(p) return p == 1 and in_dialog end }
+	req(C, "complete", "cord_2", ";sp=n779")
+	check(turned(cord) and failed("task_complete_talk") == 3, "Server: in some dialog (the partner is not reported there): ok")
+	in_dialog = false
+	req(C, "complete", "cord_2", ";sp=n779")
+	check(not turned(cord) and failed("task_complete_talk") == 4, "Server: in no dialog: refused")
+	H.env.coop_quests_core, H.env.coop.levels = nil, nil
+	-- the client's turn-in in a dialog names his partner
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and npc == 777 end
+	local npc777c = C.new_obj(777)
+	C.env.get_speaker = function() return npc777c end
+	C.talking = true
+	C.tm:set_task_completed("cord_2")
+	pump()
+	C.talking = false
+	check(turned(cord) and failed("task_complete_talk") == 4, "the client's turn-in in a dialog with the giver names him: ok")
+	-- log mode: through as before, logged
+	trust.reset_for_test({ default = "log" })
+	H.env.coop.talk_recent = function() return false end
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and lines("task_complete_talk") >= 1, "log mode: a turn-in without a talk goes through, logged")
+	H.env.coop.talk_recent, H.env.alife_object = nil, nil
 
 	for _, id in ipairs({ "drx_sl_x", "faction_base_defense", "cord_2", "story_2" }) do
 		H.tm.task_info[id] = nil

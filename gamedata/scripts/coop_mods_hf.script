@@ -72,8 +72,9 @@ end
 --          item a player carries is his machine's, coop_items WP9; the host checks it went down at the next request with that
 --          item), or a check that failed in "log" (his copy, as build 56 did);
 --   "no"   refused: nothing spent, the lamp unchanged.
--- No answer in 15 s (a host of build 56): the client spends it as build 56 did. A request without the id (a client of build 56)
--- goes through as before: a refuel is logged ("hf_refuel_item_id"), a light's tool is looked for among his items.
+-- No answer in 15 s (a host of build 56): the client spends it as build 56 did. A request without the id, or with an id that is
+-- no number (a client of build 56), fails a check of its own: "hf_refuel_item_id", "hf_lamp_tool_id" (round 4); in "log" it
+-- goes through as before, in "refuse" nothing is lit or refuelled.
 -- Facts: Co-op, the host's copy of the player's character and his items; Server, the map server of his level (C().on "host"
 -- passes the request there) with the same facts.
 -- wait: client, item -> { at, kind, lamp }; done: client, item -> until (the host took it, its removal is on its way); left: host
@@ -435,6 +436,10 @@ local function host_place(t, from)
 	if next(data) and hm and hm.update_data then pcall(hm.update_data, obj_id, data) end
 	if hm and hm.delete_data then pcall(hm.delete_data, item_id) end
 	alife_release_id(item_id)
+	-- round 4 (S5 of the round 3 review): its owner, his character: a mine from his own stash or his workbench's box
+	-- (coop_npc_world); forgotten at its pickup
+	local items = C().mod("coop_mods_items")
+	if items and type(items.note_stash_owner) == "function" then pcall(items.note_stash_owner, obj_id, who:id()) end
 	st.place = st.place + 1
 	log("placed %s -> %d for #%s", section, obj_id, tostring(from))
 end
@@ -474,6 +479,8 @@ local function host_pickup(t, from)
 		return
 	end
 	st.pickup = st.pickup + 1
+	local items = C().mod("coop_mods_items") -- round 4 (S5): its owner is forgotten
+	if items and type(items.note_stash_owner) == "function" then pcall(items.note_stash_owner, id, nil) end
 	for _, kind in ipairs({ "workshop", "stove" }) do
 		local tname = link_tables[kind]
 		local tt = m_data()[tname]
@@ -621,21 +628,31 @@ local function install_furniture()
 			local r = nil
 			local tools = t.on == true and lamp_tools(obj:section()) or {}
 			if #tools > 0 then
-				-- round 2: the tool the lamp needs is this player's (named; a build 56 client names none: one among his items)
+				-- round 2: the tool the lamp needs is this player's, named by its id
 				local item, why = nil, nil
 				local ok = false
 				if iid then
 					item, why = carried(iid, who, tools)
 					if item then ok, why = spent_since(item, "tool") end
-				else
-					why = "he holds none of " .. table.concat(tools, ", ")
-					for _, tool in ipairs(tools) do
-						if who:object(tool) then ok, why = true, nil break end
+					if not trust("hf_lamp_tool", ok, "player %s (#%s) lit lamp %s with item %s: %s", tostring(C().nick_of(from)),
+						tostring(from), tostring(id), tostring(iid), tostring(why)) then
+						return answer("no")
 					end
-				end
-				if not trust("hf_lamp_tool", ok, "player %s (#%s) lit lamp %s with item %s: %s", tostring(C().nick_of(from)),
-					tostring(from), tostring(id), tostring(iid), tostring(why)) then
-					return answer("no")
+				else
+					-- round 4 (blocker 2 of the round 3 review): no id, or an id that is no number, is its own check that always
+					-- fails, as hf_refuel_item_id: "log" lights it as build 56 did (his machine spent its copy), "refuse" lights
+					-- nothing. It used to pass hf_lamp_tool on "he holds one" and spent nothing anywhere: one box of matches lit
+					-- the lamp again and again. Mixed builds cannot connect, so no honest client sends one.
+					local holds = false
+					for _, tool in ipairs(tools) do
+						if who:object(tool) then holds = true break end
+					end
+					if not trust("hf_lamp_tool_id", false,
+						"player %s (#%s) lit lamp %s without the tool's id (sent %s; he holds %s; a build 56 client?)",
+						tostring(C().nick_of(from)), tostring(from), tostring(id), tostring(t.i),
+						holds and "one" or ("none of " .. table.concat(tools, ", "))) then
+						return
+					end
 				end
 				r = (ok and item) and host_spend(item, "tool") or "left" -- a failed check in "log": his copy, as build 56
 			end
