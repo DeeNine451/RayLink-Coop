@@ -16,9 +16,10 @@
 	                            on_complete, "actor_has_item(sec)" of a target / title, "actor_has_item_amount(sec:n)"), n or one;
 	                          - DIALOG_TAKES: a stock dialog takes it and no task line names it. Only while the info that opens the
 	                            dialog is held, and at most its number for each player (his character); the count is in the save.
-	                        "Still lacks": what this check let the group give up for that task before (kept per task object,
-	                        so a new give of the same id starts at zero). Only what the check itself let through is counted, so a
-	                        "log" build writes exactly the lines a "refuse" build would refuse.
+	                        "Still lacks": what this check let the group give up for that task before (round 5: kept per task
+	                        id and its taker's character; a new give of the id starts at zero only after a run that was turned
+	                        in, a cancelled or failed run's count carries over). Only what the check itself let through is
+	                        counted, so a "log" build writes exactly the lines a "refuse" build would refuse.
 	  quest_give_npc        quests.act "give_npc" (coop_quests_party.host_give_npc): a dialog hands the group's items to an NPC
 	                        because its speaker lacks them (patch_client_relocate, the Agroprom documents). The verdict and the
 	                        ledger of quest_take, under its own name.
@@ -110,7 +111,9 @@ local EFFECT_ONCE = {
 local ENDED_MS = 10000 -- a task that ended this long ago still counts: the dialog that ends it may take the item a moment later
 local LOOK_MS = 1000
 
-local taken = setmetatable({}, { __mode = "k" }) -- task object -> { [section] = items given up for it }
+-- task id -> taker key -> { run = weak set of the task object counted for, done = { [section] = items given up }, completed }
+-- (round 5, A6 of the round 4 review; see "quest_take, quest_give_npc" below)
+local ledger = {}
 local made_for = setmetatable({}, { __mode = "k" }) -- task object -> { [effect key] = true }: made for this run of the task
 local seen = {} -- task id -> task object, running at the last look
 local ended = {} -- task id -> { tsk, till }: tasks that were running a moment ago
@@ -181,15 +184,22 @@ end
 
 -- coop_tasks: this process's save_var of key `k` of the actor's pstor, `old` its value before. from_give: a var of a give this
 -- process runs (ops.give). A table saved again after a field of it changed (the stock delivery functor's item_1_id, a stash
--- flag) keeps what it was: its own, or a client's.
-function note_own(k, v, old, from_give)
+-- flag) keeps what it was: its own, or a client's. foreign (round 5): the host writes a client's value it does not take as its
+-- own (a give's var task_give_offer refused): the key holds no fact of the host's until the host writes it again.
+function note_own(k, v, old, from_give, foreign)
 	if not (fact_key(k, v) or fact_key(k, old)) then return end
 	own_init()
-	if v == nil then
+	if v == nil or foreign then
 		own[k] = nil
 	elseif from_give or not (type(v) == "table" and rawequal(v, old)) then
 		own[k] = v
 	end
+end
+
+-- Round 5 (blocker 1 of the round 4 review): is key `k` (value v) one of the task facts the checks read? coop_tasks ops.give judges
+-- these vars of a client's give against the host's offer (check task_give_offer).
+function is_fact(k, v)
+	return fact_key(k, v)
 end
 
 -- The value of fact `key` in the host's pstor, when the host wrote it itself; nil otherwise.
@@ -298,6 +308,12 @@ local function on_task_end(tsk, state)
 	if obj == nil then return end
 	ended[id] = { tsk = obj, till = now_ms() + ENDED_MS }
 	seen[id] = nil
+	-- round 5 (A6): a run turned in took what it asked for; the next run of the task starts its take anew
+	if state == task.completed then
+		for _, e in pairs(ledger[id] or {}) do
+			if e.run[obj] then e.completed = true end
+		end
+	end
 end
 
 -- May player `peer` see task `id`? No audience record (every task outside a split-levels world): yes.
@@ -349,7 +365,39 @@ end
 -------------------------------------------------------------------------------
 -- quest_take, quest_give_npc
 -------------------------------------------------------------------------------
--- The best task for this take: { tsk, id, need, left }, or nil.
+-- Round 5 (A6 of the round 4 review): what the check let go is counted per task id and the character of its taker, not per task
+-- object. The stock makes a new object at every give, so give -> take -> cancel -> give again asked the group for the same items
+-- again and again (the review's probe: 4 cycles took 8 medkits of a task that asks for 2). A new run of the task starts at zero
+-- only when the run before it was turned in (completed: its turn-in took what it asked for); after a cancel or a fail the count
+-- carries over. Not in the save: a load starts it anew (as before).
+local function taker_key(id)
+	local core = qc()
+	local ct = core and core.mod("coop_tasks")
+	local ok, c = pcall(function() return ct.taker_character(id) end)
+	return (ok and c ~= nil) and ("c" .. tostring(c)) or "?"
+end
+
+-- The ledger entry of task `id` (object tsk) for its taker `who`, moved to this run; nil when there is none (and not `create`).
+local function ledger_of(id, who, tsk, create)
+	local per = ledger[id]
+	local e = per and per[who]
+	if e and not e.run[tsk] then
+		if e.completed then
+			e = nil -- the run before was turned in: this one starts anew
+		else
+			e.run = setmetatable({ [tsk] = true }, { __mode = "k" }) -- cancelled or failed: its count carries over
+		end
+	end
+	if not e and create then
+		e = { run = setmetatable({ [tsk] = true }, { __mode = "k" }), done = {}, completed = false }
+		per = per or {}
+		ledger[id] = per
+		per[who] = e
+	end
+	return e
+end
+
+-- The best task for this take: { tsk, id, need, left, who }, or nil.
 local function take_task(peer, sec)
 	local info = tasks_now()
 	if not info then return nil, false end
@@ -358,9 +406,10 @@ local function take_task(peer, sec)
 		if sees(id, peer) then
 			local need = need_of(id, sec)
 			if need then
-				local t = keyable(tsk) and taken[tsk]
-				local left = need - (t and t[sec] or 0)
-				if not best or left > best.left then best = { tsk = tsk, id = id, need = need, left = left } end
+				local who = taker_key(id)
+				local e = keyable(tsk) and ledger_of(id, who, tsk, false) or nil
+				local left = need - (e and e.done[sec] or 0)
+				if not best or left > best.left then best = { tsk = tsk, id = id, need = need, left = left, who = who } end
 			end
 		end
 	end
@@ -451,13 +500,9 @@ function note_take(ticket, sec, got)
 		end
 		return
 	end
-	if not keyable(ticket.tsk) then return end
-	local t = taken[ticket.tsk]
-	if not t then
-		t = {}
-		taken[ticket.tsk] = t
-	end
-	t[sec] = (t[sec] or 0) + got
+	if not (keyable(ticket.tsk) and type(ticket.id) == "string") then return end
+	local e = ledger_of(ticket.id, ticket.who or "?", ticket.tsk, true)
+	e.done[sec] = (e.done[sec] or 0) + got
 end
 
 -------------------------------------------------------------------------------
@@ -539,14 +584,27 @@ function note_spawn(ticket)
 	note_made(ticket)
 end
 
+local run_listeners = {}
+
+-- Round 5 (S2 of the round 4 review): fn(f, t) hears every counted effect this process's own logic ran (note_run). In a server the
+-- condlists of a level run on its map server; coop_quests_far passes such a run to the world server, whose list a client's ask is
+-- judged by. This module asks no mode: it only tells who listens.
+function on_run(fn)
+	if type(fn) == "function" then run_listeners[#run_listeners + 1] = fn end
+end
+
 -- Round 4 (S2 of the round 3 review): this process's own logic ran counted effect `f` (parameters t: p1..) without an error,
 -- outside a client's request (a condlist, the host player's dialog, an on_init): its key is noted as a client's ask notes it, so a
 -- client cannot have the same thing made again. A section the effect does not make, a missing parameter: nothing. Noted on the
--- process that ran it: the host of a co-op (its save keeps it), the world server of a server; a map server's own run stays on the
--- map server, whose list the world server does not see.
+-- process that ran it: the host of a co-op (its save keeps it), the world server of a server, and the listeners hear it (round 5:
+-- a map server's run reaches the world server's list through coop_quests_far, event far_qnote).
 function note_run(f, t)
 	local name, key, tid, bad = count_of(f, t)
 	if not name or not key or bad then return end
+	for _, fn in ipairs(run_listeners) do
+		local ok, err = pcall(fn, f, t)
+		if not ok then printf("! [coop_quests_trust] a run listener: %s", tostring(err)) end
+	end
 	if tid then
 		local run = running_now()
 		local tsk = run and run[tid]

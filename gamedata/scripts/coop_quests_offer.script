@@ -231,6 +231,80 @@ end
 
 local last_req = {} -- "peer:npc" -> time
 
+-------------------------------------------------------------------------------
+-- Host: the offers made to each player (round 5, blocker 1 of the round 4 review)
+-------------------------------------------------------------------------------
+-- A give request (coop_tasks ops.give) carries the task vars his dialog prepared. They count as the host's own facts only where
+-- they are what the host offered him (coop_tasks check task_give_offer). offer_here keeps, per player, task and NPC, the vars it
+-- sent (serialized: a copy that nothing changes later), with his character (a peer slot may come back as another player). Kept
+-- until the task is given to him, for OFFER_KEEP_MS at most, OFFERS_MAX per player (the oldest go first). The process that answers
+-- offer_req is the one that runs the give: the host of a co-op, the world server of a server (its offers over the far view).
+local OFFER_KEEP_MS = 3600000
+local OFFERS_MAX = 256
+local made_offers = {} -- peer -> { n, tasks = { [task id] = { [npc id] = { s = serialized vars, at, char } } } }
+
+local function character_of(peer)
+	local ct = qc.mod("coop_tasks")
+	local ok, c = pcall(function() return ct.character_of(peer) end)
+	return ok and c or nil
+end
+
+local function note_offer(peer, npc_id, tid, vars)
+	local s = qc.ser(vars or {})
+	if not (type(peer) == "number" and type(tid) == "string" and s) then return end
+	local mine = made_offers[peer]
+	if not mine then
+		mine = { n = 0, tasks = {} }
+		made_offers[peer] = mine
+	end
+	local per = mine.tasks[tid]
+	if not per then
+		per = {}
+		mine.tasks[tid] = per
+	end
+	if per[npc_id] == nil then mine.n = mine.n + 1 end
+	per[npc_id] = { s = s, at = now(), char = character_of(peer) }
+	while mine.n > OFFERS_MAX do
+		local old_t, old_n, old_at = nil, nil, nil
+		for t, list in pairs(mine.tasks) do
+			for n, o in pairs(list) do
+				if not old_at or o.at < old_at then old_t, old_n, old_at = t, n, o.at end
+			end
+		end
+		if not old_t then break end
+		mine.tasks[old_t][old_n] = nil
+		if next(mine.tasks[old_t]) == nil then mine.tasks[old_t] = nil end
+		mine.n = mine.n - 1
+	end
+end
+
+-- Host: copies of the vars of the offers of task `tid` this process made player `peer` (newest first); nil: none.
+function offers_of(peer, tid)
+	local mine = made_offers[peer]
+	local per = mine and mine.tasks[tid]
+	if not per then return nil end
+	local char, t, list = character_of(peer), now(), {}
+	for _, o in pairs(per) do
+		if t - o.at <= OFFER_KEEP_MS and (o.char == nil or char == nil or o.char == char) then list[#list + 1] = o end
+	end
+	table.sort(list, function(a, b) return a.at > b.at end)
+	local out = {}
+	for _, o in ipairs(list) do
+		local v = qc.des(o.s)
+		if type(v) == "table" then out[#out + 1] = v end
+	end
+	return #out > 0 and out or nil
+end
+
+-- Host: task `tid` was given to player `peer`: his offers of it are spent.
+function offer_given(peer, tid)
+	local mine = made_offers[peer]
+	local per = mine and mine.tasks[tid]
+	if not per then return end
+	for _ in pairs(per) do mine.n = mine.n - 1 end
+	mine.tasks[tid] = nil
+end
+
 -- Is this answer made over the far view: for a level this process does not lead (a world server for every level, the host
 -- of split levels for the others)? There the NPC is a stand-in of its ALife record, not a game object.
 local function over_far_view()
@@ -263,7 +337,10 @@ local function offer_here(t, from)
 		local d = data[tid] or {}
 		local msg = { n = npc_id, q = seq, i = tid }
 		local v = qc.ser(d.vars or {})
-		if v and #v <= qc.MAX_BLOB then msg.v = v end
+		if v and #v <= qc.MAX_BLOB then
+			msg.v = v
+			note_offer(from, npc_id, tid, d.vars) -- round 5: what he was offered (coop_tasks task_give_offer)
+		end
 		local m = qc.ser(d.msgs or {})
 		if m and #m <= 4000 then msg.m = m end
 		if d.bounty then msg.bt = d.bounty end

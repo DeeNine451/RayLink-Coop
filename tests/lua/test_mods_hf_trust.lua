@@ -289,6 +289,71 @@ from_client("hf_place", { i = li2:id(), s = "hf_lamp", x = 21, y = 0, z = 0, d =
 pl = CREATED[n0 + 1]
 check(pl ~= nil and (HF_DATA[pl.id] or {}).condition == nil, "item not online here: no condition at all (the mod's own rule)")
 
+-------------------------------------------------------------------------------
+-- Round 5 (blocker 3 of the round 4 review): the step left to his machine is the mod's own (ui_furniture_light.toggle_light:
+-- utils_item.degrade(obj, 0.05) for a degradable tool, utils_item.discharge for the rest: one use). His machine reports his item's
+-- state (coop_items WP9): a smaller drop is no step.
+-------------------------------------------------------------------------------
+print("== R5 B3, the review's probe: a lighter that loses 0.0001 per light instead of the mod's 0.05")
+do
+	T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
+	local lp = lamp("hf_lamp_tools")
+	local cheat = held("hf_lighter", 500, { _cond = 0.9 })
+	local lit = 0
+	for _ = 1, 100 do
+		off(lp)
+		light(lp, cheat)
+		if HF_DATA[lp:id()].is_on == true then lit = lit + 1 end
+		cheat._cond = cheat._cond - 0.0001 -- what his machine reports for the item
+	end
+	check(lit == 1 and counter("hf_lamp_tool").refused == 99 and not released(cheat:id()),
+		"refuse: one light, then every light refused (lit " .. lit .. ", refused " .. counter("hf_lamp_tool").refused .. ")")
+	check((trust_line("hf_lamp_tool") or ""):find("0.05", 1, true) ~= nil, "the line names the mod's step: " .. tostring(trust_line("hf_lamp_tool")))
+	-- the same lighter, honest: a step of 0.05 a light, as many lights as the mod gives, then the host removes it
+	T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
+	local honest = held("hf_lighter", 500, { _cond = 0.9 })
+	local lights = 0
+	for _ = 1, 40 do
+		if released(honest:id()) then break end
+		off(lp)
+		light(lp, honest)
+		if HF_DATA[lp:id()].is_on == true then lights = lights + 1 end
+		-- his machine's degrade (kept to whole thousandths, as the item state travels in steps of 1/65535 anyway)
+		if last_answer() == "left" then honest._cond = math.floor((honest._cond - 0.05) * 1000 + 0.5) / 1000 end
+	end
+	check(lights == 18 and released(honest:id()) and counter("hf_lamp_tool").failed == 0,
+		"honest: 18 lights from 0.9 by the mod's steps (the last at 0.05 removes it), none refused (" .. lights .. ")")
+	-- log mode: the cheat's lights go on as before, each logged
+	T.reset_for_test({ default = "log" })
+	local cheat2 = held("hf_lighter", 500, { _cond = 0.9 })
+	lit = 0
+	for _ = 1, 10 do
+		off(lp)
+		light(lp, cheat2)
+		if HF_DATA[lp:id()].is_on == true then lit = lit + 1 end
+		cheat2._cond = cheat2._cond - 0.0001
+	end
+	check(lit == 10 and counter("hf_lamp_tool").failed == 9, "log: lit as before, 9 lines")
+end
+
+print("== R5 B3: a multi-use tool goes down by one use a light")
+do
+	T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
+	local lq = lamp()
+	local box = held("box_matches", 500, { _uses = 5 })
+	light(lq, box)
+	check(HF_DATA[lq:id()].is_on == true and last_answer() == "left", "a use left to his machine")
+	off(lq)
+	box._uses = 5
+	light(lq, box)
+	check(HF_DATA[lq:id()].is_on == false and counter("hf_lamp_tool").refused == 1, "the use not spent: refused")
+	box._uses = 4
+	light(lq, box)
+	check(HF_DATA[lq:id()].is_on == true and counter("hf_lamp_tool").refused == 1, "one use less: lit")
+	release_id(box:id())
+	T.reset_for_test({ default = "log" })
+end
+
 print("== a network text never becomes a format")
 T.reset_for_test({ default = "log" })
 INI["%s%n"] = {}

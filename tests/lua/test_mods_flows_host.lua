@@ -12,6 +12,11 @@ local function from_client(name, t) coop_main.on_event("mods." .. name, coop_mai
 -------------------------------------------------------------------------------
 INI.furn_item = { placeable_section = "furn_obj" }
 INI.furn_obj = { item_section = "furn_item" }
+-- a Hideout Furniture stash (placeable_type = stash) and its workbench (placeable_workshop, bind_workshop_furniture)
+INI.furn_stash_item = { placeable_section = "furn_stash" }
+INI.furn_stash = { item_section = "furn_stash_item", placeable_type = "stash" }
+INI.workshop_item = { placeable_section = "placeable_workshop" }
+INI.placeable_workshop = { item_section = "workshop_item", script_binding = "bind_workshop_furniture.init" }
 HF_DATA = {}
 hf_obj_manager = {
 	get_data = function(id) return HF_DATA[id] end,
@@ -143,6 +148,7 @@ actor_status_sleep = { get_last_sleep = function() return SLEEPY end }
 guitar_anim = { play_guitar = function() local snd = sound_object([[guitarsong1]]); snd:play(db.actor) end }
 smr_loot = { try_spawn = function(box) ZCP_ROLL = { box = box:id(), actor = db.actor:id() } end }
 
+axr_main.callback_add("server_entity_on_unregister") -- the stock axr_main has it (the stub lists only what tests used before)
 start_all()
 local C = coop_mods_core
 SendScriptCallback("actor_on_update") -- late installs (NTA functors, rebinds)
@@ -162,7 +168,7 @@ check(HF_DATA[placed] and HF_DATA[placed].condition == 0.7 and HF_DATA[placed].i
 	"place: the data is the host's (its item's condition), nothing of the client's (round 3, R2-B3)")
 check(sent("mods.hf_data") ~= nil, "place: furniture data published to clients")
 local function owners() return alife_storage_manager.get_state().coop_stash_owner or {} end
-check(owners()[placed] == 500, "place: its owner is booked, his character (round 4, S5: a mine from his own stash or workbench)")
+check(owners()[placed] == nil, "place: a prop books no owner (round 5, S7: only a stash or a workbench has one)")
 local foreign = spawn("furn_item", vec3(0, 0, 0), 0) -- the host's own item
 from_client("hf_place", { i = foreign.id, s = "furn_obj", x = 21, y = 0, z = 0, lv = 1, gv = 2, d = "" })
 check(SE[foreign.id] ~= nil, "place: item of another player refused")
@@ -179,6 +185,33 @@ check(SE[placed] == nil and CREATED[1] and CREATED[1].sec == "furn_item" and CRE
 	"pickup: the mod's pickup ran with the player's character as the actor (item into its inventory)")
 check(db.actor:id() == 0, "pickup: identity restored")
 check(owners()[placed] == nil, "pickup: its owner is forgotten")
+
+-- Round 5 (S7 of the round 4 review): an owner is booked only for a stash and a workbench (what coop_npc_world's mine check reads),
+-- and it goes with the object however the object goes: a reused id inherits nothing.
+local function place_one(item_sec, obj_sec)
+	NOW = NOW + 5000 -- (the request's rate limit)
+	local it = spawn(item_sec, vec3(20, 0, 0), 500)
+	from_client("hf_place", { i = it.id, s = obj_sec, x = 21, y = 0, z = 0, lv = 1, gv = 2, d = "" })
+	local made = nil
+	for id, se in pairs(SE) do if se._sec == obj_sec and owners()[id] ~= nil then made = id end end
+	return made
+end
+local st_id = place_one("furn_stash_item", "furn_stash")
+check(st_id ~= nil and owners()[st_id] == 500, "place: a Hideout Furniture stash books its owner")
+local wb_id = place_one("workshop_item", "placeable_workshop")
+check(wb_id ~= nil and owners()[wb_id] == 500, "place: a workbench books its owner (its box is judged by it)")
+-- the stash goes another way than hf_pickup (the host player's stock pickup, a script's release): its owner goes with it
+local se_st = SE[st_id]
+release_id(st_id)
+SendScriptCallback("server_entity_on_unregister", se_st, "se_physic")
+check(owners()[st_id] == nil and owners()[wb_id] == 500, "a stash released in any way: its owner is forgotten, the workbench keeps its own")
+spawn("furn_obj", vec3(21, 0, 0), nil, { id = st_id })
+check(owners()[st_id] == nil, "an object that reuses the id inherits no owner")
+release_id(st_id)
+local se_wb = SE[wb_id]
+release_id(wb_id)
+SendScriptCallback("server_entity_on_unregister", se_wb, "se_physic")
+check(owners()[wb_id] == nil, "the workbench released: its owner is forgotten")
 
 local _, wb = spawn("furn_obj", vec3(21, 0, 0))
 SENT = {}

@@ -924,5 +924,215 @@ do
 	fire(Hm, "load_state", {})
 end
 
+-------------------------------------------------------------------------------
+-- Round 5 (blocker 1 of the round 4 review): the vars of a client's give count as the host's facts only as far as they are what
+-- the host offered him (coop_quests_offer keeps, per player, task and NPC, the vars of each offer it made); check
+-- task_give_offer. A give with no offer of the host (his own machine's stock generation) keeps today's facts in "log".
+-------------------------------------------------------------------------------
+local npc2_h = Hm.new_obj(751, "sim_stalker_trader2", vec(5, 0, 0), { _stalker = true })
+local npc2_c = Cm.new_obj(751, "sim_stalker_trader2", vec(1, 0, 0), { _stalker = true })
+for _, M in ipairs({ Hm, Cm }) do
+	M.ini.offer_f = { fetch_descr = "offer_f_descr", fetch_func = "%=setup_fetch_task(offer_f_fetch)%", job_descr = "offer_f_job" }
+	M.npc_tasks = { [750] = { "offer_f" }, [751] = { "offer_f" } }
+end
+-- the host's fetch setup (tasks_fetch.setup_fetch_task): one bread at the barman, one salt at the trader
+Hm.env.xr_effects.setup_fetch_task = function(a, n, p)
+	local spk = Hm.env.get_speaker()
+	Hm.env.save_var(Hm.actor, p[1], (spk and spk:id() == 751) and "salt" or "bread")
+	Hm.env.save_var(Hm.actor, p[1] .. "_count", 1)
+end
+-- the honest path of a client: his dialog opens, the host's offer comes, the dialog shows it (its vars go into his pstor)
+local function offered_at(npc)
+	NOW = NOW + 2000
+	Cm.env.coop_quests_offer.request_offer(npc, "dyn")
+	pump()
+	Cm.talk_npc = npc
+	Cm.env.axr_task_manager.generate_available_tasks(npc, nil)
+	Cm.env.dialogs.text_npc_has_task(Cm.actor, npc)
+end
+local function give_it(id, giver)
+	Cm.tm:give_task(id, giver)
+	pump()
+end
+local function drop_task(id)
+	Hm.tm.task_info[id], Cm.tm.task_info[id], Hm.engine_tasks[id] = nil, nil, nil
+end
+local function cps() return Cm.env.db.storage[0].pstor end
+
+print("== R5 B1: an honest give of the host's offer: its facts, no line")
+do
+	fresh()
+	proxy._pos = vec(4, 0, 0)
+	NOW = NOW + 11000 -- (the tasks the sections above ended are out of their window)
+	tick(Hm)
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse", task_give_offer = "refuse" })
+	offered_at(npc_c)
+	check(cps().offer_f_fetch == "bread", "(the host's offer is in his pstor: one bread)")
+	give_it("offer_f", 750)
+	check(Hm.tm.task_info.offer_f ~= nil and hps().offer_f_fetch == "bread" and counted("task_give_offer") == 1
+		and trust_lines(Hm, "task_give_offer") == 0, "given, the bread the host offered, checked and held")
+	Hm.actor._inv = {}
+	Hm.give_item(Hm.actor, "bread")
+	ask("take", { s = "bread", n = 1 })
+	check(Hm.count(Hm.actor, "bread") == 0, "quest_take refuse: the bread of the host's offer is a fact, taken")
+	drop_task("offer_f")
+	-- the PDA board shows the offers of several NPCs; his pstor has the last one it drew, whoever he takes it from
+	offered_at(npc_c)
+	offered_at(npc2_c)
+	check(cps().offer_f_fetch == "salt", "(two NPCs offer it: the trader's salt is in his pstor)")
+	give_it("offer_f", 750)
+	check(hps().offer_f_fetch == "salt" and trust_lines(Hm, "task_give_offer") == 0,
+		"the vars of any offer the host made him: held")
+	drop_task("offer_f")
+	-- the offer is spent by the give: the same vars given again need a new offer
+	give_it("offer_f", 750)
+	check(trust_lines(Hm, "task_give_offer") == 1 and last_trust(Hm, "task_give_offer"):find("no offer", 1, true) ~= nil,
+		"an offer is spent by its give: a second give of it is no offer's")
+	drop_task("offer_f")
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+print("== R5 B1, the review's probe A1: a forged fetch carried in the give of a task the host offered")
+do
+	fresh()
+	offered_at(npc_c)
+	cps().offer_f_fetch, cps().offer_f_fetch_count = "wpn_gauss", 1000 -- a modified client rewrites what the dialog put there
+	give_it("offer_f", 750)
+	local line = last_trust(Hm, "task_give_offer")
+	check(trust_lines(Hm, "task_give_offer") == 1 and line:find("anna", 1, true) and line:find("offer_f_fetch", 1, true)
+		and line:find("would be refused", 1, true), "log: the line names the player and the var: " .. line)
+	check(hps().offer_f_fetch == "wpn_gauss" and hps().offer_f_fetch_count == 1000, "log: written as before")
+	drop_task("offer_f")
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse", task_give_offer = "refuse" })
+	offered_at(npc_c)
+	cps().offer_f_fetch, cps().offer_f_fetch_count = "wpn_gauss", 1000
+	give_it("offer_f", 750)
+	check(Hm.tm.task_info.offer_f ~= nil and hps().offer_f_fetch == "bread" and hps().offer_f_fetch_count == 1,
+		"refuse: given with what the host offered him (bread x1), not his rifles")
+	Hm.actor._inv = {}
+	for _ = 1, 5 do Hm.give_item(Hm.actor, "wpn_gauss") end
+	ask("take", { s = "wpn_gauss", n = 5 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 5, "refuse: no task asks the group for its rifles (5 left)")
+	-- a fact var the offer never made (a count added to a generic fetch) is not written at all
+	drop_task("offer_f")
+	offered_at(npc_c)
+	cps().offer_f_target_id = 760
+	give_it("offer_f", 750)
+	check(hps().offer_f_target_id == nil and trust_lines(Hm, "task_give_offer") == 3,
+		"refuse: a fact var the host's offer has not is not written")
+	cps().offer_f_target_id = nil
+	drop_task("offer_f")
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+print("== R5 B1, the review's probe A2: no offer of the host (a DRX id), forged rifles handed to an NPC")
+do
+	fresh()
+	Hm.ini.drx_sl_forge_t = {}
+	Cm.ini.drx_sl_forge_t = {}
+	Cm.env.save_var(Cm.actor, "drx_sl_forge_t_fetch", "wpn_gauss") -- shared prefix: coop_tvd first, then the give carries it again
+	Cm.env.save_var(Cm.actor, "drx_sl_forge_t_fetch_count", 50)
+	pump()
+	give_it("drx_sl_forge_t", 750)
+	local line = last_trust(Hm, "task_give_offer")
+	check(trust_lines(Hm, "task_give_offer") == 1 and line:find("no offer", 1, true) ~= nil and line:find("drx_sl_forge_t", 1, true),
+		"log: a give with fact vars and no offer of the host: logged (" .. line .. ")")
+	proxy._pos = vec(4, 0, 0)
+	Hm.actor._inv = {}
+	for _ = 1, 3 do Hm.give_item(Hm.actor, "wpn_gauss") end
+	local before = Hm.count(npc_h, "wpn_gauss")
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_give_npc = "refuse" })
+	give_npc("wpn_gauss", 3)
+	check(Hm.count(npc_h, "wpn_gauss") == before + 3, "log: his vars are facts as before (quest_give_npc lets them go)")
+	drop_task("drx_sl_forge_t")
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_give_npc = "refuse", quest_take = "refuse", task_give_offer = "refuse" })
+	give_it("drx_sl_forge_t", 750)
+	check(Hm.tm.task_info.drx_sl_forge_t ~= nil and hps().drx_sl_forge_t_fetch == "wpn_gauss",
+		"refuse: given, his vars written (his task runs as his dialog showed it)")
+	for _ = 1, 3 do Hm.give_item(Hm.actor, "wpn_gauss") end
+	before = Hm.count(npc_h, "wpn_gauss")
+	give_npc("wpn_gauss", 3)
+	check(Hm.count(npc_h, "wpn_gauss") == before and Hm.count(Hm.actor, "wpn_gauss") == 3,
+		"refuse: but no fact of the host's: no group rifle goes to the NPC")
+	ask("take", { s = "wpn_gauss", n = 1 })
+	check(Hm.count(Hm.actor, "wpn_gauss") == 3, "refuse: nor to the taker")
+	drop_task("drx_sl_forge_t")
+	-- a give that carries no fact var is not judged
+	local n0 = counted("task_give_offer")
+	Hm.ini.plain_t = {}
+	Cm.ini.plain_t = {}
+	Cm.env.save_var(Cm.actor, "plain_t_note", 3)
+	give_it("plain_t", 750)
+	check(Hm.tm.task_info.plain_t ~= nil and counted("task_give_offer") == n0, "a give with no fact var: not judged")
+	drop_task("plain_t")
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+print("== R5 B1, the review's probe A6: give -> take -> cancel -> give again does not ask the group again")
+do
+	fresh()
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_take = "refuse" })
+	Hm.ini.cyc_t = {}
+	Cm.ini.cyc_t = {}
+	Hm.actor._inv = {}
+	for _ = 1, 10 do Hm.give_item(Hm.actor, "medkit_a6") end
+	local cb = Hm.env.task_manager.task_callback
+	local function engine_end(id, state) cb({ get_id = function() return id end }, state) end
+	for _ = 1, 4 do
+		Cm.env.save_var(Cm.actor, "cyc_t_fetch", "medkit_a6")
+		Cm.env.save_var(Cm.actor, "cyc_t_fetch_count", 2)
+		give_it("cyc_t", 750)
+		ask("take", { s = "medkit_a6", n = 2 })
+		Cm.tm:set_task_cancelled("cyc_t")
+		pump()
+		engine_end("cyc_t", Hm.env.task.fail) -- the engine ends it (the stub drops a task without a repeat timeout)
+		drop_task("cyc_t")
+	end
+	check(Hm.count(Hm.actor, "medkit_a6") == 8, "4 cycles: the 2 medkits of one run, not 8 (" .. Hm.count(Hm.actor, "medkit_a6") .. " of 10 left)")
+	-- honest: a run turned in (completed) gives the next run of the task its own take
+	Hm.actor._inv = {}
+	for _ = 1, 4 do Hm.give_item(Hm.actor, "medkit_a6") end
+	Hm.ini.rep2_t = {}
+	Cm.ini.rep2_t = {}
+	for run = 1, 2 do
+		Cm.env.save_var(Cm.actor, "rep2_t_fetch", "medkit_a6")
+		Cm.env.save_var(Cm.actor, "rep2_t_fetch_count", 2)
+		give_it("rep2_t", 750)
+		ask("take", { s = "medkit_a6", n = 2 })
+		check(Hm.count(Hm.actor, "medkit_a6") == 4 - 2 * run, "run " .. run .. " of a task done twice: its 2 medkits taken")
+		engine_end("rep2_t", Hm.env.task.completed)
+		drop_task("rep2_t")
+	end
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+-------------------------------------------------------------------------------
+-- Round 5 (S6 of the round 4 review): Crossfire's companion squad made by the host's own logic is noted even when its effect
+-- raises after the squad exists (as a client's ask is).
+-------------------------------------------------------------------------------
+print("== R5 S6: the host's own run of the isg squad that raised after making it: noted, a client's ask refused")
+do
+	fresh()
+	story_anew()
+	fire(Hm, "load_state", {})
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_effect_once = "refuse" })
+	local n0 = Hm.made_fx.isg_companion_squad or 0
+	Hm.fx_raise = "isg_companion_squad"
+	check(not pcall(Hm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad), "(the host's own run raised after the squad)")
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1, "(one squad exists)")
+	Cm.env.dialogs_lostzone.spawn_pass_hall_isg_companion_squad()
+	pump()
+	check((Hm.made_fx.isg_companion_squad or 0) == n0 + 1 and trust_lines(Hm, "quest_effect_once") == 1,
+		"a client's ask after it: refused, no second squad")
+	-- any other effect of the host's own logic that raised is still not noted (a failed spawn can be made later)
+	Hm.env.coop_trust.reset_for_test({ default = "log", quest_spawn_once = "refuse" })
+	Hm.spawn_raise = true
+	check(not pcall(Hm.env.xr_effects.spawn_item_at_pos, Hm.actor, nil, { "drx_x18_documents" }), "(a spawn of the host raised)")
+	ask("fx", { f = "spawn_item_at_pos", p1 = "drx_x18_documents" })
+	check(Hm.spawned[#Hm.spawned] == "drx_x18_documents", "that one is not noted: a client's ask makes it")
+	fire(Hm, "load_state", {})
+	Hm.env.coop_trust.reset_for_test(nil)
+end
+
 print(string.format("== %d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then error("failures") end

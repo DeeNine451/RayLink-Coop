@@ -1007,6 +1007,41 @@ local function on_hit(t, from)
 end
 
 -------------------------------------------------------------------------------
+-- Quest spawns a map server's own logic made (round 5, S2 of the round 4 review)
+-------------------------------------------------------------------------------
+-- The condlists of a level run on its map server, and coop_quests_story notes there a counted effect they ran (a quest item, the
+-- ambush mine, the barrier's first wave: coop_quests_trust.note_run). A client's ask of the same effect is decided on the world
+-- server (quests.act "fx": coop_quests_story host_fx -> coop_quests_trust check_spawn), whose list never saw the map server's run:
+-- a second copy could be asked for. The map server passes each run on (far_qnote: the effect and its parameters, never a key), and
+-- the world server notes it as a run of its own, from a map server only: the same rules (a section the effect cannot make is not
+-- kept; a run of a task's wave counts for the world server's running task) and the world server's save.
+local function pass_quest_run(f, t)
+	if not map_server() or type(f) ~= "string" then return end
+	local msg = { f = f }
+	for i = 1, 8 do
+		local v = type(t) == "table" and t["p" .. i]
+		if v ~= nil then msg["p" .. i] = tostring(v) end
+	end
+	qc().send("far_qnote", msg, 0)
+end
+
+local function on_quest_run(t, from)
+	if not world_server() or type(from) ~= "number" or from < 0x100 or type(t.f) ~= "string" then return end
+	local qt = q_mod("coop_quests_trust")
+	if qt and type(qt.note_run) == "function" then qt.note_run(t.f, t) end
+end
+
+-- Set up once per Lua state, at the first update (patch_world_calls), not at load.
+local quest_runs_set = false
+local function set_quest_runs()
+	if quest_runs_set then return end
+	quest_runs_set = true
+	qc().on("far_qnote", on_quest_run, TAG)
+	local qt = q_mod("coop_quests_trust")
+	if qt and type(qt.on_run) == "function" then qt.on_run(pass_quest_run) end
+end
+
+-------------------------------------------------------------------------------
 -- Frames
 -------------------------------------------------------------------------------
 local next_tick = 0
@@ -1035,6 +1070,7 @@ function _stats() return stats end
 function _names_of() return names_of end
 
 local function patch_world_calls()
+	set_quest_runs() -- round 5 (S2): a map server's own quest spawns, noted on the world server
 	-- The logic of a companion is an NPC's on the level he stands on: tasks_agent_rescue makes the spy one from a status functor.
 	local ac = q_mod("axr_companions")
 	local setup = ac and ac.setup_companion_logic

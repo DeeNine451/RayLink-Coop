@@ -606,7 +606,8 @@ end
 -- character (his object's id on the process that made it) of the player who made it. Who reads it: the mine check
 -- (coop_npc_world others_stash), on the process that leads the level (the host of a co-op, the map server of a server; the book
 -- goes on to the world server's save with stash_book). Booked here for a backpack stash, by coop_mods_hf for placed furniture
--- (a Hideout Furniture stash, a workbench and so its box). A stash made before build 57 has none. owner nil: forgotten.
+-- (a Hideout Furniture stash, a workbench and so its box; round 5: nothing else). A stash made before build 57 has none. owner
+-- nil: forgotten (round 5: also whenever the object is released, server_entity_on_unregister in on_game_start).
 function note_stash_owner(id, owner)
 	id = tonumber(id)
 	if not id then return end
@@ -1241,6 +1242,13 @@ function on_game_start()
 	start_step("install_gun", install_gun)
 	start_step("install_box_rolls", install_box_rolls)
 	start_step("install_take", install_take)
+	-- round 5 (S7 of the round 4 review): an owner booked for a stash or a workbench (here and by coop_mods_hf) goes with its object
+	-- however the object goes (a pickup by another's stock code, a script's release), so a reused id inherits none. The stock's own
+	-- place for that (axr_main: "good place to remove ids from persistent tables").
+	RegisterScriptCallback("server_entity_on_unregister", function(se)
+		local id = se and se.id
+		if type(id) == "number" then pcall(note_stash_owner, id, nil) end
+	end)
 	if #installed == 0 then return end
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("load_state", function() spent = {} end)

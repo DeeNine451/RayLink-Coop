@@ -1516,6 +1516,161 @@ do
 	check(turned(cord) and lines("task_complete_talk") >= 1, "log mode: a turn-in without a talk goes through, logged")
 	H.env.coop.talk_recent, H.env.alife_object = nil, nil
 
+	-- Round 5 (blocker 2 of the round 4 review): the Lua turn-in of a task whose objective is not about items asks the host's own
+	-- state of the task (check task_complete_state), as the engine path does (host.still_running). The honest turn-ins: the stock
+	-- and DRX turn-in dialogs and z_gavrilenko_tasks_fix turn in a task at its stage_complete (the client's stub has the host's
+	-- stage); the host's own check found it done; a dialog completes one named task directly (its own precondition).
+	print("== R5 B2: the Lua turn-in asks the host's own state of the task")
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and (npc == 777 or npc == 780) end
+	cord.status_functor, cord.stage, cord.last_check_task, cord.forced_status = "bounty_task", 0, nil, nil
+	trust.reset_for_test({ default = "log", task_complete = "refuse", task_complete_state = "refuse" })
+	check(H.mod.host_state_verdict("cord_2", 2, 1, false, false, true) == false, "(the engine path refuses a bounty still running)")
+	req(C, "complete", "cord_2", ";sp=n777")
+	local sline = ""
+	for i = #H.log, 1, -1 do
+		if H.log[i]:find("[coop-trust] ! task_complete_state:", 1, true) then sline = H.log[i] break end
+	end
+	check(not turned(cord) and failed("task_complete_state") == 1 and sline:find("one", 1, true) ~= nil
+		and sline:find("254", 1, true) ~= nil, "the review's probe C1: the Lua turn-in in a talk with its giver, refused: " .. sline)
+	cord.stage = 254
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and failed("task_complete_state") == 1,
+		"at its stage_complete (254 without one in its ini: the stock and DRX turn-in dialogs): ok")
+	local tini = H.env.task_manager.task_ini
+	tini.r_float_ex = function(_, id, key) if id == "cord_2" and key == "stage_complete" then return 3 end end
+	cord.stage = 3
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and failed("task_complete_state") == 1, "at the stage_complete of its ini (z_gavrilenko_tasks_fix reads it too): ok")
+	cord.stage = 2
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(not turned(cord) and failed("task_complete_state") == 2, "a stage below it: refused")
+	tini.r_float_ex = nil
+	cord.stage, cord.last_check_task = 0, "complete"
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and failed("task_complete_state") == 2, "the host's own check found it done: ok")
+	cord.last_check_task = nil
+	-- a dialog that completes one named task directly (dialogs_lostzone's crossfire at Hernandez): its precondition is the objective
+	for _, m in ipairs({ H, C }) do
+		local ti = m.env.task_manager.task_ini
+		local known = ti.section_exist
+		ti.section_exist = function(s, id) return id == "lttz_hb_task_4_1_crossfire" or known(s, id) end
+	end
+	C.tm:give_task("lttz_hb_task_4_1_crossfire")
+	pump()
+	local cf = H.tm.task_info.lttz_hb_task_4_1_crossfire
+	cf.status_functor = nil
+	req(C, "complete", "lttz_hb_task_4_1_crossfire", ";sp=n780")
+	check(turned(cf) and failed("task_complete_state") == 2, "a task its dialog completes directly (dialogs_lostzone): ok at any stage")
+	-- an item task is the money and item checks' (a DRX money task: the taker's ledger pays it)
+	cord.status_functor = "drx_sl_money_task_status"
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and failed("task_complete_state") == 2 and trust.status().task_complete_state.checked == 6,
+		"a money task: not judged by its state (" .. trust.status().task_complete_state.checked .. " checked)")
+	-- log mode: through as before, a line
+	cord.status_functor = "bounty_task"
+	trust.reset_for_test({ default = "log" })
+	req(C, "complete", "cord_2", ";sp=n777")
+	check(turned(cord) and lines("task_complete_state") >= 3, "log mode: a turn-in of a task still running goes through, logged")
+	H.tm.task_info.lttz_hb_task_4_1_crossfire, H.engine_tasks.lttz_hb_task_4_1_crossfire = nil, nil
+
+	-- Round 5 (S1 of the round 4 review): DRX gives a task with the giver's squad id (dialogs.drx_sl_give_sl_task: giver_id =
+	-- se_obj.group_id), and its stock turn-in accepts any member of that squad (axr_task_manager.get_first_finished_task)
+	print("== R5 S1: a member of the giver's squad counts as the giver")
+	trust.reset_for_test({ default = "log", task_complete_talk = "refuse", task_cancel = "refuse", task_stage = "refuse" })
+	H.env.alife_object = function(id)
+		if id == 779 then return { id = 779, group_id = 7790 } end
+		if id == 781 then return { id = 781, group_id = 7810 } end
+	end
+	H.env.coop.talk_recent = function(peer, npc) return (peer == 1 or peer == 2) and (npc == 779 or npc == 781) end
+	local stock_lock = H.env.coop.talk_lock_of
+	H.env.coop.talk_lock_of = nil
+	cord.task_giver_id, cord.target_functor, cord.current_target, cord.stage = 7790, nil, nil, 254
+	req(C, "complete", "cord_2", ";sp=n779")
+	check(turned(cord) and failed("task_complete_talk") == 0,
+		"the review's probe C4: a turn-in at a member of the giver squad, the task pointing nowhere: ok")
+	req(C, "complete", "cord_2", ";sp=n781")
+	check(not turned(cord) and failed("task_complete_talk") == 1, "a member of another squad: refused")
+	req(C2, "cancel", "cord_2", ";sp=n779")
+	check(cord.cancelled_by_actor == true and failed("task_cancel") == 0,
+		"another player's cancel in a talk with the giver's squad member (dialogs.npc_cancel_task): his choice, ok")
+	cord.forced_status, cord.cancelled_by_actor = nil, nil
+	cord.stage = 20
+	req(C, "stage", "cord_2", ";st=n21;sp=n779")
+	check(cord.stage == 21 and failed("task_stage") == 0, "a stage step at the giver's squad member, the task pointing nowhere: ok")
+	req(C, "stage", "cord_2", ";st=n22;sp=n781")
+	check(cord.stage == 21 and failed("task_stage") == 1, "at a member of another squad: refused")
+	cord.task_giver_id = 777
+
+	-- Round 5 (S4 of the round 4 review): z_gavrilenko_tasks_fix turns the task in 1 s after the dialog opens, the dialog may be
+	-- closed by then. The client keeps the NPC of its last talk for the host's window (15 s) and names him.
+	print("== R5 S4: a turn-in a moment after the dialog closed names the NPC of the last talk")
+	trust.reset_for_test({ default = "log", task_complete_talk = "refuse" })
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and npc == 777 end
+	local gav = C.new_obj(777)
+	C.env.get_speaker = function() return gav end
+	C.talking = true
+	C.callbacks.GUI_on_show("Dialog")
+	C.talking = false
+	C.callbacks.GUI_on_hide("Dialog")
+	NOW = NOW + 1000
+	C.tm:set_task_completed("cord_2")
+	pump()
+	check(turned(cord) and failed("task_complete_talk") == 0, "1 s after the dialog opened, it closed meanwhile: he names 777, ok")
+	NOW = NOW + 16000
+	C.tm:set_task_completed("cord_2")
+	pump()
+	check(not turned(cord) and failed("task_complete_talk") == 1, "16 s after the talk: no partner named, refused")
+
+	-- Round 5 (S5 of the round 4 review): a dialog closed and opened again with the same NPC between two looks of the host's scan
+	-- (0.5 s) is a new talk. The engine asks coop_npc_meet.talk_verdict before it grants a client's lock (coop_dialog.cpp
+	-- host_try_lock): a lock granted while he does not hold this NPC's is a new talk; a request repeated while he holds it is not.
+	print("== R5 S5: a quick re-talk with the same NPC is a new talk")
+	trust.reset_for_test({ default = "log", task_stage = "refuse" })
+	local lock = {}
+	H.env.coop.talk_lock_of = function(peer) return lock[peer] end
+	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and npc == 779 end
+	H.env.task_functor = { tf_s5 = function() return 7790 end }
+	cord.target_functor = "tf_s5"
+	local granted = true
+	H.env.coop_npc_meet = { talk_verdict = function(npc, who)
+		if granted then return true, nil end
+		return false, "busy"
+	end }
+	local stock_verdict = H.env.coop_npc_meet.talk_verdict
+	tick(H) -- the host's scan
+	local verdict = H.env.coop_npc_meet.talk_verdict
+	check(verdict ~= stock_verdict, "the host watches the talks it grants (coop_npc_meet.talk_verdict)")
+	local a1, a2 = verdict(H.new_obj(5779), proxy_on_host)
+	check(a1 == true and a2 == nil, "the verdict's answer is the stock one")
+	local npc779h = H.new_obj(779)
+	verdict(npc779h, proxy_on_host)
+	lock[1] = 779
+	tick(H)
+	cord.stage = 30
+	req(C, "stage", "cord_2", ";st=n31;sp=n779")
+	check(cord.stage == 31 and failed("task_stage") == 0, "a step in his talk with 779: ok")
+	lock[1] = nil
+	verdict(npc779h, proxy_on_host) -- closed and opened again before the host looked
+	lock[1] = 779
+	req(C, "stage", "cord_2", ";st=n32;sp=n779")
+	check(cord.stage == 32 and failed("task_stage") == 0, "a quick re-talk with 779 between two looks: a new talk, ok")
+	verdict(npc779h, proxy_on_host) -- a client that asks for the lock again while he holds it
+	req(C, "stage", "cord_2", ";st=n33;sp=n779")
+	check(cord.stage == 32 and failed("task_stage") == 1, "the lock asked again while he holds it: no new talk, refused")
+	lock[1] = nil
+	granted = false
+	check(verdict(npc779h, proxy_on_host) == false, "(the meet rules say no)")
+	granted = true
+	lock[1] = 779
+	req(C, "stage", "cord_2", ";st=n33;sp=n779")
+	check(cord.stage == 32 and failed("task_stage") == 2, "a talk the host did not grant: no new talk, refused")
+	lock[1] = nil
+	tick(H)
+	H.env.coop_npc_meet, H.env.task_functor, H.env.alife_object, H.env.coop.talk_recent = nil, nil, nil, nil
+	H.env.coop.talk_lock_of = stock_lock
+	cord.target_functor, cord.status_functor, cord.stage = nil, "actor_has_fetch_item", 0
+	trust.reset_for_test({ default = "log" })
+
 	for _, id in ipairs({ "drx_sl_x", "faction_base_defense", "cord_2", "story_2" }) do
 		H.tm.task_info[id] = nil
 		H.engine_tasks[id] = nil

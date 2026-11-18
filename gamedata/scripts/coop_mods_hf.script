@@ -78,7 +78,7 @@ end
 -- Facts: Co-op, the host's copy of the player's character and his items; Server, the map server of his level (C().on "host"
 -- passes the request there) with the same facts.
 -- wait: client, item -> { at, kind, lamp }; done: client, item -> until (the host took it, its removal is on its way); left: host
-local spend = { wait = {}, done = {}, left = {}, ACK_MS = 15000, TOOL_STEP = 0.05 }
+local spend = { wait = {}, done = {}, left = {}, ACK_MS = 15000, TOOL_STEP = 0.05, STEP_SLACK = 0.001 }
 
 local function trust(name, ok, fmt, ...)
 	local found, t = pcall(function() return _G.coop_trust end)
@@ -131,14 +131,22 @@ local function carried(iid, who, sections)
 end
 
 -- Host: the use or the step left to his machine at the last request with this item went (its state on the host, which his
--- machine reports, is lower now). -> ok, why
+-- machine reports, is lower now). Round 5 (blocker 3 of the round 4 review): lower by the mod's own step, not by any amount: a use
+-- of a multi-use item (utils_item.discharge), TOOL_STEP of a degradable tool's condition (ui_furniture_light.toggle_light:
+-- utils_item.degrade(obj, 0.05)); STEP_SLACK covers the item state's travel (condition in steps of 1/65535). A machine that reports
+-- 0.0001 a light lit one lighter about 9000 times. -> ok, why
 local function spent_since(obj, kind)
 	local w = spend.left[obj:id()]
 	if not w then return true end
 	local k, v = spend_state(obj, kind)
-	if k == w.k and v ~= nil and v >= w.v then
-		return false, string.format("the use left to his machine at the last request was not spent (%s still %s)",
-			k == "u" and "uses" or "condition", tostring(v))
+	local most = k == "u" and w.v - 1 or w.v - spend.TOOL_STEP + spend.STEP_SLACK
+	if k == w.k and v ~= nil and v > most then
+		if k == "u" then
+			return false, string.format("the use left to his machine at the last request was not spent (uses still %s, were %s)",
+				tostring(v), tostring(w.v))
+		end
+		return false, string.format("the step left to his machine at the last request was not spent: condition %s, was %s, the "
+			.. "mod's step %s asks for %.3f at most", tostring(v), tostring(w.v), tostring(spend.TOOL_STEP), most)
 	end
 	spend.left[obj:id()] = nil
 	return true
@@ -400,6 +408,17 @@ local function client_place(section, loc, rot, lvid, gvid, item_id)
 	})
 end
 
+-- Round 5 (S7 of the round 4 review): is placed section `sec` furniture that has an owner? A Hideout Furniture stash
+-- (placeable_type = stash, as coop_npc_world's mine check reads it) or a workbench (placeable_workshop, bound by
+-- bind_workshop_furniture: its box, m_data.workshop_stashes, is judged by the workbench's owner).
+local function owned_kind(sec)
+	local okt, kind = pcall(function() return ini_sys:r_string_ex(sec, "placeable_type") end)
+	if okt and kind == "stash" then return true end
+	if sec == "placeable_workshop" then return true end
+	local okb, bind = pcall(function() return ini_sys:r_string_ex(sec, "script_binding") end)
+	return okb and type(bind) == "string" and bind:find("bind_workshop_furniture", 1, true) ~= nil
+end
+
 local function host_place(t, from)
 	local item_id = C().lid(tonumber(t.i))
 	local se = type(item_id) == "number" and item_id < 65535 and alife_object(item_id)
@@ -437,9 +456,13 @@ local function host_place(t, from)
 	if hm and hm.delete_data then pcall(hm.delete_data, item_id) end
 	alife_release_id(item_id)
 	-- round 4 (S5 of the round 3 review): its owner, his character: a mine from his own stash or his workbench's box
-	-- (coop_npc_world); forgotten at its pickup
+	-- (coop_npc_world); forgotten at its pickup. Round 5 (S7 of the round 4 review): booked only for a stash or a workbench, what
+	-- that check reads (a lamp or a chair grew the save's list for nothing), and forgotten whenever the object goes
+	-- (coop_mods_items: server_entity_on_unregister), not only through hf_pickup.
 	local items = C().mod("coop_mods_items")
-	if items and type(items.note_stash_owner) == "function" then pcall(items.note_stash_owner, obj_id, who:id()) end
+	if owned_kind(section) and items and type(items.note_stash_owner) == "function" then
+		pcall(items.note_stash_owner, obj_id, who:id())
+	end
 	st.place = st.place + 1
 	log("placed %s -> %d for #%s", section, obj_id, tostring(from))
 end
