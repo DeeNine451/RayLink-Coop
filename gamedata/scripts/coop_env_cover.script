@@ -1,0 +1,260 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- F5-COV-1. The caller supplies the level's body: the co-op host and the map's decider use identical rules.
+-- No personal underground/current_safe_cover events, actor immunities, patched pos_in_cover or local tent lists.
+-- No callbacks, wrappers, saves or network handlers. F5-COV-2/3 own scheduling, trust and delivery.
+
+local peers = {}
+local ray_table
+local status_registered = false
+local no_emission = { l13_generators = true, l11_hospital = true }
+local tb_sets = { l09_deadcity = "DC", k00_marsh = "GS", y04_pole = "ME", jupiter = "JU", zaton = "ZA",
+    l05_bar = "RO", l11_pripyat = "PR", pripyat = "OU", l10_radar = "RA", l04_darkvalley = "DV" }
+
+local function mod(name)
+    return coop_mods_core.mod(name)
+end
+
+local function manager(name, getter)
+    local m = mod(name)
+    return m and m[getter] and m[getter]() or nil
+end
+
+local function phases()
+    local sm = manager("surge_manager", "get_surge_manager")
+    local pm = manager("psi_storm_manager", "get_psi_storm_manager")
+    return (GetEvent("surge", "state") or (sm and sm.started)) and true or false,
+        (GetEvent("psi_storm", "state") or (pm and pm.started)) and true or false, sm
+end
+
+local function closed_level(name, sm)
+    if no_emission[name] or (sm and sm.indoor_levels and sm.indoor_levels[name]) then return true end
+    local lw = mod("level_weathers")
+    -- Before the weather manager initializes valid_levels, an empty table proves nothing about this map.
+    if lw and lw.valid_levels and next(lw.valid_levels) and lw.valid_levels[name] ~= true then return true end
+    local dynamic = mod("dynamic_emission_cover_mcm")
+    if dynamic and dynamic.excluded_maps and dynamic.excluded_maps[name] then return true end
+    local tb = mod("tb_coordinate_based_safe_zones")
+    return tb and tb.tb_ug_maps and tb.tb_ug_maps[name] == true or false
+end
+
+local function static_cover(sm, pos)
+    if not sm then return false end
+    if sm.init_surge_covers then sm:init_surge_covers() end
+    -- surge_manager's stock restrictors, before actor-specific mod wrappers can add personal cover.
+    for name in pairs(sm.covers or {}) do
+        local zone = db.zone_by_name[name]
+        if zone and zone:inside(pos) then return true end
+    end
+    return false
+end
+
+local function tent_cover(pos)
+    if not mod("item_tent") or not level.iterate_nearest then return false end
+    local found = false
+    level.iterate_nearest(pos, 2.0, function(obj)
+        if not obj or obj:section() ~= "ph_tent" then return false end
+        found = obj:position():distance_to(pos) < 1.5
+        return found
+    end)
+    return found
+end
+
+local function tb_cover(name, pos)
+    local tb = mod("tb_coordinate_based_safe_zones")
+    local suffix = tb_sets[name]
+    local boxes = tb and suffix and tb["tbSZ_" .. suffix]
+    for _, box in ipairs(boxes or {}) do
+        -- Exact TB predicate: aa/ba bound x, ac/bc bound z, bb is the only y bound (ab is unused).
+        if pos.x > box[1] and pos.z < box[3] and pos.x < box[4] and pos.z > box[6] and pos.y < box[5] then
+            return true
+        end
+    end
+    return false
+end
+
+local function build_rays()
+    if ray_table then return end
+    ray_table = {}
+    -- Dynamic Emission Cover init: 16 azimuths, 8 elevations, with both reductions, 109 directions.
+    for i = 1, 16 do
+        for ii = 0, 7 do
+            if not (ii == 7 and i % 3 ~= 0) and not (ii == 6 and i % 2 == 0) then
+                local dir = vector():set(0, 0, 1)
+                local angle = (ii / 7) * 82
+                dir.y = math.sin(angle * 0.017453292519943295769236907684886)
+                dir.z = math.cos(angle * 0.017453292519943295769236907684886)
+                dir = vector_rotate_y(dir, (i / 16) * 360):normalize()
+                ray_table[#ray_table + 1] = vector():set(dir)
+            end
+        end
+    end
+end
+
+local function stance_offset(peer)
+    -- Engine movement flags (actor_defs.h), from the latest snapshot. No snapshot means standing.
+    for _, row in ipairs(coop.players() or {}) do
+        if row.id == peer then
+            local flags = row.mstate
+            if type(flags) == "number" and flags >= 0 and flags <= 4294967295 and flags == math.floor(flags) then
+                if math.floor(flags / 16) % 2 == 1 then
+                    return math.floor(flags / 32) % 2 == 1 and 0.25 or 0.5
+                end
+            end
+            break
+        end
+    end
+    return 0.75
+end
+
+local function option(m, key, fallback)
+    local n = m.get_config and m.get_config(key)
+    if type(n) ~= "number" or n ~= n or n == math.huge or n == -math.huge or n < 0 then return fallback end
+    return n
+end
+
+local function scan_config(m)
+    local range = option(m, "cover_range", 8)
+    local threshold = option(m, "distance_factor", 0.85)
+    local bonus = option(m, "north_cover_bonus", 0.01)
+    local grace = option(m, "grace_period", 1)
+    return string.format("%.17g/%.17g/%.17g/%.17g", range, threshold, bonus, grace), range, threshold, bonus, grace
+end
+
+local function record(peer, body, name)
+    local p = peers[peer]
+    -- Object lookups can return distinct Lua userdata for the same engine object.
+    local id = body:id()
+    if not p or p.id ~= id or p.map ~= name then
+        p = { id = id, map = name, source = "none", rays = 0, since = time_global() }
+        peers[peer] = p
+    end
+    return p
+end
+
+local function clear_scan(p)
+    p.scan, p.score, p.safe, p.grace, p.phase, p.config = nil, nil, nil, nil, nil, nil
+end
+
+local function dynamic_safe(p, grace)
+    if p.safe and p.grace and time_global() >= p.grace + grace * 1000 then p.safe = false end
+    return p.safe == true
+end
+
+function reset(peer)
+    if peer == nil then
+        peers = {}
+        if status_registered then coop_mods_core.status_line("env_cover", nil); status_registered = false end
+    else peers[peer] = nil end
+end
+
+function tick(peer, body)
+    if not coop_mods_core.active() then reset(); return end
+    if not body then reset(peer); return end
+    if not status_registered then coop_mods_core.status_line("env_cover", status); status_registered = true end
+    local name = level.name()
+    local p = record(peer, body, name)
+    local surge, psi, sm = phases()
+    local m = mod("dynamic_emission_cover_mcm")
+    local geometry = mod("demonized_geometry_ray")
+    if not (surge or psi) or closed_level(name, sm) or not m or not geometry or not geometry.geometry_ray then
+        clear_scan(p)
+        return
+    end
+    build_rays()
+    local budget = math.min(#ray_table, math.floor(option(m, "rays_per_update", 10)))
+    local config, range, threshold, bonus, grace = scan_config(m)
+    local phase = surge and "surge" or "psi"
+    if p.phase ~= phase or p.config ~= config then clear_scan(p); p.phase, p.config = phase, config end
+    dynamic_safe(p, grace)
+    if range <= 0.01 then clear_scan(p); return end
+    if not p.scan then p.scan = { index = 1, points = 0 } end
+    local scan = p.scan
+    local offset = stance_offset(peer)
+    for _ = 1, budget do
+        local dir = ray_table[scan.index]
+        if not scan.pending then
+            local pos = vector():set(body:position())
+            pos.y = pos.y + offset
+            scan.origin, scan.pos = vector():set(pos), pos
+            scan.range, scan.contact_range = range, range - 0.01
+        end
+        local args = { ray_range = scan.range, contact_range = scan.contact_range, flags = (1+2+4+8), ignore_object = body }
+        local result = geometry.geometry_ray(args):get(vector():set(scan.pos), vector():set(dir))
+        p.rays = p.rays + 1
+        local material = result.result and result.result.material_name
+        local transparent = result.in_contact and material and (string.find(material, "bush") or string.find(material, "water"))
+        if transparent then
+            -- Preserve the mod's explicit range/contact subtraction and .01 advance. Recasts consume budget too;
+            -- pending work continues next tick so a dense bush cannot turn one update into an unbounded loop.
+            local distance = result.distance
+            if type(distance) ~= "number" or distance < 0 or distance ~= distance then distance = range end
+            scan.range = scan.range - distance
+            scan.contact_range = scan.contact_range - distance
+            scan.pos = vector():set(result.position):add(vector():set(dir):mul(0.01))
+            scan.pending = true
+            scan.recasts = (scan.recasts or 0) + 1
+        end
+        -- A zero-distance transparent surface still advances .01: at most range/.01 recasts can be useful.
+        local exhausted = transparent and (scan.contact_range <= 0 or scan.recasts >= math.ceil(range / 0.01))
+        if not transparent or exhausted then
+            if result.in_contact and not transparent then
+                local points = 1
+                if surge and bonus > 0 then
+                    local delta = vector():set(result.position):sub(scan.origin):normalize()
+                    if delta.z > 0 then points = points + delta.z * bonus end
+                end
+                scan.points = scan.points + points
+            end
+            scan.pending, scan.recasts = nil, nil
+            scan.index = scan.index + 1
+            if scan.index > #ray_table then
+                p.score = scan.points / #ray_table
+                if p.score >= threshold then p.safe, p.grace = true, nil
+                elseif p.safe and not p.grace then p.grace = time_global() end
+                dynamic_safe(p, grace)
+                p.scan = nil
+                break -- one complete table per cycle; don't mix the next cycle into its verdict
+            end
+        end
+    end
+end
+
+function verdict(peer, body)
+    if not coop_mods_core.active() then reset(); return false, "none", nil end
+    if not body then reset(peer); return false, "none", nil end
+    local name = level.name()
+    local p = record(peer, body, name)
+    local surge, psi, sm = phases()
+    local m = mod("dynamic_emission_cover_mcm")
+    local geometry = mod("demonized_geometry_ray")
+    if not (surge or psi) or not m or not geometry or not geometry.geometry_ray
+        or p.phase ~= (surge and "surge" or "psi") or p.config ~= scan_config(m) then clear_scan(p) end
+    local source = "none"
+    local pos = body:position()
+    if closed_level(name, sm) then source = "closed_level"
+    elseif static_cover(sm, pos) then source = "static"
+    elseif tent_cover(pos) then source = "tent"
+    elseif tb_cover(name, pos) then source = "tb_zone"
+    elseif m and dynamic_safe(p, option(m, "grace_period", 1)) then source = "dynamic" end
+    p.source = source
+    return source ~= "none", source, p.score
+end
+
+function status()
+    if not coop_mods_core.active() then reset(); return "env_cover: inactive" end
+    local out = {}
+    local name = level.name()
+    for peer, p in pairs(peers) do
+        local body = p.map == name and level.object_by_id(p.id)
+        if body then
+            verdict(peer, body)
+            local rate = p.rays * 1000 / math.max(1000, time_global() - p.since)
+            out[#out + 1] = string.format("%s:%s score=%s rays/s=%.1f", tostring(peer), p.source,
+                p.score and string.format("%.3f", p.score) or "-", rate)
+        else
+            peers[peer] = nil
+        end
+    end
+    table.sort(out)
+    return "env_cover: " .. table.concat(out, "; ")
+end
