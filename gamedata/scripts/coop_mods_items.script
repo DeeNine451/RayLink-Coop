@@ -28,7 +28,7 @@
 	  mods.stash_made  host -> client { b box, i backpack, s section, p, t, f }  the client shows the stash; with f it moves its own bag in.
 	  mods.stash_free  client -> host { b box }  a stash emptied: the box goes, the player gets the backpack back.
 	  mods.stash_book  map server -> world server { b, s, p, t, o | b, x }  player_created_stashes, the stash's owner (o, round 4:
-	                   m_data.coop_stash_owner) and the map spot live in the world's save.
+	                   m_data.coop_stash_owner), the FFT hint and the map spot live in the world's save.
 	Placeable campfire (campfire_placeable)
 	  mods.cf_place    client -> host { i item }  the stock's own place_campfire with the client's character as the actor; the item is
 	                   spent when the campfire stands, a refusal loses nothing.
@@ -582,12 +582,18 @@ local function stash_note(id, section)
 	m.player_created_stashes[id] = section
 end
 
--- The world server: the book and the spot go with the save, coop_economy_mdata shows the book to every client.
+-- The world owner saves the book and the FFT hint. se_save_var sends the hint through economy.se.
 local function stash_book(id, section, spot, name)
 	stash_note(id, section)
+	local function save_hint()
+		if type(se_save_var) == "function" then se_save_var(id, nil, "stash_hint_text", name) end
+	end
+	local box_here = alife_object(id) ~= nil
+	if box_here then save_hint() end
 	local deadline = time_global() + STASH_SPOT_WAIT_MS
 	CreateTimeEvent("coop_mods_stash", "spot_" .. id, 0, function()
 		if alife_object(id) then
+			if not box_here then save_hint() end
 			level.map_add_object_spot_ser(id, spot, name)
 			return true
 		end
@@ -672,18 +678,27 @@ end
 
 local function host_stash_make(t, from)
 	local who = C().avatar(from)
-	local iid = C().lid(tonumber(t.i))
-	local se = type(iid) == "number" and iid < 65535 and alife_object(iid)
-	if not (who and se) then return refuse("stash_make", from, "no such item") end
+	local hid = tonumber(t.i)
+	local iid = hid and hid > 0 and hid < 65535 and hid % 1 == 0 and C().lid(hid)
+	local se = iid and alife_object(iid)
+	local available = who and se
+	if not coop_trust.pass("stash_make_item", available, "peer %d named an unavailable backpack", from) or not available then
+		return refuse("stash_make", from, "no such item")
+	end
 	if spent[iid] then return refuse("stash_make", from, "the backpack is spent already") end
 	local section = se:section_name()
-	if ini_sys:r_string_ex(section, "class") ~= STASH_CLASS then return refuse("stash_make", from, "not a backpack") end
+	local backpack = ini_sys:r_string_ex(section, "class") == STASH_CLASS
+	if not coop_trust.pass("stash_make_class", backpack, "peer %d named a non-backpack item", from) or not backpack then
+		return refuse("stash_make", from, "not a backpack")
+	end
 	local pos
 	if C().root_of(iid) == who:id() then
 		pos = who:position()
 	elseif (se.parent_id == nil or se.parent_id == 65535) and who:position():distance_to_sqr(se.position) <= STASH_REACH * STASH_REACH then
 		pos = se.position
-	else
+	end
+	if not coop_trust.pass("stash_make_reach", pos ~= nil, "peer %d named a backpack outside his inventory or reach", from)
+		or not pos then
 		return refuse("stash_make", from, "the backpack is not the player's")
 	end
 	local box = alife_create(STASH_BOX, pos, who:level_vertex_id(), who:game_vertex_id()) -- vertices never from the network
@@ -693,11 +708,11 @@ local function host_stash_make(t, from)
 	local spot = STASH_SPOTS[t.p] and t.p or "treasure_player"
 	local name = type(t.t) == "string" and t.t:sub(1, STASH_NAME_MAX):gsub("%c", " ") or ""
 	note_stash_owner(box.id, who:id()) -- round 4 (S5): his stash, booked here where the level's mines are judged
-	if C().is_map_server() then
-		stash_note(box.id, section) -- the book of a map server's save is the world server's: its own level it keeps itself
-		C().to_host("stash_book", { b = box.id, s = section, p = spot, t = name, o = who:id() })
-	else
+	if coop_mode.decides_world() then
 		stash_book(box.id, section, spot, name)
+	else
+		stash_note(box.id, section) -- the level authority keeps its local list for object checks
+		C().publish("stash_book", { b = C().hid(box.id), s = section, p = spot, t = name, o = C().hid(who:id()) })
 	end
 	C().to_peer(from, "stash_made", { b = box.id, i = t.i, s = section, p = spot, t = name, f = t.f == true })
 	st.stash = st.stash + 1
