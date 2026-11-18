@@ -259,18 +259,19 @@ TEST(cp_slot_set_shift)
 	CHECK(same(s.cur, B));
 	CHECK(same(s.prev, A));
 
-	// The same source and kind again refreshes the current record only.
+	// Build 57 (owner 2026-11-18): the same source and kind again is the same place: the slot is left as it is (nothing
+	// to write, nothing to announce), the record keeps where and when it was first made.
 	Record B2 = B;
 	B2.pos[0] = 9.0f;
 	B2.game_time_ms = 5000;
-	set(s, B2);
-	CHECK(same(s.cur, B2));
+	CHECK(set(s, B2) == SetOutcome::Same);
+	CHECK(same(s.cur, B));
 	CHECK(same(s.prev, A));
 
 	// The same kind of another source shifts; so does the same source of another kind.
 	set(s, make(Kind::Tent, 11));
 	CHECK_EQ(s.cur.source, uint16_t(11));
-	CHECK(same(s.prev, B2));
+	CHECK(same(s.prev, B));
 	set(s, make(Kind::Rest, 11));
 	CHECK(s.cur.kind == Kind::Rest);
 	CHECK(s.prev.kind == Kind::Tent);
@@ -289,6 +290,104 @@ TEST(cp_slot_set_shift)
 	set(z, Record());
 	CHECK(same(z.cur, A));
 	CHECK(!z.prev.valid());
+}
+
+// Build 57 (owner 2026-11-18): "checkpoint updated" came again and again at one campfire. set() says what it did: the
+// same place (the same kind and object; without an object the same level and not farther than 10 m) changes nothing.
+TEST(cp_set_outcome)
+{
+	// The same campfire twice: Same, the slot untouched.
+	{
+		Slot s;
+		const Record fire = make(Kind::Campfire, 5, "l01_escape", 1.0f);
+		CHECK(set(s, fire) == SetOutcome::New);
+		Record again = fire;
+		again.pos[0] = 2.5f; // he stands on the other side of it
+		again.game_time_ms = 999999;
+		CHECK(set(s, again) == SetOutcome::Same);
+		CHECK(same(s.cur, fire));
+		CHECK(!s.prev.valid());
+		CHECK(!changes_slot(SetOutcome::Same));
+		// Another campfire: New, the old one goes down to prev.
+		CHECK(set(s, make(Kind::Campfire, 6, "l01_escape", 30.0f)) == SetOutcome::New);
+		CHECK_EQ(s.cur.source, uint16_t(6));
+		CHECK(same(s.prev, fire));
+		CHECK(changes_slot(SetOutcome::New));
+		// The same object of another kind is another place (a rest zone and a campfire with one id).
+		CHECK(set(s, make(Kind::Rest, 6, "l01_escape", 30.0f)) == SetOutcome::New);
+		CHECK(s.prev.kind == Kind::Campfire);
+	}
+	// A record without an object: the same level within 10 m is Same; farther or on another level is Moved (the current
+	// record moves, the previous one stays).
+	{
+		Slot s;
+		const Record fire = make(Kind::Campfire, 5, "l01_escape", 1.0f);
+		set(s, fire);
+		const Record story = make(Kind::Story, kNoSource, "l01_escape", 100.0f);
+		CHECK(set(s, story) == SetOutcome::New);
+		CHECK(set(s, make(Kind::Story, kNoSource, "l01_escape", 103.0f)) == SetOutcome::Same);
+		CHECK(same(s.cur, story));
+		CHECK(set(s, make(Kind::Story, kNoSource, "l01_escape", 109.99f)) == SetOutcome::Same);
+		CHECK(set(s, make(Kind::Story, kNoSource, "l01_escape", 150.0f)) == SetOutcome::Moved);
+		CHECK(near_pos(s.cur.pos, make(Kind::Story, kNoSource, "l01_escape", 150.0f).pos));
+		CHECK(same(s.prev, fire));
+		CHECK(changes_slot(SetOutcome::Moved));
+		CHECK(set(s, make(Kind::Story, kNoSource, "l02_garbage", 150.0f)) == SetOutcome::Moved);
+		CHECK(s.cur.level == "l02_garbage");
+		CHECK(same(s.prev, fire));
+		// The height counts too: 10 m straight up is the same place, 11 m is not.
+		Record up = s.cur;
+		up.pos[1] += 10.0f;
+		CHECK(set(s, up) == SetOutcome::Same);
+		up.pos[1] += 1.0f;
+		CHECK(set(s, up) == SetOutcome::Moved);
+		// Arrival and story are different kinds even on one spot.
+		Record arrival = s.cur;
+		arrival.kind = Kind::Arrival;
+		CHECK(set(s, arrival) == SetOutcome::New);
+	}
+	// Build 57 round 2 (lead's ruling on review S1/S2): only arrival and story move. Any other record without an object (a
+	// start base's: kind Rest, no object) somewhere else is New: the first goes down to prev, so a base that turns hostile
+	// still has the record before it to fall back to.
+	{
+		Slot s;
+		const Record a = make(Kind::Rest, kNoSource, "l01_escape", 0.0f);
+		const Record b = make(Kind::Rest, kNoSource, "l01_escape", 200.0f);
+		CHECK(set(s, a) == SetOutcome::New);
+		CHECK(set(s, b) == SetOutcome::New);
+		CHECK(near_pos(s.cur.pos, b.pos));
+		CHECK(same(s.prev, a));
+		// on another level as well
+		const Record c = make(Kind::Rest, kNoSource, "l02_garbage", 0.0f);
+		CHECK(set(s, c) == SetOutcome::New);
+		CHECK(same(s.prev, b));
+		// the same one within 10 m stays Same
+		CHECK(set(s, make(Kind::Rest, kNoSource, "l02_garbage", 5.0f)) == SetOutcome::Same);
+		CHECK(same(s.prev, b));
+		// arrival still moves
+		Slot m;
+		set(m, a);
+		CHECK(set(m, make(Kind::Arrival, kNoSource, "l02_garbage", 0.0f)) == SetOutcome::New);
+		CHECK(set(m, make(Kind::Arrival, kNoSource, "l03_agroprom", 0.0f)) == SetOutcome::Moved);
+		CHECK(same(m.prev, a));
+	}
+	// Nothing to set: Ignored, the slot as it was.
+	{
+		Slot s;
+		const Record fire = make(Kind::Campfire, 5);
+		set(s, fire);
+		CHECK(set(s, Record()) == SetOutcome::Ignored);
+		CHECK(same(s.cur, fire));
+		CHECK(!changes_slot(SetOutcome::Ignored));
+	}
+	// same_place itself: invalid records are never the same place.
+	{
+		const Record a = make(Kind::Campfire, 5);
+		CHECK(same_place(a, a));
+		CHECK(!same_place(a, Record()));
+		CHECK(!same_place(Record(), Record()));
+		CHECK(!same_place(a, make(Kind::Campfire, kNoSource)));
+	}
 }
 
 TEST(cp_slot_source_lost)

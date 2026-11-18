@@ -14,7 +14,13 @@
 		<text>Camp updated: campfire.</text>
 	</string>
 	<string id="st_coop_cp_updated_rest">
-		<text>Camp updated: resting place.</text>
+		<text>Camp updated: a resting place.</text>
+	</string>
+	<string id="st_coop_cp_updated_bed">
+		<text>Camp updated: a sleeping place.</text>
+	</string>
+	<string id="st_coop_cp_updated_base">
+		<text>Camp updated: a base.</text>
 	</string>
 	<string id="st_coop_cp_updated_tent">
 		<text>Camp updated: your tent or sleeping bag.</text>

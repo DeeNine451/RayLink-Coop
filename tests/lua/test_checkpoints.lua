@@ -346,9 +346,13 @@ case("changed_own_tip_and_spot", function()
 	end
 	MSG = nil
 	fire("coop_checkpoint_changed", 0, "campfire", 124, false, "l01_escape")
+	local at = ck().last_update(0)
 	MSG = nil
+	NOW = NOW + 5000
 	fire("coop_checkpoint_changed", 0, "campfire", 124, false, "l01_escape")
-	check(MSG == STR.st_coop_cp_updated_campfire, "the same camp rested at again is news again (outside the entry window)")
+	-- Build 57 (owner 2026-11-18): "checkpoint updated" came every N minutes at one and the same campfire
+	check(MSG == nil, "the same camp rested at again is no news (outside the entry window)")
+	check(ck().last_update(0) == at, "and the panel's 'just updated' mark does not move")
 	local ok = pcall(fire, "coop_checkpoint_changed", "bad", {}, nil, nil, nil)
 	ok = ok and pcall(fire, "coop_checkpoint_changed", 0, "no_such_kind", 5, false, "x")
 	ok = ok and pcall(fire, "coop_checkpoint_changed", nil, nil, nil, nil, nil)
@@ -372,6 +376,67 @@ case("changed_rollback_tip", function()
 	check(MSG == nil, "'none' again (the list at world entry): no tip")
 end)
 
+-- Build 57 (owner 2026-11-18): the tip only when the place changed. The host resends the whole list on other occasions too
+-- (the group view switched, a client's "loading" flag), so the script compares with the record it had, always: the kind,
+-- the object and the level; without an object the level and 10 m (the position from coop.checkpoint.get).
+case("same_place_no_news", function()
+	fresh("host")
+	fire("coop_checkpoint_changed", 0, "campfire", 124, false, "l01_escape")
+	MSG = nil
+	NOW = NOW + 1000
+	fire("coop_checkpoint_changed", 0, "campfire", 125, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_campfire, "another campfire is news")
+	MSG = nil
+	NOW = NOW + 1000
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_rest, "a rest place after a campfire is news")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l01_escape")
+	check(MSG == nil, "the bed of the base again: no news")
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l02_garbage")
+	check(MSG == STR.st_coop_cp_updated_rest, "the same id on another level is another place")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 300, true, "l02_garbage")
+	check(MSG == STR.st_coop_cp_rollback, "a rollback is always news, even to the record it had")
+	-- the whole list again (the group view switched) outside the entry window: the own and the ally's records unchanged
+	fire("coop_checkpoint_changed", 500, "tent", 301, false, "l01_escape")
+	local ally_at = ck().last_update(500)
+	local own_at = ck().last_update(0)
+	MSG = nil
+	NOW = NOW + 60000
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l02_garbage")
+	fire("coop_checkpoint_changed", 500, "tent", 301, false, "l01_escape")
+	check(MSG == nil and ck().last_update(0) == own_at and ck().last_update(500) == ally_at,
+		"a resent list: no tip, no panel mark moved")
+	check(SPOTS[300] ~= nil and SPOTS[301] ~= nil and SPOT_ADDS[300] == 1, "the spots stay as they are")
+
+	-- without an object: the level and 10 m
+	fresh("host")
+	CP_RECORD[0] = { kind = "story", level = "l01_escape", x = 100, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "story", -1, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_story, "a story checkpoint: news")
+	MSG = nil
+	CP_RECORD[0] = { kind = "story", level = "l01_escape", x = 106, y = 0, z = 6 }
+	fire("coop_checkpoint_changed", 0, "story", -1, false, "l01_escape")
+	check(MSG == nil, "the same story checkpoint resent (within 10 m): no news")
+	CP_RECORD[0] = { kind = "story", level = "l01_escape", x = 150, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "story", -1, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_story, "a story checkpoint 50 m away: news")
+	MSG = nil
+	CP_RECORD[0] = { kind = "story", level = "l02_garbage", x = 150, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "story", -1, false, "l02_garbage")
+	check(MSG == STR.st_coop_cp_updated_story, "on another level: news")
+	MSG = nil
+	CP_RECORD[0] = { kind = "arrival", level = "l02_garbage", x = 150, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "arrival", -1, false, "l02_garbage")
+	check(MSG == STR.st_coop_cp_updated_arrival, "another kind on the same spot: news")
+	-- no position to compare (an engine without coop.checkpoint.get, a record that changed again meanwhile): news
+	MSG = nil
+	CP_RECORD[0] = nil
+	fire("coop_checkpoint_changed", 0, "arrival", -1, false, "l02_garbage")
+	check(MSG == STR.st_coop_cp_updated_arrival, "no position known: the engine's word is trusted")
+end)
+
 case("arrival_no_spot", function()
 	fresh("host")
 	fire("coop_checkpoint_changed", 0, "arrival", -1, false, "l02_garbage")
@@ -382,6 +447,86 @@ case("arrival_no_spot", function()
 	fire("coop_checkpoint_changed", 0, "story", 77, false, "l02_garbage")
 	fire("coop_checkpoint_changed", 0, "arrival", 78, false, "l02_garbage")
 	check(next(SPOT_ADDS) == nil, "arrival and story never get a spot, whatever the source")
+end)
+
+-- Build 57 (owner 2026-11-18: "for the bases that are not covered, just put the point at the place of the first spawn on
+-- that base"): the record of a base without a sleeping place is kind "rest" without an object. Its tip says "a base"; it has
+-- no PDA spot (no object to put one on); the same base again (within 10 m) is no news; a sleeping place is still "rest".
+case("base_without_sleeping_place", function()
+	fresh("host")
+	CP_RECORD[0] = { kind = "rest", level = "l01_escape", x = 106.27, y = -2.86, z = -1.75 }
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", -1, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_base and MSG ~= nil, "a base without a sleeping place: st_coop_cp_updated_base (" .. tostring(MSG) .. ")")
+	check(next(SPOT_ADDS) == nil, "and no PDA spot")
+	local at = ck().last_update(0)
+	MSG = nil
+	NOW = NOW + 60000
+	fire("coop_checkpoint_changed", 0, "rest", -1, false, "l01_escape")
+	check(MSG == nil and ck().last_update(0) == at, "the same base again: no news, the panel mark stays")
+	MSG = nil
+	INI.coop_bases = { bar_actor_sleep_zone = "50, dolg" }
+	SE[300] = { id = 300, name = function() return "bar_actor_sleep_zone" end }
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_bed and MSG ~= nil, "the bed of a base (a sleep zone of [coop_bases]): a sleeping place")
+	MSG = nil
+	CP_RECORD[0] = { kind = "rest", level = "l01_escape", x = 106.27, y = -2.86, z = -1.75 }
+	fire("coop_checkpoint_changed", 0, "rest", -1, true, "l01_escape")
+	check(MSG == STR.st_coop_cp_rollback, "a rollback to it says rollback")
+	-- an ally's base record: no tip, no spot, the panel mark moves
+	MSG = nil
+	CP_RECORD[500] = { kind = "rest", level = "l01_escape", x = 0, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 500, "rest", -1, false, "l01_escape")
+	check(MSG == nil and ck().last_update(500) ~= nil and SPOTS[-1] == nil, "an ally on a base: no tip, no spot, the panel knows")
+end)
+
+-- Build 57 round 2 (the lead 2026-11-18, review S6): three texts for a rest record. A sleep zone of [coop_bases] as its object
+-- (the server object's name, else the online object's on a client): "a sleeping place"; no object (a base without a sleeping
+-- place): "a base"; any other rest place (a surge cover, a rest zone of no base, the object or [coop_bases] missing): the
+-- generic "a resting place".
+case("rest_texts_bed_base_rest", function()
+	check(STR.st_coop_cp_updated_bed ~= nil and STR.st_coop_cp_updated_rest ~= nil and STR.st_coop_cp_updated_base ~= nil and
+		STR.st_coop_cp_updated_bed ~= STR.st_coop_cp_updated_rest and STR.st_coop_cp_updated_base ~= STR.st_coop_cp_updated_rest,
+		"three different texts")
+	check(STR.st_coop_cp_updated_rest == "Camp updated: a resting place.", "the generic text is back: " .. tostring(STR.st_coop_cp_updated_rest))
+	check(STR.st_coop_cp_updated_bed == "Camp updated: a sleeping place.", "the bed: " .. tostring(STR.st_coop_cp_updated_bed))
+	fresh("host")
+	INI.coop_bases = { esc_basement_sleep_area = "50, stalker, csky, ecolog", bar_actor_sleep_zone = "50, dolg" }
+	SE[300] = { id = 300, name = function() return "esc_basement_sleep_area" end }
+	SE[301] = { id = 301, name = function() return "ros_vagon_sleep" end } -- a rest zone of no base
+	SE[302] = { id = 302, name = function() return "esc_surge_cover_7" end } -- a surge cover
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_bed, "a sleep zone of [coop_bases]: bed (" .. tostring(MSG) .. ")")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 301, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_rest, "a rest zone of no base: rest (" .. tostring(MSG) .. ")")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 302, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_rest, "a surge cover: rest (" .. tostring(MSG) .. ")")
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 303, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_rest, "the object not found: rest (" .. tostring(MSG) .. ")")
+	MSG = nil
+	CP_RECORD[0] = { kind = "rest", level = "l01_escape", x = 500, y = 0, z = 0 }
+	fire("coop_checkpoint_changed", 0, "rest", -1, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_base, "no object: a base (" .. tostring(MSG) .. ")")
+	-- no [coop_bases] in the system ltx: the generic text
+	INI.coop_bases = nil
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 300, false, "l01_escape")
+	check(MSG == STR.st_coop_cp_updated_rest, "no [coop_bases]: rest (" .. tostring(MSG) .. ")")
+	-- a client: no server object, the online object's name
+	fresh("client")
+	INI.coop_bases = { bar_actor_sleep_zone = "50, dolg" }
+	OBJ[310] = { _id = 310, name = function() return "bar_actor_sleep_zone" end }
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "rest", 310, false, "l05_bar")
+	check(MSG == STR.st_coop_cp_updated_bed, "a client: the online sleep zone's name, bed (" .. tostring(MSG) .. ")")
+	-- other kinds are untouched
+	MSG = nil
+	fire("coop_checkpoint_changed", 0, "campfire", 311, false, "l05_bar")
+	check(MSG == STR.st_coop_cp_updated_campfire, "a campfire: campfire")
 end)
 
 case("group_spot", function()
@@ -1279,7 +1424,8 @@ end)
 case("string_tables", function()
 	local IDS = {
 		"st_coop_cp_updated_campfire", "st_coop_cp_updated_rest", "st_coop_cp_updated_tent", "st_coop_cp_updated_arrival",
-		"st_coop_cp_updated_story", "st_coop_cp_updated_mod", "st_coop_cp_rollback", "st_coop_cp_rollback_none",
+		"st_coop_cp_updated_story", "st_coop_cp_updated_mod", "st_coop_cp_updated_base", "st_coop_cp_updated_bed", "st_coop_cp_rollback",
+		"st_coop_cp_rollback_none",
 		"st_coop_cp_ally", "st_coop_cp_spot", "st_coop_cp_panel",
 		"st_coop_cp_refused_combat", "st_coop_cp_refused_dead", "st_coop_cp_refused_far", "st_coop_cp_refused_far_pack",
 		"st_coop_cp_refused_limit", "st_coop_cp_refused_no_item", "st_coop_cp_refused_failed",

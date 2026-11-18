@@ -212,6 +212,45 @@ TEST(protocol_f3a_body_facts_round_trip)
 	Reader none(w.data().data(), 1);
 	CHECK(!b.read(none));
 	CHECK_EQ(b.source, levels::wire::kNoObject);
+	// Build 57 (owner 2026-11-18): the footing (the base whose ground he stands on, by the map server's geometry) follows, fixed
+	// size: u8 kind, u16 ref, 3 floats, u32 level vertex, u16 game vertex. A packet without it is short and fails.
+	CHECK_EQ(w.size(), size_t(5 + 21));
+	CHECK_EQ(int(b.footing.kind), int(coop::checkpoint::base::kFootNone));
+	levels::wire::LevelBodyFacts f;
+	f.place = 1;
+	f.footing.kind = coop::checkpoint::base::kFootStart;
+	f.footing.ref = 7;
+	f.footing.pos[0] = 12.5f;
+	f.footing.pos[1] = -3.0f;
+	f.footing.pos[2] = 400.25f;
+	f.footing.lv = 123456;
+	f.footing.gv = 2368;
+	Writer wf;
+	f.write(wf);
+	Reader rf(wf.data().data(), wf.data().size());
+	levels::wire::LevelBodyFacts g;
+	CHECK(g.read(rf));
+	CHECK_EQ(int(g.footing.kind), int(coop::checkpoint::base::kFootStart));
+	CHECK_EQ(g.footing.ref, uint16_t(7));
+	CHECK(g.footing.pos[0] == 12.5f && g.footing.pos[1] == -3.0f && g.footing.pos[2] == 400.25f);
+	CHECK_EQ(g.footing.lv, uint32_t(123456));
+	CHECK_EQ(g.footing.gv, uint16_t(2368));
+	CHECK(coop::checkpoint::base::footing_ok(g.footing));
+	for (size_t cut = 5; cut < wf.data().size(); ++cut)
+	{
+		Reader shortr(wf.data().data(), cut);
+		levels::wire::LevelBodyFacts h;
+		h.footing.kind = coop::checkpoint::base::kFootZone;
+		CHECK(!h.read(shortr)); // a build-56 tail (5 bytes) or any cut: refused, and nothing of it is kept
+		CHECK_EQ(int(h.footing.kind), int(coop::checkpoint::base::kFootNone));
+	}
+	// what the map server sent is read as it is; whether it names a base is footing_ok's and the world server's
+	f.footing.kind = 9;
+	Writer wb;
+	f.write(wb);
+	Reader rb(wb.data().data(), wb.data().size());
+	CHECK(g.read(rb));
+	CHECK(!coop::checkpoint::base::footing_ok(g.footing));
 	CHECK(!revive::is_client_op(revive::OpLosses));
 	CHECK(!revive::is_client_op(revive::OpStash)); // an order to a map server: a player's copy must not make one
 }

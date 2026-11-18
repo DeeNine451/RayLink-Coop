@@ -16,6 +16,12 @@
 	<string id="st_coop_cp_updated_rest">
 		<text>Привал обновлён: место отдыха.</text>
 	</string>
+	<string id="st_coop_cp_updated_bed">
+		<text>Привал обновлён: спальное место.</text>
+	</string>
+	<string id="st_coop_cp_updated_base">
+		<text>Привал обновлён: база.</text>
+	</string>
 	<string id="st_coop_cp_updated_tent">
 		<text>Привал обновлён: ваша палатка или спальник.</text>
 	</string>

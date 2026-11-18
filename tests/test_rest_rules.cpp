@@ -3,6 +3,7 @@
 #include "test_util.h"
 
 #include "coop_rest_rules.h"
+#include "coop_checkpoint_base_rules.h" // Build 57: the camp a lie-down on a base writes
 
 using namespace coop::rest;
 
@@ -905,4 +906,40 @@ TEST(rest_group_lie_down_again_takes_the_fight_now)
 	CHECK(t.cancelled.empty());
 	CHECK(g.state_of(2) == State::Resting);
 	CHECK(t.block == Block::Combat);
+}
+
+// Build 57 (owner 2026-11-18): the camp a lie-down writes (coop_rest.cpp host_request). On a friendly base it is the base's
+// bed, wherever on its ground he lay (at the campfire, in a shelter); lying down again at the same campfire off a base is
+// the same place: nothing written, nothing announced (no "checkpoint updated" for every sleep there).
+TEST(rest_lie_down_camp_on_a_base_and_again)
+{
+	using namespace coop::checkpoint;
+	const auto rec = [](Kind kind, uint16_t source, float x) {
+		Record r;
+		r.level = "l05_bar";
+		r.pos[0] = x;
+		r.level_vertex = 10;
+		r.game_vertex = 3;
+		r.kind = kind;
+		r.source = source;
+		return r;
+	};
+	const Record fire = rec(Kind::Campfire, 40, 5.0f);
+	const Record bed = rec(Kind::Rest, 900, 0.0f);
+	Slot s;
+	CHECK(set(s, base::lie_down_record(fire, false, &bed)) == SetOutcome::New);
+	CHECK(s.cur.kind == Kind::Rest && s.cur.source == 900);
+	CHECK(set(s, base::lie_down_record(rec(Kind::Rest, 41, 12.0f), false, &bed)) == SetOutcome::Same);
+	Slot off;
+	CHECK(set(off, base::lie_down_record(fire, false, nullptr)) == SetOutcome::New);
+	CHECK(set(off, base::lie_down_record(rec(Kind::Campfire, 40, 6.5f), false, nullptr)) == SetOutcome::Same);
+	CHECK(off.cur.source == 40 && !off.prev.valid());
+	// Build 57: a base without a sleeping place (a start location): its record has no object; lying down again on it is the
+	// same place
+	const Record point = rec(Kind::Rest, kNoSource, 300.0f);
+	Slot camp;
+	CHECK(set(camp, base::lie_down_record(fire, false, &point)) == SetOutcome::New);
+	CHECK(camp.cur.kind == Kind::Rest && camp.cur.source == kNoSource && camp.cur.pos[0] == 300.0f);
+	CHECK(set(camp, base::lie_down_record(rec(Kind::Campfire, 41, 290.0f), false, &point)) == SetOutcome::Same);
+	CHECK(set(camp, base::lie_down_record(rec(Kind::Tent, 77, 295.0f), true, &point)) == SetOutcome::New); // his own tent
 }

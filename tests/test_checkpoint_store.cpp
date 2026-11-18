@@ -641,3 +641,70 @@ TEST(cps_host_store_queue_and_bound)
 	CHECK(host.find(1) == nullptr);
 	CHECK(host.take_pending().empty());
 }
+
+// Build 57 (owner 2026-11-18): a new visit to the same campfire (he stepped out of its 3 m and back, it went out for a moment,
+// he lay down at it) is the same place: the host writes nothing and announces nothing, so no "checkpoint updated" goes out.
+// The host's apply_set does exactly this: set(), then change() only when changes_slot().
+TEST(cps_repeat_visit_announces_nothing)
+{
+	HostStore host;
+	Slot s;
+	const auto apply = [&](const Record& r) {
+		const SetOutcome o = set(s, r);
+		if (changes_slot(o))
+			CHECK(host.change(1, s, false));
+		return o;
+	};
+	CHECK(apply(rec(Kind::Campfire, 10)) == SetOutcome::New);
+	CHECK_EQ(host.take_pending().size(), size_t(1));
+	Record again = rec(Kind::Campfire, 10, "l01_escape", 2.0f);
+	again.game_time_ms = 987654321;
+	CHECK(apply(again) == SetOutcome::Same);
+	CHECK(host.take_pending().empty());
+	CHECK(host.find(1) && same(host.find(1)->cur, rec(Kind::Campfire, 10))); // the cache still holds what was told
+	// another campfire is news again
+	CHECK(apply(rec(Kind::Campfire, 11)) == SetOutcome::New);
+	CHECK_EQ(host.take_pending().size(), size_t(1));
+	// a story checkpoint where the last one was (within 10 m): nothing; 50 m away: news
+	CHECK(apply(rec(Kind::Story, kNoSource, "l01_escape", 100.0f)) == SetOutcome::New);
+	host.take_pending();
+	CHECK(apply(rec(Kind::Story, kNoSource, "l01_escape", 105.0f)) == SetOutcome::Same);
+	CHECK(host.take_pending().empty());
+	CHECK(apply(rec(Kind::Story, kNoSource, "l01_escape", 150.0f)) == SetOutcome::Moved);
+	CHECK_EQ(host.take_pending().size(), size_t(1));
+}
+
+// Build 57 (owner 2026-11-18): the record of a base without a sleeping place (a start location) is kind Rest WITHOUT an
+// object. It is a valid record: stored in the character's custom data, sent in CheckpointState, kept by the client's mirror,
+// and no lost object ever rolls it back (source_lost never matches "no source").
+TEST(cps_base_record_without_object)
+{
+	const Record r = rec(Kind::Rest, kNoSource, "l01_escape", 106.27f);
+	CHECK(r.valid());
+	// the save: the custom data of the character
+	std::string text = "[coop]\r\nkey = 0123abcd\r\n";
+	Slot s;
+	s.cur = r;
+	s.prev = rec(Kind::Campfire, 66);
+	slot_to_ini(text, s);
+	unsigned corrupt = 9;
+	const Slot back = slot_from_ini(text, &corrupt);
+	CHECK_EQ(corrupt, 0u);
+	CHECK(same(back.cur, r));
+	CHECK_EQ(back.cur.source, kNoSource);
+	// the wire
+	Writer w;
+	write_state(w, 7, false, r);
+	StateMsg m;
+	CHECK(read_back(w, m));
+	CHECK(same(m.record, r));
+	// the client's mirror
+	Mirror mirror;
+	CHECK(mirror.apply(0, m));
+	CHECK(mirror.get(0) && mirror.get(0)->kind == Kind::Rest && mirror.get(0)->source == kNoSource);
+	// no object to lose: nothing rolls it back
+	Slot keep = s;
+	CHECK(!source_lost(keep, kNoSource));
+	CHECK(!source_lost(keep, 66) || (keep.cur.valid() && keep.cur.source == kNoSource));
+	CHECK(same(keep.cur, r));
+}
