@@ -1,0 +1,167 @@
+-- Ядро: без проверок режима (docs/MODES.md).
+-- Dev 57 G2-1: adapters for settings that bypass the normal option stores/cache refresh.
+-- Co-op: the host supplies world options; Server: the world supplies them through coop_settings.
+-- Every machine retains player options and refreshes only DAO's pure cache. No map facts are required.
+-- New local options (axr_options.ltx, never world save/infos):
+--   coop/coop_player/mtop_save_rate, coop/coop_player/mtop_increasing.
+-- No new network events. All wrappers delegate unchanged outside a session.
+
+local installed = {}
+local smr_loading = 0
+local CARD_OPTIONS = {
+	card_game_21_save_rate = "coop/coop_player/mtop_save_rate",
+	card_game_21_increasing = "coop/coop_player/mtop_increasing",
+}
+local NAME_PATH = "gameplay/general/player_name"
+
+local function start_step(name, f)
+	local ok, err = pcall(f)
+	if not ok then printf("! [coop_settings_mods] %s failed: %s", name, tostring(err)) end
+end
+
+-- Wrap the local loader, including callbacks already registered by value. Keep the original loader:
+-- it alone knows SMR's module list, missing-key defaults and persist-override behaviour.
+local function install_smr()
+	if installed.smr then return end
+	local m = coop_mods_core.mod("smr_config")
+	local ui = coop_mods_core.mod("ui_mcm")
+	if not (m and ui) then return end
+	local load, holder, index = coop_mods_core.find_local(m, "load_state")
+	if type(load) ~= "function" or not holder then return end
+	coop_mods_core.wrap(ui, "set", "settings.smr.player_load", function(orig)
+		return function(path, ...)
+			if smr_loading > 0 and coop_mods_core.active() and coop_settings.owner_of("mcm", path) == "player" then
+				return
+			end
+			return orig(path, ...)
+		end
+	end)
+	local slot = { load_state = load }
+	coop_mods_core.wrap(slot, "load_state", "settings.smr.load_state", function(orig)
+		return function(...)
+			if not coop_mods_core.active() then return orig(...) end
+			smr_loading = smr_loading + 1
+			local ok, err = pcall(orig, ...)
+			smr_loading = smr_loading - 1
+			if not ok then error(err, 0) end
+		end
+	end)
+	debug.setupvalue(holder, index, slot.load_state)
+	coop_mods_core.swap_callback("load_state", load, slot.load_state)
+	installed.smr = true
+end
+
+local dao_load
+local function refresh_dao()
+	if not coop_mods_core.active() or not dao_load then return end
+	-- load_settings only rebuilds defaults + ui_mcm values. on_option_change also changes world anomalies.
+	start_step("DAO cache", dao_load)
+end
+
+local function install_dao()
+	if installed.dao then return end
+	local m = coop_mods_core.mod("drx_da_main")
+	if not m then return end
+	local load = coop_mods_core.find_local(m, "load_settings")
+	if type(load) ~= "function" then return end
+	dao_load = load
+	RegisterScriptCallback("on_option_change", refresh_dao)
+	-- A new Lua state may inherit an unchanged settings overlay from the level-transition stash:
+	-- no new packet/change callback is necessary then, but the new DAO cache still needs its values.
+	RegisterScriptCallback("actor_on_first_update", refresh_dao)
+	RegisterScriptCallback("on_game_load", refresh_dao)
+	refresh_dao()
+	installed.dao = true
+end
+
+local function card_value(info)
+	return axr_main.config:r_value("options", CARD_OPTIONS[info], 1, false) == true
+end
+
+local function save_card(self, field, info)
+	if not coop_mods_core.active() then return end
+	axr_main.config:w_value("options", CARD_OPTIONS[info], self[field]:GetCheck() == true)
+	axr_main.config:save()
+end
+
+local function install_mtop()
+	if installed.mtop then return end
+	local m = coop_mods_core.mod("ui_mod_elements")
+	if not (m and m.card_game_21_point) then return end
+	coop_mods_core.wrap(m, "info_get_boolean", "settings.mtop.read", function(orig)
+		return function(info, inversion, ...)
+			if coop_mods_core.active() and CARD_OPTIONS[info] then
+				local value = card_value(info)
+				if inversion == true then return not value end
+				return value
+			end
+			return orig(info, inversion, ...)
+		end
+	end)
+	coop_mods_core.wrap(m, "info_give_on_boolean", "settings.mtop.no_world_infos", function(orig)
+		return function(value, info, ...)
+			-- Original Update calls this every frame. Neither world infos nor local options are written here;
+			-- only the player's click below persists a choice, so simultaneous windows cannot overwrite it.
+			if coop_mods_core.active() and CARD_OPTIONS[info] then return end
+			return orig(value, info, ...)
+		end
+	end)
+	coop_mods_core.wrap(m.card_game_21_point, "InitCallBacks", "settings.mtop.toggles", function(orig)
+		return function(self, ...)
+			if not coop_mods_core.active() then return orig(self, ...) end
+			orig(self, ...)
+			self:Register(self.check_save_rate, "coop_settings_save_rate")
+			self:Register(self.check_increasing, "coop_settings_increasing")
+			self:AddCallback("coop_settings_save_rate", ui_events.BUTTON_CLICKED, function(w)
+				save_card(w, "check_save_rate", "card_game_21_save_rate")
+			end, self)
+			self:AddCallback("coop_settings_increasing", ui_events.BUTTON_CLICKED, function(w)
+				save_card(w, "check_increasing", "card_game_21_increasing")
+			end, self)
+		end
+	end)
+	installed.mtop = true
+end
+
+-- A temporary row makes the ordinary name field use the same CVar/Apply/cfg_save path as RayLink's nick field.
+-- Do not mutate the shared definition or its captured stock functors: single player must retain them.
+local function nick_row(row)
+	local copy = {}
+	for k, v in pairs(row) do copy[k] = v end
+	copy.cmd, copy.curr, copy.functor = "coop_nick", nil, nil
+	return copy
+end
+
+local function install_nick()
+	if installed.nick then return end
+	local m = coop_mods_core.mod("ui_options")
+	if not (m and m.UIOptions) then return end
+	coop_mods_core.wrap(m.UIOptions, "Reset_opt", "settings.nick.draw", function(orig)
+		return function(self, tree, path, ...)
+			if not coop_mods_core.active() or path ~= "gameplay/general" or type(tree) ~= "table" or type(tree.gr) ~= "table" then
+				return orig(self, tree, path, ...)
+			end
+			local copy = {}
+			for k, v in pairs(tree) do copy[k] = v end
+			copy.gr = {}
+			for i, row in ipairs(tree.gr) do copy.gr[i] = row.id == "player_name" and nick_row(row) or row end
+			return orig(self, copy, path, ...)
+		end
+	end)
+	coop_mods_core.wrap(m.UIOptions, "GetOption", "settings.nick.apply", function(orig)
+		return function(self, id, ...)
+			local row = orig(self, id, ...)
+			if coop_mods_core.active() and id == NAME_PATH and type(row) == "table" then return nick_row(row) end
+			return row
+		end
+	end)
+	installed.nick = true
+end
+
+function on_game_start()
+	-- axr_main invokes startup scripts without protection; one absent/outdated mod must not stop the others.
+	start_step("SMR", install_smr)
+	start_step("DAO", install_dao)
+	start_step("MTOP", install_mtop)
+	start_step("nick", install_nick)
+end

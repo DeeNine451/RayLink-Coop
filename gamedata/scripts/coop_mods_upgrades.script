@@ -1,0 +1,35 @@
+-- Ядро: без проверок режима (docs/MODES.md).
+-- Dev 57 G14-3 / s36:1: delayed repairs belong to the current player's mechanic queue.
+-- A different player's collection can clear the shared *_is_repairing info portion.
+-- RepairItemList is already personal through coop_economy_mdata; save_state reads its live file local,
+-- whereas m_data can be stale (load_state removes the key). No new saved keys or wire events.
+
+local installed = false
+
+local function install()
+	if installed then return end
+	local mod = coop_mods_core.mod("inventory_upgrades")
+	if not (mod and coop_mods_core.fn(mod, "save_state")) then return end
+	installed = coop_mods_core.wrap(mod, "has_repair_info", "inventory_upgrades.has_repair_info", function(orig)
+		return function(a, b, ...)
+			if not coop_mods_core.active() then return orig(a, b, ...) end
+			local scratch = {}
+			local ok, err = pcall(mod.save_state, scratch)
+			if not ok then
+				coop_mods_core.report("upgrades", "read repair queue", err)
+				return false
+			end
+			local queues = scratch.RepairItemList
+			if type(queues) ~= "table" then return false end
+			local npc = dialogs.who_is_npc(a, b)
+			local queue = queues[npc:section()]
+			return type(queue) == "table" and next(queue) ~= nil
+		end
+	end)
+end
+
+-- axr_main calls every startup in one unprotected loop: a foreign mod must not stop the others.
+function on_game_start()
+	local ok, err = pcall(install)
+	if not ok then printf("! [coop_mods_upgrades] install failed: %s", tostring(err)) end
+end

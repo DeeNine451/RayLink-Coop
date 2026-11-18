@@ -1,0 +1,22 @@
+; Core: Dev 57 G17-1, exact route corrections for both modes (docs/MODES.md).
+; Read after coop_route*.ltx. Absent modules/bindings match nothing; single player is unchanged.
+
+[binder_host]
+; m32:2 - only the map decider rolls/converts a kit; mirrors keep the other binder methods.
+kit_binder.bind = update
+
+[route_pairs]
+; m08:8 - the arena charge timer is local; trader_on_restock keeps its existing world/level route.
+; This does not change free_power's exo_outfit check for GAMMA's dolg_exolight_outfit.
+time_event@exo_loot = owner
+; m12:4 - initialize the local voice-command setting on the player's first update.
+actor_on_first_update@axr_companions_varefined = owner
+; m12:4 - refresh the local voice-command setting after an MCM change.
+on_option_change@axr_companions_varefined = owner
+; m14:3 - both PPE removal timers must run on the player that owns the effects.
+time_event@npe_actions = owner
+
+[route_scripts]
+; m23:4 - the saved story queue and its timer belong to the world decider.
+; The existing forced load_state = view still loads readable data on mirrors.
+utils_slht = host

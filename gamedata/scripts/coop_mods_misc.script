@@ -76,6 +76,176 @@ local PREFS = {
 	{ "ssfx_weapons_dof", "save_state", { "ssfx_saved_reload_time" } }, -- measured reload times per weapon section
 }
 
+-- Build 57 G1-2: these mods keep personal values outside m_data. Read their
+-- live upvalues, and restore at load_state (after pdata replaces the world's
+-- values, before on_game_load/first use). No map or mode knowledge is needed.
+local function mod_local(M, name, value, write)
+	local v, holder, index = C().find_local(M, name)
+	if write and holder then debug.setupvalue(holder, index, value) end
+	return v, holder
+end
+
+local function bounded_number(v, low, high, fallback)
+	if type(v) ~= "number" or v ~= v then return fallback end
+	return math.max(low, math.min(high, v))
+end
+
+local function personal_active()
+	-- S4 supplies the actor answer; retain compatibility while that facade is
+	-- being integrated. Registration/getters do not depend on a local actor.
+	return C().active() and (not rawget(_G, "coop_mode") or coop_mode.actor_is_player())
+end
+
+local function personal_state(key, get, restore)
+	P().register(key, { get = get })
+	RegisterScriptCallback("save_state", function(m)
+		if personal_active() then m[key] = get() end
+	end)
+	RegisterScriptCallback("load_state", function(m)
+		if personal_active() then restore(m[key], m) end
+	end)
+end
+
+local function install_helmet_prefs()
+	local M = C().mod("liz_fdda_redone_headgear_animations_hotkey")
+	if not M then return end
+	-- Older/partial versions keep the previous ownership-only behaviour.
+	local setter = C().fn(M, "set_last_helmet")
+	if not (setter and C().fn(M, "toggle_helmet")) then P().register("lastHelmetId", {}); return end
+	local chosen, pending = 0, false -- host numbering; zero explicitly clears an older choice
+	local function own_helmet()
+		local found
+		if chosen > 0 and db.actor then
+			local id = C().lid(chosen)
+			db.actor:iterate_ruck(function(_, item)
+				if item:id() == id then found = item end
+			end, nil)
+		end
+		setter(found) -- also clears any kept userdata whose item is no longer ours
+		pending = chosen > 0 and not found
+	end
+	personal_state("lastHelmetId", function() return chosen end, function(v, m)
+		local valid = type(v) == "number" and v >= 0 and v < 65535 and v == math.floor(v)
+		local accepted = coop_trust.pass("mods_misc_helmet_id", v == nil or valid, "invalid saved helmet id (%s)", type(v))
+		-- Ids are identities, not magnitudes: even in log mode an invalid id
+		-- must not be clamped/rounded to the id of a different inventory item.
+		chosen = accepted and valid and v or 0
+		if v ~= nil then m.lastHelmetId = chosen end
+		setter(nil)
+		pending = chosen > 0
+	end)
+	C().wrap(M, "set_last_helmet", "misc.helmet_choice", function(orig) return function(item, ...)
+		if not C().active() then return orig(item, ...) end
+		-- The caller has just chosen a live item. Never obtain this id from lastHelmet later.
+		chosen = item and C().hid(item:id()) or 0
+		pending = false
+		return orig(item, ...)
+	end end)
+	C().wrap(M, "toggle_helmet", "misc.helmet_hotkey", function(orig) return function(...)
+		if not C().active() then return orig(...) end
+		own_helmet()
+		local current = db.actor and db.actor:item_in_slot(12)
+		local id = current and C().hid(current:id()) -- capture BEFORE the animation can move the item
+		local r = orig(...)
+		local selected = mod_local(M, "lastHelmet") -- reference comparison only; no userdata method
+		if current and rawequal(selected, current) then chosen, pending = id, false end
+		return r
+	end end)
+	local old = C().fn(M, "on_save_state")
+	if C().wrap(M, "on_save_state", "misc.helmet_save", function(orig) return function(m, ...)
+		if not C().active() then return orig(m, ...) end
+		m.lastHelmetId = chosen
+	end end) then C().swap_callback("save_state", old, M.on_save_state) end
+	local function retry()
+		if C().active() and pending then own_helmet() end
+	end
+	RegisterScriptCallback("actor_on_first_update", retry)
+	RegisterScriptCallback("actor_on_update", retry)
+end
+
+local function install_live_prefs()
+	local N = C().mod("z_beefs_nvgs")
+	if N then
+		personal_state("coop_misc_nvg_state", function()
+			return { gain = bounded_number(mod_local(N, "nvg_gain_current"), 0.1, 3, 1),
+				direction = mod_local(N, "gain_directionality") ~= false }
+		end, function(v)
+			v = type(v) == "table" and v or {}
+			mod_local(N, "nvg_gain_current", bounded_number(v.gain, 0.1, 3, 1), true)
+			mod_local(N, "gain_directionality", v.direction ~= false, true)
+		end)
+	end
+	local O = C().mod("liz_fdda_redone_outfit")
+	if O then
+		local function limit()
+			local mcm = C().mod("liz_fdda_redone_mcm")
+			local max = mcm and C().fn(mcm, "get_config") and mcm.get_config("outfit_anm/memory_size")
+			max = bounded_number(max or mod_local(O, "mcm_memory_max"), -1, 64, 3)
+			return max > 0 and math.floor(max) or 64 -- unlimited MCM history still has a bounded personal record
+		end
+		local function history(v)
+			local out = {}
+			if type(v) == "table" then
+				for i = math.max(1, #v - limit() + 1), #v do
+					local sec = v[i]
+					if type(sec) == "string" and #sec > 0 and #sec <= 128 then out[#out + 1] = sec end
+				end
+			end
+			return out
+		end
+		personal_state("coop_misc_outfit_history", function()
+			local memory = mod_local(O, "memory")
+			local last = bounded_number(mod_local(O, "memory_last"), -1, 2147483647, -1)
+			local out = {}
+			for i = math.max(0, last - limit() + 1), last do out[#out + 1] = memory and memory[i] end
+			return history(out)
+		end, function(v)
+			local ordered, memory = history(v), {}
+			for i, sec in ipairs(ordered) do memory[i - 1] = sec end
+			mod_local(O, "memory", memory, true)
+			mod_local(O, "memory_first", 0, true)
+			mod_local(O, "memory_last", #ordered - 1, true)
+		end)
+	end
+	local X = C().mod("exo_powers")
+	if X then
+		local deadline = 0
+		C().wrap(X, "deactivate_powers", "misc.exo_cooldown", function(orig) return function(seconds, ...)
+			if not C().active() then return orig(seconds, ...) end
+			local r = orig(seconds, ...)
+			deadline = time_global() + bounded_number(seconds, 0, 86400, 0) * 1000
+			return r
+		end end)
+		C().wrap(X, "reset_cooldown", "misc.exo_reset", function(orig) return function(...)
+			if C().active() then deadline = 0 end
+			return orig(...)
+		end end)
+		personal_state("coop_misc_exo_cooldown_ms", function()
+			return bounded_number(deadline - time_global(), 0, 86400000, 0)
+		end, function(v)
+			local left = bounded_number(v, 0, 86400000, 0)
+			deadline = time_global() + left
+			mod_local(X, "on_cooldown", left > 0, true)
+			RemoveTimeEvent("exo_powers", "deactivate_power")
+			if left > 0 then CreateTimeEvent("exo_powers", "deactivate_power", left / 1000, X.reset_cooldown) end
+		end)
+	end
+	local R = C().mod("level_environment")
+	if R then
+		-- Stock on_game_load reads this key after pdata; refresh from live locals,
+		-- not its possibly stale m_data copy. No console text comes from the wire.
+		personal_state("r2_drops_control", function()
+			return { bounded_number(mod_local(R, "droplet_pwr"), 0, 1, 0),
+				bounded_number(mod_local(R, "droplet_speed"), 0, 1, 0) }
+		end, function(v, m)
+			v = type(v) == "table" and v or {}
+			-- The stock later interpolates these into a console command: only
+			-- locally bounded numbers may reach it, never saved strings/tables.
+			m.r2_drops_control = { bounded_number(v[1], 0, 1, 0), bounded_number(v[2], 0, 1, 0) }
+		end)
+	end
+end
+
 local function install_prefs()
 	local n = 0
 	for _, spec in ipairs(PREFS) do
@@ -93,14 +263,8 @@ local function install_prefs()
 			end
 		end
 	end
-	-- The helmet the headgear hotkey puts back on (lastHelmetId). Its save function calls lastHelmet:id() on a game object
-	-- the mod keeps for good; once that helmet is destroyed (sold, dropped and gone offline) the call reads freed memory.
-	-- A single player reaches it at a save, a report would reach it every 15 s. So the value is not read: the key is only
-	-- made the player's own (nothing is ever reported: after a load he has no last helmet, and never the host's id).
-	if C().mod("liz_fdda_redone_headgear_animations_hotkey") then
-		P().register("lastHelmetId", {})
-		n = n + 1
-	end
+	install_helmet_prefs()
+	install_live_prefs()
 	-- its save_state is a global (agdd_voiced_actor.script:1481): the remaining ms of the long shout cooldown
 	local voiced = C().mod("agdd_voiced_actor")
 	if voiced and C().fn(voiced, "save_state") then
@@ -122,8 +286,12 @@ local function install_pdata()
 		P().register("experience_framework_savedata", { subs = EF_SUBS, prime = { "experience_core" } })
 		installed[#installed + 1] = "experience_framework"
 	end
-	if C().mod("haru_quick_action_wheel_mcm") then
-		P().register("haru_qaw", { prime = { "haru_quick_action_wheel_mcm" } })
+	local wheel = C().mod("haru_quick_action_wheel_mcm")
+	if wheel then
+		P().register("haru_qaw", { get = function()
+			local tm = wheel.TAB_MANAGER -- created by the mod's later on_game_start
+			if tm then return { tabs = tm.tabs, current_tab = tm.current_tab } end
+		end })
 		installed[#installed + 1] = "quick_action_wheel"
 	end
 	if C().mod("ish_kill_tracker") then
