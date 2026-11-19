@@ -23,6 +23,25 @@
 
 	G12-2: the point key runs through the stock trigger. The receiving level resolves the selected companions.
 	The save keeps Useful Idiots' own NPC records and stores player templates under character IDs.
+
+	G12-4 (m21:2): the other commands of the wheel (idiots_ui OnClickButton) and of the keys (idiots_keybinds onKeybindEvent).
+	On a player's machine the companions are copies: what illish.lib.npc writes there (a state's info portion, IDIOTS_RELOAD,
+	a look or move point in db.storage) no AI reads. While one button or key event runs there, every NPC.setState of a
+	companion (toggleState, cycleActiveState, setStates and setState(nil) end in it), setReloadModes, lookAtPoint and
+	moveOutOfTheWay is noted; a state still changes the copy at once (the wheel shows it), the others are not run there. The
+	notes go out as one request, mods.idiots_cmd, to the decider of the player's level (co-op: the host; server: the world
+	server passes it to the map server of his level). There every companion is checked (a living companion here; its leader
+	from anywhere, another player next to it: orders are the group's), each command runs once with the library, the sender's
+	character is "the actor" of an away order, VAR's shout of the order is not voiced by the decider's own actor, and the
+	sender gets mods.idiots_state: the true state of every companion he named, which his copy then shows. The decider never
+	forwards (no scope there), the point key and the personal template keep their own requests (G12-2). The co-op host's own
+	wheel and keys and single player run the mod as it is. Not covered: waypoints and unstick of the wheel (se_save_var and
+	alife():teleport_object on the copy).
+
+	Events (ids in host numbering):
+	  mods.idiots_cmd    player -> decider of his level  { c = "row|row..." }, rows: s,<id>,<group>,<action>,<1|0|n> (setState)
+	                     m,<id>,<wmode|n>,<emode|n> (setReloadModes)  l,<id>,<x>,<y>,<z> (lookAtPoint)  a,<id> (moveOutOfTheWay)
+	  mods.idiots_state  decider -> that player  { s = "<id>:<0/1 per info-bearing action of NPC.ACTIONS, in order>|..." }
 --]]
 
 local tostring, type, ipairs, pcall = tostring, type, ipairs, pcall
@@ -505,6 +524,318 @@ local function install_keys()
 	C().on(POINT, on_point, "host")
 end
 
+-- G12-4 (m21:2): the wheel's and the keys' commands on a player's machine go to the decider of his level.
+local CMD, STATE = "idiots_cmd", "idiots_state"
+local MAX_CMDS, MAX_ROWS, MAX_BYTES, NEAR_SQR = 256, 1024, 12000, 225 -- rows per request, per button / key event; 15 m
+local scope, batch, quiet, infos = 0, nil, 0, nil -- player: inside a command / its rows; decider: running a player's rows
+
+-- The info portions of NPC.ACTIONS in their order: a companion's state, as the decider answers it.
+local function info_actions()
+	if not infos then
+		infos = {}
+		for _, group in ipairs(npc.ACTIONS or {}) do
+			for _, action in ipairs(group.actions or {}) do
+				if type(action.info) == "string" then infos[#infos + 1] = action.info end
+			end
+		end
+	end
+	return infos
+end
+
+local function command_id(obj)
+	if type(obj) == "number" then obj = npc.getCompanion(obj) end
+	local id = obj and C().hid(obj:id())
+	return valid_id(id, 1) and id or nil
+end
+
+local function note(row)
+	batch = batch or {}
+	if #batch < MAX_ROWS then
+		batch[#batch + 1] = row
+	elseif #batch == MAX_ROWS then
+		log("! a companion command over %d rows is not sent", MAX_ROWS)
+		batch[#batch + 1] = false
+	end
+	return true
+end
+
+local function note_state(obj, group, action, enabled)
+	local id = command_id(obj)
+	local e = enabled == true and "1" or enabled == false and "0" or enabled == nil and "n" or nil
+	if id and e and type(group) == "string" and type(action) == "string" and group:match("^[%a_]+$")
+		and action:match("^[%a_]+$") and npc.isStateful(group, action) then
+		note(string_format("s,%d,%s,%s,%s", id, group, action, e))
+	end
+end
+
+local function mode_word(v, max)
+	if v == nil then return "n" end
+	if type(v) == "number" and v >= 0 and v <= max and v % 1 == 0 then return string_format("%d", v) end
+end
+
+local function note_reload(obj, wmode, emode)
+	local id, w, e = command_id(obj), mode_word(wmode, 1), mode_word(emode, 2)
+	return id ~= nil and w ~= nil and e ~= nil and note(string_format("m,%d,%s,%s", id, w, e))
+end
+
+local function note_look(obj, pos)
+	local id = command_id(obj)
+	local ok, x, y, z = pcall(function() return pos.x, pos.y, pos.z end)
+	return id ~= nil and ok and coordinate(x) and coordinate(y) and coordinate(z)
+		and note(string_format("l,%d,%.3f,%.3f,%.3f", id, x, y, z))
+end
+
+local function note_away(obj, options)
+	local id = options == nil and command_id(obj)
+	return id and note(string_format("a,%d", id)) or false
+end
+
+local function send_commands(rows)
+	local part, size = {}, 0
+	local function flush()
+		if #part > 0 then C().to_host(CMD, { c = table.concat(part, "|") }) end
+		part, size = {}, 0
+	end
+	for _, row in ipairs(rows) do
+		if row then
+			if #part == MAX_CMDS or size + #row + 1 > MAX_BYTES then flush() end
+			part[#part + 1] = row
+			size = size + #row + 1
+		end
+	end
+	flush()
+end
+
+local function close_scope(ok, ...)
+	scope = 0
+	local rows = batch
+	batch = nil
+	if rows then send_commands(rows) end
+	if not ok then error((...), 0) end
+	return ...
+end
+
+-- A wheel button or a key event of a player's machine: its library calls become one request.
+local function command_scope(orig)
+	return function(...)
+		if scope > 0 or not (C().active() and coop_mode.is_player_mirror()) then return orig(...) end
+		scope = 1
+		return close_scope(pcall(orig, ...))
+	end
+end
+
+local function install_library()
+	C().wrap(npc, "setState", "idiots.cmd_state", function(orig)
+		return function(obj, group, action, enabled, ...)
+			if scope > 0 and obj ~= nil then note_state(obj, group, action, enabled) end
+			return orig(obj, group, action, enabled, ...)
+		end
+	end)
+	C().wrap(npc, "setReloadModes", "idiots.cmd_reload", function(orig)
+		return function(obj, wmode, emode, ...)
+			if scope > 0 and note_reload(obj, wmode, emode) then return end
+			return orig(obj, wmode, emode, ...)
+		end
+	end)
+	C().wrap(npc, "lookAtPoint", "idiots.cmd_look", function(orig)
+		return function(obj, pos, ...)
+			if scope > 0 and note_look(obj, pos) then return end
+			return orig(obj, pos, ...)
+		end
+	end)
+	C().wrap(npc, "moveOutOfTheWay", "idiots.cmd_away", function(orig)
+		return function(obj, options, ...)
+			if scope > 0 and note_away(obj, options) then return end
+			return orig(obj, options, ...)
+		end
+	end)
+end
+
+local function parse_row(row)
+	local kind = row:sub(1, 1)
+	if kind == "s" then
+		local id, group, action, e = row:match("^s,(%d+),([%a_]+),([%a_]+),([01n])$")
+		id = tonumber(id)
+		if not (valid_id(id, 1) and npc.isStateful(group, action)) then return nil end
+		local enabled = nil
+		if e == "1" then enabled = true elseif e == "0" then enabled = false end
+		return { k = kind, id = id, group = group, action = action, enabled = enabled }
+	elseif kind == "m" then
+		local id, w, e = row:match("^m,(%d+),([%dn]),([%dn])$")
+		id, w, e = tonumber(id), tonumber(w), tonumber(e) -- "n": nil, the library's default
+		if not (valid_id(id, 1) and (w == nil or w <= 1) and (e == nil or e <= 2)) then return nil end
+		return { k = kind, id = id, wmode = w, emode = e }
+	elseif kind == "l" then
+		local id, x, y, z = row:match("^l,(%d+),(%-?[%d%.]+),(%-?[%d%.]+),(%-?[%d%.]+)$")
+		id, x, y, z = tonumber(id), tonumber(x), tonumber(y), tonumber(z)
+		if not (valid_id(id, 1) and coordinate(x) and coordinate(y) and coordinate(z)) then return nil end
+		return { k = kind, id = id, x = x, y = y, z = z }
+	elseif kind == "a" then
+		local id = tonumber(row:match("^a,(%d+)$"))
+		return valid_id(id, 1) and { k = kind, id = id } or nil
+	end
+	return nil
+end
+
+local function parse_commands(c)
+	if type(c) ~= "string" or #c == 0 or #c > MAX_BYTES or c:find("||", 1, true) or c:sub(1, 1) == "|"
+		or c:sub(-1) == "|" then return nil end
+	local rows = {}
+	for row in c:gmatch("[^|]+") do
+		if #rows == MAX_CMDS then return nil end
+		local cmd = parse_row(row)
+		if not cmd then return nil end
+		rows[#rows + 1] = cmd
+	end
+	return rows
+end
+
+local function command_object(id)
+	local lid = C().lid(id)
+	return lid and level.object_by_id(lid), lid
+end
+
+-- The decider's companion of a command (nil: no target, or refused) and the object the sender named. Orders are the
+-- group's (owner 2026-11-01): its leader's from anywhere, another player's next to it.
+local function command_target(cmd, from, actor, owner)
+	local obj, lid = command_object(cmd.id)
+	local st = obj and db.storage[lid]
+	local ready = obj and npc.isCompanion(obj) and (cmd.k ~= "l" and cmd.k ~= "a"
+		or st ~= nil and st[st.enemy and "combat" or "beh"] ~= nil) or false
+	if not coop_trust.guard("idiots_cmd_target", ready, "peer %d: command for %d, no living companion here", from, cmd.id)
+		then return nil, obj end
+	local owned = actor:alive() and (coop_npc_companions.owner_character(obj) == owner
+		or actor:position():distance_to_sqr(obj:position()) <= NEAR_SQR)
+	if not coop_trust.pass("idiots_cmd_owner", owned, "peer %d: command for %d, a far companion he does not lead",
+		from, cmd.id) then return nil, obj end
+	return obj, obj
+end
+
+local function run_command(cmd, obj, actor)
+	if cmd.k == "s" then
+		npc.setState(obj, cmd.group, cmd.action, cmd.enabled)
+	elseif cmd.k == "m" then
+		npc.setReloadModes(obj, cmd.wmode, cmd.emode)
+	elseif cmd.k == "l" then
+		npc.lookAtPoint(obj, vector():set(cmd.x, cmd.y, cmd.z))
+	else
+		local ok, e = C().as_player(actor, npc.moveOutOfTheWay, obj) -- "the actor" it steps away from is the sender
+		if not ok then error(e, 0) end
+	end
+end
+
+local function answer(from, ids, objs)
+	local part, size = {}, 0
+	for _, id in ipairs(ids) do
+		local obj = objs[id]
+		if npc.isCompanion(obj) then
+			local bits = {}
+			for i, info in ipairs(info_actions()) do bits[i] = obj:has_info(info) and "1" or "0" end
+			local row = string_format("%d:%s", id, table.concat(bits))
+			if size + #row + 1 > MAX_BYTES then
+				C().to_peer(from, STATE, { s = table.concat(part, "|") })
+				part, size = {}, 0
+			end
+			part[#part + 1] = row
+			size = size + #row + 1
+		end
+	end
+	if #part > 0 then C().to_peer(from, STATE, { s = table.concat(part, "|") }) end
+end
+
+local function answer_skipped(t, from, rows)
+	-- The world server can drop a request at its rate limit before relaying it. Only the level leader has these states.
+	if not coop_mode.leads_here() then return end
+	rows = rows or parse_commands(t.c)
+	if not rows then return end
+	local ids, objs = {}, {}
+	for _, cmd in ipairs(rows) do
+		local id = cmd.id
+		if not objs[id] then
+			local obj = command_object(id)
+			if obj then
+				objs[id] = obj
+				ids[#ids + 1] = id
+			end
+		end
+	end
+	answer(from, ids, objs)
+end
+
+-- Decider of the sender's level: run each command once, then tell him the true state of every companion he named.
+local function on_commands(t, from)
+	local rows = parse_commands(t.c)
+	local good = rows ~= nil
+	if not coop_trust.pass("idiots_cmd_args", good, "peer %d: invalid companion command list", from) or not good then return end
+	local actor = C().avatar(from)
+	local owner = actor and C().hid(actor:id())
+	if not valid_id(owner, 0) then return answer_skipped(t, from, rows) end
+	local ids, objs = {}, {}
+	quiet = quiet + 1
+	for _, cmd in ipairs(rows) do
+		local okc, obj, named = pcall(command_target, cmd, from, actor, owner)
+		if okc then
+			if named and not objs[cmd.id] then
+				objs[cmd.id] = named
+				ids[#ids + 1] = cmd.id
+			end
+			if obj then
+				local ok, e = pcall(run_command, cmd, obj, actor)
+				if not ok then log("! command %s for %d: %s", cmd.k, cmd.id, e) end
+			end
+		else
+			log("! command target %s for %d: %s", cmd.k, cmd.id, obj)
+		end
+	end
+	quiet = quiet - 1
+	answer(from, ids, objs)
+end
+
+-- Player's machine: the decider's state of his companions, on their copies.
+local function on_state(t)
+	if not (npc and coop_mode.is_player_mirror() and type(t.s) == "string" and #t.s <= MAX_BYTES) then return end
+	local list = info_actions()
+	for row in t.s:gmatch("[^|]+") do
+		local id, flags = row:match("^(%d+):([01]+)$")
+		id = tonumber(id)
+		local lid = valid_id(id, 1) and #flags == #list and C().lid(id)
+		local obj = lid and level.object_by_id(lid)
+		if obj then
+			for i, info in ipairs(list) do
+				local want, have = flags:byte(i) == 49, obj:has_info(info)
+				if want and not have then
+					obj:give_info_portion(info)
+				elseif have and not want then
+					obj:disable_info_portion(info)
+				end
+			end
+		end
+	end
+end
+
+local function install_commands()
+	if not npc then return end
+	install_library()
+	local keys, ui = C().mod("idiots_keybinds"), C().mod("idiots_ui")
+	if keys then C().wrap(keys, "onKeybindEvent", "idiots.cmd_keys", command_scope) end
+	local okw, wheel = pcall(function() return ui and ui.UIWheelCompanion end)
+	if okw and wheel then C().wrap(wheel, "OnClickButton", "idiots.cmd_wheel", command_scope) end
+	-- VAR shouts an order through the "actor" of this process (illish.patches.axr_companions' legacy setters): a player's
+	-- order run here is his, not this process's player's
+	local ac = C().mod("axr_companions")
+	if ac and C().fn(ac, "actors_command") then
+		C().wrap(ac, "actors_command", "idiots.remote_quiet", function(orig)
+			return function(...)
+				if quiet > 0 then return end
+				return orig(...)
+			end
+		end)
+	end
+	C().set_limit(CMD, 8, 4, answer_skipped)
+	C().on(CMD, on_commands, "host")
+	C().on(STATE, on_state, "player")
+end
+
 local function start_step(name, f)
 	local success, e = pcall(f)
 	if not success then log("! %s: %s", name, tostring(e)) end
@@ -519,4 +850,5 @@ function on_game_start()
 		install_storage()
 	end)
 	start_step("point key", install_keys)
+	start_step("commands", install_commands)
 end
