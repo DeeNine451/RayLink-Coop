@@ -30,3 +30,10 @@ For any feature, behaviour change or bug:
   Copies for reading: `temp/review/corpus/`, `temp/stock_scripts/scripts/`; stand configs: `E:\RayLinkGames\GAMMA\game-dev\gamedata\`.
 - Do not build the engine (the lead does, through `temp/build_guarded_fast.ps1`).
 - Say "works" or "matches" only after a test or a command showed it; otherwise say "not checked".
+
+## Only mods that are on (owner, 2026-11-19, TZ R22)
+
+Co-op targets the MO2 profile `G.A.M.M.A` (`E:\RayLinkGames\GAMMA\mo2\profiles\G.A.M.M.A\modlist.txt`: `+` on, `-` off).
+`docs/MOD_REPLACEMENTS.md` lists what co-op switches off or replaces (Soulslike, YACS no quit, Ironman Roguelite, the stock
+new-game modes). Code, tests, review scenarios and tester items are written only for mods that are on and not switched off.
+Before you cite a mod's script, check which version is active: the top enabled mod that has the file, else stock Anomaly.
