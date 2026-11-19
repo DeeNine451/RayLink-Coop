@@ -1,0 +1,264 @@
+-- Co-op stand only. The playing host owns the squad, the bodies and the talk lock.
+-- h spawns and measures the squad. ag opens a real talk, uses the wrapped dialog actions,
+-- moves its own actor and accepts the group transition. No stand files are written by Lua.
+local START, GOAL = "l01_escape", "l02_garbage"
+local STASH = "cmp_probe_squad"
+local NO_VERTEX = 4294967295
+local FOLLOW_MS, ARRIVAL_MS = 20000, 30000
+local ROLE, TOKEN
+local fixture, spawned, ready_at, lock_pos, moved_at, arrival_at, last_distance
+local requested_talk, hired, wait_sent, follow_sent, jumped, finished
+local next_tick, next_confirm = 0, 0
+local received = {}
+
+local function out(fmt, ...)
+	printf("[companions] %s %s", ROLE, string.format(fmt, ...))
+	get_console():execute("flush")
+end
+
+local function fixture_id()
+	if fixture then return fixture end
+	local path = getFS():update_path("$fs_root$", "zz_companions_" .. TOKEN .. ".txt")
+	local file = io.open(path, "r")
+	if not file then return end
+	local line = file:read("*l")
+	file:close()
+	local id = line and #line <= 5 and tonumber(line:match("^(%d+)$"))
+	if id and id > 0 and id < 65535 then fixture = id end
+	return fixture
+end
+
+local function on_info(payload, from)
+	if from ~= 0 then return end
+	local data = coop_main.decode(payload)
+	local id = fixture_id()
+	if id and data.i == id and data.l == coop.self_id() then
+		local map = level.name()
+		if not received[map] then
+			out("npc.comp_info level=%s npc=%d l=%d", map, data.i, data.l)
+			received[map] = true
+		end
+	end
+end
+
+local function other_player()
+	for _, p in ipairs(coop.players()) do
+		if not p.is_self and p.avatar_id then
+			local body = level.object_by_id(p.avatar_id)
+			if body and body:alive() then return p.id, body end
+		end
+	end
+end
+
+-- level.vertex_id can snap far away or to another floor. Measure the returned vertex.
+local function ring(center, radius, tolerance, accept)
+	local best_id, best_pos, best_error
+	for _, r in ipairs({ radius, radius - tolerance / 2, radius + tolerance / 2 }) do
+		for step = 0, 23 do
+			local a = step * math.pi / 12
+			local sample = vector():set(center.x + math.cos(a) * r, center.y, center.z + math.sin(a) * r)
+			local id = level.vertex_id(sample)
+			if id and id < NO_VERTEX then
+				local pos = level.vertex_position(id)
+				local err = math.abs(pos:distance_to(center) - radius)
+				if math.abs(pos.y - center.y) <= 2 and err <= tolerance
+					and (not best_error or err < best_error) and (not accept or accept(pos)) then
+					best_id, best_pos, best_error = id, pos, err
+				end
+			end
+		end
+	end
+	return best_id, best_pos
+end
+
+local function spawn(body)
+	local pos = body:position()
+	local lv, target = ring(pos, 5, 0.5)
+	assert(lv, "no AI vertex 5 m from the client")
+	local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
+	-- The debug test_squad path: use one specified member so Useful Idiots need not split the squad.
+	local sim = alife()
+	local sq = assert(alife_create("stalker_sim_squad_novice", target, lv, gv), "squad spawn failed")
+	local npc_id = assert(sq:add_squad_member("sim_default_stalker_0", target, lv, gv), "stalker spawn failed")
+	local se = assert(sim:object(npc_id), "no stalker server object")
+	SIMBOARD:setup_squad_and_group(se)
+	SendScriptCallback("squad_on_npc_creation", sq, se, nil)
+	sq:refresh()
+	out("spawn squad=%d npc=%d at %.2f m from the client", sq.id, npc_id, pos:distance_to(target))
+	return { squad = sq.id, npc = npc_id }
+end
+
+local function sample(stage, npc, body)
+	local p, q = npc:position(), body:position()
+	local distance = p:distance_to(q)
+	out("%s level=%s commander=(%.2f,%.2f,%.2f) client=(%.2f,%.2f,%.2f) distance=%.2f",
+		stage, level.name(), p.x, p.y, p.z, q.x, q.y, q.z, distance)
+	return distance
+end
+
+local function host_before(peer, body, now)
+	if jumped then return end
+	if not spawned then
+		ready_at = ready_at or now
+		if now - ready_at < 3000 then return end
+		spawned = spawn(body)
+	end
+	local npc = level.object_by_id(spawned.npc)
+	if not (npc and npc:alive()) then return end
+	if not spawned.announced then
+		local sq = assert(alife_object(spawned.squad), "spawned squad not found")
+		assert(sq:commander_id() == npc:id(), "spawned stalker is not the commander")
+		assert(coop_npc_companions.owner_character(npc) == nil, "spawned stalker is already a companion")
+		npc:enable_talk()
+		out("ready npc=%d peer=%d", spawned.npc, peer)
+		spawned.announced = true
+	end
+	if not lock_pos and coop.talk_recent(peer, spawned.npc, 5000) then
+		lock_pos = vector():set(body:position())
+		out("talk lock npc=%d peer=%d", spawned.npc, peer)
+	end
+	if not lock_pos or coop_npc_companions.owner_character(npc) ~= body:id() then return end
+	local displacement = body:position():distance_to(lock_pos)
+	if not moved_at and displacement >= 27 and displacement <= 33 then
+		moved_at = now
+		sample("move seen", npc, body)
+	end
+	if not moved_at or now - moved_at < FOLLOW_MS then return end
+	assert(sample("follow after 20 s", npc, body) <= 10, "commander farther than 10 m after following")
+	assert(coop.stash_set(STASH, string.format("%d %d %d %d", spawned.squad, spawned.npc, peer, body:id())),
+		"could not keep the squad identity across the transition")
+	jumped = true
+	out("jump to %s", GOAL)
+	JumpToLevel(GOAL)
+end
+
+local function host_after(peer, body, now)
+	local saved = assert(coop.stash_get(STASH), "missing pre-transition squad identity")
+	local sid, nid, owner_peer, owner_id = saved:match("^(%d+) (%d+) (%d+) (%d+)$")
+	assert(sid and peer == tonumber(owner_peer) and body:id() == tonumber(owner_id), "client identity changed across load")
+	arrival_at = arrival_at or now
+	local sq = alife_object(tonumber(sid))
+	local npc = level.object_by_id(tonumber(nid))
+	if sq and npc and npc:alive() and sq:commander_id() == npc:id() then
+		local vertex = game_graph():vertex(sq.m_game_vertex_id)
+		if alife():level_name(vertex:level_id()) == GOAL and coop_npc_companions.owner_character(npc) == body:id() then
+			local distance = npc:position():distance_to(body:position())
+			if distance <= 15 then
+				sample("arrival", npc, body)
+				out("PASS npc=%d peer=%d", npc:id(), peer)
+				finished = true
+				return
+			end
+			last_distance = distance
+		end
+	end
+	if now - arrival_at >= ARRIVAL_MS then
+		if npc then sample("arrival timeout", npc, body) end
+		error(last_distance and "commander farther than 15 m after arrival" or "same squad, map or owner missing after arrival", 0)
+	end
+end
+
+local function client_before(npc, host_body, now)
+	local actor = db.actor
+	local dialog = dialogs_axr_companion
+	if not requested_talk then
+		local pos = npc:position()
+		if actor:position():distance_to(pos) > 2.5 then
+			local lv, near = ring(pos, 1.8, 0.5)
+			assert(lv, "no AI vertex within talk distance")
+			actor:set_actor_position(vector():set(near.x, near.y + 0.3, near.z))
+			return
+		end
+		if not npc:is_talk_enabled() then return end
+		actor:run_talk_dialog(npc, false)
+		requested_talk = now
+		return
+	end
+	if not hired then
+		if not (npc:is_talking() and actor:is_talking()) then
+			assert(now - requested_talk < 10000, "the real talk did not open")
+			return
+		end
+		dialog.become_actor_companion(actor, npc, "dm_is_not_actor_companion_dialog")
+		hired = true
+		out("sent recruit npc=%d", npc:id())
+		return
+	end
+	if not (received[START] and coop_npc_companions.held_here(npc)) then return end
+	-- Observe wait first so the follow action must change a flag on the authority.
+	if not wait_sent then
+		dialog.set_companion_to_wait_state(actor, npc, "dm_is_actor_companion_dialog")
+		wait_sent = true
+		return
+	end
+	local waiting = npc:has_info("npcx_beh_wait")
+	if not follow_sent then
+		if waiting then
+			dialog.set_companion_to_follow_state(actor, npc, "dm_is_actor_companion_dialog")
+			follow_sent = true
+		end
+		return
+	end
+	if not moved_at and not waiting then
+		local pos, hp = actor:position(), host_body:position()
+		local lv, target = ring(pos, 30, 1, function(p) return p:distance_to(hp) >= 20 end)
+		assert(lv, "no AI vertex 30 m away from the client and at least 20 m from the host")
+		actor:stop_talk()
+		actor:set_actor_position(vector():set(target.x, target.y + 0.3, target.z))
+		out("moved %.2f m after follow", pos:distance_to(target))
+		moved_at = now
+	end
+	if moved_at and now - moved_at >= FOLLOW_MS and now >= next_confirm then
+		next_confirm = now + 2000
+		get_console():execute("coop_transition_confirm")
+	end
+end
+
+local function tick()
+	local now = time_global()
+	if finished or now < next_tick or not (db.actor and coop.is_live()) then return end
+	next_tick = now + 250
+	local peer, body = other_player()
+	if not body then return end
+	local map = level.name()
+	assert(map == START or map == GOAL, "unexpected level " .. tostring(map))
+	if ROLE == "h" then
+		if map == GOAL then host_after(peer, body, now) else host_before(peer, body, now) end
+		return
+	end
+	local id = fixture_id()
+	local local_id = id and coop.to_local_id(id)
+	local npc = local_id and level.object_by_id(local_id)
+	if not (npc and npc:alive()) then return end
+	if map == GOAL then
+		if received[GOAL] and coop_npc_companions.held_here(npc) then
+			out("PASS npc=%d peer=%d", id, coop.self_id())
+			finished = true
+		end
+	else
+		client_before(npc, body, now)
+	end
+end
+
+local function update()
+	local ok, err = pcall(tick)
+	if not ok then
+		finished = true
+		out("FAIL %s", tostring(err))
+	end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	if not ok or type(line) ~= "string" then return end
+	ROLE = line:match("%-coop_probe%s+(%w+)")
+	TOKEN = line:match("%-zz_cmp_token%s+(%w+)")
+	if not TOKEN or (ROLE ~= "h" and ROLE ~= "ag") then return end
+	local armed, err = pcall(function()
+		if ROLE == "ag" then
+			assert(coop_main.add_event_handler("npc.comp_info", on_info), "could not observe npc.comp_info")
+		end
+		RegisterScriptCallback("actor_on_update", update)
+	end)
+	if not armed then printf("[companions] %s FAIL %s", ROLE, tostring(err)) end
+end
