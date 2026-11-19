@@ -244,7 +244,9 @@ for _, set in ipairs(modes.names()) do
 		check(M.admit(small, s1:id(), 1, math.huge, player) == true, set .. ": an infinite pending weight counts as 0 (the engine bounds it)")
 		check(M.admit(small, s1:id(), nil, nil, player) == true, set .. ": no pending at all")
 
-		-- G6-1b: Soulslike transfers death items to the treasure box, then releases the hidden box.
+		-- G6-1b: a script moves a box's contents into a full stash, then releases the source box (Hideout Furniture judges
+		-- only moves out of the player's own bag, so nothing may be refused and lost here). Soulslike, which does this on
+		-- death in single player, is off in co-op (docs/MOD_REPLACEMENTS.md); the case stays for any mod or script that does it.
 		local treasure = box("inventory_box")
 		item(70, treasure)
 		local hidden, hidden_box = box("hidden_box")
@@ -259,7 +261,7 @@ for _, set in ipairs(modes.names()) do
 		alife_release(hidden_box)
 		next_frame()
 		check(OBJ[first:id()] == first and OBJ[second:id()] == second and shown(treasure) == 77,
-			set .. ": both death items survive the hidden box release and land in the full treasure box")
+			set .. ": both items survive the source box release and land in the full stash")
 	else
 		-- the world server has no map: no stash is online in it, nothing is judged here (the map server of that level decides)
 		local b = box("hf_stash_small", false)
