@@ -114,6 +114,8 @@ CI_BUILD_HEADER = "src/xrCore/raylink_build.h"  # ci_sync writes the build numbe
 CI_BUILD_DEFINE = re.compile(rb"^#define RAYLINK_BUILD[ \t]+\d+[ \t]*$", re.M)
 CI_PATCHED = frozenset({"src/xrgame/xrgame.vcxproj", "src/xrgame/xrgame.vcxproj.filters"})  # ci_sync / vcxproj_add
 CI_SOURCE_EXT = (".cpp", ".h", ".hpp", ".inl", ".c", ".rc")
+# what the build reads from engine-ci: the sources and the SDK (its headers and libraries; review 4, B4/E4)
+CI_TREES = ("src", "sdk")
 PROTOCOL = "engine/src/xrCoop/coop_protocol.h"
 ROUTE = re.compile(r"^gamedata/configs/coop_route[^/]*\.ltx$", re.I)
 # the product: our gamedata layers and the engine's sources and gamedata (an engine README or CI edit needs no stand)
@@ -125,15 +127,16 @@ TESTS = "tests"
 GATE_FILES = frozenset([f"tools/{name}" for name in (
     "layers.txt", "layers_allow.txt", "srv_entry.txt", "persisted_keys.txt", "stock_files.txt", "check_layers.py",
     "check_gates.py", "release.py", "stand_common.ps1", "stand_hostplay.ps1", "stand_srv.ps1", "ded_check.ps1",
-    "test_lua.cmd", "build_tests.cmd", "run_all_tests.cmd")] + ["tests/lua/run_all.lua"])
+    "mo2_stand.py", "test_lua.cmd", "build_tests.cmd", "run_all_tests.cmd")] + ["tests/lua/run_all.lua"])
 GATE_DIRS = ("tools/stand/",)
 # the facade and its two layers: they decide in which process when_srv code runs (review 3, C5)
 MODE_FILES = frozenset({"gamedata/scripts/coop_mode.script", "gamedata/scripts/coop_srv_mode.script",
                         "gamedata/scripts/coop_hostplay_mode.script"})
 # what a stand mark certifies: the scenario files that ran (tools/stand is tracked; temp/stand keeps the run history),
-# the runners, and the two checkers the runner imports for the dirty check and the digests (review 3, S3)
+# the runners, the two checkers the runner imports for the dirty check and the digests (review 3, S3) and the file
+# helpers it writes into the stand with (tools/mo2_stand.py: replace_file never writes through a hard link, R21)
 SCENARIO_PATHS = ("tools/stand", "tools/stand_common.ps1", "tools/stand_hostplay.ps1", "tools/stand_srv.ps1",
-                  "tools/ded_check.ps1", "tools/check_gates.py", "tools/check_layers.py")
+                  "tools/ded_check.ps1", "tools/check_gates.py", "tools/check_layers.py", "tools/mo2_stand.py")
 # the mode cvars every stand profile runs with (tools/stand/stand_head.py writes them before each scenario; S2)
 PROFILE = "tools/stand/stand_profile.ltx"
 # the co-op tests and their runners: a srv-only change may add or edit only test_srv_* files there (B10)
@@ -446,20 +449,68 @@ def blob_ids(data: bytes) -> tuple[str, str]:
                  for d in (data, data.replace(b"\r\n", b"\n")))
 
 
-def ci_index(ci: pathlib.Path) -> Optional[tuple[dict[str, str], set[str], set[str]]]:
-    """(index blob of every tracked src file, files that differ from the index, untracked src files) of the engine-ci
-    worktree; None when engine-ci is not a git worktree (then every file is read)."""
+def ci_index(ci: pathlib.Path, trees: Sequence[str] = CI_TREES) -> Optional[tuple[dict[str, str], set[str], set[str]]]:
+    """(index blob of every tracked file under trees, files that differ from the index, untracked files) of the
+    engine-ci worktree; None when engine-ci is not a git worktree (then every file is read)."""
     if not (ci / ".git").exists():
         return None
     index: dict[str, str] = {}
-    for item in git(ci, "ls-files", "-s", "-z", "--", "src").split("\0"):
+    for item in git(ci, "ls-files", "-s", "-z", "--", *trees).split("\0"):
         meta, _, path = item.partition("\t")
         parts = meta.split()
         if len(parts) == 3 and parts[2] == "0" and parts[0] != "160000":
             index[path] = parts[1]
-    changed = {p for p in git(ci, "diff-files", "--name-only", "-z", "--", "src").split("\0") if p}
-    others = {p for p in git(ci, "ls-files", "--others", "--exclude-standard", "-z", "--", "src").split("\0") if p}
+    changed = {p for p in git(ci, "diff-files", "--name-only", "-z", "--", *trees).split("\0") if p}
+    others = {p for p in git(ci, "ls-files", "--others", "--exclude-standard", "-z", "--", *trees).split("\0") if p}
     return index, changed, others
+
+
+# the one-line items tools/vcxproj_add.py writes into engine-ci's xrGame.vcxproj for our coop sources
+VCX_COOP_ITEM = re.compile(r'^\s*<(ClCompile|ClInclude) Include="coop\\([^"]+)" />\s*$')
+
+
+def vcxproj_problems(engine: pathlib.Path, ci: pathlib.Path) -> list[str]:
+    """engine-ci's xrGame.vcxproj builds what engine HEAD's does (review 4, B4/E3): the same text once the one-line coop
+    items tools/vcxproj_add.py writes are set aside (their order differs), the same set of coop sources compiled
+    (ClCompile; a ClInclude only lists a header), and each of them a file of engine HEAD. A define, a compiler option or a
+    source outside src/xrGame/coop that engine-ci alone compiles is a difference."""
+    rel = "src/xrGame/xrGame.vcxproj"
+    head_text = git_show(engine, f"HEAD:{rel}")
+    path = ci / rel
+    if not head_text:
+        return []
+    if not path.is_file():
+        return [f"engine-ci has no {rel}"]
+
+    def split(text: str) -> tuple[list[str], set[str]]:
+        rest, compiled = [], set()
+        for line in text.lstrip("﻿").replace("\r\n", "\n").split("\n"):
+            m = VCX_COOP_ITEM.match(line)
+            if m is None:
+                rest.append(line.rstrip())
+            elif m.group(1) == "ClCompile":
+                compiled.add(m.group(2).replace("\\", "/").lower())  # coop\srv\x.cpp -> srv/x.cpp
+        while rest and not rest[-1]:
+            rest.pop()  # a final line break (engine-ci's copy has none) builds the same
+        return rest, compiled
+
+    head_rest, head_compiled = split(head_text)
+    ci_rest, ci_compiled = split(path.read_bytes().decode("utf-8", "replace"))
+    problems = []
+    if head_rest != ci_rest:
+        changed = sum(1 for a, b in zip(head_rest, ci_rest) if a != b) + abs(len(head_rest) - len(ci_rest))
+        problems.append(f"engine-ci's {rel} differs from engine HEAD's beyond the coop items vcxproj_add writes "
+                        f"({changed} line(s)): a define, an option or a source only engine-ci builds")
+    heads = {p.lower() for p, _ in tree_blobs(engine, "HEAD", ["src/xrGame/coop"])}
+    only_ci = sorted(n for n in ci_compiled - head_compiled if f"src/xrgame/coop/{n}" not in heads)
+    if only_ci:
+        problems.append(f"engine-ci's {rel} compiles {len(only_ci)} coop source(s) engine HEAD does not have: "
+                        + ", ".join(only_ci[:5]))
+    lacking = sorted(head_compiled - ci_compiled)
+    if lacking:
+        problems.append(f"engine-ci's {rel} does not compile {len(lacking)} coop source(s) of engine HEAD: "
+                        + ", ".join(lacking[:5]))
+    return problems
 
 
 def exe_source(engine: Optional[pathlib.Path], exe: pathlib.Path, ci: pathlib.Path) -> tuple[str, list[str]]:
@@ -468,10 +519,10 @@ def exe_source(engine: Optional[pathlib.Path], exe: pathlib.Path, ci: pathlib.Pa
         return "", ["no engine repository"]
     engine_head = head(engine)
     problems = []
-    dirty = dirty_lines(engine, ["src"])
+    dirty = dirty_lines(engine, list(CI_TREES))
     if dirty:
-        problems.append(f"engine/src has {len(dirty)} uncommitted file(s) ({dirty[0][3:]} ...): the exe must "
-                        "come from committed sources")
+        problems.append(f"engine/{dirty[0][3:].split('/')[0]} has {len(dirty)} uncommitted file(s) ({dirty[0][3:]} ...): "
+                        "the exe must come from committed sources")
     ci_exe = ci.joinpath(*CI_EXE)
     if not ci_exe.is_file():
         return "", problems + [f"no engine-ci build {ci_exe}"]
@@ -483,28 +534,34 @@ def exe_source(engine: Optional[pathlib.Path], exe: pathlib.Path, ci: pathlib.Pa
             problems.append(f"the exe {short(have)} is not engine-ci's build {short(ci_hash)}: copy the build "
                             "(tools/stand_overlay.py) or build again")
     built = ci_exe.stat().st_mtime
-    heads = dict(tree_blobs(engine, "HEAD", ["src"]))
+    heads = dict(tree_blobs(engine, "HEAD", list(CI_TREES)))
     known = ci_index(ci)
     differ: list[str] = []
     missing: list[str] = []
     newer: list[str] = []
     for path, blob in sorted(heads.items()):
         low = path.lower()
-        if low in CI_PATCHED:
-            continue
         target = ci / path
-        if known is not None and path in known[0] and path not in known[1] and low != CI_BUILD_HEADER.lower():
-            if known[0][path] != blob:
-                differ.append(path)
-            continue  # unchanged since engine-ci's checkout: git's index holds its blob
+        # review 4, B4/E2: every file is stat'ed before git's index is trusted: a build from an uncommitted edit that
+        # `git checkout` then put back matches the index again, but the checkout gave it a time after the exe's
         try:
-            data = target.read_bytes()
             mtime = target.stat().st_mtime
         except OSError:
             missing.append(path)
             continue
         if mtime > built:
             newer.append(path)
+        if low in CI_PATCHED:
+            continue  # vcxproj_problems below
+        if known is not None and path in known[0] and path not in known[1] and low != CI_BUILD_HEADER.lower():
+            if known[0][path] != blob:
+                differ.append(path)
+            continue  # unchanged since engine-ci's checkout: git's index holds its blob
+        try:
+            data = target.read_bytes()
+        except OSError:
+            missing.append(path)
+            continue
         if low == CI_BUILD_HEADER.lower():
             want = git_show(engine, f"HEAD:{path}").encode("utf-8").replace(b"\r\n", b"\n")
             if CI_BUILD_DEFINE.sub(b"#define RAYLINK_BUILD N", data.replace(b"\r\n", b"\n")) != \
@@ -512,20 +569,24 @@ def exe_source(engine: Optional[pathlib.Path], exe: pathlib.Path, ci: pathlib.Pa
                 differ.append(path)
         elif blob not in blob_ids(data):
             differ.append(path)
-    for low in sorted(CI_PATCHED):
-        project = next((ci / p for p in heads if p.lower() == low), None)
-        if project is not None and project.is_file() and project.stat().st_mtime > built:
-            newer.append(project.relative_to(ci).as_posix())
     heads_low = {p.lower() for p in heads}
     extra = []
     if known is not None:
         candidates = set(known[0]) | known[2]
     else:
-        base = ci / "src"
-        candidates = {p.relative_to(ci).as_posix() for p in base.rglob("*") if p.is_file()} if base.is_dir() else set()
+        candidates = set()
+        for tree in CI_TREES:
+            base = ci / tree
+            if base.is_dir():
+                candidates |= {p.relative_to(ci).as_posix() for p in base.rglob("*") if p.is_file()}
     for path in sorted(candidates):
-        if path.lower() not in heads_low and path.lower().endswith(CI_SOURCE_EXT) and (ci / path).is_file():
+        low = path.lower()
+        if low in heads_low or not (ci / path).is_file():
+            continue
+        # src: a source file the build may compile; sdk: any file (a library or a header the build links or includes)
+        if low.endswith(CI_SOURCE_EXT) or low.startswith("sdk/"):
             extra.append(path)
+    problems += vcxproj_problems(engine, ci)
 
     def names(items: list[str]) -> str:
         return ", ".join(items[:5]) + (f" (+{len(items) - 5})" if len(items) > 5 else "")
@@ -681,6 +742,55 @@ def tests_state(root: pathlib.Path) -> dict[str, str]:
             "first_dirty": dirty[0].strip() if dirty else ""}
 
 
+LUA_RUNNER = ("temp", "lua", "runlua.exe")
+
+
+def lua_stamp(root: pathlib.Path) -> str:
+    """The source stamp tools/test_lua.cmd builds temp/lua/runlua.exe with (RUNLUA_STAMP): the first 8 hex digits of the
+    SHA-1 of tests/lua/runlua.c, tests/lua/native_coop.cpp, every engine/src/xrCoop file native_coop.cpp names in a line
+    that starts with #include (its second word, quotes off, when that file exists) and tools/test_lua.cmd, in that order
+    ("missing0" for a file that cannot be read)."""
+    def part(path: pathlib.Path) -> str:
+        try:
+            return hashlib.sha1(path.read_bytes()).hexdigest()[:8]
+        except OSError:
+            return "missing0"
+
+    native = root / "tests" / "lua" / "native_coop.cpp"
+    parts = [part(root / "tests" / "lua" / "runlua.c"), part(native)]
+    try:
+        lines = native.read_bytes().decode("latin-1").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        words = line.split() if line.startswith("#include") else []
+        if len(words) >= 2:
+            name = words[1][1:-1] if len(words[1]) >= 2 and words[1][0] == words[1][-1] == '"' else words[1]
+            header = root / "engine" / "src" / "xrCoop" / name
+            try:
+                exists = header.is_file()
+            except OSError:
+                exists = False
+            if exists:
+                parts.append(part(header))
+    parts.append(part(root / "tools" / "test_lua.cmd"))
+    return "".join(parts)
+
+
+def lua_runner_stale(root: pathlib.Path) -> Optional[str]:
+    """Why the shared Lua runner was not built from the sources now (review 4, B5: tools/test_lua.cmd runs the old
+    temp/lua/runlua.exe and exits 0 when it cannot rebuild it), or None. The stamp is a string in the exe."""
+    exe = root.joinpath(*LUA_RUNNER)
+    if not exe.is_file():
+        return "there is no temp\\lua\\runlua.exe"
+    want = lua_stamp(root)
+    data = exe.read_bytes()
+    if want.encode("ascii") not in data and want.upper().encode("ascii") not in data:
+        return (f"temp\\lua\\runlua.exe was not built from the sources now (stamp {want[:16]}...): tools\\test_lua.cmd "
+                "could not rebuild it and ran a stale runner (fix the build, or wait for another Lua run to end)")
+    return None
+
+
 def tests_mark(root: pathlib.Path, marks: pathlib.Path, command: str, state_file: Optional[pathlib.Path],
                native: Optional[int], lua: Optional[int]) -> int:
     """begin: drop the old tests.ok, print the state (both HEADs, dirty) for `write`. write: tests.ok when both suites
@@ -706,6 +816,10 @@ def tests_mark(root: pathlib.Path, marks: pathlib.Path, command: str, state_file
         why.append(f"tools\\build_tests.cmd failed ({native})")
     if lua != 0:
         why.append(f"tools\\test_lua.cmd failed ({lua})")
+    else:
+        stale = lua_runner_stale(root)
+        if stale:
+            why.append(stale)
     if before.get("dirty") != "0" or now["dirty"] != "0":
         why.append(f"the tree was not clean (dirty {before.get('dirty', '?')} before, {now['dirty']} after"
                    + (f": {now['first_dirty']}" if now["first_dirty"] else "") + ")")

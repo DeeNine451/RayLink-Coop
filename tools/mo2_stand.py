@@ -200,6 +200,73 @@ def _unlink(path: Path) -> None:
         _delete_ignoring_readonly(str(path))
 
 
+# ---- writing into a stand (TZ.md R21: the stand's files are hard links to the mods' own files) --------------------
+# Every tool that writes into a stand (tools/stand/stand_head.py, tools/stand_overlay.py) goes through these: a write
+# into an existing name would change the mod's file for every link of it, and clearing a read-only attribute would
+# change the mod's attribute. The old name is deleted first (read-only-safe), then a new file takes the name.
+
+def link_count(path) -> int:
+    """How many names the file has: 1 = a file of its own, 2 or more = hard links share its data, 0 = no file."""
+    try:
+        return os.stat(path, follow_symlinks=False).st_nlink
+    except FileNotFoundError:
+        return 0
+
+
+def delete_blocker(path) -> "str | None":
+    """Why one name of the file cannot be deleted now, or None (it can, or there is no file). Opens it for DELETE with
+    full sharing, as _delete_ignoring_readonly does: a process that holds the file without FILE_SHARE_DELETE (a running
+    game, a scanner) blocks it. Reads and changes nothing."""
+    path = str(path)
+    if not os.path.lexists(path):
+        return None
+    if sys.platform != "win32":
+        return None if os.access(os.path.dirname(path) or ".", os.W_OK) else "its folder is not writable"
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.HANDLE]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    delete_access, share_all, open_existing, open_reparse_point = 0x00010000, 0x7, 3, 0x00200000
+    handle = k32.CreateFileW(path, delete_access, share_all, None, open_existing, open_reparse_point, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        return str(ctypes.WinError(ctypes.get_last_error()))
+    k32.CloseHandle(handle)
+    return None
+
+
+def remove_file(path) -> None:
+    """Delete one name of a file. Other hard links keep their data and their read-only attribute."""
+    _unlink(Path(path))
+
+
+def replace_file(path, data: bytes) -> int:
+    """Put data at path as a NEW file: the bytes go to a fresh file next to it, the old name (a hard link into a mod's
+    folder, maybe read-only) is deleted, the fresh file takes the name. No other link of the old file ever sees the new
+    bytes or loses its read-only attribute. Returns the old name's link count (0: there was no file)."""
+    path = Path(path)
+    if path.is_dir() and not path.is_symlink():
+        raise IsADirectoryError(f"a folder stands where a file goes: {path}")
+    links = link_count(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.new")
+    if os.path.lexists(tmp):
+        _unlink(tmp)
+    try:
+        with open(tmp, "xb") as f:
+            f.write(data)
+        if links:
+            _unlink(path)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.lexists(tmp):
+            _unlink(tmp)
+        raise
+    return links
+
+
 def _place(src: str, dst: Path, copy: bool) -> None:
     if os.path.lexists(dst):
         if dst.is_dir() and not os.path.islink(dst):
@@ -301,6 +368,8 @@ def materialize(layers: list[Layer], out) -> Report:
                 report.linked += 1
     finally:
         tmp = manifest_path.with_suffix(".tmp")
+        if os.path.lexists(tmp):
+            _unlink(tmp)  # a leftover of an interrupted run: never written into (R21)
         tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, manifest_path)
 

@@ -193,6 +193,14 @@ LUA_SCRIPT_STRING = re.compile(r"""["'](coop_\w+)["']""")
 # script's own (review 3, C1)
 LUA_TABLE_COPY = re.compile(r"([A-Za-z_]\w*)(?:\s*\.\s*\w+|\[[^\]]*\])*(?:\s+or\s+\{\s*\})?")
 LUA_PURE_PREFIX = ("string.", "math.", "bit.")
+# calls that run a function given to them at once: a function literal given to one runs at load when the call does
+# (`string.gsub(s, p, function() ... end)`, `pcall(function() ... end)`; review 4, X6)
+LUA_RUNS_ARG = frozenset({"string.gsub", "table.sort", "pcall", "xpcall", "table.foreach", "table.foreachi"})
+# Ядро builds a script's name at run time: no string names the script it reaches (review 4, X7)
+LUA_COMPUTED_SCRIPT = re.compile(r"""(?:\brawget\s*\(\s*_G\s*,|\b_G\s*\[)\s*(["'])coop_[^"'\n]*\1\s*\.\.""")
+# a one-line function-like macro that pastes tokens: `#define COOP_FAR_HOOK(name) bool coop_far_hook_##name(u16 id)`
+# spells the name of what it defines (review 4, X10b)
+PASTE_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^()\n]*)\)[ \t]+([^\n\\]*##[^\n\\]*)$", re.M)
 LUA_STRING_METHODS = frozenset({"format", "sub", "gsub", "find", "match", "gmatch", "len", "lower", "upper", "rep", "byte",
                                 "char", "reverse", "split", "trim"})
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^">]+)[">]')
@@ -741,9 +749,16 @@ def parse_cpp(path: str, code: str) -> CppFile:
         # `u32 FarLimits::squads_per_player = 4;` defines a static member of FarLimits (C8)
         q = re.search(r"([A-Za-z_]\w*)\s*::\s*$", prefix)
         type_text = re.sub(r"(?:[A-Za-z_]\w*\s*::\s*)+$", "", prefix)
-        names = [n for n in IDENT.findall(type_text) if n not in CPP_DECL_WORDS]
+        # `coop::hooks::AutoReg<FarSkip>`: the class is AutoReg, not its template argument (review 4, X8b)
+        bare_type = type_text
+        while True:
+            stripped = re.sub(r"<[^<>]*>", " ", bare_type)
+            if stripped == bare_type:
+                break
+            bare_type = stripped
+        names = [n for n in IDENT.findall(bare_type) if n not in CPP_DECL_WORDS]
         # the class of an object, when it is one: its constructor runs at static initialization (C7)
-        obj_type = names[-1] if names and not compile_time and "*" not in type_text and "&" not in type_text else ""
+        obj_type = names[-1] if names and not compile_time and "*" not in bare_type and "&" not in bare_type else ""
         result.variables.append(CppVar(line_of(offset + m.start(2)), m.group(2), internal, call,
                                        q.group(1) if q else "", obj_type))
 
@@ -1469,11 +1484,45 @@ def rewrite_lua(line: str, aliases: dict[str, str]) -> str:
                   lambda m: aliases[m.group(1)], line)
 
 
+def paste_macros(sources: Iterable[Source]) -> dict[str, tuple[list[str], str]]:
+    """name -> (parameters, body) of the one-line token-pasting function-like macros of our C++ files."""
+    out: dict[str, tuple[list[str], str]] = {}
+    for src in sources:
+        if src.lang == "cpp" and src.code and src.layer != "stock" and "##" in src.code:
+            for m in PASTE_MACRO.finditer(src.code):
+                out.setdefault(m.group(1), ([p.strip() for p in m.group(2).split(",")], m.group(3).strip()))
+    return out
+
+
+def expand_paste(code: str, macros: dict[str, tuple[list[str], str]]) -> str:
+    """code with every use of a paste macro expanded on its own line (lines are kept): `COOP_FAR_HOOK(skip) {` reads as
+    `bool coop_far_hook_skip(u16 id) {`, so the function it defines is indexed (review 4, X10b)."""
+    rx = re.compile(r"\b(" + "|".join(map(re.escape, macros)) + r")\s*\(([^()\n]*)\)")
+
+    def one(m: re.Match[str]) -> str:
+        params, body = macros[m.group(1)]
+        args = [a.strip() for a in m.group(2).split(",")]
+        if len(args) != len(params):
+            return m.group(0)
+        for p, a in zip(params, args):
+            if p:
+                body = re.sub(rf"\b{re.escape(p)}\b", lambda _m, a=a: a, body)
+        return re.sub(r"\s*##\s*", "", body)
+
+    lines = code.split("\n")
+    for i, line in enumerate(lines):
+        if not re.match(r"[ \t]*#", line) and rx.search(line):
+            lines[i] = rx.sub(one, line)
+    return "\n".join(lines)
+
+
 def build(root: pathlib.Path, layers: LayerMap, srv_entry: Sequence[str]) -> Model:
     sources = collect(root, layers)
+    pastes = paste_macros(sources)
     for src in sources:
         if src.lang == "cpp" and src.code and src.layer != "stock":
-            src.cpp = parse_cpp(src.path, blank_preprocessor(src.code))
+            code = expand_paste(src.code, pastes) if pastes and src.layer in ("srv", "hostplay") else src.code
+            src.cpp = parse_cpp(src.path, blank_preprocessor(code))
             src.aliases = {a: re.sub(r"\s+", "", t) for a, t in ALIAS_NS.findall(src.code)}
             src.usings = {re.split(r"\s*::\s*", u)[-1] for u in USING_NS.findall(src.code)}
         elif src.lang == "lua":
@@ -1604,6 +1653,24 @@ def lua_own_names(code: str, mod_name: str, code_strings: str = "",
         m = LUA_TABLE_COPY.fullmatch(expr.strip())
         if m and m.group(1) not in ("nil", "true", "false") and (m.group(1) == name or m.group(1) not in own):
             own.discard(name)
+    # `local cfg = rawget(_G, "coop_far_cfg")` (`or {}` too) is that table, not one of its own (review 4, X3)
+    for name in re.findall(r"\blocal\s+([A-Za-z_]\w*)\s*=\s*rawget\s*\(", code):
+        own.discard(name)
+    # a file-level global that copies another table (`far_cfg = coop_far_cfg`, `far_db = db`, `x = rawget(...)`) is
+    # that table (review 4, X4); `x = x or {}` and a copy of a table of its own stay its own
+    file_level = re.findall(r"^([A-Za-z_]\w*)\s*=(?!=)[ \t]*([^\n]*)$", code, re.M)
+    changed = True
+    while changed:
+        changed = False
+        for name, expr in file_level:
+            if name not in own:
+                continue
+            expr = expr.strip()
+            m = LUA_TABLE_COPY.fullmatch(expr)
+            if re.match(r"rawget\s*\(", expr) or (m and m.group(1) not in ("nil", "true", "false")
+                                                  and m.group(1) != name and m.group(1) not in own):
+                own.discard(name)
+                changed = True
     return own
 
 
@@ -1618,9 +1685,14 @@ def lua_load_functions(src: Source, calls: list[tuple[int, str, Optional[LuaFunc
     load = {id(fn) for fn in by_name.get("on_game_start", ()) if not fn.local}
     for name in re.findall(r"(?m)^[ \t]*on_game_start\s*=\s*([A-Za-z_]\w*)\s*$", src.code):
         load |= {id(fn) for fn in by_name.get(name, ())}
+    literals = lua_literals_run_now(src)
     changed = True
     while changed:
         changed = False
+        for fid, around in literals:
+            if fid not in load and (around is None or id(around) in load):
+                load.add(fid)  # a function literal called at once, or given to string.gsub / pcall ... (X5, X6)
+                changed = True
         for pos, name, inner in calls:
             if inner is not None and id(inner) not in load:
                 continue
@@ -1629,6 +1701,127 @@ def lua_load_functions(src: Source, calls: list[tuple[int, str, Optional[LuaFunc
                     load.add(id(fn))
                     changed = True
     return load
+
+
+def open_paren_before(code: str, pos: int, limit: int = 4000) -> Optional[int]:
+    """The `(` whose argument list holds pos directly (not inside a table constructor `{...}`), or None."""
+    parens = braces = 0
+    i = pos - 1
+    stop = max(0, pos - limit)
+    while i >= stop:
+        c = code[i]
+        if c == ")":
+            parens += 1
+        elif c == "(":
+            if parens == 0:
+                return i if braces == 0 else None
+            parens -= 1
+        elif c == "}":
+            braces += 1
+        elif c == "{":
+            if braces == 0:
+                return None
+            braces -= 1
+        i -= 1
+    return None
+
+
+def lua_literals_run_now(src: Source) -> list[tuple[int, Optional[LuaFunction]]]:
+    """(id, the function around it or None at file level) of every function literal that runs as soon as the code
+    around it runs: called at once, `(function() ... end)()` (review 4, X5), or given straight to a call that runs its
+    argument now: string.gsub, s:gsub, table.sort, pcall, xpcall, table.foreach and locals that stand for them (X6). A
+    literal given to any other call (CreateTimeEvent, RegisterScriptCallback, coop_mode.when_srv) runs later; that call
+    itself is what counts."""
+    code = src.code
+    runners = set(LUA_RUNS_ARG)
+    for name, expr in re.findall(r"(?m)^[ \t]*local\s+([A-Za-z_]\w*)\s*=\s*([\w.]+)\s*$", code):
+        if expr in LUA_RUNS_ARG:
+            runners.add(name)
+    spans = sorted(src.lua_spans, key=lambda f: (f.start, -f.end))
+    out: list[tuple[int, Optional[LuaFunction]]] = []
+    for f in spans:
+        if f.name:
+            continue
+        kw = code.rfind("function", 0, f.start)
+        if kw < 0:
+            continue
+        now = bool(re.match(r"\s*\)\s*\(", code[f.end + 3:f.end + 64])) and code[:kw].rstrip().endswith("(")
+        if not now:
+            j = open_paren_before(code, kw)
+            if j is not None and (not code[j + 1:kw].strip() or code[j + 1:kw].rstrip().endswith(",")):
+                callee = re.search(r"([A-Za-z_][\w.:]*)\s*$", code[:j])
+                if callee:
+                    c = callee.group(1)
+                    now = c in runners or (re.split(r"[.:]", c)[-1] == "gsub" and ":" in c)
+        if not now:
+            continue
+        around = None
+        for g in spans:
+            if g is not f and g.start <= kw < g.end and (around is None or g.start >= around.start):
+                around = g
+        out.append((id(f), around))
+    return out
+
+
+def lua_param_writes(src: Source, own: set[str], load: set[int],
+                     when_spans: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """A load-time function of the file that writes into its parameter when a call at load gives it a table that is not
+    the script's own: `wrap(sim_board.simulation_board, "assign_squad_to_smart", f)` with `tbl[key] = ...` in wrap
+    (review 4, X2). (line, why)."""
+    code = src.code
+    starts = line_starts(code)
+    spans = sorted(src.lua_spans, key=lambda f: (f.start, -f.end))
+
+    def innermost(pos: int) -> Optional[LuaFunction]:
+        best = None
+        for g in spans:
+            if g.start <= pos < g.end and (best is None or g.start >= best.start):
+                best = g
+        return best
+
+    out: list[tuple[int, str]] = []
+    for fn in src.lua_functions:
+        if id(fn) not in load or not fn.name:
+            continue
+        open_ = code.rfind("(", 0, max(0, fn.start - 1))
+        params = [p.strip() for p in code[open_ + 1:fn.start - 1].split(",")] if open_ >= 0 else []
+        foreign: dict[str, str] = {}
+        for m in re.finditer(rf"(?<![\w.:]){re.escape(fn.name)}\s*\(", code):
+            if re.search(r"\bfunction\s*$", code[max(0, m.start() - 24):m.start()]):
+                continue  # the definition
+            around = innermost(m.start())
+            if (around is not None and id(around) not in load) or any(a <= m.start() <= b for a, b in when_spans):
+                continue  # not a call at load
+            depth, j, k = 0, m.end() - 1, m.end() - 1
+            parts: list[str] = []
+            while j < len(code):
+                c = code[j]
+                if c in "({[":
+                    depth += 1
+                elif c in ")}]":
+                    depth -= 1
+                    if depth == 0:
+                        parts.append(code[k + 1:j])
+                        break
+                elif c == "," and depth == 1:
+                    parts.append(code[k + 1:j])
+                    k = j
+                j += 1
+            for param, arg in zip(params, parts):
+                t = LUA_TABLE_COPY.fullmatch(arg.strip())
+                if param and t and t.group(1) not in ("nil", "true", "false") and t.group(1) not in own:
+                    foreign.setdefault(param, re.sub(r"\s+", "", arg.strip()))
+        if not foreign:
+            continue
+        for rx in (LUA_PATCH, LUA_RAWSET, LUA_SETMETA):
+            for m in rx.finditer(code, fn.start, fn.end):
+                target = m.group(1)
+                if target in foreign and innermost(m.start()) is fn and \
+                        not any(a <= m.start() <= b for a, b in when_spans):
+                    out.append((bisect.bisect_right(starts, m.start()),
+                                f"writes into its parameter {target}, which a call at load gives {foreign[target]} (a "
+                                "table this script does not own), outside coop_mode.when_srv"))
+    return out
 
 
 def lua_calls(src: Source) -> list[tuple[int, re.Match[str], Optional[LuaFunction]]]:
@@ -1672,6 +1865,10 @@ def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]
             expr = re.sub(r"\s+", "", expr)
             if expr in LUA_PURE or expr.startswith(LUA_PURE_PREFIX):
                 pure_aliases.add(name.strip())
+    for name, expr in re.findall(r"""(?m)^[ \t]*local\s+([A-Za-z_]\w*)\s*=\s*rawget\s*\(\s*_G\s*,\s*["']([\w.]+)["']\s*\)""",
+                                 src.code_strings):
+        if expr in LUA_PURE or expr.startswith(LUA_PURE_PREFIX):
+            pure_aliases.add(name)  # `local pf = rawget(_G, "printf")` (review 4, a false alarm of round 4)
     out: list[tuple[int, str]] = []
     seen: set[int] = set()
     for pos, m, inner in calls:
@@ -1686,6 +1883,8 @@ def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]
             continue  # a load-time function of this file: its own calls are checked
         if name in pure_aliases:
             continue  # `local string_format = string.format`
+        if name in LUA_PROTECTED and re.match(r"\s*\(\s*function\b", code[m.end() - 1:]):
+            continue  # pcall(function() ... end): the literal's body runs at load and is checked itself (X6)
         if name in LUA_PROTECTED:
             arg = re.match(r"\s*\(\s*([A-Za-z_][\w.]*)\s*[,)]", code[m.end() - 1:])
             if arg and (arg.group(1) in LUA_PURE or arg.group(1).startswith(LUA_PURE_PREFIX)
@@ -1706,7 +1905,8 @@ def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]
             continue
         seen.add(number)
         where = "file level" if inner is None else (
-            "on_game_start" if inner.name == "on_game_start" else f"{inner.name}(), which runs at load")
+            "on_game_start" if inner.name == "on_game_start" else
+            "a function literal that runs at load" if not inner.name else f"{inner.name}(), which runs at load")
         out.append((number, f"calls {name}() at load ({where}) outside coop_mode.when_srv: every process runs it"))
     return out
 
@@ -1998,6 +2198,9 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                     refs |= {m.group(1) or m.group(2) for m in LUA_MODULE_CALL.finditer(with_strings)}
                     # a plain string with a script's name (a dispatch table read through rawget(_G, name), C6)
                     refs |= set(LUA_SCRIPT_STRING.findall(with_strings))
+                    if layer == "core" and LUA_COMPUTED_SCRIPT.search(with_strings):
+                        add("L3", number, "a computed script name (rawget(_G, \"coop_\" .. x)): Ядро reaches a script "
+                                          "no string names, of any layer; ask coop_mode instead (review 4, X7)")
                     for ref in sorted(refs):
                         if ref == FACADE or ref == mod_name or ref not in model.script_layer:
                             continue
@@ -2050,6 +2253,11 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
             if layer == "srv":
                 for number, why in lua_load_calls(src, own, spans):
                     add("L9", number, why)
+                calls_ = lua_calls(src)
+                bare_calls = [(p, "" if p and src.code[p - 1] in ".:" else m_.group(1), inner_)
+                              for p, m_, inner_ in calls_]
+                for number, why in lua_param_writes(src, own, lua_load_functions(src, bare_calls), spans):
+                    add("L9", number, why)
                 for number in call_results:
                     add("L9", number, "coop_mode.when_srv gets the result of a call: the call runs at load in every "
                                       "process; give it the function, not its result")
@@ -2058,6 +2266,8 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                 for k, line_no in enumerate(locals_[LOCALS_LIMIT:], LOCALS_LIMIT + 1):
                     findings.append(Finding("L7", src.path, line_no, f"file-level locals over {LOCALS_LIMIT}",
                                             f"local number {k} of {len(locals_)}"))
+
+    findings += srv_test_inits(model.root)
 
     # L10: every saved key still appears in some script
     script_text = "\n".join(s.code_strings for s in sources if s.lang == "lua" and is_gamedata_script(s.path))
@@ -2071,6 +2281,29 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
     for f in findings:
         unique.setdefault((f.rule, f.path, f.line), f)
     return sorted(unique.values(), key=lambda f: (f.path, f.line, f.rule))
+
+
+def srv_test_inits(root: pathlib.Path) -> list[Finding]:
+    """L9C over tests/test_srv_*.cpp (review 4, X11): a srv-only change may add or edit these, and a namespace-scope
+    initializer with a call (`static const int s = (_putenv("COOP_FUZZ_RUNS=1"), 0);`) runs before every co-op test of
+    the same native exe."""
+    out: list[Finding] = []
+    tests = root / "tests"
+    for path in sorted(tests.glob("test_srv_*.cpp")) if tests.is_dir() else []:
+        rel = path.relative_to(root).as_posix()
+        raw = read_source(path)
+        code, with_strings = strip_both(raw, CPP_TOKENS, "/")
+        cpp = parse_cpp(rel, blank_preprocessor(code))
+        ctor = {f.qualifier for f in cpp.functions if f.qualifier and f.name == f.qualifier}
+        lines = with_strings.split("\n")
+        for var in cpp.variables:
+            call = var.call or (f"the constructor {var.type}()" if var.type and var.type in ctor else "")
+            if call:
+                by = call if " " in call else f"{call}(...)"
+                out.append(Finding("L9C", rel, var.line, norm(lines[var.line - 1] if var.line - 1 < len(lines) else ""),
+                                   f"{var.name} is initialized by {by} when the test exe loads: it runs before every "
+                                   "co-op test of that exe"))
+    return out
 
 
 def scan(root: pathlib.Path, layers: LayerMap, srv_entry: list[str], keys: list[tuple[int, str, str]],

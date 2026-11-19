@@ -35,11 +35,12 @@ if (-not (Test-Path -LiteralPath $exe)) { throw "not deployed: $exe (run deploy.
 
 $cp1251 = [System.Text.Encoding]::GetEncoding(1251)
 
-# The GAMMA stand is made of hard links to the mods' files (tools\mo2_stand.py): writing into an existing file could
-# change a mod's original, so the old file is removed and a new one is written.
+# The GAMMA stand is made of hard links to the mods' files (tools\mo2_stand.py, the launcher's stand; TZ R21): writing
+# into an existing file would change a mod's original, and Remove-Item -Force would clear the read-only attribute all its
+# links share. tools\stand_common.ps1 Write-StandLines deletes the old name (read-only-safe) and writes a new file.
+. (Join-Path $PSScriptRoot 'stand_common.ps1')
 function Write-NewLines([string]$Path, [System.Collections.Generic.List[string]]$Lines) {
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
-    [System.IO.File]::WriteAllLines($Path, $Lines, $cp1251)
+    Write-StandLines -Path $Path -Lines $Lines -Encoding $cp1251
 }
 
 # What the faction-select screen puts into new_game_loadout / new_game_money with nothing bought:

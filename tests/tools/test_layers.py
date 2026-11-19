@@ -539,3 +539,125 @@ def test_real_allow_list_is_sorted_and_well_formed():
     entries = [l for l in lines if l and not l.startswith("#")]
     assert entries == sorted(entries)
     assert int(lines[0].split(":")[1]) >= sum(int(e.rsplit("|", 1)[1]) for e in entries)
+
+
+# --- review 4, B7: the early warning's new holes (temp/modes_review4/new_attacks4*.py X2-X11) -------------------------
+# The trees are written here, not under fixtures/: the repository's .gitignore line `engine/` would hide a new C++
+# fixture folder (review 4, B6).
+
+def tree(work: Path, files: dict) -> Path:
+    root = make(work)
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+    return root
+
+
+def found(out: str, name: str, rule: str = "L9") -> list[int]:
+    return sorted(line for path, line, r in violations(out) if r == rule and path.endswith(name))
+
+
+FAR_CFG = "-- Ядро: limits\nmax_squads = 4\n\nfunction may_spawn(n)\n\treturn n < max_squads\nend\n"
+
+
+def test_x2_a_load_time_helper_patching_its_parameter_is_l9(work, capsys):
+    root = tree(work, {"gamedata/scripts/coop_srv_far_board.script":
+                       "-- srv: far squads keep their targets\n"
+                       "local function wrap(tbl, key, fn)\n\tlocal base = tbl[key]\n"
+                       "\ttbl[key] = function(...) return fn(base, ...) end\nend\n\n"
+                       "local function far_assign(base, board, squad, smart_id)\n\treturn base(board, squad, smart_id)\nend\n\n"
+                       "wrap(sim_board.simulation_board, \"assign_squad_to_smart\", far_assign)\n"
+                       "local mine = {}\nlocal function put(t, k) t[k] = true end\nput(mine, \"a\")\n"})
+    code, out = run(root, capsys)
+    assert code == 1 and found(out, "coop_srv_far_board.script") == [4], out  # 13: put() writes into its own table
+    assert "sim_board" in out
+
+
+def test_x3_x4_a_copy_of_a_foreign_table_through_rawget_or_a_file_level_global_is_not_own(work, capsys):
+    root = tree(work, {"gamedata/scripts/coop_far_cfg.script": FAR_CFG,
+                       "gamedata/scripts/coop_srv_far_cfg.script":
+                       "-- srv: the world server's limits\nlocal cfg = rawget(_G, \"coop_far_cfg\")\n"
+                       "local alt = _G[\"coop_far_cfg\"]\n\n"
+                       "function on_game_start()\n\tcfg.max_squads = 2\n\talt.max_squads = 3\nend\n",
+                       "gamedata/scripts/coop_srv_far_cfg2.script":
+                       "-- srv: the world server's limits\nfar_cfg = coop_far_cfg\nfar_db = db\nfar_own = far_own or {}\n"
+                       "far_mine = {}\nfar_alias = far_mine\n\n"
+                       "function on_game_start()\n\tfar_cfg.max_squads = 2\n\tfar_db.coop_far_world = true\n"
+                       "\tfar_own.x = 1\n\tfar_alias.y = 2\nend\n"})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_srv_far_cfg.script") == [6, 7], out
+    assert found(out, "coop_srv_far_cfg2.script") == [9, 10], out  # 11, 12: its own tables
+
+
+def test_x5_x6_a_function_literal_run_at_load_is_load_time(work, capsys):
+    root = tree(work, {"gamedata/scripts/coop_srv_far_hud2.script":
+                       "-- srv: no map spots for far players\nlocal started = (function()\n"
+                       "\tcoop_items.set_spots_enabled(false)\n\texec_console_cmd(\"ai_use_old_vision 1\")\n"
+                       "\treturn true\nend)()\n",
+                       "gamedata/scripts/coop_srv_far_names.script":
+                       "-- srv: far squad names\nlocal names = {}\n"
+                       "string.gsub(\"far_a far_b\", \"%S+\", function(w) names[#names + 1] = w; coop_items.set_x(false) end)\n"
+                       "table.sort(names, function(a, b) coop_items.set_y(1) return a < b end)\n"
+                       "local ok = pcall(function() return rawget(_G, \"printf\") end)\n"
+                       "pcall(function() coop_items.set_z(1) end)\n"
+                       "local later = { on_tick = function() coop_items.set_w(1) end }\n"})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_srv_far_hud2.script") == [3, 4], out
+    # 5: pcall of a pure body is pure (the review's false alarm); 7: a function kept in a table runs later
+    assert found(out, "coop_srv_far_names.script") == [3, 4, 6], out
+
+
+def test_x7_core_building_a_script_name_is_l3(work, capsys):
+    root = tree(work, {"gamedata/scripts/coop_price_kinds.script":
+                       "-- Ядро\nlocal KINDS = { \"group\", \"srv_far\" }\nfunction factor(item)\n\tlocal f = 1\n"
+                       "\tfor _, kind in ipairs(KINDS) do\n\t\tlocal m = rawget(_G, \"coop_\" .. kind .. \"_prices\")\n"
+                       "\t\tlocal n = _G[\"coop_\" .. kind]\n\t\tlocal fixed = rawget(_G, \"coop_items\")\n"
+                       "\tend\n\treturn f\nend\n",
+                       "gamedata/scripts/coop_srv_far_prices.script": "-- srv\nfunction price_factor(item)\n\treturn 1\nend\n"})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_price_kinds.script", "L3") == [6, 7], out  # 8: a fixed name of Ядро
+    assert "computed script name" in out
+
+
+HOOKS_H = ("#pragma once\nnamespace coop::hooks\n{\nusing SkipFn = bool (*)(unsigned short);\nvoid set_skip(SkipFn fn);\n"
+           "template <class T> struct AutoReg\n{\n\tAutoReg() { set_skip(&T::skip); }\n};\n}\n")
+
+
+def test_x8b_a_static_object_of_a_class_template_with_a_constructor_is_l9c(work, capsys):
+    root = tree(work, {"engine/src/xrGame/coop/coop_hooks.h": HOOKS_H,
+                       "engine/src/xrGame/coop/srv/coop_far_skip.cpp":
+                       "#include \"../coop_hooks.h\"\nnamespace coop::srvfar\n{\nstruct FarSkip\n{\n"
+                       "\tstatic bool skip(unsigned short id) { return false; }\n};\n"
+                       "static coop::hooks::AutoReg<FarSkip> s_reg;\nstatic FarSkip s_plain;\n}\n"})
+    code, out = run(root, capsys)
+    assert found(out, "coop_far_skip.cpp", "L9C") == [8], out  # 9: FarSkip has no constructor
+    assert "the constructor AutoReg()" in out
+
+
+def test_x10b_a_function_a_srv_macro_spells_is_found_when_core_calls_it(work, capsys):
+    root = tree(work, {"engine/src/xrGame/coop/coop_far_hooks.h":
+                       "#pragma once\nnamespace coop\n{\nbool coop_far_hook_skip(unsigned short id);\n"
+                       "inline bool far_skip_any(unsigned short id) { return coop_far_hook_skip(id); }\n}\n",
+                       "engine/src/xrGame/coop/srv/coop_far_hook.cpp":
+                       "#include \"../coop_far_hooks.h\"\n#define COOP_FAR_HOOK(name) bool coop_far_hook_##name(unsigned short id)\n"
+                       "namespace coop\n{\nCOOP_FAR_HOOK(skip)\n{\n\treturn false;\n}\n}\n"})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_far_hooks.h", "L3") == [5], out
+    assert "coop_far_hook_skip" in out
+
+
+def test_x11_a_static_initializer_with_a_call_in_a_srv_test_is_l9c(work, capsys):
+    root = tree(work, {"tests/test_srv_far_env.cpp":
+                       "// srv tests: far squads\n#include <cstdlib>\n"
+                       "static const int s_runs = (_putenv(\"COOP_FUZZ_RUNS=1\"), 0);\nstatic const int s_plain = 4;\n"
+                       "TEST(far_env)\n{\n\tCHECK(s_runs == 0);\n}\n",
+                       "tests/test_items.cpp": "static const int s_other = (_putenv(\"X=1\"), 0);\n"})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "tests/test_srv_far_env.cpp", "L9C") == [3], out  # 4: no call
+    assert not found(out, "tests/test_items.cpp", "L9C"), out  # a co-op test file is the co-op tests' own business

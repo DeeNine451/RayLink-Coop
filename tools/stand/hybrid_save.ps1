@@ -22,6 +22,7 @@ param(
     [int]$StepsTimeoutS = 900
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\stand_common.ps1')  # Write-Stand*, Copy-Stand*, Remove-StandFile: never write through a hard link (TZ R21)
 # Tracked in tools\stand (docs/MODES.md section 10): the probes come from this folder; logs and the stand's
 # settings kept for the restore go to the repository's temp\stand (ignored: the run history).
 $OutDir = Join-Path $PSScriptRoot '..\..\temp\stand'
@@ -46,7 +47,7 @@ function New-BinCopy([string]$name) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $Stand 'bin') -File | ForEach-Object {
         $dst = Join-Path $dir $_.Name
-        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Force }
+        Remove-StandFile -Path $dst
         New-Item -ItemType HardLink -Path $dst -Target $_.FullName | Out-Null
     }
     return (Join-Path $dir 'AnomalyCoopDX11AVX.exe')
@@ -58,10 +59,10 @@ function New-Profile([string]$letter, [string]$nick, [hashtable]$cvars) {
     $name = "appdata_$letter"
     $text = [System.IO.File]::ReadAllText((Join-Path $Stand 'fsgame.ltx'), $cp1251) -replace '(?m)^(\$app_data_root\$\s*=.*\|\s*)appdata\\', "`${1}$name\"
     if ($text -notmatch [regex]::Escape("$name\")) { throw 'fsgame.ltx format unexpected' }
-    [System.IO.File]::WriteAllText((Join-Path $Stand "fsgame_$letter.ltx"), $text, $cp1251)
+    Write-StandText -Path (Join-Path $Stand "fsgame_$letter.ltx") -Text $text -Encoding $cp1251
     $appdata = Join-Path $Stand $name
     New-Item -ItemType Directory -Force -Path $appdata | Out-Null
-    & robocopy (Join-Path $Stand 'appdata_t') $appdata /E /XF coop_player.key axr_options.ltx /XD savedgames logs raylink screenshots /NFL /NDL /NJH /NJS /NP | Out-Null
+    Copy-StandTree -From (Join-Path $Stand 'appdata_t') -To $appdata -ExcludeFiles @('coop_player.key', 'axr_options.ltx') -ExcludeDirs @('savedgames', 'logs', 'raylink', 'screenshots')
     $global:LASTEXITCODE = 0
     $user = Join-Path $appdata 'user.ltx'
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -73,7 +74,7 @@ function New-Profile([string]$letter, [string]$nick, [hashtable]$cvars) {
         $idx = $lines.FindIndex([Predicate[string]] { param($l) $l -match ('^' + [regex]::Escape($key) + '\s') })
         if ($idx -ge 0) { $lines[$idx] = "$key $($all[$key])" } else { $lines.Add("$key $($all[$key])") }
     }
-    [System.IO.File]::WriteAllLines($user, $lines, $cp1251)
+    Write-StandLines -Path $user -Lines $lines -Encoding $cp1251
     return $appdata
 }
 function Get-StartKit([string]$Ltx, [string]$Fac) {
@@ -142,11 +143,11 @@ $logC = $null
 if ($Players -ge 3) { $null = New-Profile 'u' 'tester2' $null; $logC = Join-Path $Stand ('appdata_u\logs\xray_' + $env:USERNAME + '.log') }
 if (Test-Path -LiteralPath $hostLog) { Remove-Item -LiteralPath $hostLog }
 $hostSaves = Join-Path $hostData 'savedgames'
-if (Test-Path -LiteralPath $hostSaves) { Get-ChildItem -LiteralPath $hostSaves -Filter "$Save*" | Remove-Item -Force }
+if (Test-Path -LiteralPath $hostSaves) { Get-ChildItem -LiteralPath $hostSaves -Filter "$Save*" | ForEach-Object { Remove-StandFile -Path $_.FullName } }
 $scripts = Join-Path $Stand 'gamedata\scripts'
-Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'coop_zz_hybrid.script') -Destination (Join-Path $scripts 'coop_zz_hybrid.script') -Force
-Get-ChildItem -LiteralPath $Stand -Filter 'zz_hybrid_*.txt' | Remove-Item -Force
+Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_hybrid.script') -To (Join-Path $scripts 'coop_zz_hybrid.script')
+Get-ChildItem -LiteralPath $Stand -Filter 'zz_hybrid_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
 Get-ChildItem -LiteralPath $Stand -Directory -Filter 'appdata_ms*' | ForEach-Object { $l = Join-Path $_.FullName ('logs\xray_' + $env:USERNAME + '.log'); if (Test-Path -LiteralPath $l) { Remove-Item -LiteralPath $l } }
 
 $opt = Join-Path $Stand 'gamedata\configs\axr_options.ltx'
@@ -172,7 +173,7 @@ $lines.Add("new_game_faction = $Faction")
 $lines.Add("new_game_loadout = $($kit.Loadout)")
 $lines.Add("new_game_map = $Map")
 if ($kit.Money) { $lines.Add("new_game_money = $($kit.Money)") }
-[System.IO.File]::WriteAllLines($opt, $lines, $cp1251)
+Write-StandLines -Path $opt -Lines $lines -Encoding $cp1251
 
 $gameHost = $null; $a = $null; $c = $null
 $why = ''
@@ -246,9 +247,9 @@ finally {
         $l = Join-Path $_.FullName ('logs\xray_' + $env:USERNAME + '.log')
         if (Test-Path -LiteralPath $l) { Copy-Item -LiteralPath $l -Destination (Join-Path $OutDir ("${Tag}_hybrid_" + $_.Name + '.log')) -Force }
     }
-    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
-    Get-ChildItem -LiteralPath $Stand -Filter 'zz_hybrid_*.txt' | Remove-Item -Force
-    Copy-Item -LiteralPath $optKeep -Destination $opt -Force
+    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+    Get-ChildItem -LiteralPath $Stand -Filter 'zz_hybrid_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+    Copy-StandFile -From $optKeep -To $opt
 }
 Get-ChildItem -LiteralPath $OutDir -Filter "${Tag}_hybrid_*.log" | Sort-Object Name | ForEach-Object {
     Write-Host "=== $($_.Name): the probe ==="

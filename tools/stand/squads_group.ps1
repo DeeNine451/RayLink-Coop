@@ -15,6 +15,7 @@ param(
     [int]$StepsTimeoutS = 600
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\stand_common.ps1')  # Write-Stand*, Copy-Stand*, Remove-StandFile: never write through a hard link (TZ R21)
 # Tracked in tools\stand (docs/MODES.md section 10): the probes come from this folder; logs and the stand's
 # settings kept for the restore go to the repository's temp\stand (ignored: the run history).
 $OutDir = Join-Path $PSScriptRoot '..\..\temp\stand'
@@ -27,7 +28,7 @@ $binB = Join-Path $Stand 'bin_b'
 New-Item -ItemType Directory -Force -Path $binB | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $Stand 'bin') -File | ForEach-Object {
     $dst = Join-Path $binB $_.Name
-    if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Force }
+    Remove-StandFile -Path $dst
     New-Item -ItemType HardLink -Path $dst -Target $_.FullName | Out-Null
 }
 $exeB = Join-Path $binB 'AnomalyCoopDX11AVX.exe'
@@ -38,17 +39,17 @@ function New-Profile([string]$letter, [string]$nick) {
     $name = "appdata_$letter"
     $text = [System.IO.File]::ReadAllText((Join-Path $Stand 'fsgame.ltx'), $cp1251) -replace '(?m)^(\$app_data_root\$\s*=.*\|\s*)appdata\\', "`${1}$name\"
     if ($text -notmatch [regex]::Escape("$name\")) { throw 'fsgame.ltx format unexpected' }
-    [System.IO.File]::WriteAllText((Join-Path $Stand "fsgame_$letter.ltx"), $text, $cp1251)
+    Write-StandText -Path (Join-Path $Stand "fsgame_$letter.ltx") -Text $text -Encoding $cp1251
     $appdata = Join-Path $Stand $name
     New-Item -ItemType Directory -Force -Path $appdata | Out-Null
-    & robocopy (Join-Path $Stand 'appdata_t') $appdata /E /XF coop_player.key axr_options.ltx /XD savedgames logs raylink screenshots /NFL /NDL /NJH /NJS /NP | Out-Null
+    Copy-StandTree -From (Join-Path $Stand 'appdata_t') -To $appdata -ExcludeFiles @('coop_player.key', 'axr_options.ltx') -ExcludeDirs @('savedgames', 'logs', 'raylink', 'screenshots')
     $global:LASTEXITCODE = 0
     $user = Join-Path $appdata 'user.ltx'
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.AddRange([string[]][System.IO.File]::ReadAllLines($user, $cp1251))
     $idx = $lines.FindIndex([Predicate[string]] { param($l) $l -match '^coop_nick\s' })
     if ($idx -ge 0) { $lines[$idx] = "coop_nick $nick" } else { $lines.Add("coop_nick $nick") }
-    [System.IO.File]::WriteAllLines($user, $lines, $cp1251)
+    Write-StandLines -Path $user -Lines $lines -Encoding $cp1251
     return $appdata
 }
 
@@ -106,9 +107,9 @@ $hostLog = Join-Path $hostData ('logs\xray_' + $env:USERNAME + '.log')
 $clientLog = Join-Path $Stand ('appdata_t\logs\xray_' + $env:USERNAME + '.log')
 foreach ($f in @($hostLog, $clientLog)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
 $scripts = Join-Path $Stand 'gamedata\scripts'
-Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'coop_zz_squads.script') -Destination (Join-Path $scripts 'coop_zz_squads.script') -Force
-Get-ChildItem -LiteralPath $Stand -Filter 'zz_squads_*.txt' | Remove-Item -Force
+Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_squads.script') -To (Join-Path $scripts 'coop_zz_squads.script')
+Get-ChildItem -LiteralPath $Stand -Filter 'zz_squads_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
 
 # the new game's choice, as the stock screen writes it ([character_creation] of the stand's axr_options.ltx)
 $opt = Join-Path $Stand 'gamedata\configs\axr_options.ltx'
@@ -134,7 +135,7 @@ $lines.Add("new_game_faction = $Faction")
 $lines.Add("new_game_loadout = $($kit.Loadout)")
 $lines.Add("new_game_map = $Map")
 if ($kit.Money) { $lines.Add("new_game_money = $($kit.Money)") }
-[System.IO.File]::WriteAllLines($opt, $lines, $cp1251)
+Write-StandLines -Path $opt -Lines $lines -Encoding $cp1251
 Write-Host "new game: $Faction at $Map, $($kit.Money) RU"
 
 $gameHost = $null; $client = $null
@@ -186,9 +187,9 @@ finally {
     foreach ($pair in @(@($clientLog, 'client'), @($hostLog, 'host'))) {
         if (Test-Path -LiteralPath $pair[0]) { Copy-Item -LiteralPath $pair[0] -Destination (Join-Path $OutDir "${Tag}_squads_$($pair[1]).log") -Force }
     }
-    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
-    Get-ChildItem -LiteralPath $Stand -Filter 'zz_squads_*.txt' | Remove-Item -Force
-    Copy-Item -LiteralPath $optKeep -Destination $opt -Force
+    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+    Get-ChildItem -LiteralPath $Stand -Filter 'zz_squads_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+    Copy-StandFile -From $optKeep -To $opt
 }
 foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
     Write-Host "--- $($pair[1]): the probe ---"

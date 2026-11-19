@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -261,7 +262,9 @@ def test_classify(repos, path, layer, why):
                                   # B10: the co-op test runners; B12: the stand's scenarios and probes
                                   "tools/test_lua.cmd", "tools/build_tests.cmd", "tests/lua/run_all.lua",
                                   "tools/ded_check.ps1", "tools/stand/carry_group.ps1", "tools/stand/run_guarded.ps1",
-                                  "tools/stand/coop_zz_squads.script", "tools/stand/stand_head.py"])
+                                  "tools/stand/coop_zz_squads.script", "tools/stand/stand_head.py",
+                                  # round 5: stand_head writes into the stand through it (R21)
+                                  "tools/mo2_stand.py"])
 def test_lists_and_checkers_are_core(repos, name):
     # item 3: a one-line list edit could turn an Ядро file into srv; the checkers decide what a change needs
     root, _, _ = repos
@@ -877,7 +880,7 @@ def scenario_repo(work: Path) -> tuple[Path, Path]:
     write(root, ".gitignore", "engine/\nengine-ci/\ntemp/\ngamedata/scripts/coop_local.script\n")
     (root / "tools" / "stand").mkdir(parents=True)
     for name in ("check_gates.py", "check_layers.py", "stand_common.ps1", "stand_hostplay.ps1", "stand_srv.ps1",
-                 "ded_check.ps1"):
+                 "ded_check.ps1", "mo2_stand.py"):
         shutil.copy2(ROOT / "tools" / name, root / "tools" / name)
     for path in STAND.iterdir():
         if path.is_file():
@@ -1068,6 +1071,7 @@ def test_tests_mark_is_written_only_after_a_clean_green_run_of_both_heads(repos,
         return code, capsys.readouterr().out
 
     write_tests_mark(root, engine)
+    fake_lua_runner(root)
     assert begin() == 0 and not (marks / "tests.ok").exists()  # an old mark never outlives a new run
     code, out = finish(0, 1)
     assert code == 1 and "test_lua.cmd failed" in out and not (marks / "tests.ok").exists(), out
@@ -1098,6 +1102,7 @@ def test_run_all_tests_cmd_writes_tests_ok_only_when_both_suites_pass(repos):
     write(root, "tools/build_tests.cmd", "@exit /b 0\n")
     write(root, "tools/test_lua.cmd", "@exit /b %STUB_LUA%\n")
     commit(root, "the runners")
+    fake_lua_runner(root)
     env = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""))
     env.pop("COOP_SKIP_LAYERS", None)
     mark_path = root / "temp" / "gates" / "tests.ok"
@@ -1349,3 +1354,503 @@ def test_stand_profile_template_names_only_mode_cvars():
     for row in rows:
         assert row.startswith("[") or re.match(r"coop_(split_levels|world_server|story_together|soft_host_move|"
                                                r"max_map_servers|map_servers_rev|mapserver_\w+) ", row), row
+
+
+# --- round 5 (TZ.md R21): the stand's files are hard links to the mods' own files ----------------------------------------
+# Real hard links (os.link) in the test folder, on the repository's volume: the launcher builds the stand
+# E:\RayLinkGames\GAMMA\game-dev the same way from E:\RayLinkGames\GAMMA\mo2\mods. A write into a stand file in place
+# would change the mod's file for everything that links it; clearing its read-only attribute would change the mod's.
+
+def set_source(stand: Path, rel: str, source: str) -> None:
+    """The manifest names source as where the launcher took the stand's rel from (one entry per path)."""
+    path = stand / ".raylink-stand.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["entries"] = [e for e in data["entries"] if e["rel"].lower() != rel.lower()] + [{"rel": rel, "source": source}]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def mod_link(work: Path, stand: Path, rel: str, data: bytes, readonly: bool = True,
+             mod: str = "12- A mod") -> Path:
+    """A mod's own file under work/mo2/mods and the stand's name for it as a hard link (the launcher's way), read-only
+    like the files of some GAMMA mods; the manifest names the mod as its source. Returns the mod's file."""
+    original = work / "mo2" / "mods" / mod / rel
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(data)
+    target = stand / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    os.link(original, target)
+    if readonly:
+        os.chmod(original, stat.S_IREAD)
+    set_source(stand, rel, str(original))
+    return original
+
+
+def untouched(original: Path, data: bytes, readonly: bool = True) -> bool:
+    return original.read_bytes() == data and (not os.access(original, os.W_OK)) == readonly
+
+
+MOD_ITEMS = b"-- the mod's own coop_items: GAMMA's, not ours\n"
+MOD_USER = b"coop_world_server 1\r\ncoop_nick tester\r\n"
+
+
+def test_deploy_replaces_a_linked_stand_file_and_never_writes_through_it(work):
+    root, stand = scenario_repo(work)
+    items = mod_link(work, stand, "gamedata/scripts/coop_items.script", MOD_ITEMS)
+    user = mod_link(work, stand, "appdata_t/user.ltx", MOD_USER)
+    assert os.stat(items).st_nlink == 2 and os.stat(user).st_nlink == 2
+    done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(work / "backup"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    got = values(done.stdout)
+    assert got["replaced_links"] == "1" and "replaced a hard link: gamedata/scripts/coop_items.script" in done.stdout
+    # the stand holds HEAD's bytes in a file of its own; the mod's file keeps its bytes and its read-only attribute
+    assert (stand / "gamedata/scripts/coop_items.script").read_text(encoding="utf-8") == "function pick() return 1 end\n"
+    assert untouched(items, MOD_ITEMS) and os.stat(items).st_nlink == 1
+    assert os.stat(stand / "gamedata/scripts/coop_items.script").st_nlink == 1
+    # profile (S2): user.ltx gets the template's mode cvars as a new file, the mod's user.ltx is the same
+    assert b"coop_world_server 0" in (stand / "appdata_t/user.ltx").read_bytes()
+    assert untouched(user, MOD_USER) and os.stat(user).st_nlink == 1
+    assert (work / "backup/gamedata/scripts/coop_items.script").read_bytes() == MOD_ITEMS
+    check = stand_head(root, "check", "--stand", str(stand), "--backup", str(work / "backup"))
+    assert check.returncode == 0, check.stdout
+
+
+def test_deploy_restores_the_mods_file_when_head_drops_our_override(work):
+    # review 4, B3 (q4_stand N2): our layer overrode a mod's file, then HEAD dropped the override
+    root, stand = scenario_repo(work)
+    write(root, "gamedata_gamma/configs/mod_by_a_mod_too.ltx", "[our override]\n")
+    commit(root, "override a mod's file")
+    original = mod_link(work, stand, "gamedata/configs/mod_by_a_mod_too.ltx", b"[the mod's]\n")
+    backup = work / "backup"
+    assert stand_head(root, "deploy", "--stand", str(stand), "--backup", str(backup)).returncode == 0
+    assert (stand / "gamedata/configs/mod_by_a_mod_too.ltx").read_bytes() == b"[our override]\n"
+    assert untouched(original, b"[the mod's]\n")
+    (root / "gamedata_gamma/configs/mod_by_a_mod_too.ltx").unlink()
+    commit(root, "drop the override")
+    done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(backup))
+    assert done.returncode == 0, done.stdout
+    assert values(done.stdout)["restored"] == "1", done.stdout
+    assert (stand / "gamedata/configs/mod_by_a_mod_too.ltx").read_bytes() == b"[the mod's]\n"
+    assert untouched(original, b"[the mod's]\n")
+    assert stand_head(root, "check", "--stand", str(stand), "--backup", str(backup)).returncode == 0
+    # the stand still runs our dropped override: check names it and fails
+    mo2_stand_tool().replace_file(stand / "gamedata/configs/mod_by_a_mod_too.ltx", b"[our override]\n")
+    check = stand_head(root, "check", "--stand", str(stand), "--backup", str(backup))
+    assert check.returncode == 1 and "dropped override" in check.stdout and "mod_by_a_mod_too.ltx" in check.stdout
+
+
+class held:
+    """A handle on the file that shares reading only (no FILE_SHARE_DELETE), as a running game holds its files: no name
+    of the file can be deleted while it is open."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __enter__(self):
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                    wintypes.DWORD, wintypes.HANDLE]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.k32 = k32
+        self.handle = k32.CreateFileW(str(self.path), 0x80000000, 0x1, None, 3, 0, None)  # GENERIC_READ, SHARE_READ
+        assert self.handle not in (None, ctypes.c_void_p(-1).value), ctypes.WinError(ctypes.get_last_error())
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.k32.CloseHandle(self.handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing modes")
+def test_deploy_refuses_before_any_write_when_a_linked_file_cannot_be_unlinked(work):
+    root, stand = scenario_repo(work)
+    items = mod_link(work, stand, "gamedata/scripts/coop_items.script", MOD_ITEMS)
+    # a game running from the stand holds the file through the stand's name (no FILE_SHARE_DELETE): that name cannot
+    # be deleted. (NTFS checks sharing per name: a handle through the mod's own name does not block the stand's.)
+    with held(stand / "gamedata/scripts/coop_items.script"):
+        done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(work / "backup"))
+        assert done.returncode == 1 and "cannot be replaced without writing through them" in done.stdout, done.stdout
+        assert "coop_items.script" in done.stdout
+        probe = stand_head(root, "links", "--stand", str(stand), "--backup", str(work / "backup"))
+        assert probe.returncode == 1 and "blocked=1" in probe.stdout, probe.stdout
+    assert untouched(items, MOD_ITEMS) and os.stat(items).st_nlink == 2  # the stand's name is still the link
+    assert not (stand / "gamedata/scripts/coop_menu_theme.script").exists()  # nothing was deployed
+    probe = stand_head(root, "links", "--stand", str(stand), "--backup", str(work / "backup"))
+    assert probe.returncode == 0, probe.stdout
+    got = values(probe.stdout)
+    assert got["would_replace_links"] == "1" and got["blocked"] == "0" and got["head_files_linked"] == "1", probe.stdout
+    assert untouched(items, MOD_ITEMS) and os.stat(items).st_nlink == 2  # the probe wrote nothing
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing modes")
+def test_deploy_refuses_before_any_write_when_a_profile_is_held(work):
+    root, stand = scenario_repo(work)
+    user = mod_link(work, stand, "appdata_t/user.ltx", MOD_USER)
+    with held(stand / "appdata_t/user.ltx"):
+        done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(work / "backup"))
+    assert done.returncode == 1 and "appdata_t/user.ltx" in done.stdout, done.stdout
+    assert (stand / "gamedata/scripts/coop_items.script").read_text(encoding="utf-8") == "function pick() return 0 end\n"
+    assert untouched(user, MOD_USER) and os.stat(user).st_nlink == 2
+
+
+def test_a_read_only_linked_leftover_leaves_without_touching_its_original(work):
+    root, stand = scenario_repo(work)
+    rel = "gamedata/scripts/coop_compat_old.script"
+    original = mod_link(work, stand, rel, b"-- our Core layer of dev-1, gone from HEAD\n", mod="Anomaly Coop - Core")
+    done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(work / "backup"))
+    assert done.returncode == 0, done.stdout
+    assert not (stand / rel).exists() and (work / "backup/removed" / rel).is_file()
+    assert untouched(original, b"-- our Core layer of dev-1, gone from HEAD\n")
+
+
+def test_a_head_file_the_manifest_does_not_list_leaves_when_head_drops_it(work):
+    # review 4, B2 (q4_stand N1): stand_overlay.py put HEAD's DXML hook and DLTX patch there; the manifest knows neither
+    root, stand = scenario_repo(work)
+    hook, patch = "gamedata/scripts/modxml_coop_x.script", "gamedata/configs/scripts/bunker/mod_bun_psi_coop_x.ltx"
+    write(root, hook, "-- a DXML hook\n")
+    write(root, patch, "![bunker]\n")
+    commit(root, "a hook and a patch")
+    write(stand, hook, "-- a DXML hook\n")             # HEAD's bytes already there
+    write(stand, patch, "![bunker] an older overlay\n")  # an older version of ours: no mod has the path either
+    backup = work / "backup"
+    done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(backup))
+    assert done.returncode == 0 and values(done.stdout)["listed"] == "2", done.stdout
+    (root / hook).unlink()
+    (root / patch).unlink()
+    commit(root, "drop both")
+    done = stand_head(root, "deploy", "--stand", str(stand), "--backup", str(backup))
+    assert done.returncode == 0, done.stdout
+    assert not (stand / hook).exists() and not (stand / patch).exists(), done.stdout
+    got = values(done.stdout)
+    assert got["stand_extra"] == "0" and got["removed"] == "2", done.stdout
+    write(stand, hook, "-- back again\n")
+    check = stand_head(root, "check", "--stand", str(stand), "--backup", str(backup))
+    assert check.returncode == 1 and "modxml_coop_x.script" in check.stdout
+
+
+def mo2_stand_tool():
+    import mo2_stand
+    return mo2_stand
+
+
+def test_stand_overlay_replaces_a_linked_stand_file_without_writing_through_it(work):
+    root = work / "mod"
+    (root / "tools").mkdir(parents=True)
+    for name in ("stand_overlay.py", "mo2_stand.py"):
+        shutil.copy2(ROOT / "tools" / name, root / "tools" / name)
+    write(root, "gamedata/scripts/coop_items.script", "function pick() return 1 end\n")
+    stand = work / "stand"
+    (stand / "bin").mkdir(parents=True)
+    (stand / ".raylink-stand.json").write_text(json.dumps({"format": 1, "entries": []}), encoding="utf-8")
+    items = mod_link(work, stand, "gamedata/scripts/coop_items.script", MOD_ITEMS)
+    done = subprocess.run([sys.executable, "-I", str(root / "tools" / "stand_overlay.py"), str(stand), str(work / "bk"),
+                           "--no-exe"], capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (stand / "gamedata/scripts/coop_items.script").read_text(encoding="utf-8") == "function pick() return 1 end\n"
+    assert untouched(items, MOD_ITEMS) and os.stat(items).st_nlink == 1
+
+
+PS_HELPERS = r"""
+$ErrorActionPreference = 'Stop'
+. '{common}'
+$cp = [System.Text.Encoding]::GetEncoding(1251)
+Write-StandLines -Path '{stand}\appdata_h\user.ltx' -Lines @('coop_nick hoster', 'bind jump kSPACE') -Encoding $cp
+Write-StandText -Path '{stand}\fsgame_h.ltx' -Text "new fsgame`r`n" -Encoding $cp
+Copy-StandFile -From '{src}\coop_zz_probe.script' -To '{stand}\gamedata\scripts\coop_zz_probe.script'
+Remove-StandFile -Path '{stand}\gamedata\scripts\coop_zz_old.script'
+Copy-StandTree -From '{src}\appdata_t\..\appdata_t' -To '{stand}\appdata_h2' -ExcludeFiles @('coop_player.key') -ExcludeDirs @('logs')
+Write-StandBytes -Path '{stand}\gamedata\configs\axr_options.ltx' -Bytes ([byte[]](65, 66))
+'helpers done'
+"""
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is not here")
+def test_powershell_stand_helpers_never_write_through_a_link(work):
+    stand, src = work / "stand", work / "src"
+    write(src, "coop_zz_probe.script", "-- the probe\n")
+    write(src, "appdata_t/shaders.ltx", "[new shaders]\n")
+    write(src, "appdata_t/coop_player.key", "secret\n")
+    write(src, "appdata_t/logs/xray.log", "log\n")
+    linked = {
+        "appdata_h/user.ltx": b"coop_world_server 1\r\n",
+        "fsgame_h.ltx": b"[fsgame of the mod]\r\n",
+        "gamedata/scripts/coop_zz_probe.script": b"-- a mod's script of that name\n",
+        "gamedata/scripts/coop_zz_old.script": b"-- a read-only link to remove\n",
+        "appdata_h2/shaders.ltx": b"[the mod's shaders]\n",
+        "gamedata/configs/axr_options.ltx": b"[the mod's options]\n",
+    }
+    (stand / ".raylink-stand.json").parent.mkdir(parents=True, exist_ok=True)
+    (stand / ".raylink-stand.json").write_text(json.dumps({"format": 1, "entries": []}), encoding="utf-8")
+    originals = {rel: mod_link(work, stand, rel, data) for rel, data in linked.items()}
+    script = PS_HELPERS.format(common=ROOT / "tools" / "stand_common.ps1", stand=stand, src=src)
+    done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                          capture_output=True, text=True)
+    assert done.returncode == 0 and "helpers done" in done.stdout, done.stdout + done.stderr
+    for rel, data in linked.items():
+        assert untouched(originals[rel], data), rel
+        assert os.stat(originals[rel]).st_nlink == 1, rel
+    assert (stand / "appdata_h/user.ltx").read_bytes() == b"coop_nick hoster\r\nbind jump kSPACE\r\n"
+    assert (stand / "fsgame_h.ltx").read_bytes() == b"new fsgame\r\n"
+    assert (stand / "gamedata/scripts/coop_zz_probe.script").read_bytes() == b"-- the probe\n"
+    assert os.access(stand / "gamedata/scripts/coop_zz_probe.script", os.W_OK)  # a copy of our own, writable
+    assert not (stand / "gamedata/scripts/coop_zz_old.script").exists()
+    assert (stand / "appdata_h2/shaders.ltx").read_bytes() == b"[new shaders]\n"
+    assert not (stand / "appdata_h2/coop_player.key").exists() and not (stand / "appdata_h2/logs").exists()
+    assert (stand / "gamedata/configs/axr_options.ltx").read_bytes() == b"AB"
+
+
+# every PowerShell file that writes into a stand: a write goes through the helpers of stand_common.ps1
+STAND_WRITERS = sorted([*(ROOT / "tools" / "stand").glob("*.ps1"), ROOT / "tools" / "stand_hostplay.ps1",
+                        ROOT / "tools" / "stand_srv.ps1", ROOT / "tools" / "deploy.ps1", ROOT / "tools" / "launch.ps1"])
+IN_PLACE = re.compile(r"robocopy|\[(?:System\.)?IO\.File\]::(?:WriteAll|AppendAll|Copy|Replace|Open)|Set-Content|"
+                      r"Add-Content|Out-File|Copy-Item\b|Remove-Item\b[^\n]*-Force|\.Write(?:Line)?\(|(?<![\w-])Move-Item", re.I)
+# what may stay: copies into the repository's temp\stand (the run history) and the staging folder of deploy.ps1
+TO_OUR_FOLDERS = re.compile(r"Copy-Item -LiteralPath [^\n]*-Destination \(Join-Path \$(?:OutDir|fixture|engineStage)\b|"
+                            r"Copy-Item -LiteralPath \$opt -Destination \$optKeep\b|"
+                            r"Copy-Item -LiteralPath \$BuiltExe -Destination \(Join-Path \$engineStage|"
+                            r"\$in\.Write|\[System\.IO\.File\]::WriteAllLines\(\(Join-Path \$fixture", re.I)
+
+
+@pytest.mark.parametrize("path", STAND_WRITERS, ids=lambda p: p.name)
+def test_stand_scripts_write_into_the_stand_only_through_the_helpers(path):
+    bad = []
+    for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        code = line.split("#", 1)[0] if not line.lstrip().startswith("#") else ""
+        if IN_PLACE.search(code) and not TO_OUR_FOLDERS.search(code):
+            bad.append(f"{path.name}:{number}: {line.strip()}")
+    assert not bad, "\n".join(bad)
+
+
+# --- review 4, B1: a scenario's verdict is bound to this run ------------------------------------------------------------
+
+B1_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+. '{tools}\stand_common.ps1'
+function Invoke-HeadProfile {{ param([string]$Stand) }}  # no stand here: a no-op
+$s = @{{ Name = 'fake_group'; Script = '{script}'; Args = ''; TagArg = $false; StandArg = $null;
+    Pass = @('steps done: host True, client True', 'squads: PASS'); Bad = @('squads: FAIL') }}
+$stale = Join-Path $script:StandDir 'b57_stand_fake_group.out'
+New-Item -ItemType Directory -Force -Path $script:StandDir | Out-Null
+[System.IO.File]::WriteAllLines($stale, [string[]]@('steps done: host True, client True', 'squads: PASS (an older run)'))
+$lock = $null
+if ('{lock}' -eq 'yes') {{ $lock = [System.IO.File]::Open($stale, 'Open', 'Write', 'Read') }}  # an orphaned scenario
+try {{ $r = Invoke-Scenario -Scenario $s -Tag 'b57' -Stand '{stand}' }} finally {{ if ($lock) {{ $lock.Close() }} }}
+"verdict Ok=$($r.Ok); problems: $($r.Problems -join ' | ')"
+"""
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is not here")
+@pytest.mark.parametrize(("script", "body", "lock", "ok", "why"), [
+    # the older output of the same tag is held open: this run is not judged (before: Ok=True from the old .out)
+    ("fake_group.ps1", "Write-Output 'squads: FAIL (this run)'\nexit 1\n", "yes", False, "could not be removed"),
+    # the scenario fails and exits 1; the older PASS output must not count
+    ("fake_group.ps1", "Write-Output 'squads: FAIL (this run)'\nexit 1\n", "no", False, "scenario exit code: 1"),
+    # the scenario prints every pass line but throws at the end: a failed run
+    ("fake_group.ps1", "Write-Output 'steps done: host True, client True'\nWrite-Output 'squads: PASS'\n"
+                       "$ErrorActionPreference = 'Stop'\nthrow 'the server did not quit'\n", "no", False,
+     "scenario exit code: 1"),
+    # the guard cannot start the scenario (no such script): no 'run finished' from this run's file either
+    ("missing_group.ps1", "", "no", False, "stderr"),
+    # control: a passing scenario passes
+    ("fake_group.ps1", "Write-Output 'steps done: host True, client True'\nWrite-Output 'squads: PASS'\n", "no", True, ""),
+])
+def test_scenario_verdict_is_bound_to_this_run(work, script, body, lock, ok, why):
+    tools = work / "tools"
+    (tools / "stand").mkdir(parents=True)
+    shutil.copy2(ROOT / "tools" / "stand_common.ps1", tools / "stand_common.ps1")
+    shutil.copy2(ROOT / "tools" / "stand" / "run_guarded.ps1", tools / "stand" / "run_guarded.ps1")
+    write(tools, "stand/fake_group.ps1", body)
+    code = B1_SCRIPT.format(tools=tools, script=script, lock=lock, stand=work / "nostand")
+    done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", code],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    line = next(l for l in done.stdout.splitlines() if l.startswith("verdict"))
+    assert line.startswith(f"verdict Ok={ok}"), done.stdout
+    assert why in line, line
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is not here")
+@pytest.mark.parametrize("profile", [False, True], ids=["stock", "profile"])
+def test_deploy_ps1_never_builds_over_the_launchers_stand(work, profile):
+    # R21: deploy.ps1's robocopy /MIR (stock) would purge the launcher's stand and write through its links
+    game = work / "game"
+    (game / "bin").mkdir(parents=True)
+    (game / "fsgame.ltx").write_text("$app_data_root$ = true | false | $fs_root$ | appdata\\\r\n", encoding="cp1251")
+    exe = work / "AnomalyDX11AVX.exe"
+    exe.write_bytes(b"MZ")
+    stand = work / "game-dev"
+    (stand / "gamedata" / "scripts").mkdir(parents=True)
+    (stand / ".raylink-stand.json").write_text(json.dumps({"format": 1, "entries": []}), encoding="utf-8")
+    items = mod_link(work, stand, "gamedata/scripts/e.script", b"a GAMMA mod's file")
+    args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "tools" / "deploy.ps1"),
+            "-TestRoot", str(stand), "-SkipGameBin", "-GameDir", str(game), "-BuiltExe", str(exe),
+            "-EngineGamedata", str(work), "-ModGamedata", str(work / "none")]
+    if profile:
+        args += ["-Profile", "G.A.M.M.A", "-Mo2Dir", str(work / "mo2")]
+    done = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    assert done.returncode != 0 and "launcher's stand" in done.stdout + done.stderr, done.stdout + done.stderr
+    assert untouched(items, b"a GAMMA mod's file") and (stand / "gamedata/scripts/e.script").is_file()
+
+
+# --- review 4, B4: exe_source does not trust engine-ci's index; the project file and the SDK are compared -------------
+
+VCXPROJ = ("<Project>\r\n  <ItemDefinitionGroup>\r\n    <PreprocessorDefinitions>XRGAME_EXPORTS;%(PreprocessorDefinitions)"
+           "</PreprocessorDefinitions>\r\n  </ItemDefinitionGroup>\r\n  <ItemGroup>\r\n"
+           "    <ClCompile Include=\"coop\\coop_items.cpp\" />\r\n    <ClCompile Include=\"coop\\coop_levels.cpp\" />\r\n"
+           "    <ClCompile Include=\"Level.cpp\" />\r\n  </ItemGroup>\r\n  <ItemGroup>\r\n"
+           "    <ClInclude Include=\"coop\\coop_items.h\" />\r\n  </ItemGroup>\r\n</Project>\r\n")
+
+
+def built_with_project(root: Path, engine: Path, exe: Path) -> Path:
+    write(engine, "src/xrGame/xrGame.vcxproj", VCXPROJ)
+    write(engine, "sdk/include/dx_extra.h", "#pragma once\n")
+    commit(engine, "the project file and the SDK")
+    return built_from_head(root, engine, exe)
+
+
+def rebuild(ci: Path, exe: Path) -> None:
+    ci_exe(ci, exe)
+
+
+def test_exe_source_stats_every_file_before_trusting_the_index(repos):
+    # E2: built from an uncommitted edit, then `git checkout` put the file back: it matches the index again
+    root, engine, exe = repos
+    ci = built_with_project(root, engine, exe)
+    assert gates.exe_source(engine, exe, ci)[1] == []
+    rel = "src/xrGame/coop/coop_levels.cpp"
+    assert rel not in sh(ci, "status", "--porcelain")  # unchanged since engine-ci's checkout: the index shortcut
+    write(ci, rel, "// an uncommitted edit of Ядро\n")
+    rebuild(ci, exe)
+    # the build happened a while ago: every source is older than the exe, the exe older than now
+    past = time.time() - 600
+    for path in [p for tree in ("src", "sdk") for p in (ci / tree).rglob("*") if p.is_file()]:
+        os.utime(path, (past, past))
+    built = time.time() - 300
+    os.utime(ci.joinpath(*gates.CI_EXE), (built, built))
+    sh(ci, "checkout", "--", rel)  # no rebuild; the exe keeps the edit; git's index holds the file's new time
+    assert rel not in sh(ci, "status", "--porcelain")
+    source, problems = gates.exe_source(engine, exe, ci)
+    assert source == "" and any("changed after the exe was built" in p and rel in p for p in problems), problems
+
+
+@pytest.mark.parametrize(("case", "why"), [
+    ("define", "differs from engine HEAD's beyond the coop items"),
+    ("outside_coop", "differs from engine HEAD's beyond the coop items"),
+    ("extra_coop", "compiles 1 coop source(s) engine HEAD does not have: coop_far_old.cpp"),
+    ("lacking_coop", "does not compile 1 coop source(s) of engine HEAD: coop_levels.cpp"),
+    ("reordered", None),  # vcxproj_add writes the coop items in its own order, and lists headers: the same build
+])
+def test_exe_source_compares_engine_cis_project_file(repos, case, why):
+    # E3: engine-ci's xrGame.vcxproj was never compared: a define or a source outside src/ went through
+    root, engine, exe = repos
+    ci = built_with_project(root, engine, exe)
+    text = (ci / "src/xrGame/xrGame.vcxproj").read_bytes().decode("utf-8")  # CRLF as MSBuild's file has it
+    if case == "define":
+        text = text.replace("XRGAME_EXPORTS;", "XRGAME_EXPORTS;COOP_SKIP_CHECKS;")
+    elif case == "outside_coop":
+        text = text.replace("    <ClCompile Include=\"Level.cpp\" />", "    <ClCompile Include=\"Level.cpp\" />\r\n"
+                                                                          "    <ClCompile Include=\"..\\..\\sdk\\patch.cpp\" />")
+    elif case == "extra_coop":
+        text = text.replace("<ClCompile Include=\"Level.cpp\" />", "<ClCompile Include=\"Level.cpp\" />\r\n"
+                                                                    "    <ClCompile Include=\"coop\\coop_far_old.cpp\" />")
+    elif case == "lacking_coop":
+        text = text.replace("    <ClCompile Include=\"coop\\coop_levels.cpp\" />\r\n", "")
+    else:
+        text = text.replace("    <ClCompile Include=\"coop\\coop_items.cpp\" />\r\n    <ClCompile Include=\"coop\\coop_levels.cpp\" />",
+                            "    <ClCompile Include=\"coop\\coop_levels.cpp\" />\r\n    <ClCompile Include=\"coop\\coop_items.cpp\" />")
+        text = text.replace("    <ClInclude Include=\"coop\\coop_items.h\" />", "    <ClInclude Include=\"coop\\coop_lamps.h\" />\r\n"
+                                                                              "    <ClInclude Include=\"coop\\coop_items.h\" />")
+    (ci / "src/xrGame/xrGame.vcxproj").write_bytes(text.encode("utf-8"))
+    rebuild(ci, exe)
+    source, problems = gates.exe_source(engine, exe, ci)
+    if why is None:
+        assert problems == [] and source == sh(engine, "rev-parse", "HEAD"), problems
+    else:
+        assert source == "" and any(why in p for p in problems), problems
+
+
+@pytest.mark.parametrize(("case", "why"), [
+    ("edited", "differs from engine HEAD in 1 file(s): sdk/include/dx_extra.h"),
+    ("extra", "engine HEAD does not have: sdk/lib/extra.lib"),
+])
+def test_exe_source_compares_the_sdk(repos, case, why):
+    # E4: sdk/ (headers and libraries the build reads) was never compared
+    root, engine, exe = repos
+    ci = built_with_project(root, engine, exe)
+    if case == "edited":
+        write(ci, "sdk/include/dx_extra.h", "#pragma once\n#define COOP_SKIP 1\n")
+    else:
+        (ci / "sdk/lib").mkdir(parents=True)
+        (ci / "sdk/lib/extra.lib").write_bytes(b"!<arch>\n")
+    rebuild(ci, exe)
+    source, problems = gates.exe_source(engine, exe, ci)
+    assert source == "" and any(why in p for p in problems), problems
+
+
+# --- review 4, B5: tests.ok never comes from a stale Lua runner ---------------------------------------------------------
+
+def fake_lua_runner(root: Path, stamp: str = "") -> Path:
+    """temp/lua/runlua.exe as tools/test_lua.cmd builds it: the source stamp is a string inside the exe."""
+    exe = root.joinpath(*gates.LUA_RUNNER)
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_bytes(b"MZ\x00runlua\x00" + (stamp or gates.lua_stamp(root)).encode("ascii") + b"\x00")
+    return exe
+
+
+def test_lua_stamp_is_the_one_test_lua_cmd_builds(work):
+    root = work / "mod"
+    write(root, "tests/lua/runlua.c", "int main() { return 0; }\n")
+    write(root, "tests/lua/native_coop.cpp", "#include \"lua.hpp\"\n#include \"coop_routes.h\"\n#include <string>\n"
+                                             "  #include \"coop_indented.h\"\n#include \"coop_lua_fn.h\" // a comment\n")
+    write(root, "engine/src/xrCoop/coop_routes.h", "#pragma once\n")
+    write(root, "engine/src/xrCoop/coop_lua_fn.h", "#pragma once\nint f();\n")
+    write(root, "engine/src/xrCoop/coop_indented.h", "#pragma once\n")  # findstr /b: an indented line is not read
+    write(root, "tools/test_lua.cmd", "@echo off\n")
+    sha = lambda rel: hashlib.sha1((root / rel).read_bytes()).hexdigest()[:8]  # noqa: E731
+    assert gates.lua_stamp(root) == "".join(sha(r) for r in ("tests/lua/runlua.c", "tests/lua/native_coop.cpp",
+                                                             "engine/src/xrCoop/coop_routes.h",
+                                                             "engine/src/xrCoop/coop_lua_fn.h", "tools/test_lua.cmd"))
+
+
+def test_lua_stamp_of_this_repository_is_the_runners_when_it_is_fresh():
+    exe = ROOT.joinpath(*gates.LUA_RUNNER)
+    if not exe.is_file():
+        pytest.skip("no temp\\lua\\runlua.exe here")
+    said = subprocess.run([str(exe), "-stamp"], capture_output=True, text=True).stdout.strip()
+    if said != gates.lua_stamp(ROOT):
+        pytest.skip("the shared runner is stale right now (another run rebuilds it)")
+    assert gates.lua_runner_stale(ROOT) is None
+
+
+def test_tests_mark_refuses_a_run_on_a_stale_lua_runner(repos, capsys):
+    root, engine, _ = repos
+    marks = root / "temp" / "gates"
+    state = marks / "tests.state"
+    write(root, "tests/lua/runlua.c", "int main() { return 0; }\n")
+    write(root, "tests/lua/native_coop.cpp", "#include \"coop_routes.h\"\n")
+    write(engine, "src/xrCoop/coop_routes.h", "#pragma once\n")
+    commit(root, "runner sources")
+    commit(engine, "a header")
+    fake_lua_runner(root)
+    write(engine, "src/xrCoop/coop_routes.h", "#pragma once\nint changed();\n")
+    commit(engine, "the header changed: the runner must be rebuilt")
+
+    def run_once() -> tuple[int, str]:
+        assert gates.main(["--root", str(root), "--tests-mark", "begin"]) == 0
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(capsys.readouterr().out, encoding="utf-8")
+        code = gates.main(["--root", str(root), "--tests-mark", "write", "--state", str(state), "--native", "0",
+                           "--lua", "0"])
+        return code, capsys.readouterr().out
+
+    code, out = run_once()  # test_lua.cmd could not rebuild (vcvars / lua51.lib missing): it ran the old runner, exit 0
+    assert code == 1 and "stale runner" in out and not (marks / "tests.ok").exists(), out
+    fake_lua_runner(root)  # rebuilt from the sources now
+    code, out = run_once()
+    assert code == 0 and (marks / "tests.ok").exists(), out
+    (root.joinpath(*gates.LUA_RUNNER)).unlink()
+    code, out = run_once()
+    assert code == 1 and "no temp\\lua\\runlua.exe" in out, out

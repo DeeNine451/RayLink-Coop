@@ -11,6 +11,7 @@ param(
     [int]$StepsTimeoutS = 900
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\stand_common.ps1')  # Write-Stand*, Copy-Stand*, Remove-StandFile: never write through a hard link (TZ R21)
 # Tracked in tools\stand (docs/MODES.md section 10): the probes come from this folder; logs and the stand's
 # settings kept for the restore go to the repository's temp\stand (ignored: the run history).
 $OutDir = Join-Path $PSScriptRoot '..\..\temp\stand'
@@ -26,10 +27,10 @@ function New-Profile([string]$letter) {
     $name = "appdata_$letter"
     $text = [System.IO.File]::ReadAllText((Join-Path $Stand 'fsgame.ltx'), $cp1251) -replace '(?m)^(\$app_data_root\$\s*=.*\|\s*)appdata\\', "`${1}$name\"
     if ($text -notmatch [regex]::Escape("$name\")) { throw 'fsgame.ltx format unexpected' }
-    [System.IO.File]::WriteAllText((Join-Path $Stand "fsgame_$letter.ltx"), $text, $cp1251)
+    Write-StandText -Path (Join-Path $Stand "fsgame_$letter.ltx") -Text $text -Encoding $cp1251
     $appdata = Join-Path $Stand $name
     New-Item -ItemType Directory -Force -Path $appdata | Out-Null
-    & robocopy (Join-Path $Stand 'appdata_t') $appdata /E /XF coop_player.key axr_options.ltx /XD savedgames logs raylink screenshots /NFL /NDL /NJH /NJS /NP | Out-Null
+    Copy-StandTree -From (Join-Path $Stand 'appdata_t') -To $appdata -ExcludeFiles @('coop_player.key', 'axr_options.ltx') -ExcludeDirs @('savedgames', 'logs', 'raylink', 'screenshots')
     $global:LASTEXITCODE = 0
     return $appdata
 }
@@ -83,11 +84,11 @@ $data = New-Profile 's'
 $log = Join-Path $data ('logs\xray_' + $env:USERNAME + '.log')
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
 $saves = Join-Path $data 'savedgames'
-if (Test-Path -LiteralPath $saves) { Get-ChildItem -LiteralPath $saves -Filter 'zz_sp_smoke*' | Remove-Item -Force }
+if (Test-Path -LiteralPath $saves) { Get-ChildItem -LiteralPath $saves -Filter 'zz_sp_smoke*' | ForEach-Object { Remove-StandFile -Path $_.FullName } }
 $scripts = Join-Path $Stand 'gamedata\scripts'
-Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'coop_zz_sp.script') -Destination (Join-Path $scripts 'coop_zz_sp.script') -Force
-Get-ChildItem -LiteralPath $Stand -Filter 'zz_sp_*.txt' | Remove-Item -Force
+Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_sp.script') -To (Join-Path $scripts 'coop_zz_sp.script')
+Get-ChildItem -LiteralPath $Stand -Filter 'zz_sp_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
 
 $opt = Join-Path $Stand 'gamedata\configs\axr_options.ltx'
 $optKeep = Join-Path $OutDir 'axr_options.before_sp.ltx'
@@ -112,7 +113,7 @@ $lines.Add("new_game_faction = $Faction")
 $lines.Add("new_game_loadout = $($kit.Loadout)")
 $lines.Add("new_game_map = $Map")
 if ($kit.Money) { $lines.Add("new_game_money = $($kit.Money)") }
-[System.IO.File]::WriteAllLines($opt, $lines, $cp1251)
+Write-StandLines -Path $opt -Lines $lines -Encoding $cp1251
 
 $game = $null
 $why = ''
@@ -145,9 +146,9 @@ finally {
     Start-Sleep -Seconds 3
     Get-Process -Name 'AnomalyCoop*' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($Stand, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host "! left running: $($_.Id), stopped"; Stop-Process -Id $_.Id -Force }
     if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $OutDir "${Tag}_sp.log") -Force }
-    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | Remove-Item -Force
-    Get-ChildItem -LiteralPath $Stand -Filter 'zz_sp_*.txt' | Remove-Item -Force
-    Copy-Item -LiteralPath $optKeep -Destination $opt -Force
+    Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+    Get-ChildItem -LiteralPath $Stand -Filter 'zz_sp_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
+    Copy-StandFile -From $optKeep -To $opt
 }
 Write-Host '--- the probe ---'
 Show-Lines $log '\[sp\]' 40

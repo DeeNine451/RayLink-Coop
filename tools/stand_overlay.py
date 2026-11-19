@@ -9,12 +9,16 @@ stand (a materialized game root with one merged gamedata\\), keeping everything 
 - The Engine layer (engine\\gamedata, the lowest priority in MO2) is NOT overlaid: on a merged root it would replace
   files that mods override. Deploy it by hand when engine\\gamedata changes.
 - Revert: copy <backup dir> back over the stand and delete the files of new_files.txt.
+- Hard links (TZ.md R21): the launcher's stand is hard links to the mods' own files. A stand file is never written in
+  place: its old name is deleted first (read-only-safe) and a new file takes the name (tools/mo2_stand.py replace_file),
+  so the mod keeps its bytes and its read-only attribute.
 """
-import shutil
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I leaves the script's folder out
+import mo2_stand  # noqa: E402  (replace_file: never write into a hard-linked stand file)
 SKIP_NAMES = {"axr_options.ltx", "cache_dbg.ltx"}
 SKIP_EXT = {".bak", ".tmp", ".log", ".orig"}
 
@@ -54,13 +58,13 @@ def main():
             keep = backup / rel
             if not keep.exists() and not dry:
                 keep.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(dst, keep)
+                keep.write_bytes(dst.read_bytes())  # a copy of our own (copy2 would carry a mod's read-only bit)
             copied.append(rel)
         else:
             added.append(rel)
         if not dry:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(data)
+            mo2_stand.replace_file(dst, data)
     if added and not dry:
         backup.mkdir(parents=True, exist_ok=True)
         listed = backup / "new_files.txt"

@@ -42,6 +42,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $cp1251 = [System.Text.Encoding]::GetEncoding(1251)
+# Write-Stand*, Copy-Stand*, Remove-StandFile: never write into an existing file of a root (TZ R21: a GAMMA stand's files
+# are hard links to the mods' own files; Copy-Item -Force, [IO.File]::WriteAll*, robocopy would write through them)
+. (Join-Path $PSScriptRoot 'stand_common.ps1')
 
 function Assert-Path([string]$Path, [string]$What) {
     if (-not (Test-Path -LiteralPath $Path)) { throw "$What not found: $Path" }
@@ -68,10 +71,15 @@ if ($Profile) {
     throw "$TestRoot is a GAMMA stand built by mo2_stand.py (its files are hard links to the mods): use -Profile, or another -TestRoot for the stock stand"
 }
 
+# the launcher's stand (E:\RayLinkGames\GAMMA\game-dev, .raylink-stand.json) is hard links to E:\RayLinkGames\GAMMA\mo2\mods:
+# deploy.ps1 never builds over it (robocopy /MIR would purge it); tools\stand\stand_head.py deploys HEAD there
+if (Test-Path -LiteralPath (Join-Path $TestRoot '.raylink-stand.json')) {
+    throw "$TestRoot is the launcher's stand (.raylink-stand.json: hard links to the mods): deploy.ps1 never writes there; tools\stand\stand_head.py deploy puts HEAD on it"
+}
 New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
 
 if (-not $SkipGameBin) {
-    Copy-Item -LiteralPath $BuiltExe -Destination (Join-Path $gameBin $ExeName) -Force
+    Copy-StandFile -From $BuiltExe -To (Join-Path $gameBin $ExeName)
     Write-Host "also: $gameBin\$ExeName"
 }
 
@@ -95,12 +103,14 @@ if ($Profile) {
         if ((Get-Item -LiteralPath $binB -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             throw "bin_b is a link, not a folder: $binB"
         }
-        Get-ChildItem -LiteralPath $binB -Recurse -File -Force | Remove-Item -Force
+        Get-ChildItem -LiteralPath $binB -Recurse -File -Force | ForEach-Object {
+            try { Remove-StandFile -Path $_.FullName } catch { Write-Host "bin_b: cannot remove $($_.Exception.Message)" }
+        }
     }
     Get-ChildItem -LiteralPath $binA -Recurse -File -Force | ForEach-Object {
         $dst = Join-Path $binB $_.FullName.Substring($binA.Length + 1)
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
-        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue }
+        try { Remove-StandFile -Path $dst } catch { Write-Host "bin_b: cannot remove $($_.Exception.Message)" }
         New-Item -ItemType HardLink -Path $dst -Target $_.FullName -ErrorAction SilentlyContinue | Out-Null
     }
     # A file in bin_b that could not be removed (held by a scanner, a stale game) kept the OLD exe and the client
@@ -108,7 +118,7 @@ if ($Profile) {
     $exeA = Join-Path $binA $ExeName
     $exeB = Join-Path $binB $ExeName
     if ((Get-FileHash -LiteralPath $exeA).Hash -ne (Get-FileHash -LiteralPath $exeB -ErrorAction SilentlyContinue).Hash) {
-        Copy-Item -LiteralPath $exeA -Destination $exeB -Force
+        try { Copy-StandFile -From $exeA -To $exeB } catch { Write-Host "bin_b: $($_.Exception.Message)" }
         if ((Get-FileHash -LiteralPath $exeA).Hash -ne (Get-FileHash -LiteralPath $exeB).Hash) {
             throw "bin_b keeps another exe than bin: $exeB (is a game still running from it?)"
         }
@@ -126,11 +136,11 @@ if ($Profile) {
 
     # 2. exe folders: hard links to the game's DLLs/configs + our exe
     $tmpExe = Join-Path $TestRoot $ExeName
-    Copy-Item -LiteralPath $BuiltExe -Destination $tmpExe -Force
+    Copy-StandFile -From $BuiltExe -To $tmpExe
     foreach ($name in 'bin', 'bin_b') {
         $dir = Join-Path $TestRoot $name
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        Get-ChildItem -LiteralPath $dir -File | Remove-Item -Force
+        Get-ChildItem -LiteralPath $dir -File | ForEach-Object { Remove-StandFile -Path $_.FullName }
         Get-ChildItem -LiteralPath $gameBin -File | Where-Object { $_.Extension -ne '.exe' } | ForEach-Object {
             New-Item -ItemType HardLink -Path (Join-Path $dir $_.Name) -Target $_.FullName | Out-Null
         }
@@ -141,13 +151,10 @@ if ($Profile) {
     # 3. gamedata: engine revision first, our mod on top
     $gd = Join-Path $TestRoot 'gamedata'
     # axr_options.ltx is written by the game itself (player settings): excluded files are neither copied nor purged
-    & robocopy $EngineGamedata $gd /MIR /XF axr_options.ltx /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "robocopy engine gamedata failed: $LASTEXITCODE" }
+    Copy-StandTree -From $EngineGamedata -To $gd -ExcludeFiles @('axr_options.ltx') -Mirror
     if (Test-Path -LiteralPath $ModGamedata) {
-        & robocopy $ModGamedata $gd /E /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw "robocopy mod gamedata failed: $LASTEXITCODE" }
+        Copy-StandTree -From $ModGamedata -To $gd
     }
-    $global:LASTEXITCODE = 0
     Write-Host "gamedata: $gd"
 }
 
@@ -164,7 +171,7 @@ foreach ($inst in 'a', 'b', 'server') {
     $appdataName = "appdata_$inst"
     $text = $fsText -replace '(?m)^(\$app_data_root\$\s*=.*\|\s*)appdata\\', "`${1}$appdataName\"
     if ($text -notmatch [regex]::Escape("$appdataName\")) { throw 'fsgame.ltx format unexpected: app_data_root not rewritten' }
-    [System.IO.File]::WriteAllText((Join-Path $TestRoot "fsgame_$inst.ltx"), $text, $cp1251)
+    Write-StandText -Path (Join-Path $TestRoot "fsgame_$inst.ltx") -Text $text -Encoding $cp1251
 
     $appdata = Join-Path $TestRoot $appdataName
     New-Item -ItemType Directory -Force -Path $appdata | Out-Null
@@ -178,14 +185,12 @@ foreach ($inst in 'a', 'b', 'server') {
             if ($idx -ge 0) { $lines[$idx] = $line } else { $lines.Add($line) }
         }
         $lines.Add("coop_nick player_$inst")
-        [System.IO.File]::WriteAllLines($userOut, $lines, $cp1251)
+        Write-StandLines -Path $userOut -Lines $lines -Encoding $cp1251
     }
     $modsAppdata = Join-Path $TestRoot 'appdata'
     if ($Profile -and (Test-Path -LiteralPath $modsAppdata)) {
         # files the mods put into appdata\ (shader presets): in MO2 the game sees them in its own appdata
-        & robocopy $modsAppdata $appdata /E /XF user.ltx /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw "robocopy mods' appdata failed: $LASTEXITCODE" }
-        $global:LASTEXITCODE = 0
+        Copy-StandTree -From $modsAppdata -To $appdata -ExcludeFiles @('user.ltx')
     }
     Write-Host "instance ${inst}: $TestRoot\fsgame_$inst.ltx, $appdata"
 }
@@ -201,6 +206,6 @@ foreach ($bat in @(@{ inst = 'a'; name = 'Player A - host.bat' }, @{ inst = 'b';
         "powershell -NoProfile -ExecutionPolicy Bypass -File `"$launchPs1`" $($bat.inst) -GameDir `"$TestRoot`"",
         'if errorlevel 1 pause'
     )
-    [System.IO.File]::WriteAllText((Join-Path $TestRoot $bat.name), (($lines -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
+    Write-StandText -Path (Join-Path $TestRoot $bat.name) -Text (($lines -join "`r`n") + "`r`n") -Encoding ([System.Text.Encoding]::ASCII)
     Write-Host "launcher: $TestRoot\$($bat.name)"
 }

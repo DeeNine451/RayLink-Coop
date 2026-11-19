@@ -366,3 +366,31 @@ def test_cli_writes_report(fake):
     text = rep.read_text(encoding="utf-8")
     assert "gamedata/scripts/a.script" in text
     assert f"files       {report.files}" in text
+
+
+# --- round 5 (TZ.md R21): the helpers every tool writes into a stand with ----------------------------------------------
+
+def test_replace_file_never_writes_through_a_read_only_link(work):
+    original = write(work / "mods" / "A" / "gamedata" / "scripts" / "a.script", "the mod's")
+    os.chmod(original, stat.S_IREAD)
+    stand = work / "stand" / "gamedata" / "scripts" / "a.script"
+    stand.parent.mkdir(parents=True)
+    os.link(original, stand)
+    assert ms.link_count(stand) == 2 and ms.delete_blocker(stand) is None
+    assert ms.replace_file(stand, b"ours") == 2
+    assert stand.read_bytes() == b"ours" and ms.link_count(stand) == 1 and os.access(stand, os.W_OK)
+    assert original.read_text(encoding="utf-8") == "the mod's" and not os.access(original, os.W_OK)
+    assert ms.link_count(original) == 1
+    assert ms.replace_file(work / "stand" / "new.ltx", b"new") == 0  # no file there before
+    assert not [p for p in stand.parent.iterdir() if p.name.endswith(".new")]  # no temporary file left
+
+
+def test_remove_file_deletes_one_name_of_a_read_only_link(work):
+    original = write(work / "mods" / "A" / "x.ltx", "x")
+    os.chmod(original, stat.S_IREAD)
+    link = work / "stand" / "x.ltx"
+    link.parent.mkdir(parents=True)
+    os.link(original, link)
+    ms.remove_file(link)
+    assert not link.exists() and original.read_text(encoding="utf-8") == "x" and not os.access(original, os.W_OK)
+    assert ms.link_count(original) == 1

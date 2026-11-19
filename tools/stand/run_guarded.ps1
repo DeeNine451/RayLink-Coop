@@ -28,6 +28,10 @@ while (-not $run.HasExited) {
     Start-Sleep -Seconds 3
 }
 if ($stopped) { Write-Host 'GUARD: a game outside the stand started, the stand run was stopped' }
-else { Write-Host 'run finished' }
+else {
+    Write-Host 'run finished'
+    # the runner (tools\stand_common.ps1 Invoke-Scenario) fails a scenario that threw or exited non-zero (review 4, B1)
+    Write-Host "scenario exit code: $($run.ExitCode)"
+}
 Get-Content -LiteralPath $outPath -Encoding UTF8 | Select-Object -Last 150
 if ((Test-Path -LiteralPath $errPath) -and (Get-Item -LiteralPath $errPath).Length -gt 0) { Write-Host '--- stderr ---'; Get-Content -LiteralPath $errPath | Select-Object -Last 30 }

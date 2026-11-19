@@ -29,6 +29,164 @@ $script:ErrorPattern = 'FATAL ERROR|LUA error|stack traceback|! \[coop'
 
 function Hide-Hex([string]$text) { return ($text -replace '[0-9a-fA-F]{32,}', '<hidden>') }
 
+# ---- writing into a stand (TZ.md R21) -----------------------------------------------------------------------------------
+# The launcher builds the stand (E:\RayLinkGames\GAMMA\game-dev) from hard links to the mods' own files
+# (E:\RayLinkGames\GAMMA\mo2\mods, about 60,700 of 61,800 files). Copy-Item -Force, [IO.File]::WriteAll*, Set-Content,
+# Out-File and robocopy write INTO an existing file: through a link that changes the mod's file for everything that
+# links it. Remove-Item -Force clears a read-only attribute, which every link shares. So every write into a stand
+# (the scenarios of tools\stand, the runners, tools\deploy.ps1, tools\launch.ps1) goes through these helpers: the bytes
+# go to a fresh file next to the target, the old name is deleted (FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE: the
+# attribute stays as it is for the other links), the fresh file takes the name. tools\mo2_stand.py replace_file does
+# the same in Python.
+function Initialize-StandFiles {
+    if ('RayLinkStand.Files' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace RayLinkStand {
+public static class Files {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition,
+                                             uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref uint info, uint size);
+    // one name of the file: DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE (Windows 10 1809+, NTFS)
+    public static void Delete(string path) {
+        using (SafeFileHandle h = CreateFileW(path, 0x00010000, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+            if (h.IsInvalid) { throw new Win32Exception(Marshal.GetLastWin32Error(), "cannot delete " + path); }
+            uint flags = 0x1 | 0x2 | 0x10;
+            if (!SetFileInformationByHandle(h, 21, ref flags, 4)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "cannot delete " + path);
+            }
+        }
+    }
+}
+}
+'@
+}
+
+function Get-StandFullPath([string]$Path) {
+    # relative to PowerShell's location, `..` collapsed (Get-ChildItem names files by their normalized path)
+    return [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+}
+
+function Remove-StandFile {
+    # deletes one name of a stand file; another hard link keeps its data and its read-only attribute
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $full = Get-StandFullPath $Path
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return }
+    Initialize-StandFiles
+    try { [RayLinkStand.Files]::Delete($full) }
+    catch [System.ComponentModel.Win32Exception] {
+        # 87: the volume does not know the flags (not NTFS): a plain delete, never by clearing the attribute
+        if ($_.Exception.NativeErrorCode -ne 87) { throw }
+        if ((Get-Item -LiteralPath $full -Force).Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+            throw "cannot delete the read-only $full without changing the attribute its links share"
+        }
+        [System.IO.File]::Delete($full)
+    }
+}
+
+function Set-StandFile {
+    # $Write fills a fresh file next to $Path (its argument: that file's path); then the old name goes and the fresh
+    # file takes it. The stand's file is never opened for writing.
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Write)
+    $full = Get-StandFullPath $Path
+    $dir = [System.IO.Path]::GetDirectoryName($full)
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $tmp = Join-Path $dir ('.' + [System.IO.Path]::GetFileName($full) + '.' + $PID + '.new')
+    Remove-StandFile -Path $tmp
+    try {
+        & $Write $tmp
+        $attr = [System.IO.File]::GetAttributes($tmp)
+        if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+            [System.IO.File]::SetAttributes($tmp, $attr -bxor [System.IO.FileAttributes]::ReadOnly)  # our own new file
+        }
+        Remove-StandFile -Path $full
+        [System.IO.File]::Move($tmp, $full)
+    }
+    catch { Remove-StandFile -Path $tmp; throw }
+}
+
+function Write-StandBytes {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][byte[]]$Bytes)
+    Set-StandFile -Path $Path -Write { param($t) [System.IO.File]::WriteAllBytes($t, $Bytes) }.GetNewClosure()
+}
+
+function Write-StandText {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][System.Text.Encoding]$Encoding)
+    Set-StandFile -Path $Path -Write { param($t) [System.IO.File]::WriteAllText($t, $Text, $Encoding) }.GetNewClosure()
+}
+
+function Write-StandLines {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Lines,
+        [Parameter(Mandatory = $true)][System.Text.Encoding]$Encoding)
+    Set-StandFile -Path $Path -Write { param($t) [System.IO.File]::WriteAllLines($t, $Lines, $Encoding) }.GetNewClosure()
+}
+
+function Copy-StandFile {
+    # a copy of $From at $To (its time kept, never read-only), as a new file
+    param([Parameter(Mandatory = $true)][string]$From, [Parameter(Mandatory = $true)][string]$To)
+    $src = Get-StandFullPath $From
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "no file to copy: $src" }
+    Set-StandFile -Path $To -Write { param($t) [System.IO.File]::Copy($src, $t, $false) }.GetNewClosure()
+}
+
+function Copy-StandTree {
+    # robocopy $From $To /E /XF <ExcludeFiles> /XD <ExcludeDirs> without writing into an existing file: a file whose
+    # size and time match is left alone (robocopy's "same"), any other goes through Copy-StandFile. Junctions are skipped.
+    # -Mirror (robocopy /MIR): files under $To that $From does not have go too (Remove-StandFile; excluded names stay).
+    param([Parameter(Mandatory = $true)][string]$From, [Parameter(Mandatory = $true)][string]$To,
+        [string[]]$ExcludeFiles = @(), [string[]]$ExcludeDirs = @(), [switch]$Mirror)
+    if ($Mirror -and (Test-Path -LiteralPath $To -PathType Container)) {
+        $srcRoot = (Get-StandFullPath $From).TrimEnd('\')
+        $dstTop = (Get-StandFullPath $To).TrimEnd('\')
+        $gone = [System.Collections.Generic.Stack[string]]::new()
+        $gone.Push($dstTop)
+        while ($gone.Count -gt 0) {
+            $dir = $gone.Pop()
+            foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force)) {
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }  # never through a junction
+                $rel = $item.FullName.Substring($dstTop.Length + 1)
+                if ($item.PSIsContainer) {
+                    if (@($ExcludeDirs | Where-Object { $item.Name -like $_ }).Count -eq 0) { $gone.Push($item.FullName) }
+                    continue
+                }
+                if (@($ExcludeFiles | Where-Object { $item.Name -like $_ }).Count -gt 0) { continue }
+                if (-not (Test-Path -LiteralPath (Join-Path $srcRoot $rel) -PathType Leaf)) { Remove-StandFile -Path $item.FullName }
+            }
+        }
+    }
+    $src = (Get-StandFullPath $From).TrimEnd('\')
+    $dstRoot = Get-StandFullPath $To
+    if (-not (Test-Path -LiteralPath $src -PathType Container)) { throw "no folder to copy: $src" }
+    New-Item -ItemType Directory -Force -Path $dstRoot | Out-Null
+    $todo = [System.Collections.Generic.Stack[string]]::new()
+    $todo.Push($src)
+    while ($todo.Count -gt 0) {
+        $dir = $todo.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force)) {
+            $dst = Join-Path $dstRoot $item.FullName.Substring($src.Length + 1)
+            if ($item.PSIsContainer) {
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+                if (@($ExcludeDirs | Where-Object { $item.Name -like $_ }).Count -gt 0) { continue }
+                New-Item -ItemType Directory -Force -Path $dst | Out-Null
+                $todo.Push($item.FullName)
+                continue
+            }
+            if (@($ExcludeFiles | Where-Object { $item.Name -like $_ }).Count -gt 0) { continue }
+            if (Test-Path -LiteralPath $dst -PathType Leaf) {
+                $have = Get-Item -LiteralPath $dst -Force
+                if ($have.Length -eq $item.Length -and $have.LastWriteTimeUtc -eq $item.LastWriteTimeUtc) { continue }
+            }
+            Copy-StandFile -From $item.FullName -To $dst
+        }
+    }
+}
+
 function Invoke-Scenario {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Scenario,
@@ -45,10 +203,35 @@ function Invoke-Scenario {
     # the mode of every stand process comes from HEAD: the profiles' mode cvars, which the last run wrote back (S2)
     Invoke-HeadProfile -Stand $Stand
     $guard = Join-Path $script:ScenarioDir 'run_guarded.ps1'
-    $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $guard -Script $Scenario.Script -Out $out -ScriptArgs $scArgs -Stand $Stand -OutDir $script:StandDir
     $problems = [System.Collections.Generic.List[string]]::new()
+    # review 4, B1: only this run's output is judged. The tag stays the same all cycle, so the output of an older run
+    # of the same tag goes first; if it cannot (an orphaned scenario still holds it), this run is not judged at all.
+    $errPath = $outPath + '.err'
+    foreach ($old in @($outPath, $errPath)) {
+        if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -ErrorAction SilentlyContinue }
+    }
+    foreach ($old in @($outPath, $errPath)) {
+        if (Test-Path -LiteralPath $old) { $problems.Add("the output of an older run could not be removed: $old (is an older scenario still running?)") }
+    }
+    if ($problems.Count -gt 0) {
+        Write-Host "  FAIL $name"; foreach ($p in $problems) { Write-Host "    $p" }
+        return [pscustomobject]@{ Name = $name; Ok = $false; Problems = $problems; Out = $outPath }
+    }
+    $guardArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $guard, '-Script', $Scenario.Script, '-Out', $out,
+        '-Stand', $Stand, '-OutDir', $script:StandDir)
+    if ($scArgs.Trim()) { $guardArgs += @('-ScriptArgs', $scArgs.Trim()) }  # an empty argument would vanish on the way
+    $guardOut = @(& powershell.exe @guardArgs)
+    $guardCode = $LASTEXITCODE
+    if ($guardCode -ne 0) { $problems.Add("run_guarded.ps1 failed (exit $guardCode)") }
+    $guardStop = $guardOut | Where-Object { $_ -match '^GUARD:' } | Select-Object -First 1
+    if ($guardStop) { $problems.Add($guardStop) }
+    if (-not ($guardOut | Where-Object { $_ -eq 'run finished' })) { $problems.Add("run_guarded.ps1 did not report 'run finished'") }
+    $codeLine = $guardOut | Where-Object { $_ -match '^scenario exit code: (-?\d+)$' } | Select-Object -First 1
+    if (-not $codeLine) { $problems.Add('run_guarded.ps1 did not report the scenario exit code') }
+    elseif ($codeLine -ne 'scenario exit code: 0') { $problems.Add($codeLine) }
     if (-not (Test-Path -LiteralPath $outPath)) {
         $problems.Add('no output file')
+        Write-Host "  FAIL $name"; foreach ($p in $problems) { Write-Host "    $p" }
         return [pscustomobject]@{ Name = $name; Ok = $false; Problems = $problems; Out = $outPath }
     }
     $lines = @(Get-Content -LiteralPath $outPath -Encoding UTF8)
@@ -67,7 +250,7 @@ function Invoke-Scenario {
             if (-not $allowed) { $problems.Add('error line: ' + (Hide-Hex $l.Trim())) }
         }
     }
-    $err = $outPath + '.err'
+    $err = $errPath
     if ((Test-Path -LiteralPath $err) -and (Get-Item -LiteralPath $err).Length -gt 0) {
         $first = Get-Content -LiteralPath $err | Select-Object -First 1
         $problems.Add('stderr: ' + (Hide-Hex "$first"))

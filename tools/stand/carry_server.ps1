@@ -11,6 +11,7 @@ param(
     [int]$StepsTimeoutS = 400
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\stand_common.ps1')  # Write-Stand*, Copy-Stand*, Remove-StandFile: never write through a hard link (TZ R21)
 # Tracked in tools\stand (docs/MODES.md section 10): the probes come from this folder; logs and the stand's
 # settings kept for the restore go to the repository's temp\stand (ignored: the run history).
 $OutDir = Join-Path $PSScriptRoot '..\..\temp\stand'
@@ -26,7 +27,7 @@ $scripts = Join-Path $Stand 'gamedata\scripts'
 $probe = Join-Path $scripts 'coop_zz_cs.script'
 foreach ($stale in @('coop_zz_npcprobe.script', 'coop_zz_lone.script')) { $p = Join-Path $scripts $stale; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p } }
 foreach ($f in @($serverLog, $clientLog, $msLog)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'coop_zz_cs.script') -Destination $probe -Force
+Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_cs.script') -To $probe
 
 function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
     $until = (Get-Date).AddSeconds($seconds)
@@ -49,7 +50,7 @@ function Show-Lines([string]$file, [string]$pattern, [int]$most, [int]$after = 0
 }
 
 $stage = Join-Path $Stand 'appdata_server\coop_new_world.ltx'
-[System.IO.File]::WriteAllText($stage, "[world]`nfaction = stalker`ntitle = carry`n", [System.Text.Encoding]::ASCII)
+Write-StandText -Path $stage -Text "[world]`nfaction = stalker`ntitle = carry`n" -Encoding ([System.Text.Encoding]::ASCII)
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.FileName = $exe
 $psi.WorkingDirectory = $Stand

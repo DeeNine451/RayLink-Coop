@@ -6,8 +6,10 @@ rem    uncommitted files the tests read (product, tests\, the runners) into temp
 rem 2. tools\build_tests.cmd (the native tests) and tools\test_lua.cmd (the Lua tests); both start with
 rem    tools\check_layers.py
 rem 3. python -I tools\check_gates.py --tests-mark write: tests.ok (mode=tests, both HEAD ids, dirty=0, native=0, lua=0)
-rem    only when both exit 0, the tree was clean before and after, and neither HEAD moved. tools\check_gates.py demands
-rem    tests.ok of the same HEADs for a release (the release rule).
+rem    only when both exit 0, the tree was clean before and after, neither HEAD moved, and the Lua runner
+rem    temp\lua\runlua.exe holds the stamp of the sources now (review 4, B5: when tools\test_lua.cmd cannot rebuild it,
+rem    it runs the old runner and still exits 0). tools\check_gates.py demands tests.ok of the same HEADs for a release
+rem    (the release rule).
 rem COOP_SKIP_LAYERS=1 (the lead's emergency, see build_tests.cmd) runs the tests but writes no tests.ok.
 rem Exit code: 0 when both suites passed (and the mark was written, or refused with its reason printed), else 1;
 rem 2 when the HEADs could not be read.
