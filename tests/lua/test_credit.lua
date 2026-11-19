@@ -1,11 +1,10 @@
 -- Anomaly Coop Lua test, Dev 57 G9-1 (TZ R19): the credit helper coop_credit (who / once / to_owner / on_owner) and the
--- three credit fixes of coop_reputation, each on the S4 answer sets of the facade coop_mode (docs\MODES.md section 10):
+-- two credit fixes of coop_reputation, each on the S4 answer sets of the facade coop_mode (docs\MODES.md section 10):
 --   u01:1  a mutant's death on a player's MIRROR does not count killed_monsters a second time (the decider's credit of
 --          his kill already reaches him): exactly one credit per kill in the host, client and map-server roles
 --   s34:1  the decider drops a helicopter's black box for a player's lethal hit too, once per helicopter
---   s38:1  Warfare's support money for a kill by any player goes to that player's character (coop.money_grant_to)
 -- The stock bodies are the real ones, read from the corpus copies (not the live game): bind_monster.script
--- (temp/review/corpus/merged: the file GAMMA loads), bind_heli.script, mlr_utils.script, sim_squad_warfare.script
+-- (temp/review/corpus/merged: the file GAMMA loads), bind_heli.script, mlr_utils.script
 -- (temp/stock_scripts/scripts: GAMMA does not override them).
 -- Roles per answer set: hostplay = the co-op host and a co-op client (a mirror); srv_world = the world server; srv_map =
 -- a map server and a server player's machine (a mirror); none = single player (must stay the stock game).
@@ -42,7 +41,6 @@ end
 local MONSTER = "temp/review/corpus/merged/bind_monster.script"
 local HELI = "temp/stock_scripts/scripts/bind_heli.script"
 local MLR = "temp/stock_scripts/scripts/mlr_utils.script"
-local WARFARE = "temp/stock_scripts/scripts/sim_squad_warfare.script"
 
 -- The roles of each answer set: coop.* stubs (MODE of stubs_mods.lua, self peer, the seats), and the facade's answers.
 local function client_answers(set)
@@ -108,11 +106,6 @@ local function fresh(role, opts)
 	coop.to_local_id = function(id) return id end
 	if role.map_server then coop.is_map_server = function() return true end end
 	if role.dedicated then coop.is_dedicated = function() return true end end
-	GRANTS = {}
-	coop.money_grant_to = function(character, amount)
-		GRANTS[#GRANTS + 1] = { character = character, amount = amount }
-		return amount
-	end
 
 	-- the world: this process's actor (a ghost on a server), the players' characters, an NPC, a mutant, two helicopters
 	local actor = make_actor(vec3(0, 0, 0))
@@ -120,8 +113,6 @@ local function fresh(role, opts)
 	GOm.set_callback = function() end
 	GOm.clsid = function() return 1 end
 	GOm.active_item = function() return nil end
-	HOST_MONEY = 0
-	GOm.give_money = function(o, n) if o:id() == 0 then HOST_MONEY = HOST_MONEY + n end end
 	local _, p500 = spawn("coop_player_avatar", vec3(1, 0, 0), nil, { id = 500, kind = "stalker" })
 	local _, p501 = spawn("coop_player_avatar", vec3(2, 0, 0), nil, { id = 501, kind = "stalker" })
 	local _, npc = spawn("stalker", vec3(3, 0, 0), nil, { id = 777, kind = "stalker" })
@@ -160,7 +151,7 @@ local function fresh(role, opts)
 		increment_npc_statistic = function(n, name) bump("npc" .. n:id() .. ":" .. name) end,
 	}
 
-	-- stock: bind_monster's death handler, bind_heli's hit handler, mlr_utils's box, Warfare's support reward
+	-- stock: bind_monster's death handler, bind_heli's hit handler, and mlr_utils's box
 	local env = setmetatable({}, { __index = _G })
 	VEC_ZERO = vector()
 	clsid = { poltergeist_s = 99 }
@@ -184,29 +175,19 @@ local function fresh(role, opts)
 	env.get_heli_health = real_function(HELI, "function get_heli_health(", env)
 	bind_heli = { heli_binder = { on_hit = real_function(HELI, "function heli_binder:on_hit(", env) } }
 	mlr_utils = { death_heli = real_function(MLR, "function death_heli(", env) }
-	env.printd = function() end
-	sim_squad_warfare = { squad_on_npc_death = real_function(WARFARE, "function squad_on_npc_death(", env) }
-	warfare = { actor_faction = "stalker", actor_influence_points = 0 }
-	warfare_options = { options = { actor_support_reward_money = 1000, actor_support_enemy_rank_weight = 0.25,
-		actor_support_reward_influence = 2 } }
-	game_relations = { is_factions_enemies = function(a, b) return a == "bandit" and b == "stalker" end }
-	AddScriptCallback("squad_on_npc_death")
 	AddScriptCallback("monster_on_death_callback")
 	MONSTER_DEATHS = 0
 	-- a probe of a coop_* script (route view): it sees the callback on every machine, a mirror included
 	RegisterScriptCallback("monster_on_death_callback",
 		from_script("coop_credit_probe", "return function() MONSTER_DEATHS = MONSTER_DEATHS + 1 end"))
 
-	-- the facade answers as the role, the scripts start as axr_main starts them (alphabetical: coop_reputation before warfare)
+	-- the facade answers as the role, the scripts start as axr_main starts them
 	load_script("coop_main")
 	load_script("coop_mode")
 	modes.install(coop_mode, role.set, role.over)
-	W.stock_support = sim_squad_warfare.squad_on_npc_death
-	if opts.warfare_first then RegisterScriptCallback("squad_on_npc_death", sim_squad_warfare.squad_on_npc_death) end
 	local cr = rawget(_G, "coop_credit") or coop_credit
 	if cr and cr.on_game_start then cr.on_game_start() end
 	coop_reputation.on_game_start()
-	if not opts.warfare_first then RegisterScriptCallback("squad_on_npc_death", sim_squad_warfare.squad_on_npc_death) end
 	return W
 end
 
@@ -243,30 +224,6 @@ local function boxes()
 	return n
 end
 
-local NPC_ID = 910
-local function squad_death(killer_id, opts)
-	opts = opts or {}
-	local squad = { registered_with_warfare = opts.registered ~= false,
-		get_squad_community = function() return opts.faction or "bandit" end, name = function() return "sq" end }
-	local victim = opts.victim
-	if not victim then
-		NPC_ID = NPC_ID + 1
-		victim = { id = NPC_ID, rank = function() return 3000 end }
-	end
-	SendScriptCallback("squad_on_npc_death", squad, victim, killer_id and { id = killer_id } or nil)
-	return victim
-end
-local SUPPORT = 1000 + 3000 * 0.25 -- the stock formula with the test's options: 1750
-
-local function grants_to(character)
-	local n, sum = 0, 0
-	for _, g in ipairs(GRANTS) do if g.character == character then n, sum = n + 1, sum + g.amount end end
-	return n, sum
-end
-
--------------------------------------------------------------------------------
--- coop_credit.who / once / to_owner / on_owner
--------------------------------------------------------------------------------
 local function test_who(role)
 	section(role.label .. ": who", function()
 		local C = coop_credit
@@ -483,51 +440,6 @@ local function test_heli(role)
 end
 
 -------------------------------------------------------------------------------
--- s38:1 Warfare support money and influence
--------------------------------------------------------------------------------
-local function test_warfare(role)
-	section(role.label .. ": s38 warfare", function()
-		local registered = axr_main.count("squad_on_npc_death") == 1
-			and coop_main.callback_registered("squad_on_npc_death", sim_squad_warfare.squad_on_npc_death) == true
-		check(registered, role.label .. ": s38: one Warfare handler is registered, the wrapper (file order: ours, then warfare)")
-		if role.set == "none" then
-			squad_death(0)
-			check(HOST_MONEY == SUPPORT and #GRANTS == 0 and warfare.actor_influence_points == 2,
-				role.label .. ": s38: single player is the stock (the actor's money and influence)")
-			return
-		end
-		local decides = role.set == "hostplay" and not role.mirror or role.set == "srv_world"
-		local player = role.set == "srv_world" and 501 or 500
-		squad_death(player)
-		if not decides then
-			check(#GRANTS == 0 and warfare.actor_influence_points == 0,
-				role.label .. ": s38: a process that does not decide the world pays nothing (the world's decider does)")
-			return
-		end
-		local n, sum = grants_to(player)
-		check(n == 1 and sum == SUPPORT, role.label .. ": s38: a player's kill pays the stock amount to his character")
-		check(warfare.actor_influence_points == 2 and HOST_MONEY == 0,
-			role.label .. ": s38: the shared Warfare influence grows once, the host's own money is untouched")
-		local victim = squad_death(player)
-		SendScriptCallback("squad_on_npc_death", { registered_with_warfare = true, name = function() return "sq" end,
-			get_squad_community = function() return "bandit" end }, victim, { id = player })
-		n = grants_to(player)
-		check(n == 2 and warfare.actor_influence_points == 4, role.label .. ": s38: one payment per death (a repeated callback pays nothing)")
-		squad_death(777)
-		squad_death(player, { faction = "stalker" })
-		squad_death(player, { registered = false })
-		squad_death(nil)
-		check(#GRANTS == 2 and warfare.actor_influence_points == 4,
-			role.label .. ": s38: an NPC's kill, a friendly squad, a squad outside Warfare and no killer pay nothing")
-		if role.set == "hostplay" then
-			squad_death(0)
-			check(HOST_MONEY == SUPPORT and #GRANTS == 2 and warfare.actor_influence_points == 6,
-				role.label .. ": s38: the host's own kill is the stock's (his money, once)")
-		end
-	end)
-end
-
--------------------------------------------------------------------------------
 for _, set in ipairs(modes.names()) do
 	print("== set " .. set)
 	for _, role in ipairs(ROLES[set]) do
@@ -537,25 +449,7 @@ for _, set in ipairs(modes.names()) do
 		fresh(role); test_owner(role)
 		fresh(role); test_monster(role)
 		fresh(role); test_heli(role)
-		fresh(role); test_warfare(role)
 		if set == "hostplay" and not role.mirror then
-			-- warfare's on_game_start before ours (another load order): the wrapper replaces the registered stock handler
-			fresh(role, { warfare_first = true })
-			section(role.label .. ": s38 load order", function()
-				local mine = sim_squad_warfare.squad_on_npc_death
-				-- the route shim registers its own wrapper of each handler: coop_main.callback_registered sees through it
-				check(mine ~= W.stock_support and axr_main.count("squad_on_npc_death") == 1
-					and coop_main.callback_registered("squad_on_npc_death", mine) == true
-					and coop_main.callback_registered("squad_on_npc_death", W.stock_support) ~= true,
-					role.label .. ": s38: warfare registered first: its handler is replaced by the wrapper")
-				squad_death(500)
-				squad_death(0)
-				local n, sum = grants_to(500)
-				check(n == 1 and sum == SUPPORT and HOST_MONEY == SUPPORT and warfare.actor_influence_points == 4,
-					role.label .. ": s38: warfare registered first: one payment each (the host is not paid twice)")
-				UnregisterScriptCallback("squad_on_npc_death", sim_squad_warfare.squad_on_npc_death) -- warfare's resetter
-				check(axr_main.count("squad_on_npc_death") == 0, role.label .. ": s38: warfare's resetter still removes it")
-			end)
 			-- a step of G9-1 that fails at game start is logged and does not stop coop_reputation's statistic redirect
 			fresh(role, { broken_monster = true })
 			section(role.label .. ": failed install step", function()

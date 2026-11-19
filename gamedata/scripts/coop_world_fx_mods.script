@@ -14,7 +14,7 @@ local serial, next_snapshot = 0, 0
 local pulses, mechanisms, carcasses = {}, {}, {}
 local psi
 local local_pulses, pulses_seen, local_mechanisms, local_carcasses = {}, {}, {}, {}
-local local_psi, local_particle, particles_kept = nil, 0, {}
+local local_psi
 local installed = false
 
 local function C() return coop_mods_core end
@@ -239,9 +239,6 @@ local function receive(t)
 			local_pulses[t.q] = { data = t, at = now - t.age }
 			tick_pulses(now)
 		end
-	elseif t.k == "alq" and t.q > local_particle and resource(t.path) then
-		local_particle = t.q
-		particles_kept[t.q % 48] = coop_world_fx.play(t.path, point(t))
 	elseif t.k == "mechanism" then
 		receive_mechanism(t, now)
 		tick_mechanisms(now)
@@ -289,27 +286,6 @@ local function install_pulse()
 				if not coop_mode.actor_is_player() then return scoped(mod, "script_light", no_light, orig, pos, ...) end
 			end
 			return orig(pos, ...)
-		end
-	end)
-end
-
-local function install_alq()
-	local mod = C().mod("alq_scheme")
-	local cls = mod and mod.act_alq_quest
-	C().wrap(cls, "search", "alq_scheme.act_alq_quest.search flash", function(orig)
-		return function(self, ...)
-			if not C().active() then return orig(self, ...) end
-			if not coop_mode.leads_here() then return end
-			-- blast_accident is the only particle creation in this path. Its sound and damage still run in the stock code.
-			local create = mod.particles_object
-			local function flash(path)
-				local fx = create(path)
-				return { play_at_pos = function(_, pos)
-					fx:play_at_pos(pos)
-					step("ALQ flash", publish, record(wire("alq", level.name(), put_point({ path = path }, pos))), true)
-				end }
-			end
-			return scoped(mod, "particles_object", flash, orig, self, ...)
 		end
 	end)
 end
@@ -676,8 +652,8 @@ local function clear_view()
 		stop_loop(state)
 		if state.cue then state.cue:stop() end
 	end
-	local_pulses, pulses_seen, local_mechanisms, local_carcasses, particles_kept = {}, {}, {}, {}, {}
-	local_psi, local_particle = nil, 0
+	local_pulses, pulses_seen, local_mechanisms, local_carcasses = {}, {}, {}, {}
+	local_psi = nil
 end
 
 local function update()
@@ -700,7 +676,6 @@ function on_game_start()
 	installed = true
 	step("relay", function() C().on(EVENT, receive, "player") end)
 	step("NTA pulse", install_pulse)
-	step("ALQ", install_alq)
 	step("Sabaoth", install_psi)
 	step("bridge", install_bridge)
 	step("Lab X8 door", install_door)

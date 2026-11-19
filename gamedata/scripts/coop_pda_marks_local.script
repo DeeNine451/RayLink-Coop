@@ -186,13 +186,8 @@ local function install_squads()
 		return function(self, ...)
 			if not C().active() then return orig(self, ...) end
 			if not coop_mode.leads_here() then return end
-			local role = assignments[self:commander_id()]
-			if self.show_disabled or (self.registered_with_warfare and role and role ~= "companion") then
+			if self.show_disabled then
 				return self:hide()
-			end
-			if self.registered_with_warfare then
-				squads[self.id] = nil
-				return orig(self, ...)
 			end
 			squads[self.id] = true
 		end

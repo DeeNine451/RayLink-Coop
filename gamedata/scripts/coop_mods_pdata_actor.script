@@ -1,9 +1,6 @@
 -- Ядро: без проверок режима (docs/MODES.md).
--- Dev 57 G1-4: actor-only stock/PBA data and ALQ decisions scoped to a character.
--- Co-op: the host owns ALQ quests; each player's machine supplies its own pdata.
--- Server: the quest owner uses the same cid-scoped decisions; player machines supply
--- pdata, never the console's ghost actor. No map/inventory is asked of the world owner.
--- ALQ's nested coop_actor_decisions stays in alq_quests (WORLD data), never in pdata.
+-- Dev 57 G1-4: personal drug timers, base portrait and Lucifer state.
+-- Each player supplies their own pdata. A server ghost supplies none.
 
 local started = false
 local loaded, pending
@@ -185,136 +182,6 @@ local function install_lucifer()
 	end)
 end
 
-local decision_fields = { "join", "sell", "price", "rob", "trust", "refuse" }
-local decision_actions = { heard = true, join = true, buy = true, rob_ok = true, carry = true }
-local quest_rolls = setmetatable({}, { __mode = "k" })
-local context
-local function pack(...) return { n = select("#", ...), ... } end
-
--- Keep the random draws stable while stock reevaluates goodwill, faction and
--- equipment. Only an interaction saves the resulting answers in the quest.
-local function reuse_rolls(f)
-	if not f then return end
-	local env = getfenv(f)
-	local original_math = env.math
-	local scoped_math = setmetatable({ random = function(...)
-		if not context then return original_math.random(...) end
-		local used, rolls = context.used, context.rolls
-		local i = (used[f] or 0) + 1
-		used[f] = i
-		if not rolls[f] then rolls[f] = {} end
-		if not rolls[f][i] then rolls[f][i] = original_math.random(...) end
-		return rolls[f][i]
-	end }, { __index = original_math })
-	setfenv(f, setmetatable({ math = scoped_math }, { __index = env }))
-end
-
--- Lend the stock functions ONE character's legacy-shaped fields for one call.
--- Always put the world quest back, including on error; no world fields are copied
--- into pdata. Old scalar decisions belong to the old save's actor (cid 0) only.
-local function decisions(q, cid, commit, f, ...)
-	if not (active() and q) then return f(...) end
-	cid = cid or 0
-	if context and context.q == q and context.cid == cid then return f(...) end
-	local old, personal, legacy = {}, q.coop_actor_decisions, {}
-	for _, k in ipairs(decision_fields) do old[k], legacy[k] = q[k], q[k] end
-	if commit and type(personal) ~= "table" then
-		personal = {}
-		if next(legacy) then personal[0] = legacy end
-	end
-	local record = type(personal) == "table" and personal[cid] or (cid == 0 and legacy or nil)
-	for _, k in ipairs(decision_fields) do
-		q[k] = nil
-		if type(record) == "table" then q[k] = record[k] end -- false is a saved refusal
-	end
-	local previous = context
-	local rolls = quest_rolls[q] or {}
-	quest_rolls[q] = rolls
-	rolls[cid] = rolls[cid] or {}
-	context = { q = q, cid = cid, rolls = rolls[cid], used = {} }
-	local result = pack(pcall(f, ...))
-	if commit and result[1] then
-		local t = {}
-		for _, k in ipairs(decision_fields) do t[k] = q[k] end
-		personal[cid] = t
-		q.coop_actor_decisions = personal
-	end
-	for _, k in ipairs(decision_fields) do
-		q[k] = nil
-		if not commit or not result[1] then q[k] = old[k] end
-	end
-	context = previous
-	if not result[1] then error(result[2], 0) end
-	return unpack(result, 2, result.n)
-end
-
-local function install_alq()
-	local player = C().mod("alq_player")
-	if player then
-		C().wrap(player, "join_decision", "pdata_actor.alq.join_decision", function(orig)
-			reuse_rolls(orig)
-			return function(squad, q, cid, ...)
-				return decisions(q, cid, true, orig, squad, q, cid, ...)
-			end
-		end)
-	end
-	local dialog = C().mod("alq_dialogs")
-	if not dialog then return end
-	local quest_of = C().find_local(dialog, "quest_of")
-	if not quest_of then return end
-	local function quest_for(npc)
-		local _, q = quest_of(npc)
-		return q
-	end
-	for _, name in ipairs({ "ensure_refuse", "chance_with_goodwill", "sells", "gives_in" }) do
-		reuse_rolls(C().find_local(dialog, name))
-	end
-	local snapshot = C().fn(dialog, "host_snapshot")
-	C().wrap(dialog, "host_snapshot", "pdata_actor.alq.snapshot", function(orig)
-		return function(npc, cid, ...)
-			if not active() then return orig(npc, cid, ...) end
-			return decisions(quest_for(npc), cid, false, orig, npc, cid, ...)
-		end
-	end)
-	C().wrap(dialog, "host_action", "pdata_actor.alq.action", function(orig)
-		return function(act, npc, cid, ...)
-			if not active() or not decision_actions[act] then return orig(act, npc, cid, ...) end
-			return decisions(quest_for(npc), cid, true, function(...)
-				if snapshot then snapshot(npc, cid) end -- interaction commits the answers, not a proximity poll
-				return orig(act, npc, cid, ...)
-			end, ...)
-		end
-	end)
-	-- The co-op host's own dialog never takes the request route. It runs these
-	-- same stock functions directly; on a player's mirror the mod keeps its UI path.
-	local compat = C().mod("coop_compat_alq")
-	local npc_info = C().fn(compat, "npc_info")
-	local request_dialog = C().fn(compat, "request_dialog")
-	for _, name in ipairs({ "reply_text", "pre_join", "pre_join_ok", "pre_join_no", "pre_courier", "pre_sell_ok", "pre_sell_no",
-		"txt_sell_ok", "pre_can_pay", "pre_rob_ok", "pre_rob_no", "pre_carry_ok", "pre_carry_no",
-		"act_join", "act_buy", "act_rob_ok", "act_carry" }) do
-		C().wrap(dialog, name, "pdata_actor.alq." .. name, function(orig)
-			return function(a, b, ...)
-				if not own_actor() then return orig(a, b, ...) end
-				if coop_mode.is_player_mirror() then
-					-- The stock mirror only acknowledges answers that disclosed the quest.
-					if name == "reply_text" and npc_info and request_dialog then
-						local npc = a and b and dialogs.who_is_npc(a, b) or mob_trade.GetTalkingNpc()
-						local info = npc_info(npc)
-						if info and info.lead and info.reply and not info.told then request_dialog("heard", npc) end
-					end
-					return orig(a, b, ...)
-				end
-				local npc = a and b and dialogs.who_is_npc(a, b) or mob_trade.GetTalkingNpc()
-				return decisions(quest_for(npc), C().hid(0), true, function(...)
-					if snapshot then snapshot(npc, C().hid(0)) end
-					return orig(a, b, ...)
-				end, ...)
-			end
-		end)
-	end
-end
-
 local function save_state(m)
 	if not own_actor() then return end
 	m[TIMER_KEY], m[ICON_KEY], m[LUCIFER_KEY] = current_timers(), current_icon(), current_lucifer()
@@ -332,6 +199,5 @@ function on_game_start()
 		install_stock()
 	end)
 	step("lucifer", install_lucifer)
-	step("alq", install_alq)
 	step("save", function() RegisterScriptCallback("save_state", save_state) end)
 end

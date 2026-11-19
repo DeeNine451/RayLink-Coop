@@ -128,11 +128,6 @@ for _, role in ipairs(names) do
 		SE[id] = q; return q
 	end
 	local q = squad(200, {101, 102})
-	local prey = squad(201, {})
-	alq_core = { QT_AMBUSH = "ambush", QT_MEET_AMBUSH = "meet", QT_COUNTER = "counter", quests = {},
-		squad_alive = function(o) return o ~= nil end, is_eligible = function() return false end, dbg = function() end }
-	coop_compat_alq = { change_goodwill = function() end, remove_spot = function() end }
-	alq_player = module("alq_player", read(corpus .. "alq_player.script"))
 	task_status_functor, task_functor, xr_effects, xr_conditions = {}, {}, {}, {}
 	local sky_src = real_sky
 	if role ~= "none" then
@@ -214,23 +209,6 @@ for _, role in ipairs(names) do
 		end
 	end
 	clear()
-
-	-- m18: the real ALQ warning retains betrayal and random snitch decisions.
-	alq_core.quests[200] = { type = "ambush", prey_id = 201, actor_knows = true }
-	alq_player.helping[500] = { squad_id = 200 }
-	math.random = function(a1, a2) return a2 and a1 or 1 end
-	alq_player.warn(prey, false, 500)
-	if active then
-		check(has(101, 500, -1000) and has(102, 500, -1000) and not has(101, 600, -1000)
-			and not has(102, 0, -1000), role .. " m18 ALQ betrayal only explicit cid, offline included")
-	else check(has(102, 0, -1000), "none m18 original unchanged") end
-	clear(); alq_core.quests[200].warned = nil
-	alq_player.warn(prey, false, 600)
-	if active then check(has(102, 600, -1000) and not has(102, 500, -1000), role .. " m18 successful snitch targets cid") end
-	clear(); alq_core.quests[200].warned = nil
-	math.random = function(a1, a2) return a2 and a1 or 100 end
-	alq_player.warn(prey, false, 600)
-	check(next(writes) == nil, role .. " m18 failed snitch leaves relations unchanged")
 
 	-- m19: explicit goodwill bypasses another reward recipient, with the same faction.
 	goodwill["army:500"] = -1500; goodwill["army:0"] = 0

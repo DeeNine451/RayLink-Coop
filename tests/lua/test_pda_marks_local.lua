@@ -57,18 +57,10 @@ function alife()
 	return sim
 end
 is_squad_monster = {}
-sim_squad_warfare = {
-	squad_icons = { bandit = "warfare_bandit_spot" },
-	get_enemy_info = function() return "warfare tooltip" end,
-}
-warfare = { actor_faction = "stalker" }
-warfare_options = { options = {} }
-game_relations = { is_factions_enemies = function() return true end, is_factions_friends = function() return false end }
+sim_squad_warfare = { squad_icons = { bandit = "warfare_bandit_spot" } }
 
 local squad_class = {
-	hide = function(self)
-		if self.warfare_spot then remove(self.id, self.warfare_spot); self.warfare_spot = nil end
-	end,
+	hide = function() end,
 	on_unregister = function(self) SE[self.id] = nil end,
 }
 sim_squad_scripted = { sim_squad_scripted = squad_class }
@@ -284,14 +276,6 @@ else
 	stalker_generic.remove_level_spot(21)
 	receive(request())
 	check(not has(21, service) and has(20, ordinary), "withdrawn NPC assignment clears the service spot and restores the ordinary one")
-	as_authority()
-	squad.registered_with_warfare = true
-	squad:show()
-	as_player()
-	frame()
-	check(has(20, "warfare_bandit_spot"), "a pending ordinary snapshot cannot remove a shared Warfare mark")
-	receive(request())
-	check(not has(20, ordinary), "a squad that enters Warfare disappears from ordinary Milspec data")
 
 	if authority == "srv_map" then
 		local old_reply = request()
@@ -306,16 +290,6 @@ else
 		check(has(30, ordinary) and not has(20, ordinary) and not has(21, service),
 			"server map switch displays only the new map's facts and discards a late reply from the previous map")
 	end
-
-	as_authority()
-	local warfare_squad = make_squad(50, 51, map)
-	make_npc(51, map)
-	warfare_squad.registered_with_warfare = true
-	warfare_squad:show()
-	check(has(50, "warfare_bandit_spot") and not has(50, ordinary), "Warfare retains its own show rules and shared style")
-	warfare_options.options.hide_unfriendly_squads = true
-	warfare_squad:show()
-	check(not has(50, "warfare_bandit_spot"), "Warfare still honors hide-unfriendly")
 
 	as_player()
 	actor.pda = pda

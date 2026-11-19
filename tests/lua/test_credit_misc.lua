@@ -185,41 +185,15 @@ local function misc(which, m, actor, a, b, away, event, tick)
 	loot(921)
 	corpse.iterate_ruck = corpse.iterate_inventory
 
-	local notices, spots = {}, {}
-	alq_core = { courier_packages = {} }
-	local parcel = spawn("package", vec3(0, 0, 0), 500, { id = 930 })
-	local alq = fixture("alq_player", [[
-		local function notice_package(cid, info)
-			if info.holder == cid and info.spot then return end
-			info.holder, info.spot = cid, true
-			spot(cid)
-			if not info.noticed then info.noticed = true; news(cid) end
-		end
-		local function check_holders()
-			for id, info in pairs(alq_core.courier_packages) do
-				local cid = alife_object(id).parent_id
-				if cid ~= info.holder then notice_package(cid, info) end
-			end
-		end
-		local function actor_on_update() check_holders() end
-		local function actor_on_item_take(obj) notice_package(0, alq_core.courier_packages[obj:id()]) end
-		function on_game_start()
-			RegisterScriptCallback("actor_on_update", actor_on_update)
-			RegisterScriptCallback("actor_on_item_take", actor_on_item_take)
-		end
-	]], { news = function(cid) notices[#notices + 1] = cid end, spot = function(cid) spots[#spots + 1] = cid end })
 	local adapter = io.open("gamedata/scripts/coop_credit_misc.script", "r")
 	if adapter then
 		adapter:close()
 		load_script("coop_credit_misc").on_game_start()
 	end
-	alq.on_game_start()
 	if which == "none" then
 		pda.discover_spots() medkit.broadcast(npc) nimbleclearinventory.release_itms()
-		alq_core.courier_packages[930] = { client_id = 910 }
-		tick() parcel.parent_id = 501 tick()
-		check(stock_scans == 1 and stock_medkit == 1 and cleared_stock == 1 and #notices == 1,
-			"SP delegates PDA, medkit, Nimble and ALQ to stock")
+		check(stock_scans == 1 and stock_medkit == 1 and cleared_stock == 1,
+			"SP delegates PDA, medkit and Nimble to the original functions")
 		return
 	end
 
@@ -249,18 +223,6 @@ local function misc(which, m, actor, a, b, away, event, tick)
 				"PDA map confirms the nearby player only")
 		end
 		check(coop_mods_pdata.owns("coop_credit_pda_visits"), "PDA personal visits travel with pdata")
-	end
-
-	if which ~= "srv_map" then
-		alq_core.courier_packages[930] = { client_id = 910, noticed = true, holder = 500, spot = true }
-		tick()
-		parcel.parent_id = 501 tick()
-		parcel.parent_id = 500 tick()
-		check(#notices == 1 and notices[1] == 501 and #spots == 2,
-			"ALQ legacy notice covers the saved holder and the new holder gets one explanation")
-		alq_core.courier_packages[930] = { client_id = 910 }
-		tick() parcel.parent_id = 501 tick() parcel.parent_id = 500 tick()
-		check(#notices == 3 and notices[2] == 500 and notices[3] == 501, "ALQ a fresh parcel gives one notice each after repeat transfers")
 	end
 
 	if which == "hostplay" or which == "srv_map" then

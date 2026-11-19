@@ -121,35 +121,6 @@ local function install_pda()
 	end)
 end
 
-local function install_alq()
-	local mod = C().mod("alq_player")
-	local update = C().find_local(mod, "actor_on_update")
-	local holders = C().upvalue(update, "check_holders")
-	local notice, holder, index = C().upvalue(holders, "notice_package")
-	if type(notice) ~= "function" then return end
-	-- Both stock pickup and holder polling close over this same local function.
-	local adapter = { notice_package = notice }
-	C().wrap(adapter, "notice_package", "g96.alq.notice_package", function(orig)
-		return function(cid, info)
-			if not C().active() then return orig(cid, info) end
-			if not coop_mode.decides_world() or object_id(cid) == nil then return end
-			local peer = C().peer_of(C().lid(cid))
-			if not (peer and coop_mode.seat_plays(peer)) then return end
-			if type(info.coop_notified_cids) ~= "table" then
-				info.coop_notified_cids = {}
-				if info.noticed and object_id(info.holder) then info.coop_notified_cids[tostring(info.holder)] = true end
-			end
-			local key, legacy = tostring(cid), info.noticed
-			info.noticed = info.coop_notified_cids[key] == true
-			local ok, err = pcall(orig, cid, info)
-			if ok and info.noticed then info.coop_notified_cids[key] = true end
-			info.noticed = legacy or info.noticed
-			if not ok then error(err, 0) end
-		end
-	end)
-	debug.setupvalue(holder, index, adapter.notice_package)
-end
-
 local function bounded_text(v, maximum)
 	return type(v) == "string" and #v > 0 and #v <= maximum
 end
@@ -224,7 +195,7 @@ end
 function on_game_start()
 	if not api or installed then return end
 	installed = true
-	for _, step in ipairs({ { "pda", install_pda }, { "alq", install_alq },
+	for _, step in ipairs({ { "pda", install_pda },
 		{ "medkit", install_medkit }, { "nimble", install_nimble } }) do
 		local ok, err = pcall(step[2])
 		if not ok then printf("! [coop_credit_misc] %s failed: %s", step[1], tostring(err)) end

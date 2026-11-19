@@ -1,4 +1,4 @@
--- Dev 57 G1-4. Real ALQ functions and PBA closure slices; no live-game reads.
+-- Dev 57 G1-4. Real PBA closure slices; no live-game reads.
 MODE = "client"
 dofile("tests/lua/support/stubs_mods.lua")
 local function source(path)
@@ -61,8 +61,6 @@ actor.object = function(self, ...)
 	local o = actor_object(self, ...)
 	return o and get_object_by_id(o:id())
 end
-actor.active_item = function() return nil end
-actor.money = function() return 10000 end
 actor.get_current_outfit_protection = function() return 0 end
 local pba_src = source("temp/review/corpus/merged/perk_based_artefacts.script")
 local pba = module("perk_based_artefacts", [[
@@ -119,40 +117,6 @@ local function binder()
 	local b = setmetatable({ object = actor }, { __index = bind_stalker.actor_binder })
 	db.actor_binder = b
 	return b
-end
-local squad = { id = 20, player_id = "stalker", commander_id = function() return 21 end,
-	npc_count = function() return 1 end }
-local _, npc = spawn("stalker", vec3(0, 0, 0), nil, { id = 21 })
-local quest
-function get_object_squad() return squad end
-mob_trade = { GetTalkingNpc = function() return npc end }
-dialogs = { who_is_npc = function() return npc end }
-local goodwill = { [0] = -2000, [500] = 2000, [600] = -2000 }
-local published_reply, requested_action
-coop_compat_alq = {
-	is_client = function() return false end,
-	goodwill_of = function(cid) return goodwill[cid] or 0 end,
-	faction_of = function(cid) return cid == 500 and "stalker" or "bandit" end,
-	npc_info = function() return published_reply end,
-	request_dialog = function(act) requested_action = act end,
-}
-alq_core = { get_quest = function() return quest end, quests = {}, courier_packages = {}, QT_DELIVERY = "delivery",
-	is_at_target = function() return false end, package_in_hands = function() return true end }
-local refuse_chance = 0
-alq_mcm = { get_config = function(k)
-	return k == "enabled" and true or k == "join_chance" and 50 or k == "refuse_chance" and refuse_chance or 0
-end }
-local ap = module("alq_player", source("temp/review/corpus/merged/alq_player.script"))
-local ad = module("alq_dialogs", source("temp/review/corpus/merged/alq_dialogs.script"))
-local real_random = math.random
-math.random = function(a, b) return b and a or 50 end
-local function new_quest(t)
-	quest = t or { type = "delivery", target_id = 32, package_id = 33 }
-	alq_core.quests[20] = quest
-	return quest
-end
-local function draw_for(roll, price)
-	math.random = function(a, b) return b and price or (a == 100 and roll or 1) end
 end
 load_script("coop_main").on_game_start()
 load_script("coop_mods_core").on_game_start()
@@ -232,79 +196,6 @@ local function player_scenario(mode, other_map)
 	check(load_var(actor, timers[1]) == nil and load_var(actor, timers[2]) == clock + 7 * 24 * 3600
 		and load_var(actor, timers[3]) == nil, prefix .. "the three loaded duration values are bounded and type-checked")
 	clock = 9000
-	-- Exercise the decision functions directly on the map; the real transport
-	-- reachability check below uses the corpus's separate world and map roles.
-	MODE = "host"
-	mirror = false
-	player_actor = mode == "hostplay"
-	coop.is_map_server = function() return mode ~= "hostplay" end
-	local q = new_quest({ type = "patrol", target_id = 32 })
-	local before = ap.join_decision(squad, q, 500)
-	check(before == true and ap.join_decision(squad, q, 0) == false,
-		prefix .. "m18:4 join answers use each character's goodwill and faction")
-	q = new_quest({ type = "patrol", target_id = 32, join = false, sell = true, price = 2300, trust = false, rob = true })
-	check(ap.join_decision(squad, q, 500) == true and ap.join_decision(squad, q, 0) == false,
-		prefix .. "m18:4 old scalar decisions migrate to cid 0 only")
-	q = new_quest()
-	ad.host_snapshot(npc, 500)
-	check(q.join == nil and q.sell == nil and q.trust == nil and q.refuse == nil
-		and q.coop_actor_decisions == nil, prefix .. "m18:4 proximity snapshot commits no decisions")
-	ad.host_action("heard", npc, 500)
-	local rich = ad.host_snapshot(npc, 500)
-	ad.host_action("heard", npc, 600)
-	local poor = ad.host_snapshot(npc, 600)
-	check(rich.sell == true and rich.trust == true and poor.sell == false and poor.trust == false,
-		prefix .. "m18:4 courier sell and trust decisions are per character")
-	check(q.coop_actor_decisions and q.coop_actor_decisions[500] and q.coop_actor_decisions[600],
-		prefix .. "m18:4 decisions live in saved quest keyed by cid")
-	goodwill[600] = 4000
-	poor = ad.host_snapshot(npc, 600)
-	check(poor.sell == false and poor.trust == false,
-		prefix .. "m18:4 a committed refusal remains false after goodwill changes")
-	goodwill[600] = -2000
-	q = new_quest({ type = "patrol", target_id = 32, join = false, sell = false, trust = false })
-	ad.host_snapshot(npc, 500)
-	check(q.join == false and q.sell == false and q.trust == false,
-		prefix .. "m18:4 read-only snapshot preserves legacy false fields")
-	q = new_quest()
-	draw_for(15, 15)
-	local offer = ad.host_snapshot(npc, 500)
-	draw_for(99, 35)
-	local republished = ad.host_snapshot(npc, 500)
-	local paid
-	coop_compat_alq.money_of = function() return 10000 end
-	coop_compat_alq.give_money = function(_, amount) paid = -amount end
-	local take = ap.take_package
-	ap.take_package = function() return true end
-	ad.host_action("buy", npc, 500)
-	ap.take_package = take
-	check(offer.sell and republished.sell and republished.price == offer.price and paid == offer.price,
-		prefix .. "m18:4 repeated snapshots and honest purchase retain the offered answer and price")
-	q = new_quest()
-	draw_for(50, 15)
-	local first_offer = ad.host_snapshot(npc, 500)
-	goodwill[500] = -2000
-	local updated_offer = ad.host_snapshot(npc, 500)
-	check(first_offer.sell and not updated_offer.sell and not q.coop_actor_decisions,
-		prefix .. "m18:4 proximity does not fix decisions before a change in goodwill")
-	goodwill[500] = 2000
-	math.random = function(a, b) return b and a or 50 end
-	q = new_quest()
-	refuse_chance = 100
-	local refusal = ad.host_snapshot(npc, 500)
-	coop_compat_alq.is_client = function() return true end
-	published_reply, requested_action = refusal, nil
-	MODE, mirror, player_actor = "client", true, true
-	ad.reply_text()
-	MODE, mirror, player_actor = "host", false, mode == "hostplay"
-	coop_compat_alq.is_client = function() return false end
-	if requested_action then ad.host_action(requested_action, npc, 500) end
-	check(not refusal.told and requested_action == "heard" and q.coop_actor_decisions and q.coop_actor_decisions[500].refuse > 0,
-		prefix .. "m18:4 hearing a refusal commits it for the speaking character")
-	refuse_chance = 0
-	published_reply = nil
-	MODE, mirror, player_actor = "client", true, true
-	coop.is_map_server = function() return false end
 	flags.lucifer_active = true
 	local arts = pba.iterate_belt(actor)
 	check(arts.af_lucifer == nil, prefix .. "m08:2 foreign Lucifer flag creates no personal artefact")
@@ -457,26 +348,8 @@ if selected.srv_world then
 	modes.install(coop_mode, "srv_world")
 	coop.is_map_server = function() return false end
 	coop.is_dedicated = function() return true end
-	db.actor = nil
-	local q = new_quest({ type = "patrol", target_id = 32 })
-	check(ap.join_decision(squad, q, 500) == true and ap.join_decision(squad, q, 600) == false,
-		"srv_world: ALQ decision path needs no local actor or map")
-	db.actor = actor
 	check(pba.iterate_belt(actor).af_lucifer == nil, "srv_world: the ghost actor ignores the shared Lucifer flag")
 	coop.is_dedicated = function() return false end
-end
-
-if selected.hostplay then
-	MODE, mirror = "host", false
-	player_actor = true
-	modes.install(coop_mode, "hostplay")
-	goodwill[0] = 4000
-	local q = new_quest()
-	ad.reply_text()
-	check(ad.pre_sell_ok() and ad.pre_can_pay(), "hostplay own dialog: personal price is visible to payment precondition")
-	local refusal = new_quest({ type = "patrol", target_id = 32, join = false })
-	ap.join_decision(squad, refusal, 500)
-	check(ap.join_decision(squad, refusal, 0) == false, "hostplay own dialog: old false survives another character's migration")
 end
 
 if selected.none then
@@ -486,57 +359,10 @@ if selected.none then
 	local b = binder()
 	b:load_state({ foreign_icon = "sp_base", foreign_pstor = { [timers[1]] = 12345 } })
 	first(b)
-	local q = new_quest({ type = "patrol", join = true })
 	check(load_var(actor, timers[1]) == 12345 and b.character_icon == "sp_base",
 		"none: stock timers and portrait remain unchanged")
-	check(ap.join_decision(squad, q, 600) == true and q.coop_actor_decisions == nil,
-		"none: original single-player ALQ scalar decision remains unchanged")
 	local arts = pba.iterate_belt(actor)
 	check(arts.af_lucifer ~= nil, "none: original single-player Lucifer flag remains unchanged")
 end
 
--- Run the actual merged adapter to distinguish decision tests from route reachability.
-local function alq_route(role)
-	local saved_compat, saved_sync, saved_objects = coop_compat_alq, coop.sync, OBJ
-	MODE = role == "srv_map" and "client" or "host"
-	SELF = role == "srv_map" and 257 or 0
-	coop.is_map_server = function() return role == "srv_map" end
-	coop.is_dedicated = function() return role == "srv_world" end
-	modes.install(coop_mode, role)
-	OBJ = {}
-	if role ~= "srv_world" then
-		spawn("player", vec3(0, 0, 0), nil, { id = 500, kind = "stalker" })
-		npc._kind = "stalker"
-		OBJ[npc:id()] = npc
-	end
-	local handler, published = nil, 0
-	coop.sync = {
-		handler = function(name, f) if name == "alq.dlg" then handler = f end return true end,
-		keys = function() return {} end,
-		set = function() published = published + 1; return true end,
-		on = function() return true end,
-	}
-	local compat = module("coop_compat_alq", source("temp/review/corpus/merged/coop_compat_alq.script"))
-	local stock_snapshot = ad.host_snapshot
-	local snapshots = 0
-	ad.host_snapshot = function() snapshots = snapshots + 1; return { lead = true } end
-	local resend = ap.resend_spots
-	ap.resend_spots = function() end
-	compat.on_game_start()
-	local update = assert(coop_mods_core.find_local(compat, "actor_on_update"))
-	update()
-	if role == "hostplay" then
-		check(handler and published > 0 and snapshots > 0, "hostplay: real ALQ route publishes local NPC snapshots")
-	elseif role == "srv_map" then
-		check(not handler and published == 0 and snapshots == 0, "srv_map: merged ALQ route never reaches its local NPCs")
-	else
-		check(handler and published == 0 and snapshots == 0, "srv_world: merged ALQ route has no player map to publish from")
-	end
-	coop_compat_alq, coop.sync, OBJ = saved_compat, saved_sync, saved_objects
-	ad.host_snapshot, ap.resend_spots = stock_snapshot, resend
-end
-for _, role in ipairs({ "hostplay", "srv_world", "srv_map" }) do
-	if selected[role] then alq_route(role) end
-end
-math.random = real_random
 done("PDATA ACTOR")

@@ -4,8 +4,8 @@ local modes = dofile("tests/lua/support/modes.lua")
 local mode = modes.names()[1]
 local hospital, forest = "l11_hospital", "l10_red_forest"
 local map, mirror, late = forest, false, false
-local info, lights, particles, sounds, casts = {}, {}, {}, {}, {}
-local pp, pp_removed, damage = 0, 0, 0
+local info, lights, sounds, casts = {}, {}, {}, {}
+local pp, pp_removed = 0, 0
 
 MODE = mode == "none" and "sp" or "host"
 coop.is_dedicated = function() return mode == "srv_world" and not mirror end
@@ -55,15 +55,6 @@ function script_light()
 	lights[#lights + 1] = light
 	return light
 end
-local function particle(path)
-	return { play_at_pos = function(self, pos) particles[#particles + 1] = { path = path, pos = pos } end }
-end
-particles_object = particle
-coop_world_fx = { play = function(path, pos)
-	local fx = particle(path)
-	fx:play_at_pos(pos)
-	return fx
-end }
 sound_object = setmetatable({ s3d = 2, looped = 4 }, {
 	__call = function(_, path)
 		return {
@@ -90,15 +81,6 @@ function spawn_pulse(pos)
 	l:update()
 	return "stock pulse"
 end]])
-fixture("alq_scheme", [[
-local function blast_accident(npc)
-	local fx = particles_object("anomaly2\\alq_blast")
-	fx:play_at_pos(npc:position())
-	npc:hit()
-end
-local function anomaly_accident(npc) blast_accident(npc) end
-act_alq_quest = { search = function(self) anomaly_accident(self.npc) end }
-]])
 fixture("task_status_functor", [[
 function special_steps_for_lostzone_tasks(task, id)
 	if id ~= "lttz_ms_hospital_assault" then return "other" end
@@ -123,7 +105,6 @@ local function object(id, kind)
 		id = function() return id end, name = function() return kind .. "_" .. id end,
 		section = function() return kind end, alive = function() return false end, _kind = kind,
 		position = function() return vec3(6, 3, 9) end,
-		hit = function() damage = damage + 1 end,
 		set_bone_visible = function(self, bone, visible) self[bone] = visible end,
 	}
 end
@@ -286,29 +267,12 @@ if mode == "hostplay" or mode == "srv_map" then
 end
 
 if mode == "hostplay" or mode == "srv_map" then
-	SENT = {}
-	local npc = object(700, "stalker")
-	alq_scheme.act_alq_quest.search({ npc = npc })
-	local alq = packets(1)
-	receive(alq, forest)
-	receive(alq, forest)
-	local old_mode = MODE
-	mirror, MODE = true, "client"
-	alq_scheme.act_alq_quest.search({ npc = npc })
-	mirror, MODE = false, old_mode
-	check(#alq == 1 and #particles == 2 and damage == 1 and particles[2].path == "anomaly2\\alq_blast",
-		"m18:7 ALQ relays one flash and only the authority applies damage")
-	check(mode == "hostplay" or #packets(2) == 0, "m18:7 map authority excludes the other map")
-	late, SENT = true, {}
-	tick(500)
-	check(#packets(3) == 0, "m18:7 join never replays the accident flash")
-	late = false
-
 	-- m31:9. The looter reports what the UI removed before the stock close releases the lock.
 	SENT = {}
 	local corpse = object(701, "monster")
 	objects[701] = corpse
 	coop_core_world.locks[701] = { peer = 1 }
+	local old_mode = MODE
 	mirror, MODE, SELF = true, "client", 1
 	loot(701, true)
 	mirror, MODE, SELF = false, old_mode, 0
@@ -437,13 +401,12 @@ elseif mode == "none" then
 	loot(701, false)
 	local b = mechanism(bridge, 801)
 	b:anim_forward()
-	alq_scheme.act_alq_quest.search({ npc = object(700, "stalker") })
 	local r = nta_utils.spawn_pulse(vec3(7, 6, 5))
 	info.kat_greh_sabaoth_psi = true
 	task_status_functor.special_steps_for_lostzone_tasks({}, "lttz_ms_hospital_assault")
 	check(#SENT == 0 and #casts == 0, "single player never emits a relay")
-	check(r == "stock pulse" and #lights == 1 and #sounds == 2 and damage == 1 and pp == 1 and corpse.tail == false,
-		"single player uses all five original effect paths unchanged")
+	check(r == "stock pulse" and #lights == 1 and #sounds == 2 and pp == 1 and corpse.tail == false,
+		"single player uses all four original effect paths unchanged")
 end
 
 done("world_fx_mods " .. mode)

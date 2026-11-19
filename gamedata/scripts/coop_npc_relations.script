@@ -9,7 +9,6 @@
 local C, P
 local policies, applied = {}, {}
 local installed = false
-local alq_cid
 local reset_seq, reset_seen, reset_order = 0, {}, {}
 local last_audience, next_update = nil, 0
 local REL = { enemy = -1000, friend = 1000, neutral = 0 }
@@ -131,7 +130,7 @@ local function remember(sid, cid, rel)
 	if cid == nil then policy.all, policy.chars = rel, {} else policy.chars[cid] = rel end
 end
 
--- Public ALQ hook, also usable by adapters that already know their exact audience.
+-- Apply a squad relation to one known character and persist the override.
 function set_squad_relation_for(squad, relation, cid)
 	if not (live() and owner() and squad and REL[relation] and real(cid)) then return end
 	local sid = C.hid(squad.id)
@@ -156,7 +155,6 @@ local function install_squad()
 			if not live() then return original(squad, relation, ...) end
 			if not owner() then return end
 			relation = relation or squad.relationship
-			if alq_cid ~= nil then return set_squad_relation_for(squad, relation, alq_cid) end
 			return set_audience(squad, relation)
 		end
 	end)
@@ -169,23 +167,6 @@ local function install_squad()
 			policies[sid], applied[sid] = nil, nil
 			C.publish("npcrel_policy", { s = sid, x = true })
 			return unpack(result)
-		end
-	end)
-end
-local function install_alq()
-	local m = C.mod("alq_player")
-	if not m then return end
-	C.wrap(m, "warn", "npcrel.alq_cid", function(original)
-		return function(squad, paid, cid, ...)
-			if not live() then return original(squad, paid, cid, ...) end
-			if not owner() then return end
-			cid = cid or 0
-			if not real(cid) then return end
-			local before = alq_cid; alq_cid = cid
-			local result = { pcall(original, squad, paid, cid, ...) }
-			alq_cid = before
-			if not result[1] then error(result[2], 0) end
-			return unpack(result, 2)
 		end
 	end)
 end
@@ -519,7 +500,7 @@ function on_game_start()
 	if installed then return end
 	C, P = coop_mods_core, coop_npc_players
 	installed = true
-	step("squad", install_squad); step("ALQ", install_alq); step("Skyfall", install_skyfall)
+	step("squad", install_squad); step("Skyfall", install_skyfall)
 	step("war reset", install_reset); step("Sin", install_sin); step("defense", install_defense)
 	step("events", function()
 		C.set_limit("npcrel_policy", 32, 16); C.on("npcrel_policy", wire_policy)

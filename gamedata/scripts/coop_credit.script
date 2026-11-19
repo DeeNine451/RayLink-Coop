@@ -38,7 +38,7 @@
 	coop_tasks.personal_character() run and name personal effects of a character; coop_reputation.responsible_character(obj)
 	names the player (or the companion's owner) responsible for an object; coop_reputation.for_actor(obj, fn, ...) runs fn
 	for him on the process that decides it.
-	Used by coop_reputation (G9-1: the heli box, Warfare's support money) and the units G9-2..G9-6.
+	Used by coop_reputation (G9-1: the heli box) and the units G9-2..G9-6.
 	Wire: no event of its own (the callers' verbs, each with its own prefix). Saved keys: none. Security: a payload from
 	the network is never logged or formatted here; ids are whole numbers 0..65534.
 --]]
