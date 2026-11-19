@@ -528,11 +528,13 @@ TEST(handshake_structs_roundtrip)
 	we.session_token = 0x1122334455667788ull;
 	we.host_nick = "Host";
 	we.max_players = 5;
+	we.mode = SessionMode::Coop; // protocol 33: a Welcome says the session's mode (the default says none and is refused)
 	Writer ww;
 	we.write(ww);
 	WelcomeMsg we2;
 	Reader rw(ww.ptr(), ww.size());
 	CHECK(we2.read(rw));
+	CHECK(we2.mode == SessionMode::Coop);
 	CHECK(we2.slot == 3 && we2.session_token == we.session_token && we2.host_nick == "Host" && we2.max_players == 5);
 
 	RejectMsg rj;
@@ -813,6 +815,7 @@ TEST(protocol_version_bumped_for_world_epoch)
 	we.host_nick = "Host";
 	we.max_players = 4;
 	we.world_epoch = 0xA1B2C3D4u;
+	we.mode = SessionMode::Coop; // protocol 33
 	Writer w;
 	we.write(w);
 	WelcomeMsg we2;
@@ -820,7 +823,7 @@ TEST(protocol_version_bumped_for_world_epoch)
 	CHECK(we2.read(r));
 	CHECK_EQ(we2.world_epoch, uint32_t(0xA1B2C3D4u));
 	CHECK_EQ(r.remaining(), size_t(0));
-	Reader cut(w.ptr(), w.size() - 1); // a Welcome of protocol 4 has no epoch
+	Reader cut(w.ptr(), w.size() - 1 - 1 - 1); // a Welcome of protocol 4 has no epoch (31 added the flags, 33 the mode)
 	WelcomeMsg we3;
 	CHECK(!we3.read(cut));
 }

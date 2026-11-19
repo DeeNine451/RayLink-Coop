@@ -1,0 +1,337 @@
+-- Stand only (tools/stand/phantoms_server.ps1 puts it into the stand's gamedata and takes it away). Build 57, step S3 of
+-- docs/plans/2026-11-18-two-modes.md, TZ 6.3: "the psy phantoms of a bloodsucker are unseen" in the SERVER mode. A psysucker
+-- that fights a player spawns m_phantom_bloodsucker (phantom_manager, coop_npc_phantoms): level.spawn_item with no game vertex,
+-- so a player's machine brings it online at its EntitySpawn or never. Before protocol 33 a player on a map server's level got
+-- that spawn twice from the world server (the map server's through the trunk and the world server's own copy) and left the
+-- phantom offline. Writes "[ph] <role> <step>: <result>".
+--   map server (coop.is_map_server()): 20 s after a player's character is on its level it makes a psysucker squad 20 m from him
+--     (the fight). When the fight gives no phantom in FIGHT_S, it spawns two by the very call the fight makes
+--     (phantom_manager.spawn_dynamic_phantom: "direct"). Every phantom it has goes into zz_phantoms.txt in the game's root, one
+--     line each; "end" follows END_S after the squad came, and the squad goes.
+--   ph = the client (-coop_probe ph): notes every phantom that is a live object here (its binder ran, or level.object_by_id
+--     finds it), reads the map server's list, and 15 s after its end writes "[ph] ph PASS: ..." when every phantom of the map
+--     server was a live object here and there was none more, else "[ph] ph FAIL: ...", then "[ph] ph done".
+-- Lessons of the stand (2026-11-18, coop_zz_squads.script): act only after coop.is_live(); a character only on a vertex of
+-- the AI map (level.vertex_id answers 4294967295 for "no vertex": search around the point).
+
+local ROLE = nil
+local NO_VERTEX = 4294967295
+local SQUAD = "simulation_psysucker"
+local PHANTOM = "m_phantom_bloodsucker" -- m_bloodsucker_e spawn_phantom (psysucker_* can_spawn_phantom = true)
+local WAIT_S, FIGHT_S, END_S, VERDICT_S, GIVE_UP_S = 20, 60, 90, 15, 360
+
+local function out(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("%s", "[ph] " .. tostring(ROLE) .. " " .. (ok and line or tostring(fmt)))
+end
+
+local function flush() pcall(function() get_console():execute("flush") end) end
+
+local function try(f, ...)
+	local ok, v = pcall(f, ...)
+	if ok then return v end
+	return nil
+end
+
+local function live()
+	local ok, yes = pcall(coop.is_live)
+	return ok and yes == true
+end
+
+local function file_path()
+	return getFS():update_path("$fs_root$", "zz_phantoms.txt")
+end
+
+local function is_phantom(obj)
+	local sec = obj and try(function() return obj:section() end)
+	return type(sec) == "string" and sec:find("^m_phantom") ~= nil, sec
+end
+
+-- A vertex of the AI map near (x, z) at height y: rings of growing radius around the point, nil when none.
+local function vertex_near(x, y, z, max_r)
+	for _, r in ipairs({ 0, 3, 6, 10, 15, 22, 30 }) do
+		if r > (max_r or 30) then break end
+		for k = 0, (r == 0 and 0 or 11) do
+			local a = k * math.pi / 6
+			local p = vector():set(x + math.cos(a) * r, y, z + math.sin(a) * r)
+			local id = try(level.vertex_id, p)
+			if id and id < NO_VERTEX then
+				return id, level.vertex_position(id)
+			end
+		end
+	end
+	return nil
+end
+
+local done = {}
+
+-- ---------------------------------------------------------------- map server
+
+local list = {} -- id -> { sec, x, y, z, how, at }
+local order = {}
+local direct_until = 0
+
+local function write_list()
+	local fh = io.open(file_path(), "w")
+	if not fh then return out("! cannot write %s", file_path()) end
+	for _, id in ipairs(order) do
+		local p = list[id]
+		fh:write(string.format("p %d %s %.1f %.1f %.1f %s\n", id, p.sec, p.x, p.y, p.z, p.how))
+	end
+	if done.ended then fh:write(string.format("end %d\n", #order)) end
+	fh:close()
+end
+
+local function player_here()
+	local ok, rows = pcall(coop.players)
+	if not ok or type(rows) ~= "table" then return nil end
+	for _, p in ipairs(rows) do
+		if not p.is_self and p.avatar_id then
+			local o = level.object_by_id(p.avatar_id)
+			if o then return p, o end
+		end
+	end
+	return nil
+end
+
+local function note(obj, how)
+	local yes, sec = is_phantom(obj)
+	local id = yes and try(function() return obj:id() end)
+	if not id or list[id] then return end
+	local pos = obj:position()
+	local _, avatar = player_here()
+	list[id] = { sec = sec, x = pos.x, y = pos.y, z = pos.z, how = time_global() < direct_until and "direct" or "fight", at = time_global() }
+	order[#order + 1] = id
+	out("phantom %d [%s] (%s, seen by %s) at %.1f %.1f %.1f, %.0f m from the player", id, sec, list[id].how, how, pos.x, pos.y,
+		pos.z, avatar and pos:distance_to(avatar:position()) or -1)
+	write_list()
+	flush()
+end
+
+local function scan()
+	for id = 1, 65534 do
+		local o = level.object_by_id(id)
+		if o and not list[id] and is_phantom(o) then note(o, "scan") end
+	end
+end
+
+local function make_squad(avatar)
+	local cp = avatar:position()
+	for k = 0, 11 do
+		local a = k * math.pi / 6
+		local lv, pos = vertex_near(cp.x + math.cos(a) * 20, cp.y, cp.z + math.sin(a) * 20, 10)
+		if lv and math.abs(pos.y - cp.y) < 15 then
+			local gv = level.vertex_game_vertex_id and try(level.vertex_game_vertex_id, lv) or avatar:game_vertex_id()
+			local se = alife_create(SQUAD, pos, lv, gv)
+			if not se then return out("! alife_create %s failed", SQUAD) end
+			se:create_npc(nil, pos, lv, gv)
+			local ids, sim = {}, alife()
+			for m in se:squad_members() do
+				local npc = m.object or (m.id and sim:object(m.id))
+				if npc then
+					pcall(function() SIMBOARD:setup_squad_and_group(npc) end)
+					pcall(SendScriptCallback, "squad_on_npc_creation", se, npc, nil)
+					ids[#ids + 1] = string.format("%d [%s]", m.id, try(function() return npc:section_name() end) or "?")
+				end
+			end
+			done.squad = se.id
+			out("squad %d [%s] at %.1f %.1f %.1f, %.0f m from the player: members %s", se.id, SQUAD, pos.x, pos.y, pos.z,
+				pos:distance_to(cp), table.concat(ids, ", "))
+			return
+		end
+	end
+	out("! no AI-map vertex 20 m from the player for the squad")
+end
+
+local function spawn_direct(avatar)
+	local pm = rawget(_G, "phantom_manager")
+	if not (pm and pm.spawn_dynamic_phantom) then return out("! no phantom_manager.spawn_dynamic_phantom") end
+	local cp = avatar:position()
+	direct_until = time_global() + 5000
+	for i = 1, 2 do
+		local a = i * math.pi * 0.8
+		local p = vector():set(cp.x + math.cos(a) * 12, cp.y + 1.5, cp.z + math.sin(a) * 12)
+		local ok, err = pcall(pm.spawn_dynamic_phantom, PHANTOM, p)
+		out("direct %d: %s at %.1f %.1f %.1f%s", i, PHANTOM, p.x, p.y, p.z, ok and "" or (" ! " .. tostring(err)))
+	end
+	flush()
+end
+
+local function ms_steps()
+	local now = time_global()
+	local _, avatar = player_here()
+	if not done.player_at then
+		if not avatar then return end
+		done.player_at = now
+		out("a player's character is on this level (%s): the steps start; the list is %s", tostring(level.name()), file_path())
+		write_list()
+		flush()
+		return
+	end
+	if now - (done.scan_at or 0) >= 1000 then
+		done.scan_at = now
+		scan()
+	end
+	if done.ended or not avatar then return end
+	if not done.squad_at then
+		if now - done.player_at < WAIT_S * 1000 then return end
+		done.squad_at = now
+		make_squad(avatar)
+		flush()
+		return
+	end
+	if not done.direct and now - done.squad_at >= FIGHT_S * 1000 then
+		done.direct = true
+		if #order == 0 then
+			out("the fight gave no phantom in %d s: two by the fight's own call", FIGHT_S)
+			spawn_direct(avatar)
+		else
+			out("the fight gave %d phantom(s) in %d s", #order, FIGHT_S)
+		end
+	end
+	if now - done.squad_at >= END_S * 1000 then
+		done.ended = true
+		if done.squad then
+			pcall(function()
+				local se = alife():object(done.squad)
+				if se then if rawget(_G, "alife_release") then alife_release(se) else alife():release(se, true) end end
+			end)
+		end
+		local fight, direct = 0, 0
+		for _, id in ipairs(order) do if list[id].how == "direct" then direct = direct + 1 else fight = fight + 1 end end
+		write_list()
+		out("end: %d phantom(s), %d by the fight, %d direct; the squad is gone", #order, fight, direct)
+		flush()
+	end
+end
+
+-- ---------------------------------------------------------------- client
+
+local seen = {} -- id -> { sec, how, at, d }
+local entity = {} -- id of the map server's list -> "offline" while it is an entity here and no live object
+
+local function saw(obj, how)
+	local yes, sec = is_phantom(obj)
+	local id = yes and try(function() return obj:id() end)
+	if not id or seen[id] then return end
+	local d = db.actor and obj:position():distance_to(db.actor:position()) or -1
+	seen[id] = { sec = sec, how = how, at = time_global(), d = d }
+	out("phantom %d [%s] is a live object here (%s), %.0f m from me", id, sec, how, d)
+	flush()
+end
+
+local function read_list()
+	local fh = io.open(file_path(), "r")
+	if not fh then return nil end
+	local ids, ended = {}, false
+	for line in fh:lines() do
+		local id, sec, how = line:match("^p (%d+) (%S+) %S+ %S+ %S+ (%a+)")
+		if id then ids[#ids + 1] = { id = tonumber(id), sec = sec, how = how } end
+		if line:find("^end ") then ended = true end
+	end
+	fh:close()
+	return ids, ended
+end
+
+local function verdict(ms_ids, why)
+	done.verdict = true
+	local n, live_here, offline, absent, extra = 0, 0, 0, 0, 0
+	local mine, missing = {}, {}
+	for _, p in ipairs(ms_ids or {}) do
+		n = n + 1
+		mine[p.id] = true
+		if seen[p.id] then
+			live_here = live_here + 1
+		else
+			if entity[p.id] then offline = offline + 1 else absent = absent + 1 end
+			missing[#missing + 1] = string.format("%d (%s, %s)", p.id, p.how, entity[p.id] and "an offline entity here" or "no entity here")
+		end
+	end
+	for id, s in pairs(seen) do
+		if not mine[id] then
+			extra = extra + 1
+			missing[#missing + 1] = string.format("%d [%s] here, not the map server's", id, s.sec)
+		end
+	end
+	out("the map server had %d phantom(s); live objects here: %d, offline entities: %d, absent: %d, more than the map server: %d%s",
+		n, live_here, offline, absent, extra, why and (" (" .. why .. ")") or "")
+	if #missing > 0 then out("  %s", table.concat(missing, "; ")) end
+	if n > 0 and live_here == n and extra == 0 then
+		out("PASS: every phantom of the map server was seen here, none doubled")
+	else
+		out("FAIL: %s", n == 0 and "the map server had no phantom" or (extra > 0 and "a phantom here the map server did not have" or "a phantom of the map server was never a live object here"))
+	end
+	out("done")
+	flush()
+end
+
+local function client_steps()
+	local now = time_global()
+	if not done.t0 then
+		done.t0 = now
+		out("the session is live here (%s): watching for phantoms; the map server's list is %s", tostring(level.name()), file_path())
+		flush()
+	end
+	if done.verdict then return end
+	if now - (done.read_at or 0) < 300 then return end
+	done.read_at = now
+	local ids, ended = read_list()
+	local sim = alife()
+	for _, p in ipairs(ids or {}) do
+		if not seen[p.id] then
+			local o = level.object_by_id(p.id)
+			if o then
+				saw(o, "found")
+			else
+				local se = sim and sim:object(p.id)
+				if se and not entity[p.id] then
+					entity[p.id] = true
+					out("phantom %d of the map server is an entity here, %s, no live object yet", p.id, se.online and "online" or "offline")
+					flush()
+				end
+			end
+		end
+	end
+	if ended and not done.end_at then
+		done.end_at = now
+		out("the map server's list is over: %d phantom(s)", #(ids or {}))
+	end
+	if done.end_at and now - done.end_at >= VERDICT_S * 1000 then return verdict(ids) end
+	if now - done.t0 >= GIVE_UP_S * 1000 then return verdict(ids, "no end of the map server's list in " .. GIVE_UP_S .. " s") end
+end
+
+-- ---------------------------------------------------------------- both
+
+local function wrap_binder()
+	local pm = rawget(_G, "phantom_manager") or try(function() return phantom_manager end)
+	if not (pm and type(pm.bind_phantom) == "function") then return out("! no phantom_manager.bind_phantom to watch") end
+	local orig = pm.bind_phantom
+	pm.bind_phantom = function(obj, ...)
+		local res = { pcall(orig, obj, ...) }
+		pcall(function()
+			if ROLE == "ms" then note(obj, "binder") elseif ROLE == "ph" then saw(obj, "binder") end
+		end)
+		if not res[1] then error(res[2], 0) end
+		return unpack(res, 2)
+	end
+	out("the binder of dynamic phantoms is watched")
+end
+
+local function actor_on_update()
+	if not (db.actor and live()) then return end
+	if ROLE == "ms" then ms_steps() else client_steps() end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	ROLE = ok and type(line) == "string" and line:match("%-coop_probe%s+(%w+)") or nil
+	if ROLE ~= "ph" then
+		local yes = false
+		pcall(function() yes = coop.is_map_server() == true end)
+		if not yes and not (ok and type(line) == "string" and line:find("%-coop_mapserver")) then return end
+		ROLE = "ms"
+	end
+	pcall(wrap_binder)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	printf("%s", "[ph] " .. ROLE .. " armed")
+end

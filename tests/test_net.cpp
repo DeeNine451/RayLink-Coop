@@ -5,6 +5,7 @@
 #include <enet/enet.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <iterator>
 #include <map>
@@ -116,6 +117,7 @@ struct RawHost
 	ENetHost* host = nullptr;
 	bool answer_hello = true;
 	bool got_hello = false;
+	size_t welcome_cut = 0; // bytes left off the end of the Welcome: 1 = the layout of protocol 32 (no mode byte)
 
 	RawHost() { enet_initialize(); }
 	~RawHost()
@@ -153,10 +155,11 @@ struct RawHost
 					w.session_token = 7;
 					w.host_nick = "Fake";
 					w.max_players = 4;
+					w.mode = SessionMode::Coop; // protocol 33
 					Writer body;
 					w.write(body);
 					std::vector<uint8_t> buf = {uint8_t(Msg::Welcome), 0};
-					buf.insert(buf.end(), body.data().begin(), body.data().end());
+					buf.insert(buf.end(), body.data().begin(), body.data().end() - std::ptrdiff_t(welcome_cut));
 					enet_peer_send(ev.peer, 0, enet_packet_create(buf.data(), buf.size(), ENET_PACKET_FLAG_RELIABLE));
 					enet_host_flush(host);
 				}
@@ -1456,4 +1459,212 @@ TEST(stall_without_hold_or_after_it_expired_drops_the_peer)
 	CHECK(took >= 700 + 1000);
 	CHECK(host.left[0].second.find("lost") != std::string::npos);
 	CHECK(host.s.peers().empty());
+}
+
+// ============================================================================ protocol 33: the session's mode in the Welcome
+// docs/plans/2026-11-18-two-modes.md S3: the host says once, in its Welcome, which mode its session is (SessionMode); a client
+// keeps it with the host's row (Session::session_mode) from the Welcome on, so that S4's start_client installs the mode of its
+// process before the first game handler. Co-op: the host plays. Server: a world server (its seat plays no character) and the
+// map servers it bridges.
+
+namespace
+{
+std::array<uint8_t, kHelloTokenSize> bridge_token()
+{
+	std::array<uint8_t, kHelloTokenSize> out{};
+	for (size_t i = 0; i < out.size(); ++i)
+		out[i] = uint8_t(0x40 + 5 * i);
+	return out;
+}
+} // namespace
+
+TEST(mode_coop_host_says_coop_in_its_welcome)
+{
+	Node host("Boss", 37951), cl("Alice", 37951);
+	host.cfg.mode = SessionMode::Coop; // the co-op start sets it with the seat (coop_manager start_host)
+	CHECK(host.s.session_mode() == SessionMode::None); // no session yet
+	CHECK(cl.s.session_mode() == SessionMode::None);
+	start_and_join(host, {&cl}, 37951);
+	CHECK(host.s.session_mode() == SessionMode::Coop);
+	CHECK(cl.welcome.mode == SessionMode::Coop);
+	CHECK(cl.welcome.flags & WelcomeMsg::HostSeatPlays);
+	CHECK(cl.s.session_mode() == SessionMode::Coop);
+	CHECK(cl.logged("session coop"));
+}
+
+TEST(mode_world_server_says_server_in_its_welcome)
+{
+	Node host("server", 37952), cl("Alice", 37952);
+	host.cfg.host_plays = false; // -coop_dedicated: its own seat plays no character
+	host.cfg.mode = SessionMode::Server;
+	start_and_join(host, {&cl}, 37952);
+	CHECK(host.s.session_mode() == SessionMode::Server);
+	CHECK(cl.welcome.mode == SessionMode::Server);
+	CHECK(!(cl.welcome.flags & WelcomeMsg::HostSeatPlays));
+	CHECK(cl.s.session_mode() == SessionMode::Server);
+	CHECK(cl.logged("session server"));
+}
+
+TEST(mode_map_server_gets_server_from_its_world_server)
+{
+	// A map server knows its own kind from its command line; the Welcome of its world server (to a bridge, Hello role
+	// MapServer) says the session's mode as to any player. The host of its level (no transport) answers its world's mode.
+	Node world("server", 37953), ms("ms", 37953);
+	world.cfg.host_plays = false;
+	world.cfg.mode = SessionMode::Server;
+	std::string err;
+	REQUIRE(world.host(&err));
+	world.s.issue_bridge(2, bridge_token());
+	ms.cfg.hello_role = kHelloRoleMapServer;
+	ms.cfg.hello_token = bridge_token();
+	REQUIRE(ms.connect(37953, &err));
+	REQUIRE(t::pump_until({&world.s, &ms.s}, 5000, [&] { return ms.welcomed && ms.s.is_active(); }));
+	CHECK(ms.welcome.mode == SessionMode::Server);
+	CHECK(ms.s.session_mode() == SessionMode::Server);
+	CHECK(world.s.bridges().size() == 1);
+	Session level;
+	REQUIRE(level.host_virtual(ms.cfg, ms.s, &err));
+	CHECK(level.session_mode() == SessionMode::Server); // its world's, whatever its own config says (mode None here)
+	level.shutdown("done");
+	CHECK(level.session_mode() == SessionMode::None);
+}
+
+TEST(mode_is_known_before_the_first_game_handler)
+{
+	// The host sends a game message at once, from its on_peer_joined (the update that sent the Welcome): on the client the
+	// Welcome's callback runs first and the mode is known in both.
+	Node host("server", 37954), cl("Alice", 37954);
+	host.cfg.host_plays = false;
+	host.cfg.mode = SessionMode::Server;
+	host.s.on_peer_joined = [&host](const PeerInfo& p) {
+		Writer w;
+		w.u32(0x33);
+		host.s.send(p.id, Lane::Reliable, Msg::ScriptEvent, w);
+	};
+	std::vector<std::string> order;
+	SessionMode in_welcome = SessionMode::None, in_handler = SessionMode::None;
+	cl.s.on_welcome = [&](const WelcomeMsg& w) {
+		cl.welcomed = true;
+		cl.welcome = w;
+		order.push_back("welcome");
+		in_welcome = cl.s.session_mode();
+	};
+	cl.s.on(Msg::ScriptEvent, [&](PeerId, Reader& r) {
+		order.push_back(r.u32() == 0x33 ? "handler" : "handler?");
+		in_handler = cl.s.session_mode();
+	});
+	std::string err;
+	REQUIRE(host.host(&err));
+	REQUIRE(cl.connect(37954, &err));
+	REQUIRE(t::pump_until({&host.s, &cl.s}, 5000, [&] { return order.size() >= 2; }));
+	REQUIRE(order.size() == 2);
+	CHECK_EQ(order[0], std::string("welcome"));
+	CHECK_EQ(order[1], std::string("handler"));
+	CHECK(in_welcome == SessionMode::Server);
+	CHECK(in_handler == SessionMode::Server);
+}
+
+TEST(mode_protocol_32_client_is_refused)
+{
+	Node host("Boss", 37955);
+	host.cfg.mode = SessionMode::Coop;
+	std::string err;
+	REQUIRE(host.host(&err));
+	RawPeer raw;
+	REQUIRE(raw_join(raw, host, 37955, 32));
+	const RawPeer::Message* rj = raw.find(Msg::Reject);
+	REQUIRE(rj != nullptr);
+	RejectMsg rm;
+	Reader r(rj->payload.data(), rj->payload.size());
+	REQUIRE(rm.read(r));
+	CHECK(rm.reason == RejectReason::ProtocolMismatch);
+	CHECK(rm.text.find("version 33") != std::string::npos);
+	CHECK(rm.text.find("version 32") != std::string::npos);
+	CHECK(raw.find(Msg::Welcome) == nullptr);
+	CHECK(host.s.peers().empty());
+}
+
+TEST(mode_protocol_32_host_welcome_is_refused)
+{
+	// A host of protocol 32 never gets that far (it refuses the 33 Hello), but its Welcome, without the mode, is no Welcome.
+	RawHost fake;
+	fake.welcome_cut = 1;
+	REQUIRE(fake.listen(37956));
+	Node cl("Alice", 37956);
+	std::string err;
+	REQUIRE(cl.connect(37956, &err));
+	REQUIRE(t::pump_until({&cl.s}, 5000, [&] {
+		fake.service();
+		return cl.disconnected;
+	}));
+	CHECK(fake.got_hello);
+	CHECK(!cl.welcomed);
+	CHECK(cl.disc_reason.find("malformed Welcome") != std::string::npos);
+	CHECK(cl.s.session_mode() == SessionMode::None);
+	CHECK(cl.s.role() == Role::None);
+}
+
+TEST(mode_none_in_the_config_follows_the_seat)
+{
+	// A host whose config names no mode (the library's own tests) says what its seat says.
+	for (const bool plays : {true, false})
+	{
+		const uint16_t port = plays ? 37957 : 37958;
+		Node host("Boss", port), cl("Alice", port);
+		host.cfg.host_plays = plays;
+		CHECK(host.cfg.mode == SessionMode::None);
+		start_and_join(host, {&cl}, port);
+		const SessionMode want = plays ? SessionMode::Coop : SessionMode::Server;
+		CHECK(host.s.session_mode() == want);
+		CHECK(cl.welcome.mode == want);
+		CHECK(cl.s.session_mode() == want);
+	}
+}
+
+TEST(mode_that_contradicts_the_seat_is_refused_by_host)
+{
+	struct Case
+	{
+		SessionMode mode;
+		bool plays;
+	};
+	for (const Case c : {Case{SessionMode::Coop, false}, Case{SessionMode::Server, true}, Case{static_cast<SessionMode>(9), true}})
+	{
+		Node host("Boss", 37959);
+		host.cfg.mode = c.mode;
+		host.cfg.host_plays = c.plays;
+		std::string err;
+		CHECK(!host.host(&err));
+		CHECK(err.find("mode") != std::string::npos);
+		CHECK(host.s.role() == Role::None);
+		CHECK(host.s.session_mode() == SessionMode::None);
+	}
+	// the pair that agrees hosts on the same port
+	Node host("server", 37959);
+	host.cfg.mode = SessionMode::Server;
+	host.cfg.host_plays = false;
+	std::string err;
+	CHECK(host.host(&err));
+	CHECK(host.s.session_mode() == SessionMode::Server);
+}
+
+TEST(mode_is_forgotten_when_the_session_ends)
+{
+	// A player's process may host, leave and join a server in one run: a session's mode goes with it.
+	Node coop_host("Boss", 37960), server("server", 37961), cl("Alice", 37960);
+	coop_host.cfg.mode = SessionMode::Coop;
+	server.cfg.host_plays = false;
+	server.cfg.mode = SessionMode::Server;
+	start_and_join(coop_host, {&cl}, 37960);
+	CHECK(cl.s.session_mode() == SessionMode::Coop);
+	cl.s.shutdown("leaving");
+	CHECK(cl.s.session_mode() == SessionMode::None);
+	coop_host.s.shutdown("done");
+	CHECK(coop_host.s.session_mode() == SessionMode::None);
+	std::string err;
+	REQUIRE(server.host(&err));
+	cl.welcomed = false;
+	REQUIRE(cl.connect(37961, &err));
+	REQUIRE(t::pump_until({&server.s, &cl.s}, 5000, [&] { return cl.welcomed && cl.s.is_active(); }));
+	CHECK(cl.s.session_mode() == SessionMode::Server);
 }

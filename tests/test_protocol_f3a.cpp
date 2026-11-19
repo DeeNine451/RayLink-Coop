@@ -170,7 +170,7 @@ TEST(protocol_f3a_version_is_11)
 {
 	// 11: the F3a messages, Hello carries a role and a token, PlayerState carries the vertices, TransitionState a flags
 	// byte, WeatherSync a weather set; a protocol 10 peer is refused at the handshake.
-	CHECK_EQ(kProtocolVersion, 32u); // 30: atomic weapon replacement and initial spawn metadata
+	CHECK_EQ(kProtocolVersion, 33u); // 30: atomic weapon replacement and initial spawn metadata; 33: the Welcome's mode
 }
 
 TEST(protocol_f3a_a_trip_round_trip)
@@ -214,7 +214,9 @@ TEST(protocol_f3a_body_facts_round_trip)
 	CHECK_EQ(b.source, levels::wire::kNoObject);
 	// Build 57 (owner 2026-11-18): the footing (the base whose ground he stands on, by the map server's geometry) follows, fixed
 	// size: u8 kind, u16 ref, 3 floats, u32 level vertex, u16 game vertex. A packet without it is short and fails.
-	CHECK_EQ(w.size(), size_t(5 + 21));
+	// Protocol 33 (step S3, A-S3P): u16 partner right after talking (kNoObject: none), so the head is 7 bytes.
+	CHECK_EQ(w.size(), size_t(7 + 21));
+	CHECK_EQ(int(w.data()[2] | (w.data()[3] << 8)), int(levels::wire::kNoObject)); // a's partner: nobody
 	CHECK_EQ(int(b.footing.kind), int(coop::checkpoint::base::kFootNone));
 	levels::wire::LevelBodyFacts f;
 	f.place = 1;
@@ -241,7 +243,7 @@ TEST(protocol_f3a_body_facts_round_trip)
 		Reader shortr(wf.data().data(), cut);
 		levels::wire::LevelBodyFacts h;
 		h.footing.kind = coop::checkpoint::base::kFootZone;
-		CHECK(!h.read(shortr)); // a build-56 tail (5 bytes) or any cut: refused, and nothing of it is kept
+		CHECK(!h.read(shortr)); // a build-56 tail (5 bytes), a 33 head (7) or any cut: refused, and nothing of it is kept
 		CHECK_EQ(int(h.footing.kind), int(coop::checkpoint::base::kFootNone));
 	}
 	// what the map server sent is read as it is; whether it names a base is footing_ok's and the world server's
