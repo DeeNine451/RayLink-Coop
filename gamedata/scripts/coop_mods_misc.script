@@ -144,11 +144,14 @@ local function install_helmet_prefs()
 	C().wrap(M, "toggle_helmet", "misc.helmet_hotkey", function(orig) return function(...)
 		if not C().active() then return orig(...) end
 		own_helmet()
+		local before = mod_local(M, "lastHelmet")
 		local current = db.actor and db.actor:item_in_slot(12)
 		local id = current and C().hid(current:id()) -- capture BEFORE the animation can move the item
 		local r = orig(...)
-		local selected = mod_local(M, "lastHelmet") -- reference comparison only; no userdata method
-		if current and rawequal(selected, current) then chosen, pending = id, false end
+		-- The mod's slot lookup can return a different userdata for the same item.
+		-- Detect the assignment by reference without dereferencing either saved value.
+		local selected = mod_local(M, "lastHelmet")
+		if id and selected and not rawequal(selected, before) then chosen, pending = id, false end
 		return r
 	end end)
 	local old = C().fn(M, "on_save_state")
@@ -274,6 +277,66 @@ local function install_prefs()
 	if n > 0 then installed[#installed + 1] = "prefs(" .. n .. " keys)" end
 end
 
+local function wheel_index(value, first, last)
+	return type(value) == "number" and value >= first and value <= last and value == math.floor(value)
+end
+
+local function wheel_entry(classes, entry)
+	if type(entry) ~= "table" or type(entry.class) ~= "string" or type(entry.section) ~= "string"
+		or type(entry.args) ~= "table" or entry.args[1] ~= entry.section then return end
+	local kind, id = entry.class, entry.id
+	local class = classes[kind]
+	if not class or (id ~= nil and not wheel_index(id, 0, 65534)) then return end
+
+	-- The wheel later unpacks these args into constructors and engine calls.
+	local args = { entry.section }
+	if class.is_obj then
+		local arg_id = entry.args[2]
+		if not wheel_index(arg_id, 0, 65534) or (id ~= nil and id ~= arg_id) then return end
+		id, args[2] = arg_id, arg_id
+	end
+	if kind == "QEquipWheelOption" then
+		local slot = entry.args[3]
+		-- Stock SCANNED_SLOTS spans 1..13; QEquip does not handle grenades.
+		if not wheel_index(slot, 1, 13) or slot == 4 then return end
+		args[3] = slot
+	elseif kind == "QGrenadeWheelOption" or kind == "QDetectorWheelOption" then
+		local slot = kind == "QGrenadeWheelOption" and 4 or 9
+		if entry.args[2] ~= slot then return end
+		args[2] = slot
+	end
+	return { class = kind, section = entry.section, id = id, args = args }, class.is_obj
+end
+
+local function wheel_load_data(manager, data)
+	if type(data) ~= "table" or type(data.tabs) ~= "table" then return nil end
+	local count, classes = manager.tab_count, manager.classes
+	-- Nine is the wheel's MCM maximum. Use the local count so GUI tabs and layout agree.
+	if not wheel_index(count, 1, 9) or type(classes) ~= "table" then return nil end
+	local tabs = {}
+	for i = 1, count do
+		local source = data.tabs[i]
+		local tab = { __sections = {}, __ids = {} }
+		tabs[i] = tab
+		if type(source) == "table" then
+			for _, data_entry in ipairs(source) do
+				local entry, by_id = wheel_entry(classes, data_entry)
+				if entry then
+					local index, key = tab.__sections, entry.section
+					if by_id then index, key = tab.__ids, entry.id end
+					if not index[key] then
+						index[key] = true
+						tab[#tab + 1] = entry
+					end
+				end
+			end
+		end
+	end
+	local selected = data.current_tab
+	if not wheel_index(selected, 1, count) or type(data.tabs[selected]) ~= "table" then selected = 1 end
+	return { tabs = tabs, current_tab = selected }
+end
+
 local function install_pdata()
 	local inspect = C().mod("grok_doom_weapons_inspect")
 	if inspect then
@@ -292,6 +355,13 @@ local function install_pdata()
 			local tm = wheel.TAB_MANAGER -- created by the mod's later on_game_start
 			if tm then return { tabs = tm.tabs, current_tab = tm.current_tab } end
 		end })
+		-- The callback is registered on the instance; it looks the class method up at load.
+		C().wrap(wheel.TabManager, "load_state", "misc.wheel_load", function(orig) return function(tm, m, ...)
+			if C().active() and coop_mode.is_player_mirror() and m.haru_qaw ~= nil then
+				m.haru_qaw = wheel_load_data(tm, m.haru_qaw)
+			end
+			return orig(tm, m, ...)
+		end end)
 		installed[#installed + 1] = "quick_action_wheel"
 	end
 	if C().mod("ish_kill_tracker") then
