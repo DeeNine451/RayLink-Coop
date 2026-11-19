@@ -76,12 +76,18 @@ local function reticles(module)
     P().register("z_3dss_reticle_profiles", { prime = { "z_3dss_reticle_profiles" } })
 end
 
+local function bonus_count(value)
+    -- The mod compares and decrements this count when a package is opened.
+    if type(value) == "number" and value >= 0 and value < 2^53 and value == math.floor(value) then return value end
+    return 0
+end
+
 local function rf(module)
-    P().register("tb_bonus_items", { get = function() return module.tb_bonus_items or 0 end })
-    after_restore("TB_RF_Receiver_Packages", function(m)
+    P().register("tb_bonus_items", { get = function() return bonus_count(module.tb_bonus_items) end })
+    after_restore("tb_rf_receiver_packages", function(m)
         -- The mod otherwise loads nil when its version flag is set, or keeps the
         -- previous character's variable when that flag is absent.
-        m.tb_bonus_items = m.tb_bonus_items or 0
+        m.tb_bonus_items = bonus_count(m.tb_bonus_items)
         module.tb_bonus_items = m.tb_bonus_items
     end)
 end
@@ -146,6 +152,8 @@ local function computers(module)
             local device = C().hid(id)
             if not object_id(device) then return nil end
             local trader = choices[device]
+            -- Older saves kept the owner's choice on the furniture itself.
+            if trader == nil and not coop_mode.is_player_mirror() then return orig(id, ...) end
             if not object_id(trader) then return nil end
             local local_id = C().lid(trader)
             return object_id(local_id) and local_id or nil
@@ -169,7 +177,7 @@ function on_game_start()
     install("z_3dss_gamma_camo_system", camo)
     install("z_3dss_hide_bones", bones)
     install("z_3dss_reticle_profiles", reticles)
-    install("TB_RF_Receiver_Packages", rf)
+    install("tb_rf_receiver_packages", rf)
     install("drx_da_main", dao)
     install("zzz_bas_laser_control", lasers)
     install("campfires_on_map_mcm", campfires)

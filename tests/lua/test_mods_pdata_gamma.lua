@@ -3,8 +3,13 @@
 -- Co-op: the owner has the map; Server: world owns records, map reports facts.
 -- This adapter only restores personal mod state; neither needs new world facts.
 local total_pass, total_fail = 0, 0
-local roles = { "hostplay_client", "srv_client", "hostplay_owner", "srv_map", "srv_world", "none",
-    "absent", "broken_install", "fixture_client" }
+local modes = dofile("tests/lua/support/modes.lua")
+local roles = {
+    hostplay = { "hostplay_client", "hostplay_owner", "hostplay_reconnect", "fixture_client", "absent", "broken_install" },
+    srv_world = { "srv_client", "srv_world", "srv_reconnect" },
+    srv_map = { "srv_map" },
+    none = { "none" },
+}
 
 -- Exact save/load/accessor fixtures from the reviewed merged corpus. Keep the
 -- test runnable in a clean checkout; when the corpus is present, exercise it.
@@ -157,7 +162,7 @@ end
 ]=],
 }
 
-local function run_role(role)
+local function run_role(mode, role, transfer)
     local env = {}
     for key, value in pairs(_G) do env[key] = value end
     env._G = env
@@ -168,23 +173,32 @@ local function run_role(role)
     end
     local f = assert(loadfile("tests/lua/support/stubs_mods.lua"))
     setfenv(f, env)
-    env.MODE = role:find("client") and "client" or (role == "none" and "sp" or "host")
+    local reconnect = role:find("reconnect") ~= nil
+    env.MODE = (role:find("client") or reconnect) and "client" or (role == "none" and "sp" or "host")
     f()
     local function check(ok, name) env.check(ok, role .. ": " .. name) end
     local mirror = env.MODE == "client"
     env.coop.is_map_server = function() return role == "srv_map" end
     env.coop.is_dedicated = function() return role == "srv_world" end
+    if role == "srv_map" then
+        env.coop.is_host = function() return false end
+        env.coop.is_client = function() return true end
+    end
     env.coop.world_epoch = function() return env.EPOCH or 1 end
     env.coop.levels = setmetatable({}, { __index = function() error("personal data asked for world facts") end })
-    env.coop_mode = {
-        actor_is_player = function() return role ~= "srv_map" and role ~= "srv_world" end,
-        is_player_mirror = function() return mirror end,
-    }
     env.make_actor()
     env.load_script("coop_main")
+    env.load_script("coop_mode")
+    modes.install(env.coop_mode, mode, mirror and {
+        actor_is_player = function() return true end,
+        decides_world = function() return false end,
+        leads_here = function() return false end,
+        is_player_mirror = function() return true end,
+    } or nil)
     env.load_script("coop_mods_core")
     env.load_script("coop_mods_pdata")
     env.coop_main.on_game_start()
+    env.coop_mode.on_game_start()
     env.coop_mods_core.on_game_start()
     env.coop_mods_pdata.on_game_start()
     local C, P = env.coop_mods_core, env.coop_mods_pdata
@@ -205,7 +219,9 @@ local function run_role(role)
         end
         parts[#parts + 1] = tail or ""
         local module = setmetatable({}, { __index = env })
-        env[name] = module
+        -- The filesystem gives axr_main lowercase script names. Lua module
+        -- namespaces are case-sensitive even when both paths open the file.
+        env[name:lower()] = module
         local chunk = assert(env.loadstring(table.concat(parts, "\n"), "@corpus/" .. name .. ".script"))
         setfenv(chunk, module)
         chunk()
@@ -232,10 +248,13 @@ local function run_role(role)
         function test_set(v) saved_lasers = v end
     ]], { "function save_state(", "function load_state(" })
     local fires = corpus("campfires_on_map_mcm", "local visited_campfires = {}", { "function save_state(", "function load_state(" })
-    local furniture = { [40] = { last_trader_id = 900, battery = 80 }, [41] = { last_trader_id = 901 } }
+    local furniture = { [40] = { last_trader_id = 900, battery = 80 }, [41] = { last_trader_id = 901 }, [42] = {} }
     env.hf_obj_manager = {
         get_data = function(id) return furniture[id] end,
-        update_data = function(id, data) for k, v in pairs(data) do furniture[id][k] = v end end,
+        update_data = function(id, data)
+            local device = furniture[id]
+            if device then for k, v in pairs(data) do device[k] = v end end
+        end,
     }
     local computer = corpus("bind_trading_computer", "", {
         "local function get_data(", "local function set_data(",
@@ -300,7 +319,24 @@ local function run_role(role)
         m.coop_gamma_trading_choices = { [40] = computer.get_last_selected_trader(40) }
         return m
     end
-    if mirror then
+    local function check_reported(live, label)
+        local ca = live.z_3dss_gamma_camo_system
+        check(ca and ca.unlocked_sections.mine and ca.unlocked_ids.mine and ca.unlocked_named_ids.mine
+            and ca.starting_faction == "mine" and not ca.unlocked_sections.host, label .. " m01:1 camo")
+        check(live.z_3dss_hide_bones and live.z_3dss_hide_bones.laser_hidden.mine, label .. " m01:3 bones")
+        check(live.z_3dss_reticle_profiles and live.z_3dss_reticle_profiles.selected_profiles.optic == "mine", label .. " m02:5 reticles")
+        check(live.tb_bonus_items == 4, label .. " m16:2 RF")
+        check(live.drx_da_opened_articles and live.drx_da_opened_articles.encyclopedia_anomalies.mine, label .. " m19:7 DAO")
+        check(live.saved_lasers_id and live.saved_lasers_id[51] and not live.saved_lasers_id[90], label .. " m29:2 laser")
+        check(live.visited_campfires and live.visited_campfires[52] and not live.visited_campfires[92], label .. " m32:10 campfires")
+        check(live.coop_gamma_trading_choices and live.coop_gamma_trading_choices[40] == 800, label .. " m23:8 trader")
+    end
+    if reconnect then
+        local data = state("host")
+        data.coop_mods_pdata = transfer.saved
+        load(data)
+        check_reported(snapshot(), "new Lua state reconnects from authority save")
+    elseif mirror then
         dao.opened_articles = { encyclopedia_anomalies = { stale = true } }
         local fresh = load(state("host"))
         local live = snapshot()
@@ -333,13 +369,10 @@ local function run_role(role)
         check(computer.get_last_selected_trader(41) == nil, "m23:8 no fallback for another computer")
         rf.tb_bonus_items = 4
         P.report_now()
-        local report = env.sent("mods.pd")
+        local report, packet = env.sent("mods.pd")
         local reported = report and C.deser(report.d)
-        check(reported and reported.tb_bonus_items == 4 and reported.z_3dss_gamma_camo_system.unlocked_ids.mine
-            and reported.z_3dss_hide_bones.laser_hidden.mine and reported.z_3dss_reticle_profiles.selected_profiles.optic == "mine"
-            and reported.drx_da_opened_articles.encyclopedia_anomalies.mine and reported.saved_lasers_id[51]
-            and reported.visited_campfires[52] and reported.coop_gamma_trading_choices[40] == 800,
-            "periodic report collects each live personal key")
+        check_reported(reported or {}, "periodic report collects live state")
+        if role ~= "fixture_client" then transfer.packet = packet end
         local old_hid, old_lid = C.hid, C.lid
         C.hid = function(id) return id == 42 and 142 or (id == 805 and 1805 or old_hid(id)) end
         C.lid = function(id) return id == 1805 and 805 or old_lid(id) end
@@ -363,7 +396,8 @@ local function run_role(role)
         rf.tb_bonus_items = 7
         dao.opened_articles = latest.drx_da_opened_articles
         laser.test_set({ [53] = false })
-        check(P.keep_for_load(2), "keep_for_load succeeds")
+        env.coop_main.on_world_leaving(2)
+        check((env.STASH.coop_mods_pdata or ""):match("^@load:2|"), "engine transition keeps the live state")
         local body = (env.STASH.coop_mods_pdata or ""):match("^[^|]*|(.*)$")
         local kept = body and C.deser(body) or {}
         check(kept.z_3dss_gamma_camo_system and kept.z_3dss_gamma_camo_system.unlocked_sections.latest
@@ -394,10 +428,19 @@ local function run_role(role)
         no_flags.tb_radio_1_3_has_run_once = nil
         load(no_flags, { tb_bonus_items = 8 })
         check(rf.tb_bonus_items == 8, "m16:2 restore RF even when the shared save has no RF version flag")
+        local invalid_bonus = { "9", {}, -1, 1.5, math.huge, 2^53 }
+        for _, value in ipairs(invalid_bonus) do
+            load(state("host"), { tb_bonus_items = value })
+            check(rf.tb_bonus_items == 0, "m16:2 invalid saved RF count cannot reach the package callback")
+        end
         local legacy_lasers = state("host")
         legacy_lasers.saved_lasers_id = nil
-        load(legacy_lasers)
+        local foreign_lasers = { saved_lasers = legacy_lasers.saved_lasers }
+        load(foreign_lasers)
         check(next((C.find_local(laser, "saved_lasers"))) == nil, "m29:2 legacy-only host save cannot restore foreign lasers")
+        load(legacy_lasers, { saved_lasers = { [51] = false } })
+        check(snapshot().saved_lasers_id[51] == false and snapshot().saved_lasers_id[91] == nil,
+            "m29:2 own legacy laser preference still restores")
         local no_selections = state("host")
         no_selections.z_3dss_gamma_camo_system = nil
         load(no_selections, state("mine"))
@@ -422,6 +465,11 @@ local function run_role(role)
             and untouched.z_3dss_reticle_profiles.selected_profiles.optic == "host" and untouched.saved_lasers_id[90]
             and untouched.visited_campfires[92], "authority/single player mod state untouched")
         check(next(dao.opened_articles.encyclopedia_anomalies) == nil, "authority/single player DAO retains its stock load timing")
+        if role == "hostplay_owner" then
+            load({})
+            check(computer.get_last_selected_trader(40) == 900 and computer.get_last_selected_trader(41) == 901,
+                "m23:8 co-op owner can read legacy choices from an older save")
+        end
         computer.set_last_selected_trader(40, 803)
         local saved = {}
         env.SendScriptCallback("save_state", saved)
@@ -435,8 +483,20 @@ local function run_role(role)
             check(saved.coop_gamma_trading_choices and saved.coop_gamma_trading_choices[40] == 803, "owner choice saved without client reports")
             load({ coop_gamma_trading_choices = { [40] = 804 } })
             check(computer.get_last_selected_trader(40) == 804, "owner choice restored from normal save")
+            check(computer.get_last_selected_trader(41) == 901, "owner keeps untouched legacy devices after saving a new choice")
         else
             check(saved.coop_gamma_trading_choices == nil, "server ghost does not save personal computer state")
+        end
+        if role == "hostplay_owner" or role == "srv_world" then
+            if transfer.packet then env.deliver(transfer.packet, 1) end
+            local stored = env.alife_storage_manager.get_state().coop_mods_pdata or {}
+            local ack, message = env.sent("mods.pd_ack")
+            check(stored["500"] and ack and ack.t == stored["500"].t and message.target == 1,
+                "authority writes the transport sender's character record and acknowledges it")
+            check(stored["0"] == nil and stored["500"] and stored["500"].d.z_3dss_gamma_camo_system
+                and stored["500"].d.z_3dss_gamma_camo_system.selections == nil,
+                "authority keeps the report separate from its own character and from item selections")
+            transfer.saved = stored
         end
     end
     if adapter then
@@ -447,10 +507,13 @@ local function run_role(role)
     return env.PASSES, env.FAILS
 end
 
-for _, role in ipairs(roles) do
-    local ok, p, f = pcall(run_role, role)
-    if ok then total_pass, total_fail = total_pass + p, total_fail + f
-    else print("  FAIL " .. role .. " runtime: " .. tostring(p)); total_fail = total_fail + 1 end
+for _, mode in ipairs(modes.names()) do
+    local transfer = {}
+    for _, role in ipairs(roles[mode]) do
+        local ok, p, f = pcall(run_role, mode, role, transfer)
+        if ok then total_pass, total_fail = total_pass + p, total_fail + f
+        else print("  FAIL " .. role .. " runtime: " .. tostring(p)); total_fail = total_fail + 1 end
+    end
 end
 print(string.format("GAMMA PDATA: %d passed, %d failed", total_pass, total_fail))
 if total_fail > 0 then error("GAMMA PDATA FAILED") end
