@@ -1,0 +1,476 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- F5-PRG-1. Only the record keeper calls check; only authoritative observations call note.
+-- Co-op: the host supplies observations. Server: the world record keeper receives
+-- observations from the player's map (F5-PRG-4). This module installs no handlers.
+-- Windows are per character AND record key: saving skills must not spend kills or
+-- rank awaiting a different report. Only a validated report closes its window.
+-- rank_budget(character) is a read; rank_budget(character, true) reads and commits
+-- the engine Progress window AFTER acceptance. Call once for rank + reputation.
+-- Persist snapshot(character) alongside raw pdata in the keeper's save. Restore
+-- only that keeper-owned snapshot after clear() on load, before handling reports.
+-- Raw pdata (including legacy saves without a snapshot) never seeds the budget
+-- or skill_of. This module installs no save hooks and does not persist windows.
+
+constants = { step_length = 0.7, jump_seconds = 1.5, slack = 0.25,
+	skill_allowance = 25, rank_allowance = 25, rank_per_minute = 100,
+	reputation_allowance = 10, reputation_per_minute = 25,
+	max_number = 1000000000, max_window_seconds = 3600, max_rank_allowance_minutes = 30 }
+-- Allowances cover packet/event ordering and unobservable small rewards. Unseen
+-- jumps earn at most one per 1.5 real seconds; observed jumps replace that estimate.
+-- Rank: 25 per window + 100/min; reputation: 10 + 25/min. Slack applies to events.
+-- At most 30 minutes of time-only rank/reputation allowance accrue while idle.
+-- Other time-based allowances use the one-hour window cap.
+local ledger = {}
+local SKILLS = { "endurance", "strength", "survival", "scavenging" }
+local RECORD_KEYS = { skills_levels = true, game_statistics = true, ish_kill_tracker = true,
+	milpda = true, experience_framework_savedata = true }
+local SEARCH = { novice = 25, trainee = 30, experienced = 34, professional = 40,
+	veteran = 45, expert = 50, master = 65, legend = 100 }
+local KILL_RANK = { novice = 10, trainee = 25, experienced = 40, professional = 60,
+	veteran = 85, expert = 125, master = 175, legend = 300 }
+-- Immutable GAMMA game_statistics base rewards; that mod mutates its live rank
+-- fields on each increment. /4 in increment_statistic, then /4 in increment_rank.
+-- A trusted event may supply actual rank_points / reputation_points for custom rewards.
+local REWARDS = {
+	arena_battles = {50,20}, artefacts_detected = {10,0}, artefacts_found = {25,0}, articles = {10,0},
+	boxes_smashed = {5,0}, deaths = {0,0}, donations = {0,20}, emissions = {15,0},
+	enemies_surrendered = {25,0}, field_dressings = {5,0}, helicopters_downed = {1000,25},
+	helicopters_downed2 = {500,0}, killed_companions = {0,-75}, killed_monsters = {50,0},
+	killed_prisoners = {0,-25}, killed_stalkers = {0,0}, killed_stalkers_e = {0,10},
+	killed_stalkers_f = {0,-100}, killed_stalkers_n = {0,-75}, level_changes = {0,0},
+	pdas_delivered = {20,10}, psi_storms = {10,0}, stashes_found = {10,0},
+	tasks_cancelled = {0,-25}, tasks_completed = {100,25}, tasks_failed = {0,-25},
+	wounded_helped = {25,100}, items_crafted = {10,0}, items_disassembled = {5,0},
+	self_repairs = {5,0}, minutes_disguised = {0,0},
+}
+-- Per-window burst + per-minute caps. These counters have no complete body-side
+-- observation; caps are deliberately generous plausibility limits, not proof.
+local CAPS = {
+	arena_battles = {2,2}, -- short consecutive arena bouts
+	artefacts_detected = {32,60}, artefacts_found = {32,60}, -- multi-artefact fields
+	articles = {64,120}, -- PDA/article batches
+	boxes_smashed = {64,120}, -- automatic fire on destructibles
+	deaths = {2,4}, -- repeated death/revival
+	donations = {64,120}, -- stacks handed to NPCs
+	emissions = {1,1}, psi_storms = {1,1}, -- overlap/order at a weather boundary
+	enemies_surrendered = {16,30}, -- squad combat
+	field_dressings = {32,60}, -- instant queued dressings
+	helicopters_downed = {2,4}, helicopters_downed2 = {2,4}, -- two helicopters plus explosive bonus
+	level_changes = {2,4}, -- exit/entry ordering
+	pdas_delivered = {64,120}, -- a batch of saved PDAs
+	stashes_found = {16,30}, -- several adjacent stashes
+	tasks_cancelled = {32,60}, tasks_completed = {32,60}, tasks_failed = {32,60}, -- task batches
+	wounded_helped = {16,30}, -- a squad of wounded
+	items_crafted = {128,240}, items_disassembled = {128,240}, -- crafting batches
+	self_repairs = {64,120}, -- queued repair operations
+	minutes_disguised = {2,60}, -- game-time minutes may run faster than real time
+}
+local SET_CAPS = { actor_visited_levels = 4, actor_visited_smarts = 64,
+	actor_artefacts = 128, actor_anomaly_maps = 64 } -- transitions / adjacent smarts / field and PDA batches
+
+local function number(v, lo, hi)
+	return type(v) == "number" and v == v and v >= lo and v <= hi
+end
+local function nonnegative(v) return number(v, 0, constants.max_number) end
+local function integer(v, hi) return number(v, 0, hi) and v == math.floor(v) end
+local function now()
+	local t = type(time_global) == "function" and time_global() or 0
+	return number(t, 0, 0xffffffff) and t / 1000 or 0
+end
+local function identity(v)
+	return (type(v) == "string" and #v > 0 and #v <= 128 and not v:find("[%c]")) or integer(v, constants.max_number)
+end
+local function book(character)
+	if not identity(character) then return nil end
+	if not ledger[character] then ledger[character] = { totals = {}, windows = {}, records = {}, born = now() } end
+	return ledger[character]
+end
+local function add(b, k, v)
+	if nonnegative(v) then b.totals[k] = math.min(constants.max_number, (b.totals[k] or 0) + v) end
+end
+local function elapsed(b, key)
+	local w = b.windows[key]
+	return math.min(constants.max_window_seconds, math.max(0, now() - (w and w.at or b.born)))
+end
+local function delta(b, key, event)
+	local w = b.windows[key]
+	return math.max(0, (b.totals[event] or 0) - (w and w.totals[event] or 0))
+end
+local function commit(b, key)
+	local t = {}; for k, v in pairs(b.totals) do t[k] = v end
+	b.windows[key] = { at = now(), totals = t }
+end
+local function multiplier(skill)
+	local h = haru_skills
+	local v = h and h.options and h.options["exp_multiplier_" .. skill]
+	return number(v, 0, 1000) and v or nil
+end
+local function definition(skill)
+	local h = haru_skills
+	local ini = h and h.skills_ini
+	if not (ini and type(ini.collect_section) == "function") then return nil end
+	local ok, t = pcall(ini.collect_section, ini, skill)
+	if not ok or type(t) ~= "table" then return nil end
+	local base, maximum = tonumber(t.base_requirement), tonumber(t.max_level)
+	if not (number(base, 1, 1000000) and integer(maximum, 1000)) then return nil end
+	return base, maximum
+end
+local function requirement(base, level)
+	return base * (1 + level + 0.125 * level * (level + 1))
+end
+local function table_or_empty(v) return type(v) == "table" and v or {} end
+
+-- meta is decider data, never a client's claimed multiplier. amount is distance,
+-- count, power or Health respectively. A hit may instead supply meta.power;
+-- monster_loot meta.health, task_rank meta.points. Kill kind = monster/stalker.
+function note(character, kind, amount, meta)
+	local b = book(character)
+	meta = type(meta) == "table" and meta or {}
+	if kind == "melee_hit" or kind == "hit_taken" then amount = meta.power or amount end
+	if kind == "monster_loot" then amount = meta.health or amount end
+	if kind == "task_rank" then amount = meta.points or amount end
+	if not b or not nonnegative(amount) then return false end
+	local coef = number(meta.weight_coef, 0, 100) and meta.weight_coef or nil
+	if kind == "step_m" or kind == "jump" then
+		local steps = kind == "step_m" and amount / constants.step_length or amount
+		local scale = kind == "step_m" and 1 or 10
+		add(b, "endurance", steps * scale * (coef and math.max(0, 1 - coef) or 1))
+		add(b, "strength", steps * scale * (kind == "step_m" and 0.5 or 1) * (coef or 1))
+		if kind == "jump" then add(b, "jumps", amount) end
+	elseif kind == "melee_hit" then
+		-- Haru checks alive before awarding XP, so its *5 branch is unreachable.
+		if meta.alive == true and not meta.important then add(b, "strength", amount * 30) end
+	elseif kind == "hit_taken" then
+		if integer(meta.type, 8) and meta.type >= 5 then add(b, "survival", amount * 200) end
+	elseif kind == "monster_loot" then add(b, "survival", amount * 0.1)
+	elseif kind == "corpse_search" then add(b, "scavenging", amount * (SEARCH[meta.rank] or 25))
+	elseif kind == "kill" then
+		if not integer(amount, 1000000) then return false end
+		add(b, "kills", amount)
+		local victim = meta.kind or meta.victim_kind
+		if victim == "monster" or victim == "stalker" then add(b, "kills_" .. victim, amount) end
+		local points = KILL_RANK[meta.rank] or 10
+		if ini_sys and type(ini_sys.r_float_ex) == "function" and type(meta.rank) == "string" then
+			local ok, v = pcall(ini_sys.r_float_ex, ini_sys, "rank_kill_points", meta.rank)
+			if ok and nonnegative(v) then points = v end
+		end
+		if victim == "monster" then points = REWARDS.killed_monsters[1] / 16 end
+		add(b, "rank", amount * points)
+		-- Positive enemy reputation; friendly/neutral penalties are bounded by engine rules.
+		if victim == "stalker" then add(b, "reputation", amount * 10) end
+	elseif kind == "task_rank" then
+		add(b, "rank", amount)
+		if nonnegative(meta.reputation) then add(b, "reputation", meta.reputation) end
+	elseif kind == "achievement" then add(b, "rank", amount * 1000)
+	elseif kind == "statistic" then
+		local reward = REWARDS[meta.name]
+		if not reward then return false end
+		add(b, "stat_" .. meta.name, amount)
+		add(b, "rank", amount * (nonnegative(meta.rank_points) and meta.rank_points or reward[1] / 16))
+		add(b, "reputation", amount * (nonnegative(meta.reputation_points) and meta.reputation_points or math.max(0, reward[2])))
+	else return false end
+	return true
+end
+
+function rank_budget(character, accepted)
+	local b = book(character)
+	if not b then return 0, 0 end
+	local minutes = math.min(elapsed(b, "@rank") / 60, constants.max_rank_allowance_minutes)
+	local rank = delta(b, "@rank", "rank") * (1 + constants.slack) + constants.rank_allowance + minutes * constants.rank_per_minute
+	local reputation = delta(b, "@rank", "reputation") * (1 + constants.slack) + constants.reputation_allowance + minutes * constants.reputation_per_minute
+	if accepted == true then commit(b, "@rank") end
+	return rank, reputation
+end
+
+-- Scalar refusal policy. Tables use matching per-field budgets, preserve missing
+-- old fields and never mutate either input. Skills additionally rebuild thresholds.
+function clamp(previous, reported, budget)
+	if type(previous) == "table" or type(reported) == "table" then
+		local out = {}
+		for k, v in pairs(type(previous) == "table" and previous or {}) do out[k] = clamp(v, nil, 0) end
+		for k, v in pairs(type(reported) == "table" and reported or {}) do
+			out[k] = clamp(type(previous) == "table" and previous[k] or nil, v, type(budget) == "table" and budget[k] or budget)
+		end
+		return out
+	end
+	local old = number(previous, -constants.max_number, constants.max_number) and previous or 0
+	if type(reported) ~= "number" then return previous end
+	return number(reported, -constants.max_number, constants.max_number) and math.max(old, math.min(reported, old + (nonnegative(budget) and budget or 0))) or old
+end
+
+local function audit(c, ok, reason)
+	if not ok then c.reasons[#c.reasons + 1] = reason end
+	-- Only fixed format/text reaches the console. Neither payload strings nor key
+	-- names enter this line; peer is supplied by the transport, not the report.
+	if not coop_trust.pass(c.name, ok, "progress check failed: %s", reason) then c.refused = true end
+	return ok
+end
+local function shape(value, depth, seen, size, signed)
+	local t = type(value)
+	if t == "number" then return number(value, signed and -constants.max_number or 0, constants.max_number) end
+	if t == "boolean" then return true end
+	if t == "string" then return #value <= 256 and not value:find("[%c]") end
+	if t ~= "table" or depth > 6 or seen[value] then return false end
+	seen[value] = true
+	for k, v in pairs(value) do
+		size[1] = size[1] + 1
+		if size[1] > 2048 or not identity(k) or not shape(v, depth + 1, seen, size, signed) then return false end
+	end
+	seen[value] = nil
+	return true
+end
+local function copy(v)
+	if type(v) ~= "table" then return v end
+	local out = {}; for k, x in pairs(v) do out[k] = copy(x) end; return out
+end
+local function skill_budget(b, key, name)
+	local raw = delta(b, key, name)
+	if name == "endurance" or name == "strength" then
+		raw = raw + math.max(0, math.floor(elapsed(b, key) / constants.jump_seconds) - delta(b, key, "jumps")) * 10
+	end
+	return raw * (multiplier(name) or 0) * (1 + constants.slack) + constants.skill_allowance
+end
+local function known_skill(name)
+	for _, skill in ipairs(SKILLS) do
+		if skill == name then return true end
+	end
+	return false
+end
+local function skills_check(c, b, previous, reported)
+	local out = {}
+	for _, name in ipairs(SKILLS) do
+		local base, maximum = definition(name)
+		local rules_ok = audit(c, base ~= nil and multiplier(name) ~= nil, name .. ": rules unavailable")
+		local old = previous[name]
+		local r = type(reported[name]) == "table" and reported[name] or {}
+		if not rules_ok then out[name] = old and copy(old) or nil
+		else
+			local xp = old and old.experience or 0
+			local old_level = old and math.min(old.current_level, maximum) or 0
+			while old_level > 0 and xp <= requirement(base, old_level - 1) do old_level = old_level - 1 end
+			local level = integer(r.current_level, maximum) and r.current_level or 0
+			audit(c, integer(r.current_level, maximum), name .. ": level bounds")
+			audit(c, nonnegative(r.experience), name .. ": experience bounds")
+			audit(c, r.max_level == maximum and r.base_requirement == base, name .. ": definition")
+			audit(c, r.requirement == requirement(base, level) and r.prev_requirement == (level == 0 and 0 or requirement(base, level - 1)), name .. ": requirement")
+			-- Haru uses cumulative XP, strict >, and may process only one level per
+			-- 1182ms update. An upper XP threshold would reject honest pending levels.
+			audit(c, nonnegative(r.experience) and (level == 0 or r.experience > requirement(base, level - 1)), name .. ": level experience")
+			audit(c, nonnegative(r.experience) and r.experience >= xp and level >= old_level, name .. ": decreased")
+			local budget = skill_budget(b, "skills_levels", name)
+			audit(c, nonnegative(r.experience) and r.experience <= xp + budget, name .. ": budget")
+			local accepted_xp = nonnegative(r.experience) and clamp(xp, r.experience, budget) or xp
+			local allowed_level = 0
+			while allowed_level < maximum and accepted_xp > requirement(base, allowed_level) do allowed_level = allowed_level + 1 end
+			level = math.max(math.min(old_level, allowed_level), math.min(level, allowed_level))
+			out[name] = { current_level = level, experience = accepted_xp, max_level = maximum,
+				base_requirement = base, requirement = requirement(base, level),
+				prev_requirement = level == 0 and 0 or requirement(base, level - 1) }
+		end
+	end
+	for name in pairs(reported) do
+		audit(c, known_skill(name), "skills unknown field")
+	end
+	return out
+end
+local function counter_budget(b, key, name)
+	if name:match("^killed_") then
+		local kind = name == "killed_monsters" and "monster" or "stalker"
+		return delta(b, key, "kills_" .. kind) + 1
+	end
+	local cap = CAPS[name]
+	return cap and math.max(delta(b, key, "stat_" .. name), cap[1] + cap[2] * elapsed(b, key) / 60) or nil
+end
+local function stats_check(c, b, previous, reported)
+	local out = copy(previous)
+	for sub, cap in pairs(SET_CAPS) do
+		local old, r = table_or_empty(previous[sub]), reported[sub] == nil and {} or reported[sub]
+		out[sub] = copy(old)
+		if audit(c, type(r) == "table", sub .. ": shape") then
+			local added = 0
+			for k, v in pairs(old) do if v == true then audit(c, r[k] == true, sub .. ": removed") end end
+			for k, v in pairs(r) do
+				local valid = audit(c, type(v) == "boolean", sub .. ": value")
+				if v == true and not old[k] then added = added + 1 end
+				if valid and (old[k] or added <= cap) then out[sub][k] = old[k] == true or v end
+			end
+			audit(c, added <= cap, sub .. ": budget")
+		end
+	end
+	local old, r = table_or_empty(previous.actor_statistics), reported.actor_statistics == nil and {} or reported.actor_statistics
+	out.actor_statistics = copy(old)
+	if audit(c, type(r) == "table", "statistics shape") then
+		for name, v in pairs(old) do audit(c, r[name] ~= nil, "counter: removed") end
+		local stalkers = 0
+		for name, v in pairs(r) do
+			local budget = counter_budget(b, "game_statistics", tostring(name))
+			local known = audit(c, REWARDS[name] ~= nil and budget ~= nil, "counter: unknown")
+			local before = nonnegative(old[name]) and old[name] or 0
+			local label = known and name or "counter"
+			local valid = audit(c, integer(v, constants.max_number), label .. ": bounds")
+			audit(c, nonnegative(v) and v >= before, label .. ": decreased")
+			audit(c, nonnegative(v) and budget ~= nil and v <= before + budget, label .. ": budget")
+			if known then out.actor_statistics[name] = valid and math.floor(clamp(before, v, budget)) or math.floor(before) end
+			if name == "killed_stalkers_e" or name == "killed_stalkers_f" or name == "killed_stalkers_n" then
+				stalkers = stalkers + (nonnegative(v) and math.max(0, v - before) or 0)
+			end
+		end
+		if not audit(c, stalkers <= delta(b, "game_statistics", "kills_stalker") + 1, "stalker categories: budget") then
+			for _, name in ipairs({ "killed_stalkers_e", "killed_stalkers_f", "killed_stalkers_n" }) do
+				out.actor_statistics[name] = old[name] or 0
+			end
+		end
+	end
+	local misc = reported.actor_miscellaneous
+	if misc ~= nil and audit(c, type(misc) == "table", "miscellaneous shape") then
+		out.actor_miscellaneous = copy(table_or_empty(previous.actor_miscellaneous))
+		-- GAMMA uses these as the previous values for rank/reputation news. They can
+		-- catch up to the actor's existing engine values independently of this window.
+		for name, v in pairs(misc) do
+			local known = audit(c, name == "actual_rank" or name == "actual_rept", "miscellaneous unknown")
+			local lo, hi = name == "actual_rept" and -4000 or 0, name == "actual_rept" and 4000 or constants.max_number
+			local valid = audit(c, number(v, lo, hi), "miscellaneous bounds")
+			if known then
+				local before = out.actor_miscellaneous[name]
+				out.actor_miscellaneous[name] = valid and v or (number(before, lo, hi) and before or 0)
+			end
+		end
+	end
+	for sub in pairs(reported) do
+		audit(c, SET_CAPS[sub] ~= nil or sub == "actor_statistics" or sub == "actor_miscellaneous", "statistics unknown field")
+	end
+	return out
+end
+local BODY_TEXT = { kill_id = true, comm = true, k_comm = true, name = true, kname = true,
+	level = true, text = true, icon = true }
+local BODY_BOOL = { companion = true, silent = true, was_melee = true }
+
+-- GAMMA's ish_kill_tracker saves PDA markers, including kills by other NPCs.
+-- IDs, timestamps, and marker creation/removal carry no player progress.
+local function tracker_bodies_ok(bodies)
+	if type(bodies) ~= "table" then return false end
+	for id, body in pairs(bodies) do
+		if not integer(id, 65534) or type(body) ~= "table" or body.id ~= id
+			or not integer(body.killer_id, 65534) or not integer(body.tod, constants.max_number)
+			or (body.typ ~= 1 and body.typ ~= 2) or not integer(body.ktyp, 2) then return false end
+		for k, v in pairs(body) do
+			if BODY_TEXT[k] then
+				if type(v) ~= "string" then return false end
+			elseif BODY_BOOL[k] then
+				if type(v) ~= "boolean" then return false end
+			elseif k ~= "id" and k ~= "killer_id" and k ~= "tod" and k ~= "typ" and k ~= "ktyp" then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+local function milpda_check(c, old, report)
+	for k in pairs(report) do audit(c, k == "tracked_bodies", "tracker: unknown field") end
+	if report.tracked_bodies ~= nil and not audit(c, tracker_bodies_ok(report.tracked_bodies), "tracker: body record") then
+		return copy(old)
+	end
+	return { tracked_bodies = copy(report.tracked_bodies) }
+end
+
+local function tracker_check(c, b, old, report, markers)
+	local out = copy(old)
+	for k in pairs(old) do
+		audit(c, (markers and k == "tracked_bodies") or report[k] ~= nil, "tracker: removed")
+	end
+	if markers and report.tracked_bodies == nil then out.tracked_bodies = nil end
+	for k, v in pairs(report) do
+		if markers and k == "tracked_bodies" then
+			if audit(c, tracker_bodies_ok(v), "tracker: body record") then out[k] = copy(v) end
+		elseif not audit(c, old[k] == nil or type(old[k]) == type(v), "tracker: shape") then
+			out[k] = copy(old[k])
+		elseif type(v) == "table" then out[k] = tracker_check(c, b, table_or_empty(old[k]), v)
+		elseif type(v) == "number" then
+			local before = nonnegative(old[k]) and old[k] or 0
+			audit(c, integer(v, constants.max_number) and v >= before, "kills: decreased or bounds")
+			local budget = delta(b, c.key, "kills")
+			audit(c, v <= before + budget, "kills: budget")
+			out[k] = math.floor(clamp(before, v, budget))
+		else audit(c, false, "tracker: counter type") end
+	end
+	return out
+end
+
+-- Accepted value, stable reason strings (empty for a plausible report). The
+-- fourth argument is reserved for callers with the original pdata signature.
+function check(character, peer, key, _previous, reported)
+	local c = { name = key == "skills_levels" and "progress_skills" or "progress_stats",
+		key = key, reasons = {}, refused = false }
+	local b = book(character)
+	local valid_identity = audit(c, b ~= nil and integer(peer, 65535), "progress identity")
+	local signed = key == "game_statistics"
+	local safe = audit(c, shape(reported, 0, {}, {0}, signed), "progress shape bounds")
+	local known = audit(c, RECORD_KEYS[key] == true, "progress unknown key")
+	local out
+	if valid_identity and known then
+		local old = b.records[key] or {}
+		if audit(c, type(reported) == "table", key == "skills_levels" and "skills shape" or "progress record shape") and safe then
+			if key == "skills_levels" then out = skills_check(c, b, old, reported)
+			elseif signed then out = stats_check(c, b, old, reported)
+			elseif key == "milpda" then out = milpda_check(c, old, reported)
+			elseif key == "ish_kill_tracker" then out = tracker_check(c, b, old, reported, true)
+			else
+				out = copy(reported) -- optional mod: bounds only, no invented XP formula
+				if reported.XP ~= nil and not audit(c, nonnegative(reported.XP), "framework XP bounds") then out.XP = old.XP end
+			end
+		else
+			out = copy(old)
+		end
+	end
+	if not c.refused then
+		if #c.reasons == 0 then
+			commit(b, key)
+			b.records[key] = copy(reported)
+		end
+		return reported, c.reasons
+	end
+	return out, c.reasons
+end
+
+function skill_of(character, skill)
+	local b = ledger[character]
+	local skills = b and b.records.skills_levels
+	local s = skills and skills[skill]
+	if s then return s.current_level, true end
+	return 0, false
+end
+
+function snapshot(character)
+	local b = ledger[character]
+	if b then return { records = copy(b.records) } end
+end
+
+-- Accept only the envelope from the keeper's own save or an authenticated
+-- keeper copy. Loading a world calls clear() first; a mirror may refresh its
+-- records without resetting its own observations.
+function restore(character, saved)
+	if not identity(character) or type(saved) ~= "table" or type(saved.records) ~= "table" then return false end
+	for key, record in pairs(saved.records) do
+		if not RECORD_KEYS[key] or type(record) ~= "table"
+			or not shape(record, 0, {}, {0}, key == "game_statistics") then return false end
+		if key == "skills_levels" then
+			for _, name in ipairs(SKILLS) do
+				local s = record[name]
+				if type(s) ~= "table" or not integer(s.current_level, 1000)
+					or not nonnegative(s.experience) then return false end
+			end
+			for name in pairs(record) do
+				if not known_skill(name) then return false end
+			end
+		end
+	end
+	book(character).records = copy(saved.records)
+	return true
+end
+
+-- Session owner calls clear() on world replacement; clear(character) on deletion.
+-- Ordinary disconnects must retain the ledger so reconnect cannot reset a window.
+function clear(character)
+	if character == nil then ledger = {} else ledger[character] = nil end
+end
