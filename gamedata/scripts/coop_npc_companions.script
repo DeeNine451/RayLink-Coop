@@ -72,7 +72,9 @@
 	  npc.comp_go    client -> host  { x, y, z }: his companions go there
 	  npc.comp_item  client -> host  { i = npc, o = item, g = true: gave, false: took }
 	  npc.comp_items host -> client  { i = npc, s = "id,id,...": what the group may take back }
-	  npc.comp_bring client -> the authority of his level  {}: he just moved on his map by a trip, his following squads come to him
+	  npc.comp_bring client -> the authority of his level  {}: he just moved on his map by a trip, his following squads come to him;
+	                 { f = true }: FFT's companion key (bring_companions_to_actor(true)): they come at once, past FFT's switch (G12-1)
+	  The count of companions per player (npc.comp_count) and G_FLAT's individual recruit (npc.comp_one): coop_npc_companions_hire.
 	A trip on one's own map (Fair Fast Travel, backpack travel, a guide, a "yes" to another player's trip; coop_economy_travel calls
 	  bring_mine): the squads the traveller leads that may follow (may_follow: not told to wait, not a hostage), less a member that waits,
 	  come to him, as FFT's bring_companions_to_actor does in single player, and only while FFT's switch (companions_travel_with_actor) is
@@ -104,7 +106,7 @@ local EV_TALK = "npc.comp_talk"
 -- for it this long at most; JUMP_SQR: a move of his character this long is the trip (walking is not); NEAR_SQR: a member this close stays
 local EV_BRING, BRING_AGAIN_MS, BRING_WAIT_MS, BRING_JUMP_SQR, BRING_NEAR_SQR = "npc.comp_bring", 3000, 1500, 625, 100
 
--- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order.
+-- Dialog actions forwarded to the host. Value: "add" / "remove" changes the leader, true = an order, "one" = G_FLAT's individual recruit.
 local ACTIONS = {
 	["dialogs_axr_companion.become_actor_companion"] = "add",
 	["dialogs_axr_companion.remove_companions_from_squad"] = "remove",
@@ -115,6 +117,9 @@ local ACTIONS = {
 	["dialogs_escape.set_esc_2_12_stalker_fanat_as_companion"] = "add",
 	-- a hire: the stock contract table is read by the host's timer, the days the client paid come with the order (paid_period)
 	["txr_paid_companions.register_paid_companion"] = true,
+	-- G12-1 (m31:1): G_FLAT's individual recruit, its clone and all, is one request; the authority clones (coop_npc_companions_hire)
+	["individually_recruitable_companions.become_actor_companion_individually"] = "one",
+	["individually_recruitable_companions.become_paid_actor_companion_individually_and_register"] = "one",
 }
 local PAID = "txr_paid_companions.register_paid_companion"
 local LEAVE_DIALOG = "dm_companion_leave" -- the stock menu's "leave me": the leader's. The same action in a story's dialog is anybody's.
@@ -595,7 +600,7 @@ local function host_on_cmd(t, from)
 	end
 	-- a companion of the group: everybody's orders, only who holds control dismisses it, and nobody recruits it away (W5)
 	if squad and axr_companions and axr_companions.companion_squads[squad.id] then
-		if kind == "add" then
+		if kind == "add" or kind == "one" then
 			stats.refused = stats.refused + 1
 			return
 		end
@@ -615,13 +620,23 @@ local function host_on_cmd(t, from)
 		end
 	end
 	-- Ruling F2-34: a recruit only right after this player's talk with the NPC or its squad
-	if kind == "add" and not talked_recently(from, npc, squad) then
+	if (kind == "add" or kind == "one") and not talked_recently(from, npc, squad) then
 		stats.refused_talk = stats.refused_talk + 1
 		log("recruit of %s (%s) by player #%s refused: no talk with it or its squad in the last %d ms", npc:name(),
 			tostring(npc:id()), tostring(from), RECRUIT_TALK_MS)
 		return
 	end
+	-- G12-1 (s35:2, m13:3): the mod's own room rule again, with his companions on every map (coop_npc_companions_hire)
+	local hire = _G["coop_npc_companions_hire"]
+	if hire and not hire.room_on_decider(full, from, npc, t.d) then
+		stats.refused = stats.refused + 1
+		return
+	end
 	stats.cmd_in = stats.cmd_in + 1
+	if kind == "one" then -- G12-1 (m31:1): the clone is made here and joins him when it is online
+		if hire then hire.recruit_one(full, t, from, npc) end
+		return
+	end
 	if kind == "remove" then note_let_go(squad, t.d) end
 	local before = kind == "add" and squad_ids()
 	-- (host actor, npc) makes dialogs.who_is_npc pick the NPC. Orders placed at "the actor's" position run
@@ -650,6 +665,38 @@ local function host_on_cmd(t, from)
 	local peer = is_companion_squad(squad) and control_peer(squad) or nil
 	for _, o in ipairs(members(squad)) do push_info(o, peer) end
 	if not squad then push_info(npc, nil) end
+	if hire and kind ~= true then hire.push_counts() end -- G12-1: his count at once, not at the next tick
+end
+
+-- G12-1 (m31:1), for coop_npc_companions_hire: the end of an individual recruit on the authority. The clone joins player `from` as the
+-- stock dialog's recruit does (host_on_cmd), paid: the stock contract of `paid` seconds. -> it is a companion now
+function recruit_for(from, npc, paid)
+	local full = "dialogs_axr_companion.become_actor_companion"
+	local m, fn = resolve(full)
+	local f = orig[full] or (m and m[fn])
+	if type(f) ~= "function" or not (npc and npc:alive()) then return false end
+	local before = squad_ids()
+	f(db.actor, npc)
+	local squad = squad_of(npc)
+	if paid and squad then
+		local tp = _G["txr_paid_companions"]
+		local register = orig[PAID] or (tp and tp.register_paid_companion)
+		if type(register) == "function" then register(db.actor, npc) end
+		local e = tp and type(tp.paid_companions) == "table" and tp.paid_companions[squad.id]
+		if e then e.guard_period = paid end
+	end
+	if from ~= P.self_peer() then claim_new_squads(before, from) end
+	give_back(before)
+	local peer = is_companion_squad(squad) and control_peer(squad) or nil
+	for _, o in ipairs(members(squad)) do push_info(o, peer) end
+	return is_companion_squad(squad)
+end
+
+-- G12-1, for coop_npc_companions_hire (the count of ordinary companions per player): whose this squad is here. A character id: its
+-- leader; nil: this process's own player's (no leader here); false: another process holds its word (a squad of another map).
+function hire_owner(squad_id)
+	if far_leader(squad_id) ~= nil then return false end
+	return leaders[squad_id]
 end
 
 -- Persistent character identity: a disconnected leader's peer slot may already be reused.
@@ -746,6 +793,8 @@ end
 local function host_on_req(_, from)
 	for _, told in pairs(sent_info) do told[from] = nil end
 	for _, told in pairs(sent_items) do told[from] = nil end
+	local hire = _G["coop_npc_companions_hire"]
+	if hire then hire.forget(from) end -- G12-1: his companion count too
 	if axr_companions then
 		for squad_id in pairs(axr_companions.companion_squads) do
 			local squad = alife_object(squad_id)
@@ -895,6 +944,10 @@ local function wrap_fft()
 		local own
 		if P.client_live() then
 			own = {}
+			-- G12-1 (m21:6): FFT's companion key calls it forced (on_key_release): the authority of his map brings the squads he leads
+			-- at once, past FFT's switch (host_on_bring); the time event after a trip is bring_mine's
+			local forced = ...
+			if forced == true and installed then P.send(EV_BRING, { f = true }, 0) end
 		elseif host_on and (next(leaders) ~= nil or (transfer and transfer.has_remote_leaders())) then
 			own = own_of(all)
 		else
@@ -1249,8 +1302,9 @@ local function bring_to(body, list)
 	end
 end
 
--- The authority: a player's word. Nothing of it is read: the sender comes from the transport, his squads and his place from this process.
-local function host_on_bring(_, from)
+-- The authority: a player's word. Only "forced" of it is read: the sender comes from the transport, his squads and his place from this
+-- process.
+local function host_on_bring(t, from)
 	local who = P.avatar_of_peer(from)
 	if not who or #squads_led_by(who) == 0 then return end -- he leads nothing: no cost, no line
 	local now = time_global()
@@ -1261,6 +1315,13 @@ local function host_on_bring(_, from)
 	local body = level.object_by_id(who)
 	if not body then return end
 	bring_last[from] = now
+	-- G12-1 (m21:6): FFT's companion key (forced): he did not travel, his squads come to where this process sees him now; the stock's
+	-- limits stay (bring_squad: a squad told to wait or that may not teleport, a hostage, another map's)
+	if t.f == true then
+		bring_wait[from] = nil
+		bring_to(body, squads_led_by(who))
+		return
+	end
 	local p = body:position()
 	bring_wait[from] = { at = now, who = who, x = p.x, y = p.y, z = p.z }
 end
@@ -1515,6 +1576,8 @@ function print_status()
 	log("installed %s | squads led by clients %d | orders out %d in %d refused %d, recruits without a talk %d | flags out %d in %d | follow ticks %d, recalls %d | control changed %d refused %d | go-to %d | brought after a trip %d | errors %d",
 		tostring(installed), n, stats.cmd_out, stats.cmd_in, stats.refused, stats.refused_talk, stats.info_out, stats.info_in,
 		stats.follow, stats.recall, stats.lead, stats.lead_refused, stats.go, stats.bring, P.error_count(TAG))
+	local hire = _G["coop_npc_companions_hire"]
+	if hire then hire.print_status() end -- G12-1: counts per player, individual recruits
 end
 
 function on_game_start()
