@@ -95,7 +95,7 @@ local function fixture(role, late, early, skip_adapter)
 	function s.tick(ms)
 		for _ = 1, math.ceil((ms or 250) / 250) do
 			NOW = NOW + 250
-			dte.ProcessEventQueue()
+			SendScriptCallback("actor_on_update", db.actor, 0)
 		end
 	end
 	s.actor, s.knife, s.water = actor, knife, water
@@ -121,6 +121,16 @@ for _, role in ipairs({ "hostplay", "client", "srv_player" }) do
 		s.tick(2000)
 		assert(s.attempts == attempts, "confirmed cleanup must stop")
 	end)
+	test(role .. ": an empty first pass still checks late startup ammo on the second pass", function()
+		local s = fixture(role)
+		s.live, s.acknowledge = true, true
+		SendScriptCallback("actor_on_first_update")
+		s.tick(250)
+		assert(s.attempts == 0, "first pass had no ammo to remove")
+		spawn("ammo_knife_4", s.actor:position(), s.actor:id())
+		s.tick(250)
+		assert(not s.actor:object("ammo_knife_4") and s.attempts == 1, "second startup pass must remove late ammo once")
+	end)
 	test(role .. ": failed cleanup has bounded retries", function()
 		local s = fixture(role)
 		s.live = true
@@ -136,6 +146,7 @@ for _, role in ipairs({ "hostplay", "client", "srv_player" }) do
 		s.live = true
 		save_var(s.actor, "grw_in_water", true)
 		SendScriptCallback("load_state", {})
+		assert(load_var(s.actor, "grw_in_water") == nil, "load itself must clear the saved flag")
 		SendScriptCallback("actor_on_update", s.actor, 100)
 		assert(load_var(s.actor, "grw_in_water") ~= true and s.hits == 0, "dry actor inherited saved water damage")
 		assert(s.probes == 1, "stationary actor's current material must be queried")

@@ -44,10 +44,13 @@ local function install_cleanup()
 				if plays == false then return true end
 				local state = cleanup[key]
 				if not state or (actor and state.actor and state.actor ~= actor:id()) then
-					state = { started = time_global(), next_try = 0 }
+					state = { started = time_global() }
 					cleanup[key] = state
 				end
 				if state.done then return true end
+				-- The first stock pass schedules the second even when its inventory is empty.
+				-- Only short-circuit on an empty inventory after running the original once.
+				if actor and state.next_try and not has_knife(actor) then state.done = true; return true end
 				local now = time_global()
 				if now - state.started >= WAIT_MS then
 					state.done = true
@@ -56,8 +59,7 @@ local function install_cleanup()
 				end
 				if not actor then return false end -- Live can precede the Lua actor
 				state.actor = actor:id()
-				if not has_knife(actor) then state.done = true; return true end
-				if now < state.next_try then return false end
+				if state.next_try and now < state.next_try then return false end
 				state.next_try = now + PERIOD_MS
 				local ok, err = pcall(orig, ...)
 				if not ok then coop_mods_core.report("start_guard", key, err) end
