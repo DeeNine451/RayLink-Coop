@@ -1,0 +1,191 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G9-3. The map authority pairs base loot generation with a confirmed corpse window.
+-- Haru XP is personal. The bonus items and the progressive armour roll belong to the map.
+
+local XP = "g93_search_xp"
+local REACH_SQ = 6 * 6 -- same reach as the existing corpse_loot generation request
+local searches = {} -- corpse id -> generation and first confirmed searcher's character
+local started = false
+
+local function C() return coop_mods_core end
+
+local function uint(value, max)
+	local n = tonumber(value)
+	if n and n >= 0 and n <= max and n % 1 == 0 then return n end
+end
+
+local function leads()
+	return C().active() and coop_mode.leads_here()
+end
+
+local function corpse_ok(npc)
+	return npc and IsStalker(npc) and not npc:alive()
+end
+
+local function entry(id, name)
+	local current = searches[id]
+	return current and current.name == name and current or nil
+end
+
+local function skill_bonus(haru, character)
+	if character == 0 then
+		local scavenging = haru.skills_stats.scavenging
+		return scavenging and scavenging.scavenging_skill or 0
+	end
+	local checked = coop_progress_check.skill_of(character, "scavenging")
+	local stats = haru.skills_ini:collect_section("scavenging_stats")
+	local base = tonumber(stats and stats.scavenging_skill)
+	local increment = tonumber(stats and stats.scavenging_skill_increment)
+	return base and increment and base + increment * checked or 0
+end
+
+local function install_search()
+	local haru = C().mod("haru_skills")
+	local death = C().mod("death_manager")
+	local effect = C().fn(haru, "scavanger_effect")
+	local increase = C().fn(haru, "increase_skill")
+	if not (effect and increase and C().fn(death, "create_release_item")) then return end
+	local kept = C().upvalue(effect, "always_keep_item")
+	local rank_xp = C().upvalue(effect, "rank_table")
+	local random = C().upvalue(effect, "math_random")
+	if not (type(kept) == "table" and type(rank_xp) == "table" and type(random) == "function") then
+		C().log("credit_loot", "Haru scavenging effects could not be identified")
+		return
+	end
+
+	local function award(t)
+		local character = uint(t.c, 65534)
+		local corpse = uint(t.n, 65534)
+		local at = uint(t.at, 0xffffffff)
+		local amount = uint(t.xp, 100)
+		if not (C().active() and coop_mode.actor_is_player() and character and character == C().hid(0)
+			and corpse and at and amount and amount >= 25) then return end
+		if not (haru.skills_levels.scavenging and haru.options.exp_multiplier_scavenging) then return end
+		if coop_credit.once(character .. ":" .. corpse .. ":" .. at, XP) then increase("scavenging", amount) end
+	end
+
+	local function bonus(npc, character)
+		local chance = skill_bonus(haru, character)
+		if chance <= 0 then return end
+		local extra = {}
+		npc:iterate_inventory(function(_, item)
+			local sec = item and item:section()
+			if sec and chance > random(100) and not kept[sec]
+				and not (IsWeapon(item) or IsOutfit(item) or IsHeadgear(item)) then
+				extra[#extra + 1] = sec
+			end
+		end, npc)
+		-- The engine walks the live inventory. Finish the roll before adding items to it.
+		for _, sec in ipairs(extra) do alife_create_item(sec, npc, { uses = 1, cond_r = { 0.05, 0.2 } }) end
+	end
+
+	local function settle(npc, search)
+		if not (search.generated and search.character and not search.done) then return end
+		-- Reserve the corpse before running any hooks or sending XP.
+		search.done = true
+		local character = search.character
+		local ok, err = pcall(bonus, npc, character)
+		if not ok then C().report("credit_loot", "Haru world bonus", err) end
+		local amount = rank_xp[ranks.get_obj_rank_name(npc)] or 25
+		coop_credit.to_owner(character, XP, { c = C().hid(character), n = C().hid(npc:id()),
+			at = time_global(), xp = amount })
+	end
+
+	local function remember_generation(npc, id, name, ...)
+		if se_load_var(id, name, "death_dropped") then
+			local search = entry(id, name) or { name = name }
+			searches[id] = search
+			search.generated = true
+			settle(npc, search)
+		end
+		return ...
+	end
+
+	local function confirm(npc, character)
+		local id, name = npc:id(), npc:name()
+		local search = entry(id, name)
+		if not search then
+			-- Previously generated bodies from a save have already had their one loot roll.
+			if se_load_var(id, name, "death_dropped") then return end
+			search = { name = name }
+			searches[id] = search
+		end
+		-- Keep the first confirmed participant even if base loot is still in flight.
+		if search.character == nil then search.character = character end
+		settle(npc, search)
+	end
+
+	coop_credit.on_owner(XP, award)
+	C().listen("container_opened", function(peer, id)
+		if not leads() then return end
+		local seat, body_id = uint(peer, 65534), uint(id, 65534)
+		local npc = body_id and body_id > 0 and level.object_by_id(body_id)
+		local local_player = seat and coop_mode.seat_plays(seat) and coop_mode.where(seat) == "here"
+			and coop_mode.decider(seat) == "this" and C().avatar(seat)
+		local character, owner
+		if local_player then character, owner = coop_credit.who(local_player) end
+		local valid = corpse_ok(npc) and character ~= nil and owner == seat and local_player:alive()
+		local near = valid and local_player:position():distance_to_sqr(npc:position()) <= REACH_SQ
+		if not coop_trust.pass("g93_corpse_window", near, "peer %s cannot search corpse %s",
+			tostring(seat), tostring(body_id)) or not valid then return end
+		confirm(npc, character)
+	end)
+	RegisterScriptCallback("GUI_on_show", function(name)
+		if not (name == "UIInventory" and leads() and coop_mode.actor_is_player()) then return end
+		local gui = ui_inventory and ui_inventory.GUI
+		local npc = gui and gui.mode == "loot" and gui.npc_id and level.object_by_id(gui.npc_id)
+		if corpse_ok(npc) then confirm(npc, 0) end
+	end)
+	RegisterScriptCallback("server_entity_on_unregister", function(se) searches[se.id] = nil end)
+	RegisterScriptCallback("load_state", function() searches = {} end)
+
+	C().wrap(death, "create_release_item", "g93.death_manager.create_release_item", function(orig)
+		return function(npc, ...)
+			if not (leads() and corpse_ok(npc)) then return orig(npc, ...) end
+			local id, name = npc:id(), npc:name()
+			if se_load_var(id, name, "death_dropped") then return orig(npc, ...) end
+			return remember_generation(npc, id, name, orig(npc, ...))
+		end
+	end)
+	C().wrap(haru, "scavanger_effect", "g93.haru_skills.scavanger_effect", function(orig)
+		return function(...)
+			-- Both the Haru timer and the FDDA inventory callback converge here.
+			if not C().active() then return orig(...) end
+		end
+	end)
+end
+
+local function install_rank()
+	local death = C().mod("death_manager")
+	if not death then return end
+	local mcm = C().mod("outfit_drop_mcm")
+	-- Outfit Drop Chance gates its saved copy of the Economy validator. Wrap that copy
+	-- so the unmodified MCM and rare-armour checks still run with their original odds.
+	local target, field = death, "validate_drop"
+	if C().fn(mcm, "ValidateDrop") then target, field = mcm, "ValidateDrop" end
+	C().wrap(target, field, "g93.death_manager.validate_drop", function(orig)
+		return function(...)
+			local player = C().identity_obj()
+			if not (player and leads()) then return orig(...) end
+			local rank = player:character_rank()
+			local env = getfenv(orig)
+			-- The Economy validator only reads alife():actor():rank(). Scope the
+			-- substitute to this function and restore it even if the mod throws.
+			local sim = { actor = function() return { rank = function() return rank end } end }
+			setfenv(orig, setmetatable({ alife = function() return sim end }, { __index = env, __newindex = env }))
+			local ok, result = pcall(orig, ...)
+			setfenv(orig, env)
+			if not ok then error(result, 0) end
+			return result
+		end
+	end)
+end
+
+function on_game_start()
+	if started or not rawget(_G, "coop") then return end
+	started = true
+	for _, step in ipairs({ { "search", install_search }, { "progressive armour", install_rank } }) do
+		local ok, err = pcall(step[2])
+		if not ok then printf("! [coop_credit_loot] %s: %s", step[1], tostring(err)) end
+	end
+end
