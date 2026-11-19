@@ -3,9 +3,8 @@
 -- weapon_eval_parts: > 0.9 gives 90-99 to every part). A client's copy of loot of a map server's level may still show the spawn's
 -- 1.0: the roll belongs to the authority of the level, whose copy has the wear (coop_mods_mags, wpo_eval). And a refused strip of a
 -- weapon in a body or a box says so to the player (wpo_no), it was silent.
--- Client (default) or host (MODE_ARG = "host", test_mods_wpo_roll_host.lua).
-local which = MODE_ARG or "client"
-MODE = which
+local which = ...
+MODE = which == "host" and "host" or "client"
 dofile("tests/lua/support/stubs_mods.lua")
 print("== WPO roll (" .. which .. ")")
 make_actor(vec3(20, 0, 0))
@@ -13,8 +12,8 @@ local _, other = spawn("coop_player_avatar", vec3(20, 0, 1), nil, { id = 500 })
 other._kind = "stalker"
 local function from(name, t, peer) coop_main.on_event("mods." .. name, coop_main.encode(t), peer) end
 
-SPLIT = true
-coop.levels = { split = function() return SPLIT end }
+local modes = dofile("tests/lua/support/modes.lua")
+coop.levels = { split = function() return which == "server client" end }
 
 PARTS, ROLLED = {}, {}
 function se_load_var(id, name, var) if var == "parts" then return PARTS[id] end end
@@ -45,7 +44,14 @@ local function weapon(parent, cond, pos)
 	return w
 end
 
-if which == "host" then
+if which == "co-op client" then
+	local _, box = spawn("box", vec3(21, 0, 0))
+	box._kind = "box"
+	local plain = weapon(box:id(), 1)
+	SENT = {}
+	item_parts.evaluate_parts(plain)
+	check(ROLLED[plain:id()] == 1 and sent("mods.wpo_eval") == nil, "co-op client rolls parts on its own map")
+elseif which == "host" then
 	local _, box = spawn("box", vec3(21, 0, 0))
 	box._kind = "box"
 	-- the authority of the level rolls with its own condition: the wear death_manager gave the gun here
@@ -88,6 +94,14 @@ if which == "host" then
 	from("wpo_strip", { w = fine:id(), p = "scope" }, 1)
 	check(STRIPPED == 1 and sent("mods.wpo_no") == nil, "wpo_strip: an accepted strip sends no refusal")
 else
+	-- The world decider is away according to the facade. This answer must work independently of the engine flag.
+	coop.levels.split = function() return false end
+	modes.install(coop_mode, "srv_map", {
+		where = function(peer) return peer == 0 and "away" or "here" end,
+		is_player_mirror = function() return true end,
+		actor_is_player = function() return true end,
+		leads_here = function() return false end,
+	})
 	local _, box = spawn("box", vec3(21, 0, 0))
 	box._kind = "box"
 	-- loot in a box: this copy may not have its wear yet, the authority rolls
@@ -103,7 +117,7 @@ else
 	item_parts.evaluate_parts(loot)
 	check(sent_count("mods.wpo_eval") == 2, "client: asked again after a while (a lost answer)")
 	-- the weapon just taken: its condition may still be the spawn's too. What he carries never goes without a table (arti_jamming
-	-- reads the gun in hand every second): a stand-in rolled here, the authority asked for the real one (test_mods_wpo_split.lua
+	-- reads the gun in hand every second): a stand-in rolled here, the authority asked for the real one (test_srv_mods_wpo.lua
 	-- shows the stand-in stays on this machine and gives way to the authority's roll)
 	local taken = weapon(0, 1)
 	SENT = {}
@@ -118,14 +132,6 @@ else
 	SENT = {}
 	item_parts.evaluate_parts(known)
 	check(sent("mods.wpo_eval") == nil, "client: a weapon with parts asks nobody")
-	-- without split levels nothing changes
-	SPLIT = false
-	local plain = weapon(box:id(), 1)
-	SENT = {}
-	item_parts.evaluate_parts(plain)
-	check(ROLLED[plain:id()] == 1 and sent("mods.wpo_eval") == nil, "client, one level: the mod rolls as always")
-	SPLIT = true
-
 	-- the authority's refusal of a strip is said to the player
 	TIPS = {}
 	from("wpo_no", { w = loot:id(), r = "far" }, 0)

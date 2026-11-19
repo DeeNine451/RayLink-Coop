@@ -1,12 +1,15 @@
 -- Remote NPC trades reach mob_trade without the host's ActorMenu trade-start event.
 -- Run: tools\test_lua.cmd trade_scheme
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function boot(role)
 	reset_world()
 	local M = machine(role or "host", 0, { [0] = 0, [1] = 500 })
 	local E = M.env
 	load_script(M, "coop_npc_players")
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
 	load_script(M, "coop_mods_core")
 	local adapter = load_script(M, "coop_npc_adapters")
 	-- luabind classes are userdata, unlike module tables. Match their member access.

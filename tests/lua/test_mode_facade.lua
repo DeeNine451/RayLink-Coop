@@ -136,8 +136,10 @@ for _, name in ipairs(modes.names()) do
 	-- coop_mods_core goes the same way
 	local mh, mp = mods_fire({ b = 1 }, 1)
 	local mh0 = mods_fire({ b = 2, _peer = 3 }, 0)
-	if name == "hostplay" or name == "none" then
+	if name == "hostplay" then
 		check(#mh == 1 and mh[1].from == 1 and #mp == 0, tag .. "coop_mods_core.on host: runs here")
+	elseif name == "none" then
+		check(#mh == 0 and #mh0 == 0 and #mp == 0, tag .. "coop_mods_core.on host: no authority outside a session")
 	elseif name == "srv_world" then
 		check(#mh == 0 and #mp == 1 and mp[1].target == set.bridge and mp[1].t._peer == 1,
 			tag .. "coop_mods_core.on host: passed to the map server of his map")

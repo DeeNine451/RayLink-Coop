@@ -6,6 +6,10 @@ local CHOICE = "st_freeplay_text_yes_no"
 local ACK = "st_freeplay_text_ok"
 
 local function start(M)
+	if not M.env.coop_mode then
+		local facade = load_script(M, "coop_mode")
+		modes.live(facade, function(name) return load_script(M, name) end)
+	end
 	load_script(M, "coop_mods_core")
 	load_script(M, "coop_trust").reset_for_test({ default = "log" })
 	M.windows = {}
@@ -40,6 +44,11 @@ for _, mode in ipairs(modes.names()) do
 	local world = mode == "srv_map" and machine("client", 0x101) or machine("host", 0)
 	local first = machine("client", 1)
 	local selected = machine("client", 2)
+	if mode == "srv_world" then
+		for _, player in ipairs({ first, selected }) do
+			player.env.coop.levels = { split = function() return true end }
+		end
+	end
 	world.active = mode ~= "none"
 	world.env.coop.is_dedicated = function() return mode == "srv_world" end
 	world.env.coop.is_map_server = function() return mode == "srv_map" end

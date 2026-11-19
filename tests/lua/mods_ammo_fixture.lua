@@ -3,6 +3,7 @@
 -- taken is merged into full boxes. game_setup is routed host-only, so a client's bag filled with small packs, and the
 -- workbench counts full boxes only. coop_mods_ammo merges a live client's own packs the same way, through confirmed paths
 -- only: a pack is released first, its rounds go into the other packs once the host has taken it.
+local server = ...
 MODE = "client"
 dofile("tests/lua/support/stubs_mods.lua")
 print("== ammo packs of a client are merged like the host's")
@@ -87,7 +88,9 @@ end
 game_setup = { world_itm_on = {}, world_itm_num = {}, world_itm_off = {}, world_itm_info = {}, limited_uses = {},
 	try_spawn_world_item = function() end }
 
+if server then coop.levels = { split = function() return true end } end
 start_all()
+local modes = dofile("tests/lua/support/modes.lua")
 AddScriptCallback("GUI_on_show")
 AddScriptCallback("GUI_on_hide")
 coop_economy_world.on_game_start()
@@ -243,14 +246,18 @@ local function nothing_as(mode, what, setup, undo)
 	clear()
 	MODE = "client"
 end
-nothing_as("host", "host")
-nothing_as("sp", "single player")
-nothing_as("client", "map server", function() coop.is_map_server = function() return true end end,
-	function() coop.is_map_server = nil end)
-nothing_as("host", "world server (dedicated)", function() coop.is_dedicated = function() return true end end,
-	function() coop.is_dedicated = nil end)
-nothing_as("client", "client not live yet", function() coop.is_live = function() return false end end,
-	function() coop.is_live = function() return true end end)
+if server then
+	-- Leave the transport on a player mirror while the facade switches to console/map actors.
+	nothing_as("client", "map server", function() modes.install(coop_mode, "srv_map") end,
+		function() modes.live(coop_mode, load_script) end)
+	nothing_as("client", "world server", function() modes.install(coop_mode, "srv_world") end,
+		function() modes.live(coop_mode, load_script) end)
+else
+	nothing_as("host", "host")
+	nothing_as("sp", "single player")
+	nothing_as("client", "client not live yet", function() coop.is_live = function() return false end end,
+		function() coop.is_live = function() return true end end)
+end
 
 -- and the client works again afterwards
 local m1, m2 = pack(FMJ, 3), pack(FMJ, 2)
@@ -262,4 +269,4 @@ local _, txt8 = bag(FMJ)
 check(txt8 == "5", "client again: 3+2 -> 5: " .. txt8)
 clear()
 
-done("MODS AMMO")
+done(server and "SERVER MODS AMMO" or "CO-OP MODS AMMO")

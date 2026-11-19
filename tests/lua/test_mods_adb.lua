@@ -2,6 +2,7 @@
 -- a bullet whose weapon is not on this machine. Run: tools\test_lua.cmd mods_adb
 MODE = "client"
 dofile("tests/lua/support/stubs_mods.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 print("== the damage balancer and a player's shot")
 make_actor(vec3(0, 0, 0))
 hit = { fire_wound = 8, wound = 6 }
@@ -27,6 +28,7 @@ function g.actor_on_before_hit(shit, bone, flags)
 end
 RegisterScriptCallback("actor_on_before_hit", g.actor_on_before_hit)
 
+modes.live(load_script("coop_mode"), load_script)
 load_script("coop_mods_misc")
 coop_mods_misc.on_game_start()
 local on_hit = g.actor_on_before_hit

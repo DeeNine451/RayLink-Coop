@@ -4,6 +4,7 @@
 -- is logged with its key and size and tried again (its signature is kept only for a value that went). Not shipped.
 -- Run: tools\test_lua.cmd mdata_world_big
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function setup(nclients, with_mods_core)
 	PLAYERS = { [0] = { nick = "host", proxy = 0 } }
@@ -18,7 +19,11 @@ local function setup(nclients, with_mods_core)
 			local lid = (p == 0) and info.proxy or (info.proxy == 0 and PLAYERS[p].proxy or (info.proxy == PLAYERS[p].proxy and 0 or info.proxy))
 			add_entity(W, lid, "coop_player_avatar", nil, POS[q])
 		end
-		if with_mods_core ~= false then load_script(W, "coop_mods_core") end
+		if with_mods_core ~= false then
+			local facade = load_script(W, "coop_mode")
+			modes.live(facade, function(name) return load_script(W, name) end)
+			load_script(W, "coop_mods_core")
+		end
 	end
 	for p, W in pairs(WORLDS) do start_world(W) end
 	return WORLDS[0], WORLDS[1], WORLDS[2]

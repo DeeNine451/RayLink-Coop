@@ -439,7 +439,7 @@ local function install_data_mirror()
 		end
 	end)
 	C().on("hf_data", function(t, from)
-		if not C().is_world_server() then
+		if not coop_mode.decides_world() then
 			if from == 0 then client_data(t) end
 		elseif C().is_bridge(from) then -- a map server changed it: the world's save keeps it, every machine hears it
 			client_data(t)
@@ -1206,7 +1206,7 @@ local function apply_case(ws, case_id, map)
 end
 
 local function publish_case(ws, case_id)
-	if C().is_host() then C().publish("hf_show_map", { c = case_id, m = encode_case(ws, case_id) }) end
+	if coop_mode.decides_world() or coop_mode.leads_here() then C().publish("hf_show_map", { c = case_id, m = encode_case(ws, case_id) }) end
 end
 
 -- The map decider has the device, its hidden box and the player's inventory.
@@ -1557,7 +1557,7 @@ local function install_gadgets()
 	C().on("hf_show_map", function(t, from)
 		local case_id = C().lid(tonumber(t.c))
 		if not (case_id and type(t.m) == "string") then return end
-		if not C().is_world_server() then
+		if not coop_mode.decides_world() then
 			if from == 0 then apply_case(ws, case_id, t.m) end
 		elseif C().is_bridge(from) then
 			apply_case(ws, case_id, t.m)

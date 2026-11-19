@@ -625,7 +625,7 @@ local function install_fm()
 end
 
 local function fm_tick()
-	if not (fm.R and next(fm.names) and C().is_world_server()) then return end
+	if not (fm.R and next(fm.names) and coop_mode.decides_world()) then return end
 	local tg = time_global()
 	if tg < fm.next_tick then return end
 	fm.next_tick = tg + 1000

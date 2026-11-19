@@ -3,6 +3,7 @@
 -- RL-XK6N-8U4U, RL-M68Z-RV5K, RL-PVY5-ERKS, RL-PMQ3-QJ23). coop_npc_compat rewrites that one method in place: the class
 -- and every wrapper that kept the original (Useful Idiots' PATCH_get_script_target upvalue) get the fixed function.
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local FIXTURE = "temp/lua/sim_squad_scripted.script" -- the file name is how the original is recognised
 
@@ -82,6 +83,8 @@ local function boot(role, text, idiots)
 		end
 	end
 	load_script(M, "coop_npc_players")
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
 	load_script(M, "coop_mods_core")
 	return M, E, m, original
 end
@@ -156,6 +159,8 @@ do
 	local M = machine("host", 0, { [0] = 0 })
 	M.env.getFS = function() return { update_path = function() M.reads = (M.reads or 0) + 1; return "absent/x.script" end } end
 	load_script(M, "coop_npc_players")
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
 	load_script(M, "coop_mods_core")
 	install(M)
 	check(not M.reads or not logged(M, "sim_squad_scripted"), "no sim_squad_scripted: nothing is rewritten")

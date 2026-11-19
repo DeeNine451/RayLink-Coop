@@ -3,6 +3,8 @@
 -- Run: tools\test_lua.cmd parity
 dofile("tests/lua/support/harness_quests.lua")
 
+local modes = dofile("tests/lua/support/modes.lua")
+
 local PROXY = 500 -- the client's character on the host; on the client ids 0 and 500 are swapped
 
 -- ------------------------------------------------------------------ the world of a machine
@@ -96,6 +98,8 @@ local function setup(M, opts)
 end
 
 local function boot(M)
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
 	local mod = load_script(M, "coop_parity")
 	mod.on_game_start()
 	return mod
@@ -150,6 +154,15 @@ do
 	local unsorted = { "b", "a" }
 	mod.digest(unsorted)
 	check(unsorted[1] == "b", "the digest leaves the caller's table alone")
+end
+
+print("== world authority")
+do
+	local M = machine("host", 0)
+	setup(M)
+	local mod = boot(M)
+	modes.install(M.env.coop_mode, "srv_map")
+	check(mod.request("map") == nil and #M.sent == 0, "a map authority cannot start a world parity dump")
 end
 
 MACHINES, QUEUE = {}, {}

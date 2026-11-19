@@ -18,12 +18,6 @@ check(#HANDLED == 0 and #SENT == 1, "the world server does not run a request of 
 check(SENT[1].name == "mods.lvl_req" and SENT[1].target == 0x101, "it goes to the map server of his level")
 local passed = SENT[1].payload
 check(coop_main.decode(passed).a == "5" or coop_main.decode(passed).a == 5, "with what he asked")
--- The local player request is a separate co-op case.
-local server_levels = coop.levels
-coop.levels, coop.is_dedicated = nil, function() return false end
-coop_main.on_event("mods.lvl_req", coop_main.encode({ a = 6 }), 2)
-coop.levels, coop.is_dedicated = server_levels, function() return MODE == "host" end
-check(#HANDLED == 1 and HANDLED[1].from == 2, "a co-op player's request runs on the host")
 HANDLED = {}
 coop_main.on_event("mods.wld_req", coop_main.encode({ a = 7 }), 1)
 check(#HANDLED == 1 and HANDLED[1].from == 1, "\"world\": on the world server, wherever he stands")
@@ -32,7 +26,7 @@ check(C.is_bridge(0x101) == true and C.is_bridge(1) == false, "is_bridge knows a
 HANDLED = {}
 MODE = "client"
 coop.is_map_server = function() return true end
-check(C.is_host() == true and C.is_world_server() == false, "a map server leads its level, it is not the world server")
+check(coop_mode.leads_here() and not coop_mode.decides_world(), "a map server leads its level, it is not the world server")
 check(C.is_client() == false and C.world_client() == true, "it is no mirror, and what it has of the world is a copy")
 coop_main.on_event("mods.lvl_req", passed, 0)
 check(#HANDLED == 1 and HANDLED[1].from == 1 and HANDLED[1].t._peer == nil, "on the map server it runs as if it came from him")

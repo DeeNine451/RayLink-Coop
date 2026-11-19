@@ -1,3 +1,4 @@
+local server = ...
 -- Weapon Parts Overhaul on split levels: the dots of a weapon in a body or a box, its strip, and who knows its parts.
 -- Owner, live 2026-11-15 (build 50, a world server and split levels, he was a client), a dead NPC with three weapons:
 --   1. "When I opened it, the condition of the parts was not shown as dots at all."
@@ -306,6 +307,7 @@ local function setup(split)
 			end
 			W.coop.levels = { split = function() return SPLIT end }
 		elseif peer == 0 then
+			W.coop.is_dedicated = function() return split end
 			W.coop.levels = {
 				split = function() return SPLIT end,
 				map_servers = function() return split and { { bridge = MK, level = 2 } } or {} end,
@@ -313,6 +315,17 @@ local function setup(split)
 			}
 		else
 			W.coop.levels = { split = function() return SPLIT end }
+		end
+		if split and peer ~= MK then
+			-- coop.players() omits the world server's seat, which plays no character.
+			local players = W.coop.players
+			W.coop.players = function()
+				local rows = players()
+				for i = #rows, 1, -1 do
+					if rows[i].id == 0 then table.remove(rows, i) end
+				end
+				return rows
+			end
 		end
 		-- the characters of the players, as entities
 		for q, info in pairs(PLAYERS) do
@@ -368,6 +381,7 @@ local function no_errors(W, label)
 end
 
 -------------------------------------------------------------------------------
+if server then
 section("1. the dots of a fresh weapon in a body come as soon as the authority's parts are here (symptoms 1, 2)")
 do
 	local H, A, B, M = setup(true)
@@ -543,6 +557,7 @@ do
 end
 
 -------------------------------------------------------------------------------
+else
 section("6. without split levels: the host strips, the client's open window follows too")
 do
 	local H, A = setup(false)
@@ -561,6 +576,8 @@ do
 	A.item_parts.evaluate_parts(A.OBJ[885])
 	check(parts(A, 885) ~= nil, "one level: the client rolls at once, nobody is asked")
 	no_errors(A, "client") no_errors(H, "host")
+end
+
 end
 
 print(string.format("%d passed, %d failed", CHECKS - FAILS, FAILS))

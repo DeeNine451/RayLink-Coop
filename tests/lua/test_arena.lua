@@ -4,6 +4,7 @@
 -- dialogs_mlr.script (teleport_for_totaliz) of Anomaly 1.5.3 line by line where items and positions are concerned.
 -- Run: tools\test_lua.cmd arena
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local PROXY = 500
 local BOX1, BOX2, TRIG, MANAGER, COMMENT, TOTAL, OPPONENT, BODY = 900, 901, 910, 920, 911, 912, 300, 777
@@ -288,6 +289,8 @@ local function env(M, level_name)
 	-- names no player, so everybody)
 	E.coop_npc_logic = { add_audience_rule = function(f) M.rule = f end, audience_of = function() return M.logic_aud end }
 	E.coop_npc_players = load_script(M, "coop_npc_players")
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
 	E.coop_mods_core = load_script(M, "coop_mods_core")
 	-- ui_dyn_msg_box.msg_box_ui: the box (yes = ok, no = cancel). In the game it is a luabind class (stock ui_dyn_msg_box.script:3
 	-- `class "msg_box_ui" (CUIScriptWnd)`): type() answers "userdata", calling it makes the window. Modelled as a plain function

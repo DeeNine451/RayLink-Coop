@@ -3,6 +3,7 @@
 -- Owner: "everything a client has must come through a transition exactly as in a usual game". Not shipped.
 -- Run: tools\test_lua.cmd economy_load
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function setup(nclients)
 	PLAYERS = { [0] = { nick = "host", proxy = 0 } }
@@ -193,6 +194,8 @@ function is_actor_disguised() return is_disguised end
 section("providers: disguise state and its relation keys are read from gameplay_disguise")
 do
 	local H, A = setup(1)
+	local facade = load_script(A, "coop_mode")
+	modes.live(facade, function(name) return load_script(A, name) end)
 	A.coop_mods_core = load_script(A, "coop_mods_core")
 	local gd = setmetatable({}, { __index = A })
 	setfenv(assert(loadstring(DISGUISE, "=gameplay_disguise")), gd)()

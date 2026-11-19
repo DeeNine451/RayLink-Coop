@@ -1,5 +1,6 @@
 -- Native hooks must work with already loaded/packed mods: no source reread or module rerun.
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function boot(role)
 	reset_world()
@@ -18,6 +19,8 @@ local function boot(role)
 		return false
 	end
 	load_script(M, "coop_npc_players")
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
 	load_script(M, "coop_mods_core")
 	local fh = io.open("gamedata/scripts/coop_npc_adapters.script", "r")
 	if fh then fh:close(); load_script(M, "coop_npc_adapters") end

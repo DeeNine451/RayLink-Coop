@@ -64,7 +64,7 @@ local next_tick = 0
 -- and not the world server.
 local function active()
 	local c = C()
-	return api ~= nil and c.live_client() and not c.is_host() and not c.actor_is_nobody() and db.actor ~= nil
+	return api ~= nil and c.live_client() and db.actor ~= nil
 end
 
 local function id_of(x)

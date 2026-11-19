@@ -70,8 +70,8 @@ local function mirror_flush(m)
 	local tg = time_global()
 	if tg < m.next then return end
 	m.next = tg + 500
-	local host = C().is_world_server()
-	local leads = C().is_host() -- a map server reports what changes on its level, the world server tells everybody
+	local host = coop_mode.decides_world()
+	local leads = host or coop_mode.leads_here() -- a map server reports what changes on its level, the world server tells everybody
 	local batch, size, n, included = {}, 0, 0, {}
 	for id in pairs(m.dirty) do
 		-- The host reports every change it knows of (a client's report included: the others need it once the
@@ -103,7 +103,7 @@ end
 
 local function mirror_receive(m, t, from)
 	local n = tonumber(t.n) or 0
-	local host = C().is_world_server()
+	local host = coop_mode.decides_world()
 	for i = 1, math.min(n, 200) do
 		local id = C().lid(tonumber(t["i" .. i]))
 		local s = t["d" .. i]
@@ -445,11 +445,6 @@ end
 -- is given by the authority of its level (death_manager, ItemProcessor) and reaches a client's copy later (engine: LevelEntity
 -- Item, coop_levels_xfer.cpp client_loot): a client asks that authority to roll instead, the parts come with the se mirror
 -- (coop_economy_mdata). Without split levels nothing changes.
-local function split()
-	local l = api and api.levels
-	return l ~= nil and l.split ~= nil and l.split() == true
-end
-
 -- Does this item have WPO parts at all (itms_manager.ini_parts con_parts_list)? Unknown: yes.
 local function rolls_parts(obj)
 	local im = C().mod("itms_manager")
@@ -691,7 +686,7 @@ local function install_wpo()
 	C().wrap(item_parts, "evaluate_parts", "item_parts.evaluate_parts", function(orig)
 		WPO.orig_eval = orig
 		return function(obj, ...)
-			if not (obj and C().is_client() and split()) or not rolls_parts(obj) then return orig(obj, ...) end
+			if not (obj and C().is_client() and coop_mode.where(0) == "away") or not rolls_parts(obj) then return orig(obj, ...) end
 			local id = obj:id()
 			if WPO.provisional[id] then return end -- a stand-in table is here, the real one is on its way: nothing re-evaluated
 			if parts_of(obj) then return orig(obj, ...) end

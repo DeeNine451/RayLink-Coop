@@ -4,11 +4,8 @@
 	Every coop_mods_*.script builds on this file. Nothing here changes the game by itself: it only offers
 	helpers, and every helper is inert outside a co-op session (single player behaves like stock).
 
-	Session:   active() is_host() is_client() live_client() is_world_server() is_map_server() world_client() is_bridge(peer)
-	           actor_is_nobody() (a map server's or a dedicated world server's ghost actor: no player)
-	           is_host() is "this process leads a level for its players": the host's process and a map server (docs\SPLIT_LEVELS.md 7b);
-	           is_world_server() is the first alone. is_client() is a mirror: a player's machine. world_client() also a map server: what
-	           it has of the world is a copy, the mod's world spawns and timers are not its own.
+	Session:   active() is_client() live_client() world_client()
+	           is_client() identifies a player's mirror; world_client() includes every non-deciding process in a session.
 	Modules:   mod(name) -> module table or nil (a missing addon is not an error; the file is checked first)
 	           fn(tbl, key) -> function or nil
 	           wrap(tbl, key, label, make) -> true, orig   (tbl[key] = make(orig); listed in coop_status)
@@ -99,30 +96,18 @@ function active()
 	return api ~= nil and api.is_active() == true
 end
 
+-- Compatibility for personal-data save handling and bridge validation.
 function is_world_server()
-	return api ~= nil and api.is_active() == true and api.is_host() == true
+	return active() and coop_mode.decides_world()
 end
 
-function is_map_server()
-	return api ~= nil and api.is_active() == true and api.is_map_server ~= nil and api.is_map_server() == true
-end
-
-function is_host()
-	return is_world_server() or is_map_server()
-end
-
--- This process's own actor is nobody (owner 2026-11-13): the ghost of a map server or of a world server whose seat plays no character
--- (-coop_dedicated). Same rule as coop_quests_core.actor_is_nobody / coop_npc_players.actor_is_nobody.
-function actor_is_nobody()
-	return is_map_server() or (is_world_server() and api.is_dedicated ~= nil and api.is_dedicated() == true)
-end
 
 function world_client()
 	return api ~= nil and api.is_active() == true and api.is_client() == true
 end
 
 function is_client()
-	return world_client() and not is_map_server()
+	return coop_mode.is_player_mirror()
 end
 
 function is_bridge(peer)
@@ -135,7 +120,7 @@ function is_bridge(peer)
 end
 
 function live_client()
-	return is_client() and api.is_live() == true
+	return active() and is_client() and api.is_live() == true
 end
 
 function engine()
@@ -299,7 +284,7 @@ function nick_of(peer)
 end
 
 function is_player(id)
-	return (id == 0 and not actor_is_nobody()) or (active() and id ~= 0 and peer_of(id) ~= nil)
+	return (id == 0 and coop_mode.actor_is_player()) or (active() and id ~= 0 and peer_of(id) ~= nil)
 end
 
 function is_remote_player(id)
@@ -310,7 +295,7 @@ end
 
 function player_objects()
 	local out = {}
-	if db.actor and not actor_is_nobody() then out[1] = { peer = self_peer(), obj = db.actor } end -- a ghost actor is no player's
+	if db.actor and coop_mode.actor_is_player() then out[1] = { peer = self_peer(), obj = db.actor } end -- a ghost actor is no player's
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and type(p.avatar_id) == "number" then
@@ -405,7 +390,7 @@ function set_limit(verb, burst, per_s, on_limited)
 end
 
 local function rate_ok(from, verb)
-	if from == 0 or not is_host() then return true end
+	if from == 0 or not (coop_mode.decides_world() or coop_mode.leads_here()) then return true end
 	local lim = limits[verb] or { 20, 10 }
 	local k = tostring(from) .. ":" .. verb
 	local b = buckets[k]
@@ -425,12 +410,12 @@ end
 -- host's actor is a ghost.
 local function own_player()
 	if is_client() then return true end
-	return is_world_server() and not (api.is_dedicated ~= nil and api.is_dedicated() == true)
+	return coop_mode.decides_world() and coop_mode.actor_is_player()
 end
 
 local function side_ok(side, from)
-	if side == "host" then return is_host() and type(from) == "number" and from ~= 0 end
-	if side == "world" then return is_world_server() and type(from) == "number" and from ~= 0 end
+	if side == "host" then return (coop_mode.decides_world() or coop_mode.leads_here()) and type(from) == "number" and from ~= 0 end
+	if side == "world" then return coop_mode.decides_world() and type(from) == "number" and from ~= 0 end
 	if side == "client" then return world_client() and from == 0 end
 	if side == "player" then return from == 0 and own_player() end
 	return true
@@ -562,7 +547,7 @@ end
 -- Host: items to a player, teleports, effects for everybody
 -------------------------------------------------------------------------------
 function give(peer, section, cond)
-	if not (is_host() and type(section) == "string" and ini_sys:section_exist(section)) then return false end
+	if not ((coop_mode.decides_world() or coop_mode.leads_here()) and type(section) == "string" and ini_sys:section_exist(section)) then return false end
 	local obj = avatar(peer)
 	if not obj then
 		-- a player on another level: into the record of his character, the authority of his level gets the item with it
@@ -606,7 +591,7 @@ _vec = vec
 -- player is no exception (docs\DEBUG_DESIGN.md A.2 p. 3, C.2): the order to peer 0 comes back to the Lua of the host's process from 0,
 -- the way a client's machine gets it, and moves the actor there a frame later.
 function teleport(peer, pos)
-	if not (pos and is_host() and type(peer) == "number") then return false end
+	if not (pos and (coop_mode.decides_world() or coop_mode.leads_here()) and type(peer) == "number") then return false end
 	return to_peer(peer, "tp", { x = pos.x, y = pos.y, z = pos.z })
 end
 
@@ -616,15 +601,15 @@ end
 
 function fx_sound(path)
 	if not sound_path_ok(path) then return end
-	if is_world_server() then to_all("fx", { s = path }) end
+	if coop_mode.decides_world() then to_all("fx", { s = path }) end
 end
 
 function fx_cam(anm, id, loop)
-	if is_world_server() and sound_path_ok(anm) then to_all("fx", { c = anm, i = tonumber(id) or 0, l = loop and true or false }) end
+	if coop_mode.decides_world() and sound_path_ok(anm) then to_all("fx", { c = anm, i = tonumber(id) or 0, l = loop and true or false }) end
 end
 
 function fx_stop_cam(id)
-	if is_world_server() then to_all("fx", { x = tonumber(id) or 0 }) end
+	if coop_mode.decides_world() then to_all("fx", { x = tonumber(id) or 0 }) end
 end
 
 -------------------------------------------------------------------------------
@@ -823,11 +808,11 @@ end
 
 function on_container_opened(peer, container_id)
 	peer, container_id = tonumber(peer), tonumber(container_id)
-	if is_host() and peer and container_id then fire("container_opened", peer, container_id) end
+	if (coop_mode.decides_world() or coop_mode.leads_here()) and peer and container_id then fire("container_opened", peer, container_id) end
 end
 
 function on_new_character(peer)
-	if is_world_server() then fire("new_character", peer) end
+	if coop_mode.decides_world() then fire("new_character", peer) end
 end
 
 function on_avatar_step(avatar_id, material, power, move_state)
@@ -855,7 +840,7 @@ end
 -------------------------------------------------------------------------------
 function print_status()
 	log("core", "role %s | events sent %d (failed %d), received %d (rejected %d, rate-limited %d), big %d (dropped %d), errors %d",
-		is_host() and "host" or is_client() and "client" or "off", stats.sent, stats.send_failed, stats.received,
+		(coop_mode.decides_world() or coop_mode.leads_here()) and "host" or is_client() and "client" or "off", stats.sent, stats.send_failed, stats.received,
 		stats.rejected, stats.limited, stats.big_in, stats.big_dropped, stats.errors)
 	local tags = {}
 	for tag in pairs(status_lines) do tags[#tags + 1] = tag end

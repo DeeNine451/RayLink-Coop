@@ -69,7 +69,7 @@ end
 
 -- A machine with a player character in a session: the host's game or a client, not a headless server.
 local function plays_here()
-	return C().active() and not C().actor_is_nobody()
+	return C().active() and coop_mode.actor_is_player()
 end
 
 local function step()

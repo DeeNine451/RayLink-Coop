@@ -276,7 +276,7 @@ local function s_inventories(sec, ctx)
 end
 
 local function s_money(sec, ctx)
-	local host = api.is_host()
+	local host = coop_mode.decides_world()
 	for _, p in ipairs(ctx.players) do
 		if p.is_self then
 			put_call(sec, p.id, function() return db.actor:money() end)
@@ -375,7 +375,7 @@ end
 -- This machine's file for `tag`; host_s: the host's game time at the request. The path, or nil if it cannot be written.
 function dump(tag, host_s)
 	local started = time_global()
-	local role = api.is_host() and "host" or "client"
+	local role = coop_mode.decides_world() and "host" or "client"
 	local ctx = { tag = tag, role = role, host_s = host_s }
 	read_players(ctx)
 	local lines, total, errors = {}, 0, 0
@@ -401,7 +401,7 @@ end
 
 -- Host: this machine and every client dump now. The tag used, or nil if this machine is not a session's host.
 function request(tag)
-	if not (active() and api.is_host()) then return nil end
+	if not (active() and coop_mode.decides_world()) then return nil end
 	local ok, now = pcall(game_seconds)
 	if not ok then
 		log("! no game time: %s", tostring(now))
@@ -418,7 +418,7 @@ end
 function command(args)
 	if not active() then
 		log("no co-op session")
-	elseif not api.is_host() then
+	elseif not coop_mode.decides_world() then
 		log("host only: run coop_parity on the host, every machine dumps")
 	else
 		request(args)
@@ -426,7 +426,7 @@ function command(args)
 end
 
 local function on_dump_event(payload, from)
-	if from ~= 0 or not active() or api.is_host() then return end
+	if from ~= 0 or not active() or coop_mode.decides_world() then return end
 	local t = coop_main.decode(payload)
 	dump(clean_tag(t.tag) or "untagged", tonumber(t.t))
 end

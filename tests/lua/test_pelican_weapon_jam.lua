@@ -1,6 +1,7 @@
 -- RayLink weapon parts regression. Uses the installed GAMMA calculations and repair body read-only.
 -- GAMMA_SCRIPTS may point to another profile's scripts directory.
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local gamma = os.getenv("GAMMA_SCRIPTS") or "E:/RayLink2/gamma-dev/gamedata/scripts"
 local function read_gamma(name)
@@ -120,6 +121,8 @@ local function setup(notifications, repair_type, condition)
 		configure(W, notifications)
 		load_script(W, "coop_economy_core")
 		load_script(W, "coop_economy_mdata").on_game_start()
+		local facade = load_script(W, "coop_mode")
+		modes.live(facade, function(name) return load_script(W, name) end)
 		load_script(W, "coop_mods_core")
 		load_script(W, "coop_mods_mags").on_game_start()
 		local gun = add_item(W, 880, "wpn_m4a1", peer == 1 and 0 or 501)

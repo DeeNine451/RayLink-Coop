@@ -585,7 +585,7 @@ local function install_corpse_loot()
 			local paid, why = C().as_player(who, money, npc)
 			if not paid then C().report("items", "corpse money", why) end
 		end
-		if C().is_map_server() then C().to_host("corpse_dropped", { n = id, s = npc:name() }) end -- a body rolls once, in the world's save too
+		if coop_mode.leads_here() and not coop_mode.decides_world() then C().publish("corpse_dropped", { n = id, s = npc:name() }) end -- a body rolls once, in the world's save too
 		for _, name in ipairs(USE_HANDLERS) do
 			local handler = C().fn(C().mod(name), "npc_on_use")
 			if handler then
@@ -774,11 +774,11 @@ local function host_stash_free(t, from)
 	spent[id] = true
 	alife_release_id(id)
 	C().give(from, section)
-	if C().is_map_server() then
+	if not coop_mode.decides_world() and coop_mode.leads_here() then
 		local book = m_data().player_created_stashes
 		if type(book) == "table" then book[id] = nil end
 		note_stash_owner(id, nil)
-		C().to_host("stash_book", { b = id, x = true })
+		C().publish("stash_book", { b = id, x = true })
 	else
 		stash_unbook(id)
 	end
@@ -1387,7 +1387,7 @@ end
 -------------------------------------------------------------------------------
 local first_done = false
 local function actor_on_update()
-	if C().is_host() then
+	if coop_mode.decides_world() or coop_mode.leads_here() then
 		for id in pairs(spent) do if not alife_object(id) then spent[id] = nil end end
 	elseif not first_done and C().is_client() and GS.mod then
 		-- The save's lamp table describes the host's lamps; a client never burns or picks them up itself.

@@ -4,6 +4,7 @@ print("== core (host)")
 make_actor(vec3(0, 0, 0))
 start_all()
 local C = coop_mods_core
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- serializer
 local v = { a = 1, b = -2.5, c = "x;y=z%\n:{}", d = true, e = false, n = { 1, 2, { deep = "yes" } }, [7] = "seven",
@@ -117,19 +118,21 @@ check(db.actor._tp and db.actor._tp.x == 4 and db.actor._tp.z == 6, "the order b
 db.actor._tp = nil
 deliver(s0, 1)
 check(db.actor._tp == nil, "an order from a client moves nobody")
-coop.is_dedicated = function() return true end
-deliver(s0, 0)
-check(db.actor._tp == nil, "the dedicated host's actor is a ghost: no order moves it")
--- owner 2026-11-13: that ghost is no player for the mods either (a playing host's actor is)
-check(C.actor_is_nobody() == true and C.is_player(0) == false, "the dedicated host's actor is nobody, not a player")
-local ghost_listed = false
-for _, p in ipairs(C.player_objects()) do if rawequal(p.obj, db.actor) then ghost_listed = true end end
-check(not ghost_listed, "and is not among the players' objects")
-coop.is_dedicated = nil
-check(C.actor_is_nobody() == false and C.is_player(0) == true, "a playing host's actor is his player")
-ghost_listed = false
-for _, p in ipairs(C.player_objects()) do if rawequal(p.obj, db.actor) then ghost_listed = true end end
-check(ghost_listed, "and is among the players' objects")
+-- The actor and world answers come from the facade, even if the transport still looks like the host.
+for _, name in ipairs(modes.names()) do
+	modes.install(coop_mode, name)
+	local playing = name == "hostplay" or name == "none"
+	check(C.is_player(0) == playing, name .. ": actor 0 is a player only when the mode says it plays")
+	local listed = false
+	for _, entry in ipairs(C.player_objects()) do
+		if rawequal(entry.obj, db.actor) then listed = true end
+	end
+	check(listed == playing, name .. ": player objects include only a playing actor")
+	db.actor._tp = nil
+	deliver(s0, 0)
+	check((db.actor._tp ~= nil) == (name == "hostplay"), name .. ": peer 0 order moves only a playing session seat")
+end
+modes.live(coop_mode, load_script)
 SENT = {}
 check(C.teleport(nil, vec3(1, 1, 1)) == false and #SENT == 0, "no peer: nothing sent (not a broadcast)")
 C.fx_sound("ambient\\boom")
@@ -162,7 +165,7 @@ end
 
 -- single player: everything inert
 MODE = "sp"
-check(C.active() == false and C.is_host() == false, "sp: inactive")
+check(C.active() == false and not coop_mode.decides_world() and not coop_mode.leads_here(), "sp: inactive")
 SENT = {}
 check(C.send("x", { a = 1 }) == false and #SENT == 0, "sp: nothing is sent")
 check(C.give(1, "medkit") == false, "sp: no gifts")

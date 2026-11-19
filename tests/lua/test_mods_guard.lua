@@ -252,6 +252,8 @@ if type(guard) ~= "table" then
 	done("MODS GUARD")
 	return
 end
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_script("coop_mode"), load_script)
 guard.on_game_start()
 SendScriptCallback("actor_on_update") -- the first update of a client installs the guards (outermost)
 

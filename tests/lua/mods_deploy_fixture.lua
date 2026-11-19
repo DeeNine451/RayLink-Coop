@@ -1,7 +1,7 @@
 -- The authority of a level for what a client puts into the world (coop_mods_items): the client is not trusted, its item, the distance and
--- the limit are checked here. The world server leading its own level, then a map server (the book and the spot go to the world server).
+-- the limit are checked here. The co-op host and the server authorities exercise their own cases.
 -- The real campfire_placeable and guaranteed_loot; what a client's window starts when the engine hears of it.
--- Run: tools\test_lua.cmd mods_deploy_host
+local server = ...
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
 dofile("tests/lua/support/mod_source.lua")
@@ -54,6 +54,12 @@ if GAMMA then
 	campfire_placeable.on_game_start()
 end
 
+if server then
+	coop.is_host = function() return false end
+	coop.is_client = function() return true end
+	coop.is_map_server = function() return true end
+	coop.levels = { split = function() return true end }
+end
 start_all()
 SendScriptCallback("actor_on_first_update")
 local C = coop_mods_core
@@ -77,6 +83,64 @@ INI.itm_backpack = { class = "EQ_BAKPK" }
 INI.inv_backpack = {}
 INI.st_junk = { class = "II_FOOD" }
 
+local function owners() return m_data().coop_stash_owner or {} end
+local q, raw
+
+if server then
+print("-- a map server")
+local function from_world(name, t, peer)
+	t._peer = peer or 1
+	coop_main.on_event("mods." .. name, coop_main.encode(t), 0)
+end
+NOW = NOW + 30000
+local on_map = pack(500)
+run_time_events(100)
+SENT, CREATED, SPOTS = {}, {}, {}
+from_world("stash_make", { i = on_map:id(), t = "n" })
+local made = created("inv_backpack")
+check(made ~= nil and SE[on_map:id()] == nil, "the box is made here, where the level is")
+q, raw = sent("mods.stash_book")
+check(q ~= nil and raw.target == 0 and q.b == made.id and q.s == "itm_backpack" and q.t == "n", "the world server gets the book")
+check(book()[made.id] == "itm_backpack", "and this process knows its level's stash")
+check(q and q.o == 500 and owners()[made.id] == 500, "its owner: booked here (the mine is judged here) and sent with the book")
+check(sent("mods.stash_made") ~= nil and select(2, sent("mods.stash_made")).target == 1, "the player gets the id from here")
+run_time_events(100)
+check(#SPOTS == 0, "no spot on a map server: its map is nobody's")
+local mbox = OBJ[made.id]
+mbox._kind = "box"
+SENT, CREATED = {}, {}
+NOW = NOW + 30000
+from_world("stash_free", { b = made.id })
+check(SE[made.id] == nil and created("itm_backpack") and created("itm_backpack").parent == 500, "it frees the box too")
+q = sent("mods.stash_book")
+check(q ~= nil and q.b == made.id and q.x == true, "and tells the world server")
+check(owners()[made.id] == nil, "its owner is forgotten here")
+SENT, CREATED = {}, {}
+coop_main.on_event("mods.stash_make", coop_main.encode({ i = 1 }), 3)
+check(#CREATED == 0, "a map server hears a player only through the world server")
+
+print("-- the world server takes the book only from a bridge")
+coop.is_host = function() return true end
+coop.is_client = function() return false end
+coop.is_map_server = nil
+coop.is_dedicated = function() return true end
+coop.levels.map_servers = function() return { { bridge = 0x101, level = 2 } } end
+SPOTS = {}
+local _, far_stash = spawn("inv_backpack", vec3(0, 0, 0))
+from_client("stash_book", { b = far_stash:id(), s = "itm_backpack", p = "treasure", t = "n", o = 501 }, 1)
+check(book()[far_stash:id()] == nil and owners()[far_stash:id()] == nil, "a player is not heard")
+from_client("stash_book", { b = 8123, s = "itm_backpack", p = "bad", t = "n", o = 500 }, 0x101)
+check(book()[8123] == "itm_backpack" and owners()[8123] == 500, "a bridge is, with the owner")
+run_time_events(100)
+check(#SPOTS == 0, "its box is on its way here: no spot yet")
+spawn("inv_backpack", vec3(0, 0, 0), nil, { id = 8123, offline = true })
+run_time_events(100)
+check(#SPOTS == 1 and SPOTS[1].id == 8123 and SPOTS[1].spot == "treasure_player", "then the spot, of a known kind")
+from_client("stash_book", { b = 8123, x = true }, 0x101)
+check(book()[8123] == nil and SPOTS_GONE[8123] ~= nil and owners()[8123] == nil, "and it goes the same way")
+coop.levels = nil
+
+else
 print("-- stash_make: what is checked")
 local mine = pack(500)
 local _, junk = spawn("st_junk", vec3(20, 0, 0), 500)
@@ -101,9 +165,8 @@ local box = box_id and OBJ[box_id]
 check(box and box:position():distance_to(avatar:position()) < 0.01, "where the player stands, whatever he said")
 check(SE[mine:id()] == nil, "the backpack is spent")
 check(book() and book()[box_id] == "itm_backpack", "the world's book has it")
-local function owners() return m_data().coop_stash_owner or {} end
 check(owners()[box_id] == 500, "its owner is booked: his character (round 4, S5: a mine from his own stash)")
-local q, raw = sent("mods.stash_made")
+q, raw = sent("mods.stash_made")
 check(q ~= nil and raw.target == 1 and q.b == box_id and q.s == "itm_backpack" and q.i == mine:id(), "the player is answered with the id")
 check(q and #q.t == 64 and not q.t:find("\n", 1, true), "a name of a client is cut and cleaned")
 run_time_events(100)
@@ -166,61 +229,6 @@ CREATED = {}
 NOW = NOW + 30000
 from_client("stash_free", { b = box_id })
 check(#CREATED == 0, "twice: nothing more")
-
-print("-- a map server")
-local real_active_host = coop.is_host
-coop.is_host, coop.is_client = function() return false end, function() return true end
-coop.is_map_server = function() return true end
-local function from_world(name, t, peer)
-	t._peer = peer or 1
-	coop_main.on_event("mods." .. name, coop_main.encode(t), 0)
-end
-NOW = NOW + 30000
-local on_map = pack(500)
-run_time_events(100)
-SENT, CREATED, SPOTS = {}, {}, {}
-from_world("stash_make", { i = on_map:id(), t = "n" })
-local made = created("inv_backpack")
-check(made ~= nil and SE[on_map:id()] == nil, "the box is made here, where the level is")
-q, raw = sent("mods.stash_book")
-check(q ~= nil and raw.target == 0 and q.b == made.id and q.s == "itm_backpack" and q.t == "n", "the world server gets the book")
-check(book()[made.id] == "itm_backpack", "and this process knows its level's stash")
-check(q and q.o == 500 and owners()[made.id] == 500, "its owner: booked here (the mine is judged here) and sent with the book")
-check(sent("mods.stash_made") ~= nil and select(2, sent("mods.stash_made")).target == 1, "the player gets the id from here")
-run_time_events(100)
-check(#SPOTS == 0, "no spot on a map server: its map is nobody's")
-local mbox = OBJ[made.id]
-mbox._kind = "box"
-SENT, CREATED = {}, {}
-NOW = NOW + 30000
-from_world("stash_free", { b = made.id })
-check(SE[made.id] == nil and created("itm_backpack") and created("itm_backpack").parent == 500, "it frees the box too")
-q = sent("mods.stash_book")
-check(q ~= nil and q.b == made.id and q.x == true, "and tells the world server")
-check(owners()[made.id] == nil, "its owner is forgotten here")
-SENT, CREATED = {}, {}
-coop_main.on_event("mods.stash_make", coop_main.encode({ i = 1 }), 3)
-check(#CREATED == 0, "a map server hears a player only through the world server")
-
-print("-- the world server takes the book only from a bridge")
-coop.is_host, coop.is_client = real_active_host, function() return false end
-coop.is_map_server = function() return false end
-coop.levels = { map_servers = function() return { { bridge = 0x101, level = 2 } } end, split = function() return true end,
-	bridge_of_player = function() return nil end }
-SPOTS = {}
-local _, far_stash = spawn("inv_backpack", vec3(0, 0, 0))
-from_client("stash_book", { b = far_stash:id(), s = "itm_backpack", p = "treasure", t = "n", o = 501 }, 1)
-check(book()[far_stash:id()] == nil and owners()[far_stash:id()] == nil, "a player is not heard")
-from_client("stash_book", { b = 8123, s = "itm_backpack", p = "bad", t = "n", o = 500 }, 0x101)
-check(book()[8123] == "itm_backpack" and owners()[8123] == 500, "a bridge is, with the owner")
-run_time_events(100)
-check(#SPOTS == 0, "its box is on its way here: no spot yet")
-spawn("inv_backpack", vec3(0, 0, 0), nil, { id = 8123, offline = true })
-run_time_events(100)
-check(#SPOTS == 1 and SPOTS[1].id == 8123 and SPOTS[1].spot == "treasure_player", "then the spot, of a known kind")
-from_client("stash_book", { b = 8123, x = true }, 0x101)
-check(book()[8123] == nil and SPOTS_GONE[8123] ~= nil and owners()[8123] == nil, "and it goes the same way")
-coop.levels = nil
 
 print("-- a campfire")
 if GAMMA then
@@ -298,4 +306,6 @@ NOW = NOW + 30000
 from_client("corpse_loot", { n = corpse:id() })
 check(#GUARANTEED == 1 and GUARANTEED[1].obj == corpse:id() and GUARANTEED[1].who == 0, "counted with the id the mod takes for the player")
 
-done("DEPLOY AUTHORITY")
+end
+
+done(server and "SERVER DEPLOY" or "CO-OP DEPLOY")
