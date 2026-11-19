@@ -61,8 +61,13 @@ local function scenario(which)
 	}, "ui_hud_dotmarks")
 	item_milpda = { fd = { army = { req = 4, progress = 0 } }, found_npc_pda = {}, on_option_change = function() end }
 	ish_kill_tracker = { tracked_bodies = {} }
-	mod_chunk(corpus .. "item_milpda.script", { "function actor_on_first_update(", "function load_state(", "function save_state(" }, "item_milpda")
-	mod_chunk(corpus .. "ish_kill_tracker.script", { "function invalid_body_record(", "function load_state(", "function save_state(" }, "ish_kill_tracker")
+	mod_chunk(corpus .. "item_milpda.script", {
+		"function get_faction_data(", "function validated_faction(", "function check_for_pda_progress(",
+		"function actor_on_item_take(", "function actor_on_first_update(", "function load_state(", "function save_state(",
+	}, "item_milpda")
+	mod_chunk(corpus .. "ish_kill_tracker.script", {
+		"function is_empty_mutant_corpse(", "function invalid_body_record(", "function load_state(", "function save_state(",
+	}, "ish_kill_tracker")
 	RegisterScriptCallback("load_state", ui_hud_dotmarks.load_state)
 	RegisterScriptCallback("load_state", item_milpda.load_state)
 	RegisterScriptCallback("load_state", ish_kill_tracker.load_state)
@@ -81,11 +86,11 @@ local function scenario(which)
 	local collect = coop_mods_core.upvalue(P.keep_for_load, "collect")
 	local cfg = dotmarks_main.cfg
 	local function gather() return collect() end
-	local function load_personal(data)
+	local function load_personal(data, world_box_name)
 		STASH.coop_mods_pdata = nil
 		alife_storage_manager.CALifeStorageManager_load({
 			dotmarks = { world_setting = 7, invboxes = { [1100] = {
-				id = 1100, name = "box", owned = true, found = false, searched = false, items = { [999] = "stale" },
+				id = 1100, name = world_box_name or "box", owned = true, found = false, searched = false, items = { [999] = "stale" },
 			} }, dropped_items = { [204] = "host_drop" } },
 			milpda = { faction_data = { army = { progress = 999 } }, found_npc_pda = { [204] = true },
 				tracked_bodies = { [204] = { id = 204, name = "host_body" } }, world_setting = 8 },
@@ -232,24 +237,112 @@ local function scenario(which)
 			which .. ": malformed personal table shapes cannot abort load_state: " .. tostring(err))
 		check(coop_trust.status().pda_table and coop_trust.status().pda_table.failed > 0,
 			which .. ": malformed state is reported through coop_trust before being discarded")
+
+		OBJ[200] = nil
+		load_personal(personal, "replacement_box")
+		object(200, "replacement_box")
+		check(not dotmarks_main.is_invbox_found(200) and not dotmarks_main.is_invbox_searched(200),
+			which .. ": m03:1 offline_reused_box_starts_unmarked")
+		check(dotmarks_main.cfg.invboxes[200].owned == true, which .. ": replacement keeps its world ownership")
+
+		object(200, "box"); object(201, "drop")
+		load_personal(personal)
+		gather() -- leave a previous report in m_data
+		cfg.write_to_save = false
+		local disabled = gather().coop_dotmarks_pdata
+		check(disabled and next(disabled.invboxes) == nil and next(disabled.dropped_items) == nil,
+			which .. ": m04:3 saving_disabled_collect_clears_previous_snapshot")
+		cfg.invboxes, cfg.dropped_items = {}, {}
+		load_personal(personal)
+		check(next(cfg.invboxes) == nil and next(cfg.dropped_items) == nil,
+			which .. ": m04:3 saving_disabled_does_not_restore_old_snapshot")
+		cfg.write_to_save = true
+
+		OBJ[202] = nil
+		load_personal({ milpda = {
+			faction_data = { army = { req = 4, progress = 1 } },
+			found_npc_pda = mpda.found_npc_pda, _coop_pda_ids = mpda._coop_pda_ids,
+		} })
+		item_milpda.progressive_vis = true
+		item_milpda.gain_modes = { take = 1, scrap = 3 }
+		item_milpda.progress_gain_mode = 1
+		item_milpda.safeid = function(obj) return obj:id() end
+		item_milpda.item_device = { device_npc_pda = { test_object = true } }
+		item_milpda.se_load_var = function() return { contact = { comm = "army", rank = "novice" } } end
+		item_milpda.is_blacklisted = function() return false end
+		item_milpda.ranks_by_name = { novice = 1 }
+		item_milpda.get_pda_feature_setting = function() return 1 end
+		item_milpda.gts = function() return "" end
+		item_milpda.dotip = function() end
+		local old_pda = object(202, "pda")
+		item_milpda.actor_on_item_take(old_pda)
+		check(item_milpda.fd.army.progress == 1, which .. ": same PDA cannot grant progress twice")
+		local new_pda = object(202, "replacement_pda")
+		OBJ[202] = nil -- the pickup callback has the object even before level lookup can resolve it
+		item_milpda.actor_on_item_take(new_pda)
+		check(item_milpda.fd.army.progress == 2, which .. ": m22:2 reused_pda_grants_progress_on_first_pickup")
+		item_milpda.actor_on_item_take(new_pda)
+		check(item_milpda.fd.army.progress == 2, which .. ": replacement PDA also grants progress only once")
+		item_milpda.actor_on_item_take(object(202, "another_pda"))
+		check(item_milpda.fd.army.progress == 3, which .. ": newly discovered PDA identity is remembered immediately")
+
+		coop.to_host_id = function(id) if id == 0 then return 0 end return hid(id) end
+		load_personal(personal)
+		check(item_milpda.fd.army.progress == 0 and next(item_milpda.found_npc_pda) == nil
+			and next(ish_kill_tracker.tracked_bodies) == nil,
+			which .. ": m22:2 unresolved_avatar_uses_clean_personal_defaults")
+		check(alife_storage_manager.get_state().milpda.world_setting == 8,
+			which .. ": unresolved avatar keeps unrelated world fields")
+		coop.to_host_id = hid
+
+		OBJ[203] = nil
+		local se_body = spawn("test_body", nil, nil, { id = 203, offline = true })
+		se_body.alive = function() return false end
+		se_body.name = function() return "body" end
+		ish_kill_tracker.valid_id = function(id) return id > 0 and id < 65535 end
+		ish_kill_tracker.is_id_task_target = function() return false end
+		ish_kill_tracker.is_living_thing = function(obj) return obj == se_body end
+		ish_kill_tracker.body_ttl = 3600
+		local game_seconds = 3600
+		ish_kill_tracker.get_time_elapsed = function() return game_seconds end
+		local tracker_state = {
+			tracked_bodies = { [1103] = { id = 1103, kill_id = "KT203", tod = 3500 } },
+			_coop_pda_ids = mpda._coop_pda_ids,
+		}
+		load_personal({ milpda = tracker_state })
+		local body = ish_kill_tracker.tracked_bodies[203]
+		check(not ish_kill_tracker.invalid_body_record(203, body),
+			which .. ": an offline ALife corpse still within TTL stays tracked")
+		game_seconds = 7200
+		check(ish_kill_tracker.invalid_body_record(203, body),
+			which .. ": m22:3 offline_alife_corpse_expires")
+
+		load_personal({ milpda = {
+			faction_data = { army = { req = true, progress = "bad", reset = {}, unlocked = "bad" }, bandit = 7 },
+			tracked_bodies = { [1103] = { id = 1103, kill_id = "KT203", tod = {} } },
+			_coop_pda_ids = mpda._coop_pda_ids,
+		} })
+		check(item_milpda.fd.army.req == 4 and item_milpda.fd.army.progress == 0
+			and item_milpda.fd.army.reset == nil and item_milpda.fd.army.unlocked == nil and item_milpda.fd.bandit == nil,
+			which .. ": malformed_personal_faction_fields_fall_back_to_defaults")
+		local validated, expired = pcall(ish_kill_tracker.invalid_body_record, 203, ish_kill_tracker.tracked_bodies[203])
+		check(validated and expired, which .. ": malformed_personal_body_timestamp_cannot_abort_expiry")
 	else
 		-- Authoritative processes never restore somebody else's personal state on a world load.
 		local ordinary = { milpda = { faction_data = { army = { progress = 9 } }, found_npc_pda = { [105] = true }, tracked_bodies = {} },
-			dotmarks = { invboxes = {}, dropped_items = {} } }
+			dotmarks = { invboxes = {}, dropped_items = {} }, coop_mods_pdata = { ["500"] = { t = "PDA", d = personal } } }
 		if which == "none" then
 			local original = item_milpda.save_state
 			local s = {}; original(s)
 			check(s.milpda == nil or s.milpda.faction_data ~= item_milpda.fd,
 				"none: stock save_state behavior is unchanged outside session")
 		end
-		if which ~= "srv_map" then
-			alife_storage_manager.CALifeStorageManager_load(ordinary)
-			check(item_milpda.fd.army.progress == 9, which .. ": ordinary world load retains original behavior")
-			if which ~= "none" then
-				check(item_milpda.found_npc_pda[105] and not item_milpda.found_npc_pda[102]
-					and next(ish_kill_tracker.tracked_bodies) == nil,
-					which .. ": raw world save restores PDA discovery and replaces host player's tracker too")
-			end
+		alife_storage_manager.CALifeStorageManager_load(ordinary)
+		check(item_milpda.fd.army.progress == 9, which .. ": ordinary world load retains original behavior")
+		if which ~= "none" then
+			check(item_milpda.found_npc_pda[105] and not item_milpda.found_npc_pda[102]
+				and next(ish_kill_tracker.tracked_bodies) == nil,
+				which .. ": raw world load leaves the peer's personal record unapplied")
 		end
 	end
 	return PASSES, FAILS

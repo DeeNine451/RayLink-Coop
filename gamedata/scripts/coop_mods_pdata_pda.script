@@ -7,6 +7,7 @@
 
 local DOT = "coop_dotmarks_pdata"
 local ID_META = "_coop_pda_ids"
+local FACTION_NUMBERS = { "req", "progress", "reset", "unlocked", "unlocked_c" }
 local installed = {}
 local defaults = {}
 local names = { pda = {}, body = {}, killer = {} }
@@ -25,12 +26,17 @@ local function object_id(id)
 	return coop_trust.guard("pda_id", ok, "invalid object id in personal PDA state") and id or nil
 end
 
+local function copy_number(value)
+	if value == nil then return nil end
+	local ok = type(value) == "number" and value == value and math.abs(value) <= 1e12
+	return coop_trust.guard("pda_number", ok, "invalid number in personal PDA state") and value or nil
+end
+
 local function copy(v, depth)
 	local typ = type(v)
 	if typ == "boolean" or v == nil then return v end
 	if typ == "number" then
-		local ok = v == v and math.abs(v) <= 1e12
-		if coop_trust.guard("pda_number", ok, "invalid number in personal PDA state") then return v end
+		return copy_number(v)
 	elseif typ == "string" then
 		local ok = #v <= 4096
 		if coop_trust.guard("pda_text", ok, "oversized text in personal PDA state") then return v end
@@ -70,12 +76,15 @@ local function object_name(id)
 	return ok and type(name) == "string" and name or nil
 end
 
-local function same_object(id, name)
-	local current = object_name(id)
-	local ok = current == nil or (type(name) == "string" and current == name)
+local function same_name(name, current)
 	-- identity is an always-on guard against recycled object ids; the engine gives a freed id to a new object in honest play
 	-- (validate_current looks once a second): counted with no line (round 6, S5 of the round 5 review)
-	return coop_trust.guard("pda_identity", ok)
+	return coop_trust.guard("pda_identity", type(name) == "string" and current == name)
+end
+
+local function same_object(id, name)
+	local current = object_name(id)
+	return current == nil or same_name(name, current)
 end
 
 local function translate(id, to_world)
@@ -106,7 +115,8 @@ end
 local function dot_get()
 	local cfg = config()
 	local out = { invboxes = {}, dropped_items = {} }
-	if not cfg then return out end
+	-- An empty snapshot also replaces any earlier report when saving is turned off.
+	if not (cfg and cfg.write_to_save) then return out end
 	for id, row in pairs(as_table(cfg.invboxes) or {}) do
 		local hid = translate(id, true)
 		if hid and type(row) == "table" and same_object(id, row.name) then
@@ -122,7 +132,7 @@ end
 
 local function dot_restore(m)
 	local cfg = config()
-	if not cfg then return end
+	if not (cfg and cfg.write_to_save) then return end
 	local own = as_table(m[DOT]) or {}
 	local world = as_table(m.dotmarks) or {}
 	local boxes, dropped = {}, {}
@@ -136,9 +146,13 @@ local function dot_restore(m)
 	for id, row in pairs(as_table(own.invboxes) or {}) do
 		local lid = translate(id, false)
 		if lid and type(row) == "table" and same_object(lid, row.name) then
-			local box = boxes[lid] or { id = lid, name = copy(row.name) }
-			box.found, box.searched = row.found == true, row.searched == true
-			boxes[lid] = box
+			local box = boxes[lid]
+			-- The world row also identifies a replacement while its object is offline.
+			if not box or same_name(row.name, box.name) then
+				box = box or { id = lid, name = copy(row.name) }
+				box.found, box.searched = row.found == true, row.searched == true
+				boxes[lid] = box
+			end
 		end
 	end
 	for id, name in pairs(as_table(own.dropped_items) or {}) do
@@ -182,26 +196,41 @@ local function mil_get()
 	return out
 end
 
-local function mil_restore(m)
+local function restore_factions(value)
+	local out = copy(defaults)
+	for faction, row in pairs(copy(as_table(value)) or {}) do
+		if type(faction) == "string" and as_table(row) then
+			for _, field in ipairs(FACTION_NUMBERS) do row[field] = copy_number(row[field]) end
+			local current = out[faction] or {}
+			for field, v in pairs(row) do current[field] = v end
+			out[faction] = current
+		end
+	end
+	return out
+end
+
+local function mil_restore(m, selected)
 	local item, tracker = C().mod("item_milpda"), C().mod("ish_kill_tracker")
 	local state = as_table(m.milpda) or {}
-	local meta = as_table(state[ID_META]) or {}
+	local personal = selected and state or {}
+	local meta = as_table(personal[ID_META]) or {}
 	local found, bodies = {}, {}
 	local restored_names = { pda = {}, body = {}, killer = {} }
 	body_records = {}
-	for id, value in pairs(as_table(state.found_npc_pda) or {}) do
+	for id, value in pairs(as_table(personal.found_npc_pda) or {}) do
 		local lid = translate(id, false)
 		local name = type(meta.pda) == "table" and meta.pda[id] or nil
 		if lid and value == true and same_object(lid, name) then
 			found[lid], restored_names.pda[lid] = true, copy(name) or false
 		end
 	end
-	for id, value in pairs(as_table(state.tracked_bodies) or {}) do
+	for id, value in pairs(as_table(personal.tracked_bodies) or {}) do
 		local lid = translate(id, false)
 		local name = type(meta.body) == "table" and meta.body[id] or nil
 		if lid and type(value) == "table" and same_object(lid, name) then
 			local row = copy(value)
 			row.id = lid
+			row.tod, row.typ, row.ktyp = copy_number(row.tod), copy_number(row.typ), copy_number(row.ktyp)
 			row.killer_id = translate(value.killer_id, false)
 			local kname = type(meta.killer) == "table" and meta.killer[value.killer_id] or nil
 			if row.killer_id and not same_object(row.killer_id, kname) then row.killer_id = nil end
@@ -210,7 +239,7 @@ local function mil_restore(m)
 		end
 	end
 	names = restored_names
-	state.faction_data = copy(as_table(state.faction_data)) or copy(defaults)
+	state.faction_data = restore_factions(personal.faction_data)
 	state.found_npc_pda, state.tracked_bodies = found, bodies
 	state[ID_META] = nil
 	m.milpda = state
@@ -328,12 +357,29 @@ local function install_mil()
 			end
 		end)
 	end
+	C().wrap(item, "check_for_pda_progress", "pda.item_milpda.check_for_pda_progress", function(orig)
+		return function(obj, ...)
+			if not (C().active() and obj) then return orig(obj, ...) end
+			local id = type(obj.id) == "function" and obj:id() or obj.id
+			if not object_id(id) then return orig(obj, ...) end
+			local found = item.found_npc_pda
+			local name, previous = obj:name(), names.pda[id]
+			-- The pickup can arrive before the periodic validator or even before level lookup sees the item.
+			if found[id] and previous ~= nil and not same_name(previous, name) then
+				found[id], names.pda[id] = nil, nil
+			end
+			local result = orig(obj, ...)
+			names.pda[id] = found[id] and name or nil
+			return result
+		end
+	end)
 	C().wrap(tracker, "invalid_body_record", "pda.ish_kill_tracker.invalid_body_record", function(orig)
 		return function(id, row, ...)
 			if not C().active() then return orig(id, row, ...) end
 			if row and body_records[id] == row then
 				if not same_object(id, names.body[id]) then return true end
-				if not online(id) then return false end -- absence from this map is not an expired/reused corpse
+				-- Let stock check expiry and corpse state whenever ALife can see the body.
+				if not alife_object(id) and not online(id) then return false end
 			end
 			return orig(id, row, ...)
 		end
@@ -370,9 +416,12 @@ local function install_restore()
 		return function(m, ...)
 			local result = orig(m, ...)
 			if not C().active() or type(m) ~= "table" then return result end
-			-- apply_loaded is invoked by pdata's load hook, after selecting this player's record.
+			-- pdata leaves the world's values in place if the avatar is unresolved.
+			local avatar = C().hid(0)
+			local selected = type(avatar) == "number" and avatar ~= 0
+			if not selected then m[DOT] = nil end
 			if installed.dot then dot_restore(m) end
-			if installed.mil then mil_restore(m) end
+			if installed.mil then mil_restore(m, selected) end
 			restored_storage = m
 			return result
 		end
