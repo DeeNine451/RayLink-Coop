@@ -710,11 +710,13 @@ local function nick_from(from, t)
 	return qc.nick_of(from) -- the host knows who sent it, a client's own word is not taken
 end
 
+-- Who tells what this machine opened (A-S5S: asked of coop_mode, test_srv_quests_pda): a player's machine its own word, a map
+-- server (it leads its map, the world is decided elsewhere) its map's word with the name of a player there, the decider everybody.
 local function announce_ency(s)
 	if ency.applying or not qc.active() then return end
-	if qc.is_client() then
+	if coop_mode.is_player_mirror() then
 		if qc.client_live() then qc.send("ency", { s = s }, 0) end
-	elseif qc.is_map_server() then
+	elseif coop_mode.leads_here() and not coop_mode.decides_world() then
 		qc.send("ency", { s = s, n = level_nick() }, 0)
 	elseif qc.host_party() then
 		qc.send("ency", { s = s, n = host_nick() }, -1)
@@ -957,9 +959,9 @@ end
 
 local function on_earned(name)
 	if achv_applying or type(name) ~= "string" or not qc.active() then return end
-	if qc.is_client() then
+	if coop_mode.is_player_mirror() then -- as announce_ency (A-S5S)
 		if qc.client_live() then qc.send("achv", { a = name }, 0) end
-	elseif qc.is_map_server() then
+	elseif coop_mode.leads_here() and not coop_mode.decides_world() then
 		qc.send("achv", { a = name, n = level_nick() }, 0)
 	elseif qc.host_party() then
 		qc.send("achv", { a = name, n = host_nick() }, -1)

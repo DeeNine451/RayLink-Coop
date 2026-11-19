@@ -172,7 +172,13 @@ Bm.new_obj(501, "coop_player_avatar", vec(0, 0, 0), { _stalker = true })
 Bm.players = { { id = 0, nick = "stalker_host", avatar_id = 500 }, { id = 1, nick = "player_a", avatar_id = 501 },
 	{ id = 2, is_self = true, nick = "player_b" } }
 
+-- A-S5S: coop_quests_pda asks the facade coop_mode who tells an unlock (the game has it with every script): the co-op host's
+-- answers on the host, a co-op client's on A and B
+local modes = dofile("tests/lua/support/modes.lua")
+local CO_OP_CLIENT = { decides_world = function() return false end, leads_here = function() return false end,
+	is_player_mirror = function() return true end }
 for _, M in ipairs(ALL) do
+	modes.install(load_script(M, "coop_mode"), "hostplay", M ~= Hm and CO_OP_CLIENT or nil)
 	for _, n in ipairs(SCRIPTS) do if exists(n) then load_script(M, n) end end
 	for _, n in ipairs(SCRIPTS) do
 		local mod = M.env[n]

@@ -17,10 +17,17 @@ local var_text, var_path = read("ui_pda_encyclopedia_tab_varefined")
 local emr_name = "zz_Encyclopedia_messages_restored"
 local emr_text, emr_path = read(emr_name)
 
+-- A-S5S: coop_quests_pda asks the facade coop_mode who tells an unlock (the game has it with every script): this machine's answers
+local modes = dofile("tests/lua/support/modes.lua")
+local CO_OP_CLIENT = { decides_world = function() return false end, leads_here = function() return false end,
+	is_player_mirror = function() return true end }
+
 for _, role in ipairs({ "host", "client", "map_server" }) do
 	local M = machine(role, role == "host" and 0 or 1)
 	local e, unlocked, calls, spoken = M.env, {}, {}, {}
 	e.coop.is_map_server = function() return role == "map_server" end
+	modes.install(load_script(M, "coop_mode"), role == "map_server" and "srv_map" or "hostplay",
+		role == "client" and CO_OP_CLIENT or nil)
 	e.actor_menu = { set_notification = function() M.notifications = (M.notifications or 0) + 1 end }
 	e.agdd_voiced_actor = {
 		article_with_lang_muffle = function(s) return s end,
