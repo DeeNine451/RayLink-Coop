@@ -1,0 +1,364 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G4-6. The co-op host has both players' inventories. In Server, the world
+-- routes the player's hint to the map server that has the holder and inventory.
+-- Only that decider replaces the item. The owner supplies the expiry clock through
+-- the existing rider and can raise a hint when the decider hasn't seen the rider.
+-- PBA keeps its own eligibility and loot roll. Only its scheduling and completion change.
+
+local api = rawget(_G, "coop")
+local MEAT, PBA = "meat_spoiling", "zz_treasure_manager_pba_less_artys"
+local KIND, DONE, ROTTEN = "meat", "xchg_meat_done", "rotten_meat"
+local TICK_MS, WAIT_MS = 10000, 10000
+local RETRY_MS, RECEIPT_MS = 1000, 30000
+local jobs, retries, mirror_watches = {}, {}, {}
+local meat, next_tick, installed_boxes = nil, 0, false
+
+local function C() return coop_mods_core end
+local function X() return coop_mods_xchg end
+local function ready() return C().active() and api.is_live() end
+
+local function rider_table()
+	local asm = C().mod("alife_storage_manager")
+	local data = asm and asm.get_state and asm.get_state()
+	return data and type(data.expiration_table) == "table" and data.expiration_table or nil
+end
+
+local function in_range(v, min, max)
+	return type(v) == "number" and v >= min and v <= max and v == math.floor(v)
+end
+
+local MONTH_DAYS = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+local function stamp(t)
+	if type(t) ~= "table" or not (in_range(t.Y, 1, 9999) and in_range(t.M, 1, 12)
+		and in_range(t.D, 1, MONTH_DAYS[t.M]) and in_range(t.h, 0, 23) and in_range(t.m, 0, 59)
+		and in_range(t.s, 0, 59) and in_range(t.ms, 0, 999)) then return nil end
+	if t.M == 2 and t.D == 29 and (t.Y % 4 ~= 0 or (t.Y % 100 == 0 and t.Y % 400 ~= 0)) then return nil end
+	local ct = game.CTime()
+	ct:set(t.Y, t.M, t.D, t.h, t.m, t.s, t.ms)
+	return ct
+end
+
+local function remaining(data, now)
+	local duration = type(data) == "table" and data.duration
+	if type(duration) ~= "number" or not (duration > -math.huge and duration < math.huge) then return nil end
+	if duration <= 0 then return duration end
+	local last = stamp(data.last_update)
+	return last and duration - math.max(0, now:diffSec(last)) or nil
+end
+
+local function eligible(se)
+	if not se then return false end
+	local section = se:section_name()
+	return section ~= ROTTEN and meat.meats[section]
+end
+
+local function holder_here(se, peer)
+	if not (se and peer ~= nil and coop_mode.decider(peer) == "this") then return nil end
+	local who = C().avatar(peer)
+	return who and se.parent_id == who:id() and who or nil
+end
+
+local function clear_clock(id)
+	meat.expiration_table[id] = nil
+	local riders = rider_table()
+	if riders then riders[id] = nil end
+end
+
+local function send_completion(receipt)
+	return C().to_peer(receipt.peer, DONE, receipt.payload)
+end
+
+local function tick_receipts(now)
+	for id, receipt in pairs(retries) do
+		if now >= receipt.until_ms then
+			retries[id] = nil
+		elseif now >= receipt.retry_at then
+			receipt.retry_at = now + RETRY_MS
+			if send_completion(receipt) then retries[id] = nil end
+		end
+	end
+end
+
+local function replacement(job)
+	local se = job.made and alife_object(job.made)
+	return se and se:section_name() == ROTTEN and se:name() == job.made_instance and se or nil
+end
+
+local function finish_failed(job)
+	if jobs[job.id] ~= job then return end
+	local made = replacement(job)
+	if not made then jobs[job.id] = nil; return end
+	-- Keep the reservation until the rollback has also reached the world.
+	local ok, err = pcall(alife_release, made)
+	if not ok then C().report("xchg_meat", "roll back replacement", err) end
+	X().after_gone(job.made, function(gone)
+		if jobs[job.id] ~= job then return end
+		if gone then
+			jobs[job.id] = nil
+		else
+			finish_failed(job)
+		end
+	end, WAIT_MS)
+end
+
+local function after_removal(job, gone)
+	if jobs[job.id] ~= job then return end
+	if not gone then
+		if alife_object(job.id) then return finish_failed(job) end
+		-- The removal committed in ALife. A lagging online object is no reason
+		-- to also remove the replacement.
+		X().after_gone(job.id, function(ok) after_removal(job, ok) end, WAIT_MS)
+		return
+	end
+	jobs[job.id] = nil
+	clear_clock(job.id)
+	if job.peer ~= C().self_peer() then
+		local now = time_global()
+		local receipt = { peer = job.peer, payload = { i = C().hid(job.id), r = C().hid(job.made) },
+			retry_at = now + RETRY_MS, until_ms = now + RECEIPT_MS }
+		if not send_completion(receipt) then retries[job.id] = receipt end
+	end
+end
+
+local function after_creation(job, seen)
+	if jobs[job.id] ~= job then return end
+	if not seen then return finish_failed(job) end
+	local made = replacement(job)
+	local online = level.object_by_id(job.made)
+	local parent = online and online:parent()
+	if not (made and made.parent_id == job.parent and parent and parent:id() == job.parent) then
+		-- after_made can see another item's replacement in the same bag first.
+		local left = job.deadline - time_global()
+		if left <= 0 or not made then return finish_failed(job) end
+		X().after_made(ROTTEN, job.parent, function(id) after_creation(job, id) end, left)
+		return
+	end
+
+	local se = alife_object(job.id)
+	if not (eligible(se) and holder_here(se, job.peer) and se.parent_id == job.parent
+		and C().holder_peer(job.id) == job.peer and se:name() == job.instance) then return finish_failed(job) end
+	local ok, err = pcall(alife_release, se)
+	if not ok then C().report("xchg_meat", "remove expired meat", err) end
+	X().after_gone(job.id, function(gone) after_removal(job, gone) end, WAIT_MS)
+end
+
+local function begin_swap(se, peer, who)
+	local id, parent = se.id, who:id()
+	if jobs[id] then return true end
+	local job = { id = id, parent = parent, peer = peer, instance = se:name(), deadline = time_global() + WAIT_MS }
+	jobs[id] = job
+	X().after_made(ROTTEN, parent, function(seen) after_creation(job, seen) end, WAIT_MS)
+	local ok, made = pcall(alife_create_item, ROTTEN, who)
+	job.made = ok and made and made.id or nil
+	if not job.made then
+		jobs[id] = nil
+		if not ok then C().report("xchg_meat", "create replacement", made) end
+		return false, "create failed"
+	end
+	job.made_instance = made:name()
+	return true
+end
+
+local function inspect_request(t, from, who)
+	local id = X().wire_id(t.i)
+	local se = id and alife_object(id)
+	if not (ready() and eligible(se) and who and holder_here(se, from)
+		and se.parent_id == who:id() and C().holder_peer(id) == from) then return nil, "inventory" end
+	local riders = rider_table()
+	local data = from == C().self_peer() and meat.expiration_table[id]
+		or (riders and riders[id]) or meat.expiration_table[id]
+	local duration = remaining(data, game.get_game_time())
+	if duration and duration > 0 then return nil, "fresh" end
+	return se, duration == nil and "clock unavailable" or nil
+end
+
+local function serve_meat()
+	X().serve(KIND, {
+		check = function(t, from, who)
+			local se, why = inspect_request(t, from, who)
+			return se ~= nil and why == nil, why
+		end,
+		reserve = function(t, from, who)
+			-- The common dispatcher has already run the trust check. A request may
+			-- supply the expiry hint when the stock rider hasn't reached this map.
+			local se, why = inspect_request(t, from, who)
+			if not se then return nil, why end
+			if jobs[se.id] then return nil, "reserved" end
+			return { spent = { se.id }, item = se }
+		end,
+		commit = function(_, from, who, token)
+			local ok, why = begin_swap(token.item, from, who)
+			if not ok then return false, why end
+			return true, { pending = true } -- receipt of the request; DONE confirms the swap
+		end,
+	})
+end
+
+local function ask_spoil(id)
+	local wire = C().hid(id)
+	if wire and not X().busy(KIND, wire) then X().ask(KIND, { key = wire, i = wire }) end
+end
+
+local function receive_done(t)
+	if not coop_mode.is_player_mirror() then return end
+	local id, replacement = X().wire_id(t.i), X().wire_id(t.r)
+	if not (id and replacement and id ~= replacement) or mirror_watches[id] then return end
+	local clocks = meat.expiration_table
+	local clock = clocks[id]
+	if not clock then return end
+	local watch = {}
+	mirror_watches[id] = watch
+	X().after_gone(id, function(gone)
+		if mirror_watches[id] ~= watch then return end
+		mirror_watches[id] = nil
+		if gone and meat.expiration_table == clocks and clocks[id] == clock then clear_clock(id) end
+	end, WAIT_MS)
+end
+
+local function expire_player(se, peer, authority)
+	if jobs[se.id] then return end
+	if peer == C().self_peer() and coop_mode.actor_is_player() then
+		ask_spoil(se.id) -- also takes the direct decider path for the playing host
+	elseif authority and not X().reserved(se.id) then
+		local holder = holder_here(se, peer)
+		if holder then begin_swap(se, peer, holder) end
+	end
+end
+
+local function tick_clocks(clocks, now, stamp_now, authority, skip)
+	for id, data in pairs(clocks) do
+		local se = in_range(id, 1, 65534) and not (skip and skip[id]) and alife_object(id)
+		if eligible(se) and not jobs[id] and not mirror_watches[id] then
+			local peer = C().holder_peer(id)
+			if authority or peer == C().self_peer() then
+				local frozen = meat.get_meat_is_frozen(se)
+				local duration = not frozen and remaining(data, now)
+				if duration and duration <= 0 then
+					if peer ~= nil then
+						expire_player(se, peer, authority)
+					elseif authority then
+						meat.expire_food(se)
+						clocks[id] = nil
+					end
+				elseif frozen or duration then
+					if duration then data.duration = duration end
+					data.last_update = stamp_now
+				end
+			end
+		end
+	end
+end
+
+local function tick_expiry()
+	if not ready() then return end
+	local authority = coop_mode.leads_here()
+	if not (authority or coop_mode.is_player_mirror()) then return end
+	local now = game.get_game_time()
+	local y, m, d, h, min, s, ms = now:get(0, 0, 0, 0, 0, 0, 0)
+	local stamp_now = { Y = y, M = m, D = d, h = h, m = min, s = s, ms = ms }
+	local riders = authority and rider_table()
+	tick_clocks(meat.expiration_table, now, stamp_now, authority)
+	if riders and riders ~= meat.expiration_table then
+		tick_clocks(riders, now, stamp_now, true, meat.expiration_table)
+	end
+end
+
+local function install_meat()
+	meat = C().mod(MEAT)
+	if not (meat and type(meat.expiration_table) == "table" and C().fn(meat, "get_meat_is_frozen")) then
+		meat = nil
+		return
+	end
+	local ok, old = C().wrap(meat, "tick_expiration", MEAT .. ".tick_expiration", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			return tick_expiry()
+		end
+	end)
+	if ok then C().swap_callback("actor_on_first_update", old, meat.tick_expiration) end
+	C().wrap(meat, "expire_food", MEAT .. ".expire_food", function(orig)
+		return function(se, ...)
+			if not C().active() then return orig(se, ...) end
+			if not (ready() and eligible(se)) then return end
+			local peer = C().holder_peer(se.id)
+			if peer ~= nil then return expire_player(se, peer, coop_mode.leads_here()) end
+			if coop_mode.leads_here() then return orig(se, ...) end
+		end
+	end)
+	serve_meat()
+	C().on(DONE, receive_done, "player")
+	RegisterScriptCallback("actor_on_update", function()
+		if not ready() then return end
+		local now = time_global()
+		if next(retries) then tick_receipts(now) end
+		if now < next_tick then return end
+		next_tick = now + TICK_MS
+		tick_expiry()
+	end)
+	RegisterScriptCallback("load_state", function()
+		jobs, retries, mirror_watches, next_tick = {}, {}, {}, 0
+	end)
+end
+
+-- Retain the stock PBA callback and the closure carrying its settings/junk rules.
+-- Intercept only its scheduling call, and postpone the stock callback's box mark
+-- in the actual table read by save_state and by the world-state sharing layer.
+local function install_boxes()
+	if installed_boxes then return end
+	local mod = C().mod(PBA)
+	local clean = C().fn(mod, "clean_artys")
+	if not clean then return end
+	local sequence = 0
+	local pending = setmetatable({}, { __mode = "k" })
+	installed_boxes = C().wrap(mod, "physic_object_on_use_callback", PBA .. ".physic_object_on_use_callback", function(orig)
+		return function(box, ...)
+			if not C().active() then return orig(box, ...) end
+			if not coop_mode.leads_here() then return end
+			local boxes = C().find_local(mod, "boxes")
+			if not boxes then return end
+			local id, name = box:id(), box:name()
+			local queued = pending[boxes]
+			if not queued then queued = {}; pending[boxes] = queued end
+			if queued[id] then return end
+
+			local env = getfenv(clean)
+			local saved, schedule = rawget(env, "CreateTimeEvent"), env.CreateTimeEvent
+			rawset(env, "CreateTimeEvent", function(group, action, delay, callback, ...)
+				if group ~= "pba_less_artys" or action ~= "pba_less_artys" then
+					return schedule(group, action, delay, callback, ...)
+				end
+				sequence = sequence + 1
+				schedule(group, tostring(id) .. ":" .. sequence, delay, function(...)
+					queued[id] = nil
+					local current = level.object_by_id(id)
+					if boxes[id] or not (coop_mode.leads_here() and current and current:name() == name
+						and C().find_local(mod, "boxes") == boxes) then return true end
+					local ok, complete = pcall(callback, ...)
+					if ok and complete then boxes[id] = true end
+					if not ok then C().report("xchg_meat", "clean treasure box", complete) end
+					return true
+				end, ...)
+				queued[id] = true
+			end)
+			local ok, err = pcall(orig, box, ...)
+			rawset(env, "CreateTimeEvent", saved)
+			if queued[id] then boxes[id] = nil end
+			if not ok then C().report("xchg_meat", "queue treasure box", err) end
+		end
+	end)
+end
+
+local function step(name, fn)
+	local ok, err = pcall(fn)
+	if not ok then printf("! [coop_mods_xchg_meat] %s: %s", name, tostring(err)) end
+end
+
+-- axr_main loads every script before it starts any of them. Install the PBA
+-- wrapper before the item adapter caches the box callback in its start hook.
+if api then step("wrap treasure boxes", install_boxes) end
+
+function on_game_start()
+	if not api then return end
+	step("wrap treasure boxes", install_boxes)
+	step("wrap meat spoilage", install_meat)
+end
