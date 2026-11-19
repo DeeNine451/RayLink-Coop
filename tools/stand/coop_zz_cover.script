@@ -1,0 +1,262 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Stand-only F5-COV-4 probe. The launchers drive steps with a local file.
+-- coverhost/coverworld drive the stock clock; the host and map-server probes observe decisions at the body.
+-- Only coverclient changes a report, at the existing transport call.
+
+local NICK = "cover_tester"
+local STEP_FILE = "zz_cover_step.txt"
+local ZONES = {
+	l01_escape = { "esc_smart_terrain_2_12_surge_hide_a", 8 },
+	l05_bar = { "bar_visitors_surge_hide_a", 6 },
+}
+
+local role, step_path, next_poll, finished = nil, nil, 0, false
+local observed, current_decision, surveyed, clock_started, kill_checked
+local client_stage, client_map, open_pos, shelter, shelter_pos, shelter_name
+local claiming, claimed, check_at
+
+local function out(fmt, ...)
+	printf("%s", "[cover-stand] " .. string.format(fmt, ...))
+	pcall(function() get_console():execute("flush") end)
+end
+
+local function fail(message)
+	finished, claiming = true, false
+	out("FAIL %s", message)
+end
+
+local function manager()
+	return surge_manager.get_surge_manager()
+end
+
+local function start_clock()
+	local sm = manager()
+	assert(not sm.started, "emission is already active")
+	surge_manager.start_surge()
+	assert(sm.started == true, "stock emission start was refused")
+	out("%s started", role)
+end
+
+local function skip_clock()
+	local sm = manager()
+	assert(sm.started == true, "emission ended before the skip")
+	sm:skip_surge()
+	assert(not sm.started, "stock emission skip did not stop the phase")
+	out("%s skipped", role)
+end
+
+function start_emission()
+	if role == "world" and coop.is_live() and coop_mode.decides_world() then
+		local ok, err = pcall(start_clock)
+		if not ok then fail(tostring(err)) end
+	end
+end
+
+function skip_emission()
+	if role == "world" and coop.is_live() and coop_mode.decides_world() then
+		local ok, err = pcall(skip_clock)
+		if not ok then fail(tostring(err)) end
+	end
+end
+
+local function read_step()
+	step_path = step_path or getFS():update_path("$fs_root$", STEP_FILE)
+	local file = io.open(step_path, "r")
+	if not file then return end
+	local step = file:read("*l")
+	file:close()
+	return step
+end
+
+local function player_body()
+	for _, player in ipairs(coop.players()) do
+		if not player.is_self and player.nick == NICK and coop_mode.where(player.id) == "here" and player.avatar_id then
+			return level.object_by_id(player.avatar_id)
+		end
+	end
+end
+
+local function watch_decisions()
+	local cover = assert(coop_mods_core.mod("coop_env_cover"), "missing cover decisions")
+	assert(coop_trust.mode_of("env_cover") == "log", "env_cover must use log for this scenario")
+	assert(coop_mods_core.wrap(cover, "decide", "stand.cover_decision", function(decide)
+		return function(peer, body, report, nick, active)
+			local covered = decide(peer, body, report, nick, active)
+			if active and body and nick == NICK and coop.is_live() then
+				local ok, err = pcall(function()
+					local decided, _, source = cover.cover_of(body:id())
+					if decided ~= covered then return end
+					local verdict = decided == false and "open" or (decided == true and source and ("covered (" .. source .. ")"))
+					current_decision = verdict
+					if verdict and verdict ~= observed then
+						observed = verdict
+						out("env_cover: %s %s", NICK, verdict)
+					end
+				end)
+				if not ok then fail(tostring(err)) end
+			end
+			return covered
+		end
+	end), "cannot observe cover decisions")
+end
+
+local function observe(step, actor)
+	if not coop_mode.leads_here() or coop_mode.decides_world() ~= (role == "host") then return end
+	if not surveyed then
+		local body = player_body()
+		if not (body and body:alive()) then return end
+		watch_decisions()
+		surveyed = true
+		out("%s ready map=%s", role, level.name())
+	end
+	if role == "host" and step == "start" and not clock_started then
+		start_clock()
+		clock_started = true
+	end
+	if step == "kill" and not kill_checked and current_decision == "covered (report)" then
+		local sm = manager()
+		assert(sm.started, "emission ended before the wave check")
+		local body = assert(player_body(), "missing player body at wave check")
+		assert(body:alive(), "player body is dead before wave check")
+		-- Stock compares the local actor's z with a strict >. The co-op hook independently checks remote bodies.
+		sm:kill_actor_at_pos(actor:position().z)
+		assert(body:alive(), "player body is dead after wave check")
+		kill_checked = true
+		out("%s kill checked", role)
+	end
+	if role == "host" and step == "skip" and not finished then
+		assert(kill_checked, "cannot skip before the wave check")
+		skip_clock()
+		finished = true
+	end
+end
+
+local function ground(pos)
+	local id = level.vertex_id(pos)
+	if not id or id < 0 or id >= 0xffffffff then return end
+	local node = level.vertex_position(id)
+	if node then return vector():set(node.x, node.y + 0.25, node.z) end
+end
+
+local function find_shelter(sm, map)
+	local names = ZONES[map]
+	assert(names, "no stand shelter configured for " .. map)
+	sm:init_surge_covers() -- reads [list] from the effective misc/surge_manager.ltx
+	for i = 1, names[2] do
+		local name = names[1] .. i
+		local zone = sm.covers[name] and db.zone_by_name[name]
+		local pos = zone and ground(zone:position())
+		if pos and zone:inside(pos) then return zone, pos, name end
+	end
+end
+
+local function in_static_cover(sm, pos)
+	for name in pairs(sm.covers) do
+		local zone = db.zone_by_name[name]
+		if zone and zone:inside(pos) then return true end
+	end
+	return false
+end
+
+local function find_open(sm, actor)
+	local geometry = assert(coop_mods_core.mod("demonized_geometry_ray"), "missing sky raycast")
+	local ray = geometry.geometry_ray({ ray_range = 20, contact_range = 19.99, flags = 1+2+4+8, ignore_object = actor })
+	local function clear(pos)
+		if in_static_cover(sm, pos) then return false end
+		local eye = vector():set(pos.x, pos.y + 1.5, pos.z)
+		return not ray:get(eye, vector():set(0, 1, 0)).in_contact
+	end
+	local origin = actor:position()
+	if clear(origin) then return origin end
+	for _, radius in ipairs({ 12, 24, 36, 48 }) do
+		for i = 0, 7 do
+			local angle = i * math.pi / 4
+			local near = vector():set(origin.x + radius * math.cos(angle), origin.y, origin.z + radius * math.sin(angle))
+			local pos = ground(near)
+			if pos and math.abs(pos.x - near.x) < 3 and math.abs(pos.z - near.z) < 3
+				and math.abs(pos.y - origin.y) < 6 and clear(pos) then return pos end
+		end
+	end
+end
+
+local function watch_reports(sm)
+	assert(coop_mods_core.wrap(coop, "send_event", "stand.cover_claim", function(send)
+		return function(verb, payload, target, ...)
+			if claiming and verb == "coop_env_cover" and target == 0 and coop.is_live() and sm.started
+				and db.actor and db.actor:alive() and not in_static_cover(sm, db.actor:position()) then
+				local result = send(verb, coop_main.encode({ c = true }), target, ...)
+				if not claimed then
+					claimed = true
+					out("client sent cover claim")
+				end
+				return result
+			end
+			return send(verb, payload, target, ...)
+		end
+	end), "cannot observe the client transport")
+end
+
+local function mirror(step, actor, now)
+	if not coop_mode.is_player_mirror() then return end
+	assert(actor:alive(), "client died during the emission scenario")
+	local sm, map = manager(), level.name()
+	assert(not client_map or map == client_map, "client changed map during the emission scenario")
+	if not client_stage then
+		if step ~= "ready" then return end
+		shelter, shelter_pos, shelter_name = find_shelter(sm, map)
+		assert(shelter, "no walkable static restrictor in [list] on " .. map)
+		open_pos = assert(find_open(sm, actor), "no usable open ground on " .. map)
+		actor:set_actor_position(open_pos)
+		watch_reports(sm)
+		client_map, client_stage = map, "open"
+		out("client ready map=%s shelter=%s", map, shelter_name)
+	elseif step == "inside" and client_stage == "open" and sm.started then
+		actor:set_actor_position(shelter_pos)
+		client_stage = "inside"
+	elseif step == "outside" and client_stage == "inside" and sm.started then
+		assert(shelter:inside(actor:position()), "client did not remain inside the chosen restrictor")
+		actor:set_actor_position(open_pos)
+		client_stage = "outside"
+	elseif step == "claim" and client_stage == "outside" and sm.started then
+		assert(not in_static_cover(sm, actor:position()), "client is inside at the false report step")
+		client_stage, claiming = "claim", true
+	elseif step == "check" and client_stage == "claim" and claimed then
+		assert(sm.started, "emission ended before the survival check")
+		assert(not in_static_cover(sm, actor:position()), "client is inside at the survival check")
+		check_at = check_at or now + 3000
+		if now >= check_at then
+			client_stage = "survived"
+			out("client alive after wave")
+		end
+	elseif step == "skip" and client_stage == "survived" and not sm.started then
+		claiming, finished = false, true
+		out("client done")
+	end
+end
+
+local function update()
+	if finished or not (coop.is_live() and db.actor) then return end
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+	local ok, err = pcall(function()
+		local step = read_step()
+		if not step then return end
+		if role == "client" then mirror(step, db.actor, now) else observe(step, db.actor) end
+	end)
+	if not ok then fail(tostring(err)) end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	if not ok or type(line) ~= "string" then return end
+	local probe = line:match("%-coop_probe%s+(%S+)")
+	if probe == "coverhost" then role = "host"
+	elseif probe == "coverworld" then role = "world"
+	elseif probe == "coverclient" then role = "client"
+	elseif line:find("%-coop_mapserver%s") then role = "map"
+	end
+	if role == "host" or role == "map" or role == "client" then
+		RegisterScriptCallback("actor_on_update", update)
+	end
+end

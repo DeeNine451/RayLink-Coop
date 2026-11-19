@@ -25,7 +25,8 @@ $scenarios = @(
     @{ Name = 'phantoms_server'; Script = 'phantoms_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('the client is in the world', $alive, 'phantoms: PASS'); Bad = @("^! the client's steps did not end", '^! the server did not quit', 'phantoms: FAIL') },
     @{ Name = 'allymark_server'; Script = 'allymark_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^allymark: PASS$'); Bad = @('^allymark: FAIL\b') },
     @{ Name = 'companions_server'; Script = 'companions_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^companions_server: PASS$'); Bad = @('^companions_server: FAIL\b') },
-    @{ Name = 'weather_server'; Script = 'weather_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^weather_server: PASS$'); Bad = @('^weather_server: FAIL\b') }
+    @{ Name = 'weather_server'; Script = 'weather_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^weather_server: PASS$'); Bad = @('^weather_server: FAIL\b') },
+    @{ Name = 'cover_server'; Script = 'cover_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^cover_server: PASS$'); Bad = @('^cover_server: FAIL\b') }
 )
 $code = Invoke-Stand -Mode 'srv' -Scenarios $scenarios -Tag $Tag -Stand $Stand -Only $Only -NoMark:$NoMark
 exit $code

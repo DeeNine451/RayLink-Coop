@@ -361,7 +361,7 @@ def test_mark_of_other_ids_or_other_exe_does_not_count(repos, capsys):
     ((), {"dirty": "7"}, "dirty=7"),                                  # the stand ran an exe of uncommitted code
     (("dirty",), {}, "dirty=missing"),
     ((), {"scenarios": "ded_check"}, "base_server, carry_server, taskboard_ws, phantoms_server, "
-                                 "allymark_server, companions_server, weather_server did not run"),  # a part
+                                 "allymark_server, companions_server, weather_server, cover_server did not run"),  # a part
     (("scenarios",), {}, "did not run"),
     # B12: the scenario files that ran are HEAD's (tools/stand is tracked; a relaxed check is a change of HEAD)
     (("scenarios_sha256",), {}, "scenarios_sha256 missing"),
