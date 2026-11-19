@@ -78,12 +78,11 @@ cvar("coop_autosave_interval", "int", 0, 120, 10)
 cvar("coop_autosave_count", "int", 1, 50, 10)
 cvar("coop_death_share", "float", 0, 200, 100)
 -- F3a: each player may be on a different level; the story levels that are entered together (docs/plans/2026-10-24-f3a-split-levels.md 3)
-cvar("coop_split_levels", "int", 0, 1, 0) -- off by default: every map then is the host's, as without split levels
-cvar("coop_story_together", "int", 0, 1, 1)
+cvar("coop_split_levels", "int", 0, 1, 0) -- legacy saved flag
+cvar("coop_story_together", "int", 0, 1, 1) -- legacy saved flag
 -- row 20: stalkers finish a player who is down (the stock behaviour; off by the owner's word 2026-11-02); off, they leave him as monsters do (coop_ai.cpp)
 cvar("coop_npc_finish_downed", "int", 0, 1, 0)
--- row 21 (owner 2026-11-13): the new split mode, the world as a world server process on the creator's PC; off = the split levels
--- of the old mode. Only Lua reads it (coop_newgame_modes Start, coop_world_wait.continue_plan)
+-- Saved world kind, used by the launcher and by the game when opening a save.
 cvar("coop_world_server", "int", 0, 1, 0)
 
 -------------------------------------------------------------------------------
@@ -210,17 +209,7 @@ c_item("death", "coop_npc_finish_downed", "check")
 c_item("party", "coop_friendly_fire", "check")
 c_item("party", "coop_share_rewards", "list", { v = { 0, 1, 2, 3 } })
 c_item("party", "coop_max_new_characters", "list", { v = { 1, 2, 4, 8, 16, 32, 64 } })
--- F3a: split levels (a switch: off = everything as in F3, the group on the host's level and the waiting point at every exit)
--- and "story levels together" (only while the levels are split; off = the story levels are better-together hints only).
--- Both act when the game is loaded.
-c_item("party", "coop_split_levels", "check", { applies = "load" })
--- the new mode of the split levels (owner 2026-11-13): on, a new world runs as a world server and the host joins it. Chosen when
--- the world is created and never changed after: the save's actor is the creator's own character in the old mode and the server's
--- ghost in the new one, a world cannot change which
-c_item("party", "coop_world_server", "check", { when = "create", applies = "create",
-	shown_if = { key = "c|coop_split_levels", any = { true } } })
-c_item("party", "coop_story_together", "check", { applies = "load",
-	shown_if = { key = "c|coop_split_levels", any = { true } } })
+
 -- A new player appears at the base of the world's faction (F3a; it was "next to the host" before the levels were split)
 add("party", RULE .. "join_spawn", "list", { v = { "host", "faction_start" }, def = "faction_start" })
 add("party", RULE .. "party_fast_travel", "check", { def = true })

@@ -88,6 +88,26 @@ local function load_mod(name)
 	chunk()
 	return env
 end
+-- The dedicated launcher starts the world before coop.session_info() reports a host.
+do
+	local stock = { new_game_hardcore_mode = "true", new_game_azazel_mode = "true", new_game_faction = "stalker" }
+	local saves = 0
+	coop = { session_info = function() return { active = false, host = false } end }
+	function command_line() return "RayLinkServer.exe -coop_dedicated 27960 -coop_new" end
+	axr_main = { config = {
+		r_string_ex = function(_, _, key) return stock[key] end,
+		w_value = function(_, section, key, value)
+			check(section == "character_creation", "clear the stock mode in [character_creation]")
+			stock[key] = value
+		end,
+		save = function() saves = saves + 1 end,
+	} }
+	load_mod("coop_newgame_modes").on_game_start()
+	check(stock.new_game_hardcore_mode == nil and stock.new_game_azazel_mode == nil and saves == 1,
+		"a dedicated new world clears the saved stock modes before its session starts")
+	check(stock.new_game_faction == "stalker", "clearing stock modes keeps the world's faction")
+end
+
 coop_game_schema = load_mod("coop_game_schema")
 coop_game_record = load_mod("coop_game_record")
 STAGED, ACTIVE, STAGE_OK = nil, nil, true

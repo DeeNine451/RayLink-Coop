@@ -165,16 +165,10 @@ local function wet_release()
 	own = nil
 end
 
--- This player stands where the host's process stands: with split levels his sky may be another.
-local function on_host_level()
-	local l = api.levels
-	if not (l and l.split and l.split() == true) then return true end
-	-- a world server's seat plays no character and is in no level map (plan 2026-11-12): its process stands on no player's level,
-	-- the player keeps his own wetness (as when that seat stood on "fake_start")
-	local link = type(api.server_link) == "function" and api.server_link() or nil
-	if type(link) == "table" and link.plays == false then return false end
-	local mine, his = l.my_level(), l.level_of_player(0)
-	return mine == nil or his == nil or mine == his
+-- Rain on a server client's map is local to that map.
+local function follows_host()
+	local mode = rawget(_G, "coop_mode") or coop_mode
+	return mode == nil or mode.group_travels()
 end
 
 local function faster(base, gap)
@@ -246,7 +240,7 @@ local function tick()
 			local have, file_changed = apply(wm)
 			if have and file_changed then wm:set_brightness_boosts() end
 		end
-		if on_host_level() then wet_client_tick() else wet_release() end
+		if follows_host() then wet_client_tick() else wet_release() end
 	end
 end
 

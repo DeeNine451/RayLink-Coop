@@ -127,7 +127,7 @@ int l_runs_here(lua_State* L)
 {
 	const Domain d = check_domain(L, 1, "runs_here");
 	const bool is_host = lua_toboolean(L, 2) != 0;
-	lua_pushboolean(L, coop::routes::runs_here(d, is_host) ? 1 : 0);
+	lua_pushboolean(L, coop::routes::runs_here(d, is_host, false) ? 1 : 0);
 	return 1;
 }
 

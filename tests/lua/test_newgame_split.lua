@@ -1,13 +1,5 @@
--- Anomaly Coop test: "New game" with "Split levels" on (gamedata\scripts\coop_newgame_modes.script on_start_clicked, plan
--- docs\plans\2026-11-12-split-levels-native.md 3.1, stage 6b). The stock start runs with a trap on main_menu:StartGame
--- (capture_creator): what the stock writes into [character_creation] becomes the [creator] of the staging file and is erased at
--- once, no world starts in this game, the world server is started and the waiting window opens. With the setting off the
--- start is the one of today. The stock screen and the main menu are stand-ins shaped like ui_mm_faction_select.UINewGame;
--- the catalog, the record, the view, the staging file writer and the waiting window are the real scripts; the engine's
--- world server is support\world_server_stub.lua. Not shipped. Run: tools\test_lua.cmd newgame_split
+-- Dev 57 co-op entry points: stock new game, build 56 save compatibility, and launcher auto-load.
 dofile("tests/lua/support/menu_stubs.lua")
-dofile("tests/lua/support/world_server_stub.lua")
-os.execute("mkdir temp\\tests_s6b 2>nul")
 
 STRINGS = {}
 for _, f in ipairs({ "st_coop_menu.xml", "st_coop_newgame.xml", "st_coop_game.xml" }) do
@@ -28,7 +20,8 @@ coop = {
 	host_when_ready = function(p) CALLS[#CALLS + 1] = "pending " .. tostring(p); INFO.pending_host = p; return true end,
 	connect = function(a) CALLS[#CALLS + 1] = "connect " .. a; return true end,
 }
-install_world_server(coop)
+local server_starts = 0
+coop.world_server = { start = function() server_starts = server_starts + 1; return false end }
 function command_line() return "x.exe" end
 function get_console_cmd() return nil end
 function exec_console_cmd() end
@@ -45,8 +38,6 @@ coop_game_settings = {
 load_module("coop_game_schema")
 load_module("coop_game_record")
 load_module("coop_game_settings_view")
-load_module("coop_world_stage_file")
-load_module("coop_world_wait")
 
 XML_FILES["ui_coop_newgame.xml"] = xml_paths(ROOT .. "configs/ui/ui_coop_newgame.xml")
 XML_FILES["ui_coop_chronicle.xml"] = xml_paths(ROOT .. "configs/ui/ui_coop_chronicle.xml")
@@ -72,7 +63,6 @@ function CScriptXmlInit()
 end
 
 -- the stock screen: OnStartGame writes what ui_mm_faction_select.script UINewGame:OnStartGame writes, then owner:StartGame()
-STOCK_ERROR = nil
 class "UINewGame" (CUIScriptWnd)
 function UINewGame:__init(owner)
 	self.owner = owner
@@ -101,7 +91,6 @@ function UINewGame:OnStartGame()
 	c:w_value("character_creation", "new_game_economy_treasure", 1)
 	c:w_value("character_creation", "new_game_story_mode", self.ck_story:GetCheck() and true or nil)
 	c:w_value("character_creation", "new_game_opened_routes", self.ck_routes:GetCheck() and true or nil)
-	if STOCK_ERROR then error(STOCK_ERROR) end
 	c:w_value("character_creation", "new_game_character_name", (name:gsub(" ", "_")))
 	c:w_value("character_creation", "new_game_faction", self.selected_faction)
 	c:w_value("character_creation", "new_game_icon", self.selected_icon)
@@ -118,136 +107,100 @@ function MM:ShowDialog() self.shown = true end
 function MM:HideDialog() self.shown = false end
 function MM:Show(b) self.visible = b end
 MENU = setmetatable({ starts = 0, shown = false }, { __index = MM })
-local STOCK_START = MM.StartGame
 
 local m = load_module("coop_newgame_modes")
 
-local function cc_keys()
-	local out = {}
-	for k in pairs(CFG) do if k:find("^character_creation&") then out[#out + 1] = k end end
-	return out
-end
--- split: "Split levels"; ws: "World as a separate process" (owner 2026-11-13: the new flow needs both, default true here)
-local function screen(split, ws)
+local function screen()
 	local dlg = UINewGame(MENU)
 	dlg.shown = true
 	m.apply(dlg)
-	if split ~= nil then dlg.coop_view:set("c|coop_split_levels", split and 1 or 0) end
-	if split ~= nil and ws ~= false then dlg.coop_view:set("c|coop_world_server", split and 1 or 0) end
-	if ws == false then dlg.coop_view:set("c|coop_world_server", 0) end
 	return dlg
 end
-local function start(dlg) return click(dlg, "btn_start") end
-local function stage_text()
-	local fh = io.open(WS.stage_path, "rb")
-	local s = fh and fh:read("*a") or ""
-	if fh then fh:close() end
-	return s
-end
-local function reset()
-	ws_reset(); CALLS = {}; LOG = {}; STAGED = {}
-	MENU.starts = 0
-	INFO.pending_host = 27961
-	STOCK_ERROR = nil
-	os.remove(WS.stage_path)
-	if coop_world_wait.window_of() then coop_world_wait.window_of():Close() end
-end
 
-print("== split levels on: the trap, the file, the server")
-reset()
-local dlg = screen(true)
-start(dlg)
-check(MENU.starts == 0, "no world starts in this game")
-check(rawget(MENU, "StartGame") == nil and MENU.StartGame == STOCK_START, "main_menu:StartGame is the stock one again")
-check(#cc_keys() == 0, "[character_creation] is empty: a later single player game takes nothing of it (" .. table.concat(cc_keys(), ",") .. ")")
-check(#STAGED == 0, "the record is not staged in this game")
-local text = stage_text()
-check(text:find("faction = bandit", 1, true) and text:find("\"c|coop_split_levels\" = 1", 1, true)
-	and text:find("\"c|coop_world_server\" = 1", 1, true), "the staging file: the world's faction, split on, world server on")
-check(text:find("[creator]\nname = Big Boss\nicon = ui_inGame2_bandit_1\nloadout = wpn_pm,ammo_9x18_fmj,ammo_9x18_fmj\nmoney = 1500\nmap = esc_bandit_start\nbare = 0\n", 1, true),
-	"[creator] is what the stock screen wrote")
-check(WS.calls[#WS.calls] == "start world=new port=27961 stage=true nick=Big Boss", "start{ world = new, stage = true, the pending host's port }")
-check(CALLS[#CALLS] == "pending nil" and INFO.pending_host == nil, "the pending host is cancelled")
-check(dlg.shown == false and coop_world_wait.window_of() ~= nil and coop_world_wait.window_of().shown, "the screen is closed, the waiting window is open")
-check(log_has("%[coop%-newgame%] split levels: the world server starts"), "a log line")
+local dlg = screen()
+check(coop_game_schema.item("c|coop_world_server") == nil, "new co-op games have no server creation switch")
+click(dlg, "btn_start")
+check(MENU.starts == 1 and #STAGED == 1, "starting from the game stages co-op and calls stock StartGame once")
+check(server_starts == 0 and INFO.pending_host == 27961, "stock start keeps the pending co-op host and never starts a server")
 
-print("== an empty kit is a choice")
-reset()
-dlg = screen(true)
-dlg.kit = {}
-start(dlg)
-check(stage_text():find("loadout = \nmoney = 1500\nmap = esc_bandit_start\nbare = 1\n", 1, true), "bare = 1")
-
-print("== the stock does not start (no name)")
-reset()
-dlg = screen(true)
+MENU.starts, STAGED = 0, {}
+dlg = screen()
 dlg.character_name:SetText("")
-start(dlg)
-check(#WS.calls == 0 and MENU.starts == 0 and MENU.StartGame == STOCK_START and dlg.shown and INFO.pending_host == 27961,
-	"nothing happens, the screen stays")
+click(dlg, "btn_start")
+check(MENU.starts == 0 and #STAGED == 0, "empty character name starts and stages nothing")
 
-print("== the stock fails")
-reset()
-dlg = screen(true)
-STOCK_ERROR = "a mod broke it"
-start(dlg)
-check(MENU.StartGame == STOCK_START and rawget(MENU, "StartGame") == nil, "StartGame restored after an error")
-check(#cc_keys() == 0 and #WS.calls == 0 and dlg.shown and INFO.pending_host == 27961, "keys erased, nothing started, the screen stays")
-check(dlg.coop_hint.text:find("a mod broke it", 1, true) ~= nil and log_has("! split levels"), "the player sees why, a log line")
+local cm = load_module("coop_menu")
+local function menu_for(id)
+	return setmetatable({
+		sel_id = id, PrepareHost = function() return 27961 end,
+		Refresh = function(self) self.refreshed = true end, Close = function(self) self.closed = true end,
+	}, { __index = cm.UICoopMenu })
+end
+local legacy = {
+	v = 1, id = "65190f3a-9c41", name = "Strelok", faction = "stalker",
+	values = { ["c|coop_split_levels"] = "1", ["c|coop_story_together"] = "1", ["c|coop_world_server"] = "0" },
+}
+local old = assert(coop_game_record.decode("build 56 save block", { decode = function() return legacy end }))
+local dedicated = { id = "ded", values = { ["c|coop_world_server"] = "1" } }
+local plain = { id = "plain", values = { ["c|coop_split_levels"] = "0" } }
+local cards = { [old.id] = old, [dedicated.id] = dedicated, [plain.id] = plain }
+coop_game_settings.load_card = function(id) return cards[id] end
+coop_game_settings.autosave_game = function(id) CALLS[#CALLS + 1] = "ring " .. tostring(id) end
+function exec_console_cmd(cmd) CALLS[#CALLS + 1] = cmd end
 
-print("== the server refuses")
-reset()
-dlg = screen(true)
-WS.start_ok, WS.start_why = false, "in a co-op session: leave it first"
-start(dlg)
-check(MENU.starts == 0 and dlg.shown and INFO.pending_host == 27961 and coop_world_wait.window_of() == nil,
-	"the screen stays, the pending host stays")
-check(dlg.coop_hint.text:find("leave it first", 1, true) ~= nil and #cc_keys() == 0 and io.open(WS.stage_path, "rb") == nil,
-	"the reason on the screen, no keys, no staging file")
+check(STRINGS.st_coop_world_err_old_split == nil, "the refusal text for an old hybrid world is gone")
+local menu = menu_for(old.id)
+CALLS = {}
+menu:HostAfter("save", "legacy_b56")
+check(menu.closed and menu.local_error == nil and server_starts == 0 and CALLS[1] == "ring " .. old.id and CALLS[2] == "pending 27961"
+	and CALLS[4] == "start server(legacy_b56/single/alife/load) client(localhost)",
+	"a decoded build 56 hybrid save opens through the co-op host path")
 
-print("== no staging path")
-reset()
-WS.stage_path = nil
-dlg = screen(true)
-start(dlg)
-check(MENU.starts == 0 and dlg.coop_hint.text == T("st_coop_world_err_no_stage"), "refused with a text")
-WS.stage_path = "temp/tests_s6b/coop_new_world.ltx"
+for _, id in ipairs({ plain.id, "no_card" }) do
+	menu = menu_for(id)
+	CALLS = {}
+	menu:HostAfter("save", "normal_save")
+	check(menu.closed and menu.local_error == nil and server_starts == 0 and CALLS[1] == "ring " .. id and CALLS[2] == "pending 27961"
+		and CALLS[4] == "start server(normal_save/single/alife/load) client(localhost)",
+		id .. ": Play opens the save through the normal co-op host path")
+end
 
-print("== split levels off: as today")
-reset()
-dlg = screen(false)
-start(dlg)
-check(MENU.starts == 1 and #STAGED == 1 and #WS.calls == 0 and INFO.pending_host == 27961, "the stock start, the record staged, no world server")
-check(CFG["character_creation&new_game_faction"] == "bandit", "the stock's keys stay for its on_game_load")
+menu = menu_for(dedicated.id)
+CALLS = {}
+menu:HostAfter("save", "dedicated_save")
+check(menu.local_error == T("st_srv_world_from_launcher") and menu.refreshed and not menu.closed and #CALLS == 0 and server_starts == 0,
+	"the world_server flag alone directs Play to the launcher before preparing a host or loading the save")
 
-print("== split levels on, world server off (the default): the old split mode, as before 30656b7")
-reset()
-dlg = screen(true, false)
-start(dlg)
-check(MENU.starts == 1 and #STAGED == 1 and #WS.calls == 0 and INFO.pending_host == 27961 and io.open(WS.stage_path, "rb") == nil,
-	"the stock start in this game, the record staged, no staging file, no world server")
-check(STAGED[1] and STAGED[1].values["c|coop_split_levels"] == "1" and STAGED[1].values["c|coop_world_server"] == "0",
-	"the record: split on, world server off (" .. tostring(STAGED[1] and STAGED[1].values["c|coop_world_server"]) .. ")")
-check(coop_world_wait.window_of() == nil and dlg.shown, "no waiting window")
+local stem = "coop_auto_65190f3a-9c41_3"
+function command_line() return "x.exe -coop_world_auto " .. stem end
+coop_game_settings.game_of_save = function(s) if s == stem then return old.id, old end end
+function MM:Update() self.updates = (self.updates or 0) + 1 end
+ui_main_menu = { main_menu = MM }
+coop_games = { map_texture = function() return nil end }
+CALLS = {}
+cm.on_main_menu_init(MENU)
+check(#CALLS == 0, "launcher auto-load waits until the menu is built")
+MENU:Update()
+MENU:Update()
+check(#CALLS == 4 and CALLS[1] == "ring " .. old.id and CALLS[2] == "pending 27960"
+	and CALLS[4] == "start server(" .. stem .. "/single/alife/load) client(localhost)" and MENU.updates == 2,
+	"the first menu frame hosts the requested co-op save exactly once")
+check(table.concat(LOG, "\n"):find("will host on port 27960 after " .. stem, 1, true) ~= nil,
+	"the automatic co-op host logs which save and port it uses")
 
-print("== world server on, split levels off: nothing of the new flow")
-reset()
-dlg = screen(false)
-dlg.coop_view:set("c|coop_world_server", 1)
-start(dlg)
-check(MENU.starts == 1 and #STAGED == 1 and #WS.calls == 0, "the stock start, no world server")
-
-print("== the hint and the memory line under the world server setting")
-reset()
-dlg = screen(nil)
-local tab = coop_game_schema.item("c|coop_world_server").tab
-local note = dlg.coop_view.note_text[tab]
-check(note ~= nil and note.text == T("st_coop_game_world_server_hint") and STRINGS.st_coop_game_world_server_hint ~= nil,
-	"the hint of the world server setting on its tab (" .. tostring(tab) .. ")")
-WS.memory.commit_free_mb = 2048
-dlg = screen(nil)
-note = dlg.coop_view.note_text[tab]
-check(note.text == (T("st_coop_world_mem_low"):gsub("%%s", "2.0")) and note.color == coop_ui_kit.argb(coop_menu_theme_base.DEFAULTS.colors.wait),
-	"low memory: the low line in the warning colour")
+local function auto_at_start(argument, record)
+	function command_line() return "x.exe -coop_world_auto " .. argument end
+	coop_game_settings.game_of_save = function() return record.id, record end
+	MM.Update = function() end
+	CALLS = {}
+	load_module("coop_menu").on_main_menu_init(MENU)
+	MENU:Update()
+	return #CALLS
+end
+check(auto_at_start("dedicated_save", dedicated) == 0, "auto-load leaves server worlds to the launcher")
+check(auto_at_start("new", old) == 0, "the retired automatic new-server command launches nothing")
+check(auto_at_start("\209\229\233\226", old) == 4, "a save name in the game's code page can still be hosted")
+check(auto_at_start("a)quit(", old) == 0, "only a save stem can enter the co-op load command")
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
+os.exit(FAILS == 0 and 0 or 1)

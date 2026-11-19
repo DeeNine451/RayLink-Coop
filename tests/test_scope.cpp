@@ -274,64 +274,52 @@ TEST(scope_examples)
 
 // ---------------------------------------------------------------------------------------------- route()
 
-TEST(route_core_is_the_sessions_whatever_the_flags)
+TEST(route_core_is_the_sessions_whatever_the_flag)
 {
 	for (bool from_trunk : {false, true})
-		for (bool leads : {false, true})
-			CHECK_EQ(std::string(route_name(route(Scope::Core, from_trunk, leads))), std::string("HandleHere"));
+		CHECK_EQ(std::string(route_name(route(Scope::Core, from_trunk))), std::string("HandleHere"));
 }
 
 TEST(route_world_is_always_the_world_servers)
 {
 	// the world server is the process that receives it; a player on a level of a map server asks the same process
 	for (bool from_trunk : {false, true})
-		for (bool leads : {false, true})
-			CHECK_EQ(std::string(route_name(route(Scope::World, from_trunk, leads))), std::string("HandleHere"));
+		CHECK_EQ(std::string(route_name(route(Scope::World, from_trunk))), std::string("HandleHere"));
 }
 
-TEST(route_map_stays_or_goes_to_the_authority_of_the_senders_level)
+TEST(route_map_goes_to_the_authority_of_the_senders_level)
 {
-	// from a player: here if this process leads his level, else through the tunnel to the map server that does
-	CHECK_EQ(std::string(route_name(route(Scope::Map, false, true))), std::string("HandleHere"));
-	CHECK_EQ(std::string(route_name(route(Scope::Map, false, false))), std::string("TunnelToServer"));
-	// from the trunk (a map server's virtual player, a tunnel opened): the same rule, the flag does not matter
-	CHECK_EQ(std::string(route_name(route(Scope::Map, true, true))), std::string("HandleHere"));
-	CHECK_EQ(std::string(route_name(route(Scope::Map, true, false))), std::string("TunnelToServer"));
+	// owner 2026-11-18, no hybrid: the world server leads no level, the map server of the sender's level is its authority. From a
+	// player or from the trunk (a map server's virtual player, a tunnel opened): the same rule
+	CHECK_EQ(std::string(route_name(route(Scope::Map, false))), std::string("TunnelToServer"));
+	CHECK_EQ(std::string(route_name(route(Scope::Map, true))), std::string("TunnelToServer"));
 }
 
 TEST(route_trunk_only_from_the_bridge)
 {
-	for (bool leads : {false, true})
-	{
-		CHECK_EQ(std::string(route_name(route(Scope::Trunk, true, leads))), std::string("HandleHere"));
-		CHECK_EQ(std::string(route_name(route(Scope::Trunk, false, leads))), std::string("RefuseNotTrunk"));
-	}
+	CHECK_EQ(std::string(route_name(route(Scope::Trunk, true))), std::string("HandleHere"));
+	CHECK_EQ(std::string(route_name(route(Scope::Trunk, false))), std::string("RefuseNotTrunk"));
 }
 
 TEST(route_every_cell_of_the_table)
 {
-	// 4 scopes x from_trunk x leads: the whole table in one place
+	// 4 scopes x from_trunk: the whole table in one place
 	struct Cell
 	{
 		Scope scope;
-		bool from_trunk, leads;
+		bool from_trunk;
 		Route want;
 	};
 	const Cell cells[] = {
-		{Scope::Core, false, false, Route::HandleHere}, {Scope::Core, false, true, Route::HandleHere},
-		{Scope::Core, true, false, Route::HandleHere}, {Scope::Core, true, true, Route::HandleHere},
-		{Scope::World, false, false, Route::HandleHere}, {Scope::World, false, true, Route::HandleHere},
-		{Scope::World, true, false, Route::HandleHere}, {Scope::World, true, true, Route::HandleHere},
-		{Scope::Map, false, false, Route::TunnelToServer}, {Scope::Map, false, true, Route::HandleHere},
-		{Scope::Map, true, false, Route::TunnelToServer}, {Scope::Map, true, true, Route::HandleHere},
-		{Scope::Trunk, false, false, Route::RefuseNotTrunk}, {Scope::Trunk, false, true, Route::RefuseNotTrunk},
-		{Scope::Trunk, true, false, Route::HandleHere}, {Scope::Trunk, true, true, Route::HandleHere},
+		{Scope::Core, false, Route::HandleHere}, {Scope::Core, true, Route::HandleHere},
+		{Scope::World, false, Route::HandleHere}, {Scope::World, true, Route::HandleHere},
+		{Scope::Map, false, Route::TunnelToServer}, {Scope::Map, true, Route::TunnelToServer},
+		{Scope::Trunk, false, Route::RefuseNotTrunk}, {Scope::Trunk, true, Route::HandleHere},
 	};
 	for (const Cell& c : cells)
 	{
-		const std::string what = std::string(scope_name(c.scope)) + (c.from_trunk ? " from the trunk" : " from a player") +
-		    (c.leads ? ", leads" : ", does not lead");
-		CHECK_EQ(what + ": " + route_name(route(c.scope, c.from_trunk, c.leads)), what + ": " + route_name(c.want));
+		const std::string what = std::string(scope_name(c.scope)) + (c.from_trunk ? " from the trunk" : " from a player");
+		CHECK_EQ(what + ": " + route_name(route(c.scope, c.from_trunk)), what + ": " + route_name(c.want));
 	}
 }
 

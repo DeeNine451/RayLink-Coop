@@ -117,7 +117,7 @@ TEST(routes_defaults)
 	// handler fills the config the rest of the mod reads. Unknown name -> owner -> it runs on the client too; the
 	// live crash came from the handler being skipped there (PATCH.CONFIG empty, xr_combat_ignore.lua:206).
 	CHECK_EQ(default_of("idiots_on_start"), Domain::Owner);
-	CHECK(runs_here(default_of("idiots_on_start"), false));
+	CHECK(runs_here(default_of("idiots_on_start"), false, false));
 	CHECK_EQ(Table().route("idiots_on_start", "some_mod_script"), Domain::Owner);
 
 	// Names outside the intercepts table: the brief's prefixes, then owner.
@@ -151,7 +151,7 @@ TEST(routes_defaults)
 		t.add(script_rule("treasure_manager", Domain::Host));
 		CHECK_EQ(t.route("npc_on_use", "treasure_manager"), Domain::Host);
 		CHECK_EQ(t.route("npc_on_use", "ui_mod_menu"), Domain::Owner);
-		CHECK(runs_here(t.route("monster_on_loot_init", "ui_mutant_loot"), false));
+		CHECK(runs_here(t.route("monster_on_loot_init", "ui_mutant_loot"), false, false));
 	}
 
 	// unique_call / time_event: routed by the handler's script, owner by default: a timer follows its script like the
@@ -280,7 +280,7 @@ TEST(routes_precedence)
 	CHECK_EQ(t.route("idiots_on_start", "xr_combat_ignore"), Domain::Host);
 	t.add(forced_rule("idiots_on_start", Domain::View));
 	CHECK_EQ(t.route("idiots_on_start", "xr_combat_ignore"), Domain::View);
-	CHECK(runs_here(t.route("idiots_on_start", "xr_combat_ignore"), false));
+	CHECK(runs_here(t.route("idiots_on_start", "xr_combat_ignore"), false, false));
 	CHECK_EQ(t.route("npc_on_update", "xr_combat_ignore"), Domain::Host); // the script's other callbacks stay host
 
 	// A later rule for the same key replaces the earlier one.
@@ -405,19 +405,19 @@ TEST(routes_level_behaviour_names_what_a_leader_runs)
 
 TEST(routes_runs_here)
 {
-	CHECK(runs_here(Domain::Host, true));
-	CHECK(!runs_here(Domain::Host, false));
-	CHECK(runs_here(Domain::Level, true));
-	CHECK(!runs_here(Domain::Level, false));
+	CHECK(runs_here(Domain::Host, true, false));
+	CHECK(!runs_here(Domain::Host, false, false));
+	CHECK(runs_here(Domain::Level, true, false));
+	CHECK(!runs_here(Domain::Level, false, false));
 	CHECK(runs_here(Domain::Level, false, true)); // F3a multilevel: a client who leads his level
 	CHECK(!runs_here(Domain::Host, false, true)); // the world stays the host's
 	CHECK(!runs_here(Domain::None, true, true));
-	CHECK(runs_here(Domain::Owner, true));
-	CHECK(runs_here(Domain::Owner, false));
-	CHECK(runs_here(Domain::View, true));
-	CHECK(runs_here(Domain::View, false));
-	CHECK(!runs_here(Domain::None, true));
-	CHECK(!runs_here(Domain::None, false));
+	CHECK(runs_here(Domain::Owner, true, false));
+	CHECK(runs_here(Domain::Owner, false, false));
+	CHECK(runs_here(Domain::View, true, false));
+	CHECK(runs_here(Domain::View, false, false));
+	CHECK(!runs_here(Domain::None, true, false));
+	CHECK(!runs_here(Domain::None, false, false));
 }
 
 // --- F2 T11: engine-invoked binder methods routed by the section's script_binding (MOD_LAYER.md 2.2) ---

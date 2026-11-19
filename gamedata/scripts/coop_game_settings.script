@@ -457,13 +457,20 @@ function autosave_game(id)
 	return true
 end
 
+-- These flags still belong to saved world records. The engine no longer registers them as console variables.
+local RETIRED_CVAR_KEYS = {
+	["c|coop_split_levels"] = true,
+	["c|coop_story_together"] = true,
+	["c|coop_world_server"] = true,
+}
+
 local function apply_cvars()
 	local g = api and api.game
 	if not (S.rec and type(g) == "table" and type(g.set_cvars) == "function") then return end
 	local t, n = {}, 0
 	for key, raw in pairs(S.rec.values) do
 		local name = type(key) == "string" and key:match("^c|(.+)$")
-		if name and type(raw) == "string" then
+		if name and not RETIRED_CVAR_KEYS[key] and type(raw) == "string" then
 			t[name] = raw
 			n = n + 1
 		end

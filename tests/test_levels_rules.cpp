@@ -1,6 +1,6 @@
 // Anomaly Coop unit tests: the rules of split levels (coop_levels_rules.h; docs/plans/2026-10-24-f3a-split-levels.md
-// §1.1, §1.5, §1.10, §3). Who leads a level (the host's process, a background map server, nobody), which players a
-// level's messages reach, how a gate folds with the two game rules, the verdict on a move, the life of one map server
+// §1.1, §1.5, §1.10, §3). Who leads a level (a background map server, nobody), which players a
+// level's messages reach, how a gate folds with split levels, the verdict on a move, the life of one map server
 // (start, pause, return during the pause, crash, timeouts) and the flush round before a save.
 #include "test_util.h"
 
@@ -29,31 +29,32 @@ constexpr uint64_t kT0 = 5000;
 
 // ---------------------------------------------------------------- who leads a level
 
-// The host's process leads its own level even when a client was there first, and a client's level is a map server's.
-TEST(authority_host_process_first)
+// Owner 2026-11-18, no hybrid: no host's process leads a level. Every level with a player on it, seat 0 included, is a map
+// server's; the world server's own seat plays nobody.
+TEST(authority_every_played_level_is_a_map_servers)
 {
 	Table t;
 	t.set(seat(1, 5)); // a client on level 5 first
-	t.set(seat(0, 5)); // then the host comes to the same level
-	CHECK(t.server_of(5) == Server::HostProcess);
-
-	t.set(seat(0, 7)); // the host goes to level 7: its process leads 7, level 5 now needs a map server
-	CHECK(t.server_of(7) == Server::HostProcess);
+	t.set(seat(0, 5)); // then seat 0, playing, on the same level
 	CHECK(t.server_of(5) == Server::MapServer);
 
-	// The host that is not in the world yet (his process is loading the level) still leads the level it loads.
+	t.set(seat(0, 7)); // seat 0 goes to level 7: both levels have players
+	CHECK(t.server_of(7) == Server::MapServer);
+	CHECK(t.server_of(5) == Server::MapServer);
+
+	// A player who is not in the world yet (loading the level) already needs its server.
 	t.set(seat(0, 9, /*in_world*/ false));
-	CHECK(t.server_of(9) == Server::HostProcess);
+	CHECK(t.server_of(9) == Server::MapServer);
 }
 
 TEST(authority_map_server)
 {
 	Table t;
-	t.set(seat(0, 1)); // the host on level 1
+	t.set(seat(0, 1, true, /*plays*/ false)); // the world server's own seat on its level
 	t.set(seat(2, 3));
 	t.set(seat(3, 3));
 	CHECK(t.server_of(3) == Server::MapServer);
-	CHECK(t.server_of(1) == Server::HostProcess);
+	CHECK(t.server_of(1) == Server::None);
 
 	// A player on his way (loading the level) already needs its server.
 	t.set(seat(4, 6, /*in_world*/ false));
@@ -95,24 +96,24 @@ TEST(authority_none)
 TEST(map_server_levels_and_players)
 {
 	Table t;
-	t.set(seat(0, 1)); // the host's level: led by the host's process, no map server
+	t.set(seat(0, 1, true, /*plays*/ false)); // the world server's own seat: nobody, no map server for it
 	t.set(seat(1, 1));
 	t.set(seat(2, 4));
 	t.set(seat(3, 4, /*in_world*/ false)); // loading into 4
 	t.set(seat(4, 9));
 	t.set(seat(5, 9, true, /*plays*/ false)); // a ghost: not a player
 
-	CHECK_EQ(t.population(1), uint32_t(2));
+	CHECK_EQ(t.population(1), uint32_t(1));
 	CHECK_EQ(t.population(4), uint32_t(2));
 	CHECK_EQ(t.population(9), uint32_t(1));
 	CHECK_EQ(t.population(7), uint32_t(0));
 
-	CHECK_EQ(t.map_players(1), uint32_t(0)); // the host's process serves them, not a map server
+	CHECK_EQ(t.map_players(1), uint32_t(1)); // the player on the world server's level has a map server like any other
 	CHECK_EQ(t.map_players(4), uint32_t(2)); // the one who is loading counts: the server must be there for him
 	CHECK_EQ(t.map_players(9), uint32_t(1));
 	CHECK_EQ(t.map_players(7), uint32_t(0));
 
-	CHECK_EQ(t.map_server_levels(), (std::vector<uint16_t>{4, 9}));
+	CHECK_EQ(t.map_server_levels(), (std::vector<uint16_t>{1, 4, 9}));
 }
 
 // ---------------------------------------------------------------- whom a level's messages reach
@@ -171,7 +172,7 @@ TEST(observes_other_level_false)
 
 TEST(table_all_on_a_level)
 {
-	Table t(0);
+	Table t;
 	t.set(seat(0, 2));
 	t.set(seat(1, 2));
 	t.set(seat(2, 3));
@@ -182,26 +183,22 @@ TEST(table_all_on_a_level)
 	ghost.plays = false;
 	t.set(ghost);
 	CHECK(t.all_on(2, 2)); // a seat that plays nobody waits for nobody
-	Table lone(0);
+	Table lone;
 	CHECK(lone.all_on(4, 0));
 }
 
 TEST(gate_fold)
 {
-	// Split levels on: the gate stands; with "story maps together" off, Together is only a suggestion.
-	CHECK(effective_gate(Gate::Free, true, true) == Gate::Free);
-	CHECK(effective_gate(Gate::BetterTogether, true, true) == Gate::BetterTogether);
-	CHECK(effective_gate(Gate::Together, true, true) == Gate::Together);
-	CHECK(effective_gate(Gate::Free, true, false) == Gate::Free);
-	CHECK(effective_gate(Gate::BetterTogether, true, false) == Gate::BetterTogether);
-	CHECK(effective_gate(Gate::Together, true, false) == Gate::BetterTogether);
+	// Split levels on (the server): the gate stands, but nobody is waited for: Together is only a suggestion (owner
+	// 2026-11-18: no "story maps together", each player moves alone).
+	CHECK(effective_gate(Gate::Free, true) == Gate::Free);
+	CHECK(effective_gate(Gate::BetterTogether, true) == Gate::BetterTogether);
+	CHECK(effective_gate(Gate::Together, true) == Gate::BetterTogether);
+	CHECK(effective_gate(static_cast<Gate>(7), true) == static_cast<Gate>(7)); // decide_move refuses it
 
-	// Split levels off (Phase 3): the group moves as one through the waiting point at every exit.
-	for (Gate g : {Gate::Free, Gate::BetterTogether, Gate::Together})
-	{
-		CHECK(effective_gate(g, false, true) == Gate::Together);
-		CHECK(effective_gate(g, false, false) == Gate::Together);
-	}
+	// Split levels off (the co-op): the group moves as one through the waiting point at every exit.
+	for (Gate g : {Gate::Free, Gate::BetterTogether, Gate::Together, static_cast<Gate>(7)})
+		CHECK(effective_gate(g, false) == Gate::Together);
 }
 
 TEST(gate_names)
@@ -263,9 +260,9 @@ TEST(decide_move_together)
 	CHECK(decide_move(Gate::BetterTogether, false, 0, 3) == MoveVerdict::Go);
 
 	// With split levels off every gate is Together (effective_gate) and so every move waits at the board.
-	CHECK(decide_move(effective_gate(Gate::Free, false, true), true, 3, 3) == MoveVerdict::Board);
-	// With "story maps together" off a Together level is only a suggestion: the move goes.
-	CHECK(decide_move(effective_gate(Gate::Together, true, false), false, 0, 3) == MoveVerdict::Go);
+	CHECK(decide_move(effective_gate(Gate::Free, false), true, 3, 3) == MoveVerdict::Board);
+	// With split levels a Together level is only a suggestion: the move goes.
+	CHECK(decide_move(effective_gate(Gate::Together, true), false, 0, 3) == MoveVerdict::Go);
 }
 
 // ---------------------------------------------------------------- the life of one map server

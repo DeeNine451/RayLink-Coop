@@ -156,23 +156,18 @@ local function install()
 	return true
 end
 
--- A level change to game vertex `gvid` waits on the board.
-function trip_waits(gvid)
+-- Co-op waits for the group before a scripted level change can fade.
+function trip_waits()
 	if not session_on() then return false end
 	local lv = api.levels
 	local ok, split = pcall(function() return lv and lv.split and lv.split() end)
-	if not (ok and split) then
-		local okp, list = pcall(api.players)
-		return okp and type(list) == "table" and #list > 1
-	end
-	local okn, name = pcall(function() return alife():level_name(game_graph():vertex(gvid):level_id()) end)
-	if not okn then return false end
-	local okg, gate = pcall(lv.gate_of, name)
-	return okg and gate == "together"
+	if ok and split then return false end
+	local okp, list = pcall(api.players)
+	return okp and type(list) == "table" and #list > 1
 end
 
 local function patched_change(pos, lvid, gvid, angle, anim)
-	if anim and trip_waits(gvid) then anim = false end
+	if anim and trip_waits() then anim = false end
 	return orig_change(pos, lvid, gvid, angle, anim)
 end
 

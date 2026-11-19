@@ -1,7 +1,7 @@
 -- Anomaly Coop test (split levels, F3a task 3): the two new game rules and the new default in the catalog
 -- gamedata\scripts\coop_game_schema.script (docs\GAME_SETTINGS.md 1.2, 3.6, 8.2; docs\plans\2026-10-24-f3a-split-levels.md 3):
---   c|coop_split_levels      on / off, the switch of the split levels, in the menu, off by default
---   c|coop_story_together    on / off, only while the levels are split, on by default
+--   c|coop_split_levels      saved flag of the old hybrid
+--   c|coop_story_together    saved flag of the former story gates
 --   o|coop/coop_session/join_spawn   a new player appears at the base of the world's faction by default
 -- The catalog is loaded into a sealed environment (the standard library and nothing of the engine). The list of 21 console
 -- variables is also held against the engine's white list in engine\src\xrCoop\coop_game_values.h when that file is there.
@@ -92,11 +92,17 @@ if header then
 	local body = header:match("kGameCvars%[%]%s*=%s*{(.-)};")
 	local names = {}
 	for n in (body or ""):gmatch('"([%w_]+)"') do names[#names + 1] = n end
-	local equal = #names == #schema.CVARS
-	for i, n in ipairs(names) do
-		if schema.CVARS[i] ~= n then equal = false end
+	local runtime = {}
+	for _, k in ipairs(schema.CVARS) do
+		if k ~= "coop_split_levels" and k ~= "coop_story_together" and k ~= "coop_world_server" then
+			runtime[#runtime + 1] = k
+		end
 	end
-	check(#names == 21 and equal, "coop_game_values.h kGameCvars is the catalog's CVARS (" .. #names .. " names)")
+	local equal = #names == #runtime
+	for i, n in ipairs(names) do
+		if runtime[i] ~= n then equal = false end
+	end
+	check(#names == 18 and equal, "coop_game_values.h kGameCvars matches the live cvars (" .. #names .. " names)")
 else
 	print("  skip the engine sources are not checked out: kGameCvars is not compared")
 end
@@ -105,62 +111,15 @@ local c_items = 0
 for _, k in ipairs(schema.keys()) do
 	if k:find("^c|") then c_items = c_items + 1 end
 end
-check(c_items == 21, "all 21 console variables, and only they, are catalog items of source c (" .. c_items .. ")")
+check(c_items == 18, "18 console variables are editable catalog items (" .. c_items .. ")")
 
 -------------------------------------------------------------------------------
-print("== the two switches")
-for _, key in ipairs({ SPLIT, STORY }) do
-	local it = schema.item(key)
-	check(it ~= nil, key .. " is in the catalog")
-	if it then
-		check(it.tab == "party" and it.kind == "check" and it.src == "c" and it.cvar == key:sub(3), key .. ": a check on the group tab, a console variable")
-		check(it.def == (key == STORY), key .. ": default")
-		check(it.when == "session" and schema.editable(key, true) and schema.editable(key, false),
-			key .. ": changed between sessions, editable on an existing game")
-		check(it.applies == "load", key .. ": starts to act when the game is loaded (" .. tostring(it.applies) .. ")")
-		check(it.range and it.range[1] == 0 and it.range[2] == 1 and it.int == true, key .. ": 0..1, whole")
-		check(schema.default(key) == (key == STORY), key .. ": default()")
-	end
+print("== legacy world flags")
+for _, key in ipairs({ SPLIT, STORY, "c|coop_world_server" }) do
+	check(not schema.item(key) and not schema.editable(key, false) and not schema.editable(key, true),
+		key .. ": retained in the cvar schema, absent from the creation and editing menus")
+	check(schema.canon(key, "1") == "1" and schema.canon(key, "0") == "0", key .. ": saved values survive canonicalization")
 end
-local own = (schema.item(SPLIT) or {}).shown_if
-check(own == nil, "the switch of the split levels is in the menu of every game")
-local shown = (schema.item(STORY) or {}).shown_if
-check(shown and shown.key == SPLIT and #shown.any == 1 and shown.any[1] == true,
-	"story levels together is shown while the levels are split")
-
-local party = {}
-for i, it in ipairs(schema.items("party")) do party[i] = it.key end
-local i_split, i_story, i_join = index_of(party, SPLIT), index_of(party, STORY), index_of(party, JOIN)
-check(i_split and i_story and i_join and i_split < i_story and i_story < i_join,
-	"on the group tab: split levels, story levels together, then where a new player appears")
-check(i_split ~= nil and index_of(party, "c|coop_max_new_characters") < i_split, "after the limit of new characters")
-
--- the new split mode (owner 2026-11-13): a check right under the split levels, shown while they are on, off by default
-local WSK = "c|coop_world_server"
-local wsi = schema.item(WSK)
-check(wsi ~= nil and wsi.tab == "party" and wsi.kind == "check" and wsi.src == "c" and wsi.cvar == "coop_world_server",
-	"world server: a check on the group tab, a console variable")
-check(wsi and wsi.def == false and schema.default(WSK) == false, "world server: off by default")
--- which process runs a world is decided once: its save's actor is either the creator's own character (the old mode) or the
--- server's ghost (the new one), so the value cannot be turned on or off on a world that exists
-check(wsi and wsi.when == "create" and wsi.applies == "create", "world server: chosen when the world is created")
-check(schema.editable(WSK, false) == true and schema.editable(WSK, true) == false, "world server: not editable on an existing game")
-check(wsi and wsi.range and wsi.range[1] == 0 and wsi.range[2] == 1 and wsi.int == true and schema.to_raw(WSK, true) == "1",
-	"world server: 0..1, the console form")
-local wshown = wsi and wsi.shown_if
-check(wshown and wshown.key == SPLIT and #wshown.any == 1 and wshown.any[1] == true, "world server: shown while the levels are split")
-check(i_split and index_of(party, WSK) == i_split + 1, "world server: right under the split levels")
-
--- values: a console flag is "1" / "0"
-check(schema.normalize(SPLIT, "1") == true and schema.normalize(SPLIT, "0") == false, "normalize: 1 / 0")
-check(schema.normalize(STORY, true) == true and schema.normalize(STORY, false) == false, "normalize: a boolean stays one")
-check(schema.normalize(SPLIT, "2") == nil and schema.normalize(SPLIT, "maybe") == nil and schema.normalize(SPLIT, "") == nil, "normalize: not a flag")
-check(schema.to_raw(SPLIT, true) == "1" and schema.to_raw(SPLIT, false) == "0" and schema.to_raw(STORY, false) == "0",
-	"to_raw: the console form")
-check(schema.canon(SPLIT, "ON") == "1" and schema.canon(STORY, " 0 ") == "0", "canon: a console flag")
-local vals = (schema.item(SPLIT) or {}).values or {}
-check(#vals == 2 and vals[1][1] == true and vals[1][2] == "st_coop_game_on" and vals[2][1] == false and vals[2][2] == "st_coop_game_off",
-	"the values are the stock on / off strings")
 
 -------------------------------------------------------------------------------
 print("== join_spawn: at the faction's base by default")
@@ -192,8 +151,7 @@ check(downed and downed.shown_if == nil, "finish a downed player: always shown")
 -------------------------------------------------------------------------------
 print("== strings")
 local ids = schema.text_ids()
-local want = { "st_coop_game_split_levels", "st_coop_game_story_together", "st_coop_game_join_spawn",
-	"st_coop_game_loot_claim", "st_coop_game_npc_finish_downed", "st_coop_game_world_server",
+local want = { "st_coop_game_join_spawn", "st_coop_game_loot_claim", "st_coop_game_npc_finish_downed",
 	"st_coop_game_join_spawn_host", "st_coop_game_join_spawn_faction_start" }
 for _, id in ipairs(want) do
 	check(index_of(ids, id) ~= nil, "text_ids names " .. id)
@@ -208,10 +166,11 @@ for _, lang in ipairs({ "eng", "rus" }) do
 	for _, id in ipairs(want) do
 		if not have[id] then missing[#missing + 1] = id end
 	end
-	check(#missing == 0, lang .. ": the strings of the two switches and of join_spawn exist (missing: " .. table.concat(missing, ",") .. ")")
-	check(have.st_coop_game_split_levels == 1 and have.st_coop_game_story_together == 1, lang .. ": each switch string is defined once")
-	check(have.st_coop_game_world_server == 1 and have.st_coop_game_world_server_hint == 1,
-		lang .. ": the world server setting has its title and its hint, once each")
+	check(#missing == 0, lang .. ": the strings of the current rules exist (missing: " .. table.concat(missing, ",") .. ")")
+	for _, id in ipairs({ "st_coop_game_split_levels", "st_coop_game_story_together",
+		"st_coop_game_world_server", "st_coop_game_world_server_hint" }) do
+		check(not have[id] and not index_of(ids, id), lang .. ": removed " .. id)
+	end
 end
 
 finish()

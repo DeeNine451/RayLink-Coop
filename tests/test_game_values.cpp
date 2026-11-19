@@ -1,5 +1,5 @@
 // Anomaly Coop unit tests: the engine's part of "Game settings" that needs no engine (coop_game_values.h;
-// docs/GAME_SETTINGS.md §1.2, §3.4, §3.5): the white list of the 19 game rules, the layer that sets them over the
+// docs/GAME_SETTINGS.md §1.2, §3.4, §3.5): the white list of the 18 game rules, the layer that sets them over the
 // machine's console values and gives them back, the new game that waits in memory, and the world's group.
 #include "test_util.h"
 
@@ -42,22 +42,18 @@ struct FakeConsole : CvarConsole
 std::string repeat(char c, size_t n) { return std::string(n, c); }
 } // namespace
 
-// §1.2: the white list is the 20 rules of the table, nothing else, each once. Rows 18 and 19 are the split-levels rules of
-// F3a (docs/plans/2026-10-24-f3a-split-levels.md §3): the engine registers them (coop_split_levels, coop_story_together).
-// Row 20 is "stalkers finish a downed player" (coop_npc_finish_downed, registered by the NPC AI, coop_ai.cpp).
-TEST(game_values_cvar_list_is_the_twenty_rules)
+// §1.2: the white list is the rules of the table, nothing else, each once. Row 18 is "stalkers finish a downed player"
+// (coop_npc_finish_downed, registered by the NPC AI, coop_ai.cpp). The three rules of the hybrid (split levels, story maps
+// together, the world started by the game) are gone with it (owner 2026-11-18, docs/MODES.md section 7).
+TEST(game_values_cvar_list_is_the_eighteen_rules)
 {
 	const char* expected[] = {
 		"coop_friendly_fire", "coop_max_new_characters", "coop_share_rewards", "coop_death_mode", "coop_death_drop",
 		"coop_bleedout", "coop_revive_health", "coop_respawn_delay", "coop_contusion", "coop_death_money",
 		"coop_death_wear", "coop_death_rank", "coop_hardcore_new_kit", "coop_checkpoints_group",
-		"coop_autosave_interval", "coop_autosave_count", "coop_death_share", "coop_split_levels", "coop_story_together",
-		"coop_npc_finish_downed",
-		// row 21, owner 2026-11-13: the old split mode stays and the new one is a choice of its own. "The world runs as a process of
-		// its own on this PC" (a world server); only Lua reads it (the new game screen, Continue), the engine keeps the value
-		"coop_world_server",
+		"coop_autosave_interval", "coop_autosave_count", "coop_death_share", "coop_npc_finish_downed",
 	};
-	CHECK_EQ(kGameCvarCount, size_t(21));
+	CHECK_EQ(kGameCvarCount, size_t(18));
 	CHECK_EQ(sizeof(expected) / sizeof(expected[0]), kGameCvarCount);
 	for (size_t i = 0; i < kGameCvarCount; ++i)
 	{
@@ -68,34 +64,35 @@ TEST(game_values_cvar_list_is_the_twenty_rules)
 	}
 }
 
-// The two rules of split levels are on/off flags: a game record writes "0" / "1", and the layer takes them like the others
-// (the machine's value is remembered once and given back when the level is left).
-TEST(game_values_split_levels_rules_apply_and_release)
+// A world saved before (a hybrid world, a server world) still carries c|coop_split_levels, c|coop_story_together and
+// c|coop_world_server in its record (tools/persisted_keys.txt: the keys never go). They are no console rules any more: the layer
+// refuses them, sets nothing and holds nothing, and the load goes on (a refusal is a log line, never fatal).
+TEST(game_values_the_rules_of_the_hybrid_are_refused_and_change_nothing)
 {
-	CHECK(cvar_allowed("coop_split_levels"));
-	CHECK(cvar_allowed("coop_story_together"));
-	CHECK(!cvar_allowed("Coop_Split_Levels")); // exact names only
+	CHECK(!cvar_allowed("coop_split_levels"));
+	CHECK(!cvar_allowed("coop_story_together"));
+	CHECK(!cvar_allowed("coop_world_server"));
 	CHECK(!cvar_allowed("coop_max_map_servers")); // a machine setting (the host's PC), not a rule of the game
 	CHECK(!cvar_allowed("coop_mapserver_linger"));
-	CHECK(cvar_value_valid("0"));
-	CHECK(cvar_value_valid("1"));
 
 	FakeConsole con;
-	con.values["coop_split_levels"] = "1";
-	con.values["coop_story_together"] = "1";
+	con.values["coop_split_levels"] = "0";
+	con.values["coop_story_together"] = "0";
+	con.values["coop_world_server"] = "0";
 	CvarLayer layer;
-	CHECK(layer.apply(con, "coop_split_levels", "0") == CvarVerdict::Applied);
-	CHECK(layer.apply(con, "coop_story_together", "0") == CvarVerdict::Applied);
-	CHECK_EQ(con.values["coop_split_levels"], std::string("0"));
-	CHECK_EQ(con.values["coop_story_together"], std::string("0"));
-	CHECK_EQ(layer.release(con), size_t(2));
-	CHECK_EQ(con.values["coop_split_levels"], std::string("1"));
-	CHECK_EQ(con.values["coop_story_together"], std::string("1"));
+	CHECK(layer.apply(con, "coop_split_levels", "1") == CvarVerdict::NotAllowed);
+	CHECK(layer.apply(con, "coop_story_together", "1") == CvarVerdict::NotAllowed);
+	CHECK(layer.apply(con, "coop_world_server", "1") == CvarVerdict::NotAllowed);
+	CHECK(con.sets.empty());
+	CHECK(con.gets.empty());
+	CHECK_EQ(layer.held(), size_t(0));
+	CHECK_EQ(layer.release(con), size_t(0));
 
-	// An engine that does not know the rules yet refuses them, never fatal (the list may run ahead of the console).
-	FakeConsole old;
-	CHECK(layer.apply(old, "coop_split_levels", "1") == CvarVerdict::Unknown);
-	CHECK(old.sets.empty());
+	// a rule that stays is taken as before, next to them
+	con.values["coop_friendly_fire"] = "1";
+	CHECK(layer.apply(con, "coop_friendly_fire", "0") == CvarVerdict::Applied);
+	CHECK_EQ(layer.release(con), size_t(1));
+	CHECK_EQ(con.values["coop_friendly_fire"], std::string("1"));
 }
 
 TEST(game_values_cvar_apply_remembers_machine_once)

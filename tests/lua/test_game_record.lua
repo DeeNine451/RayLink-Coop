@@ -90,12 +90,12 @@ end
 local EXPECT_TABS = { "death", "party", "world", "difficulty", "saves", "other" }
 check(deep_equal(schema.TABS, EXPECT_TABS), "TABS are death, party, world, difficulty, saves, other")
 
-local EXPECT_COUNT = { death = 13, party = 22, world = 21, difficulty = 2, saves = 2, other = 0 }
+local EXPECT_COUNT = { death = 13, party = 19, world = 21, difficulty = 2, saves = 2, other = 0 }
 for _, tab in ipairs(EXPECT_TABS) do
 	check(#schema.items(tab) == EXPECT_COUNT[tab], "tab " .. tab .. " has " .. EXPECT_COUNT[tab] .. " items (docs 3.6)")
 end
 check(#schema.items("nope") == 0, "an unknown tab has no items")
-check(#schema.keys() == 60, "60 catalog keys in all")
+check(#schema.keys() == 57, "57 catalog keys in all")
 check(schema.item("c|nope") == nil and schema.item(nil) == nil, "an unknown key has no item")
 
 do
@@ -239,7 +239,10 @@ do
 			if tokens and not deep_equal(cv.tokens, tokens) then why = why or "tokens" end
 		end
 		local it = schema.item("c|" .. name)
-		if not it then
+		local legacy = i == 18 or i == 19 or i == 21
+		if legacy then
+			if it then why = why or "a legacy flag appears in the menu" end
+		elseif not it then
 			why = why or "no catalog item"
 		else
 			if it.cvar ~= name then why = why or "item.cvar " .. tostring(it.cvar) end
@@ -267,7 +270,7 @@ do
 	for _, k in ipairs(schema.keys()) do
 		if k:find("^c|") then c_items = c_items + 1 end
 	end
-	check(c_items == 21, "all 21 console variables, and only they, are catalog items of source c")
+	check(c_items == 18, "18 live console variables are catalog items of source c")
 	local tokens = schema.item("c|coop_death_drop").values
 	check(tokens[1][1] == "drop" and tokens[4][1] == "keep", "death drop offers drop, corpse, lose, keep")
 	local share = schema.item("c|coop_death_share").values
@@ -354,13 +357,13 @@ end
 -- ------------------------------------------------------------------------------------------------ schema_create_only
 do
 	local expect = { ["faction"] = true, ["w|story"] = true, ["w|routes"] = true, ["w|difficulty"] = true,
-		["w|economy"] = true, ["c|coop_death_mode"] = true, ["c|coop_world_server"] = true }
+		["w|economy"] = true, ["c|coop_death_mode"] = true }
 	local got, all_new = {}, true
 	for _, k in ipairs(schema.keys()) do
 		if not schema.editable(k, true) then got[k] = true end
 		if not schema.editable(k, false) then all_new = false end
 	end
-	check(deep_equal(got, expect), "editable(k, true) is false for exactly faction, w|story, w|routes, w|difficulty, w|economy, c|coop_death_mode, c|coop_world_server")
+	check(deep_equal(got, expect), "editable(k, true) is false for exactly faction, w|story, w|routes, w|difficulty, w|economy, c|coop_death_mode")
 	check(all_new, "everything can be chosen while the game is created")
 	check(schema.editable("g|hit_power", true) and schema.editable("e|buy", true) and schema.editable("s|trader_buy_condition_override", true),
 		"the factors can be edited on an existing game")
@@ -852,6 +855,19 @@ do
 	check(#rec.decode(rec.encode(r, codec), codec).creator.loadout == 64, "at most 64 entries")
 	r.creator = "junk"
 	check(rec.decode(rec.encode(r, codec), codec).creator == nil, "a creator that is no table is dropped")
+end
+
+do
+	local legacy = {
+		v = 1, id = "65190f3a-9c41", name = "Strelok",
+		values = { ["c|coop_split_levels"] = "1", ["c|coop_story_together"] = "1", ["c|coop_world_server"] = "0" },
+	}
+	local loaded = rec.decode(STUB.encode(legacy), STUB)
+	local old, refused = rec.apply(loaded, { ["c|coop_split_levels"] = "0" })
+	check(old and #refused == 1 and old.values["c|coop_split_levels"] == "1",
+		"an old hybrid record keeps its split key without allowing a mode edit")
+	check(old and old.values["c|coop_story_together"] == "1" and old.values["c|coop_world_server"] == "0",
+		"the story and world server keys round-trip from an old save")
 end
 
 finish()

@@ -120,9 +120,11 @@ coop.game = {
 	end,
 	set_cvars = function(t)
 		GAME.cvars, GAME.cvar_calls = t, GAME.cvar_calls + 1
-		local n = 0
-		for _ in pairs(t) do n = n + 1 end
-		return n, GAME.refused
+		local n, refused = 0, {}
+		for name in pairs(t) do
+			if GAME.refused[name] then refused[name] = GAME.refused[name] else n = n + 1 end
+		end
+		return n, refused
 	end,
 	release_cvars = function() return 0 end,
 	machine_cvar = function(name) return GAME.machine[name] end,
@@ -138,7 +140,7 @@ CONSOLE = {
 	coop_death_drop = "drop", coop_bleedout = "60.00000", coop_revive_health = "0.30000", coop_respawn_delay = "30.00000",
 	coop_contusion = "10.00000", coop_death_money = "10.00000", coop_death_wear = "10.00000", coop_death_rank = "0.00000",
 	coop_hardcore_new_kit = "0", coop_checkpoints_group = "1", coop_autosave_interval = "10", coop_autosave_count = "10",
-	coop_death_share = "100.00000", coop_split_levels = "1", coop_story_together = "1", coop_npc_finish_downed = "0",
+	coop_death_share = "100.00000", coop_npc_finish_downed = "0",
 }
 function get_console_cmd(typ, name) return CONSOLE[name] or "" end
 
@@ -376,8 +378,8 @@ check(cs.is_game_owned("o", "alife/event/emission_state") == true and cs.is_game
 section("defaults: the machine's values plus the catalog's")
 fresh_machine()
 local D = gs.defaults()
-check(count_c(D) == 21 and D["c|coop_bleedout"] == "60" and D["c|coop_revive_health"] == "0.3" and D["c|coop_death_share"] == "100",
-	"the 21 console rules, canonical (the console prints 60.00000 / 0.30000)")
+check(count_c(D) == 18 and D["c|coop_bleedout"] == "60" and D["c|coop_revive_health"] == "0.3" and D["c|coop_death_share"] == "100",
+	"the 18 console rules, canonical (the console prints 60.00000 / 0.30000)")
 check(D["o|alife/event/emission_frequency"] == "24" and D["o|coop/coop_session/gather_radius"] == "20",
 	"host options come from the machine")
 check(D["o|coop/coop_session/travel_takes_time"] == "false" and D["o|coop/coop_session/join_spawn"] == "faction_start",
@@ -403,8 +405,8 @@ gs.before_world_start("new", "")
 local A = gs.active()
 check(A and A.id == REC1.id and A.faction == "dolg" and A.world.difficulty == 2 and A.rev == 0, "the staged record is active")
 check(GAME.staged == nil, "the engine's pending game was taken")
-check(GAME.cvar_calls == 1 and count(GAME.cvars) == 21 and GAME.cvars.coop_death_mode == "checkpoint"
-	and GAME.cvars.coop_bleedout == "60" and GAME.cvars.coop_friendly_fire == "1", "21 console values go to the engine (set_cvars)")
+check(GAME.cvar_calls == 1 and count(GAME.cvars) == 18 and GAME.cvars.coop_death_mode == "checkpoint"
+	and GAME.cvars.coop_bleedout == "60" and GAME.cvars.coop_friendly_fire == "1", "18 console values go to the engine (set_cvars)")
 check(GAME.faction == "dolg" and gs.world_faction() == "dolg", "the world's faction is set")
 check(gs.origin() == "new" and gs.running_id() == REC1.id and gs.locked() == true, "origin new, the running game, locked in a level")
 check(gs.value("o", "alife/event/emission_frequency") == "48" and gs.value("o", "gameplay/none") == nil
@@ -1053,7 +1055,7 @@ check(type(jtext) == "string" and jtext:find("\"id\":\"" .. RT.id .. "\"", 1, tr
 check(type(jtext) == "string" and jtext:find("\"title\":\"With Kent\"", 1, true) ~= nil and jtext:find("\"faction\":\"stalker\"", 1, true) ~= nil,
 	"with the title and the faction")
 check(type(jtext) == "string" and jtext:find("\"players\":[\"stormie\",\"kent\"]", 1, true) ~= nil, "and who played at the last save")
-check(type(jtext) == "string" and jtext:find("\"split\":false", 1, true) ~= nil and jtext:find("\"last_played\":\"", 1, true) ~= nil,
+check(type(jtext) == "string" and jtext:find("\"world_server\":false", 1, true) ~= nil and jtext:find("\"last_played\":\"", 1, true) ~= nil,
 	"whether the world is a process of its own, and when it was played")
 -- the journal of the world's saves (coop_saves_journal): the launcher's chronicle of a world
 local JPATH = SAVES .. RT.id .. ".csaves.json"
@@ -1293,6 +1295,46 @@ do
 	check(pcall(gs.actor_on_first_update) and E("type") == 3, "a stock handler that dies is not an error either")
 
 	FACTORS.g, FACTORS.e, coop_route, M_DATA = keep_g, keep_e, keep_route, keep_m
+end
+
+section("loads keep retired world flags without sending them to the engine")
+do
+	local unknown = "coop_unknown_test_rule"
+	GAME.refused = {
+		coop_split_levels = "NotAllowed", coop_story_together = "NotAllowed",
+		coop_world_server = "NotAllowed", [unknown] = "NotAllowed",
+	}
+	local function check_load(label, values)
+		local record = make_record(values)
+		put_save("retired_flags", record)
+		LOG = {}
+		local calls = GAME.cvar_calls
+		gs.before_world_start("load", "retired_flags")
+		local active = gs.active()
+		local refusals = {}
+		for _, line in ipairs(LOG) do
+			if line:find("! console rule ", 1, true) then refusals[#refusals + 1] = line end
+		end
+		check(active and active.id == record.id and gs.origin() == "save", label .. ": the old record loads")
+		for key, value in pairs(values) do
+			check(active and active.values[key] == value, label .. ": preserves " .. key)
+		end
+		check(GAME.cvar_calls == calls + 1 and GAME.cvars.coop_bleedout == "90",
+			label .. ": still applies supported console rules")
+		check(GAME.cvars.coop_split_levels == nil and GAME.cvars.coop_story_together == nil and GAME.cvars.coop_world_server == nil,
+			label .. ": retired rules never reach the engine")
+		check(#refusals == 1 and refusals[1]:find("! console rule " .. unknown .. " refused by the engine: NotAllowed", 1, true),
+			label .. ": only the unknown rule is logged (" .. table.concat(refusals, "; ") .. ")")
+	end
+	reset_disk()
+	check_load("Co-op / legacy hybrid", {
+		["c|coop_split_levels"] = "1", ["c|coop_story_together"] = "1", ["c|coop_world_server"] = "0",
+		["c|coop_bleedout"] = "90", ["c|" .. unknown] = "1",
+	})
+	check_load("Server", {
+		["c|coop_split_levels"] = "1", ["c|coop_world_server"] = "1",
+		["c|coop_bleedout"] = "90", ["c|" .. unknown] = "1",
+	})
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

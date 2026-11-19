@@ -107,10 +107,9 @@ local function split()
 	return l ~= nil and call(l.split) == true
 end
 
-local function led_here(lid)
+local function led_here()
 	if not split() then return true end
-	local l = levels()
-	return lid ~= nil and call(l.led_by_host_process, lid) == true
+	return false
 end
 
 local function bridge_of_level(lid)

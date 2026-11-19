@@ -88,20 +88,16 @@ TEST(dynamic_players_now)
 TEST(dynamic_slot_of)
 {
 	ServerLife life = serving(1, kT0);
-	MapSlot s = slot_of(4, life, 1, false);
+	MapSlot s = slot_of(4, life, 1);
 	CHECK(s.running && !s.empty);
 
 	life.players(0, kT0 + 1000); // Draining
-	s = slot_of(4, life, 0, false);
+	s = slot_of(4, life, 0);
 	CHECK(s.running && s.empty);
 	CHECK_EQ(s.empty_since, kT0 + 1000);
 
 	// The life still says Draining, but the table has a player on his way to it already (host_player_moves sat him there): not empty.
-	s = slot_of(4, life, 1, false);
-	CHECK(!s.empty);
-
-	// Kept through the host's move: not ours to stop.
-	s = slot_of(4, life, 0, true);
+	s = slot_of(4, life, 1);
 	CHECK(!s.empty);
 
 	// Starting, even with nobody (the players went back while it loads): not empty, only a loaded map is.
@@ -109,12 +105,12 @@ TEST(dynamic_slot_of)
 	starting.players(1, kT0);
 	starting.started(kT0);
 	starting.players(0, kT0 + 10);
-	s = slot_of(9, starting, 0, false);
+	s = slot_of(9, starting, 0);
 	CHECK(s.running && !s.empty);
 
 	// Stopping: it holds no slot.
 	life.stopping(kT0 + 2000);
-	s = slot_of(4, life, 0, false);
+	s = slot_of(4, life, 0);
 	CHECK(!s.running && !s.empty);
 }
 
@@ -235,7 +231,7 @@ TEST(dynamic_lingers_walk)
 	a.players(0, kT0 + 1000);
 	b.players(2, kT0 + 1000);
 	b.started(kT0 + 1000);
-	auto slots = [&]() { return std::vector<MapSlot>{slot_of(1, a, a.count(), false), slot_of(2, b, b.count(), false)}; };
+	auto slots = [&]() { return std::vector<MapSlot>{slot_of(1, a, a.count()), slot_of(2, b, b.count())}; };
 	a.linger_ms = linger_of(slots(), 1, setting, false);
 	CHECK_EQ(a.linger_ms, setting);
 	CHECK(!a.want_stop(kT0 + 1000 + 300000)); // five minutes later A is still there

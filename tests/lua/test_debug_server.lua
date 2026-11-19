@@ -34,7 +34,7 @@ local function engine(M, o)
 	E.coop.is_world_server = function() return o.ws == true end
 	E.coop.is_map_server = function() return o.mk == true end
 	E.coop.is_dedicated = function() return o.dedicated == true end
-	E.coop.is_player = function() return o.player ~= false end
+	E.coop.is_player = function() return not o.dedicated and not o.mk and o.player ~= false end
 	M.life = {}
 	E.coop.life_of = function(id) return M.life[id] or "alive" end
 	M.dbg = { on = o.debug ~= false, flags = {}, said = {} }
@@ -100,13 +100,15 @@ local function engine(M, o)
 		end,
 	}
 	E.coop.levels = {
-		split = function() return o.split == true end,
-		my_level = function() return o.my_level or LEVEL_HOST end,
-		level_of_player = function(peer) return (o.levels or {})[peer] or LEVEL_HOST end,
-		led_by_host_process = function(level) return level == LEVEL_HOST end,
+		split = function() return o.dedicated == true or o.split == true end,
+		my_level = function() return o.my_level or (not o.dedicated and LEVEL_HOST or nil) end,
+		level_of_player = function(peer)
+			if peer == 0 and (o.dedicated or o.mk) then return nil end
+			return (o.levels or {})[peer] or (o.dedicated and LEVEL_MK or LEVEL_HOST)
+		end,
 		bridge_of_player = function(peer)
-			local l = (o.levels or {})[peer] or LEVEL_HOST
-			return (o.split and l == LEVEL_MK and o.ws) and MK or nil
+			local l = (o.levels or {})[peer] or (o.dedicated and LEVEL_MK or LEVEL_HOST)
+			return ((o.dedicated or o.split) and l == LEVEL_MK and o.ws) and MK or nil
 		end,
 		map_servers = function() return { { bridge = MK, level = LEVEL_MK } } end,
 		players_on = function() return 1 end,
@@ -122,13 +124,23 @@ local function world(o)
 	o.ws = true
 	o.player = not o.dedicated
 	engine(H, o)
-	H.add(make_obj(503, 10, 0, 0, { _stalker = true }))
+	if not o.dedicated then H.add(make_obj(503, 10, 0, 0, { _stalker = true })) end
 	H.add(make_obj(700, 20, 0, 0, { _stalker = true, _name = "bandit_1" }))
 	load_script(H, "coop_npc_players")
 	load_script(H, "coop_debug_cmds")
 	local S = load_script(H, "coop_debug_server")
 	S.on_game_start()
 	return H, S
+end
+
+local function map_authority()
+	local K = machine("client", MK, { [3] = 900 })
+	engine(K, { mk = true, split = true, my_level = LEVEL_MK, levels = { [3] = LEVEL_MK } })
+	K.add(make_obj(900, 10, 0, 5, { _stalker = true }))
+	load_script(K, "coop_npc_players")
+	load_script(K, "coop_debug_cmds")
+	load_script(K, "coop_debug_server").on_game_start()
+	return K
 end
 
 local function ask(H, name, peer, args)
@@ -253,7 +265,7 @@ end
 
 print("== another level: coop.dbg.run to its map server (B.6, B.10)")
 do
-	local H = world({ split = true, levels = { [3] = LEVEL_MK } })
+	local H = world({ dedicated = true, levels = { [3] = LEVEL_MK } })
 	local ok, r = ask(H, "coop.dbg.spawn", 3, { v = 1, cmd = "spawn_item", sec = "wpn_ak74", at = "inv" })
 	check(ok == true and r == "forwarded", "the answer is forwarded")
 	check(#H.created == 0, "the world server made nothing itself")
@@ -262,13 +274,7 @@ do
 	check(runs[1] and runs[1].t._peer == 3 and type(runs[1].t._rid) == "number" and runs[1].t._c == "spawn_item", "with _peer, _rid, the command")
 	check(runs[1] and runs[1].t.sec == "wpn_ak74" and runs[1].t.at == "inv", "and its checked arguments")
 
-	-- the map server of that level: player 3's character is 900 there
-	local K = machine("client", MK, { [3] = 900 })
-	engine(K, { mk = true, split = true, my_level = LEVEL_MK, levels = { [3] = LEVEL_MK } })
-	K.add(make_obj(900, 5, 0, 5, { _stalker = true }))
-	load_script(K, "coop_npc_players")
-	load_script(K, "coop_debug_cmds")
-	load_script(K, "coop_debug_server").on_game_start()
+	local K = map_authority()
 	pump()
 	local c = K.created[1]
 	check(c and c.sec == "wpn_ak74" and c.t[4] == 900, "the map server makes it, the parent is his character there")
@@ -295,10 +301,6 @@ do
 	pump()
 	check(#K.created == 4 and logged(K, "spawn_item rid 41 for #3 .*medkit x3 at inv, 3 made by a map server: ids 9002%-9004") ~= nil,
 		"n = 3: three ids in one line (9002-9004)")
-	-- a world server's own run: no rid, the same line
-	local ok3 = ask(H, "coop.dbg.spawn", 0, { v = 1, cmd = "spawn_item", sec = "medkit", n = 2, at = "inv" })
-	check(ok3 == true and logged(H, "spawn_item rid %- for p0 %(peer 0, character 0%): medkit x2 at inv, 2 made by the world server: ids") ~= nil,
-		"the world server's own spawn: 'rid -', the ids it made")
 	check(K.env.coop_debug_server.ids_text({ 1, 2, 3, 7, 9, 10 }) == "1-3,7,9-10", "ids as ranges")
 
 	-- a coop.dbg.run that does not come from the world server is not taken
@@ -307,6 +309,11 @@ do
 		payload = H.env.coop_main.encode({ _c = "spawn_item", _peer = 3, _rid = 99, sec = "wpn_ak74", at = "inv", n = 1 }) }
 	pump()
 	check(#K.created == before, "a map server takes coop.dbg.run only from the world (from 0)")
+	-- A co-op host can still spawn locally, without a map-server request id.
+	local C = world()
+	local ok3 = ask(C, "coop.dbg.spawn", 0, { v = 1, cmd = "spawn_item", sec = "medkit", n = 2, at = "inv" })
+	check(ok3 == true and logged(C, "spawn_item rid %- for p0 %(peer 0, character 0%): medkit x2 at inv, 2 made by the world server: ids") ~= nil,
+		"co-op local spawn: 'rid -', the ids it made")
 end
 
 print("== world commands run once, on the world server (C.1 A16, K35)")
@@ -357,7 +364,7 @@ do
 	ok = ask(H, "coop.dbg.target", 3, { v = 1, cmd = "release", t = 700 })
 	check(ok == true and H.released[1] and H.released[1][1] == 700, "release: alife_release_id")
 
-	local H2 = world({ split = true })
+	local H2 = world({ dedicated = true })
 	H2.obj_level = { [700] = LEVEL_MK }
 	ok = ask(H2, "coop.dbg.target", 3, { v = 1, cmd = "kill", t = 700 })
 	check(ok == true and H2.orders[1] and H2.orders[1].verb == "kill" and H2.orders[1].id == 700,
@@ -399,8 +406,11 @@ do
 	check(type(out) == "string" and out:find("debug_off", 1, true) ~= nil, "debug off: the console refuses too (like sv_cheats)")
 	check(#D.created == 0, "nothing made")
 	D.dbg.on = true
+	local K = map_authority()
 	out = S.console("spawn_item @p3 sec=medkit n=5 at=near")
-	check(#D.created == 5 and D.created[1].t[4] == nil and D.created[1].t[1].x == 10, "@p3 at=near: five medkits by his character")
+	pump()
+	check(#D.created == 0 and #K.created == 5 and K.created[1].t[4] == nil and K.created[1].t[1].x == 10,
+		"@p3 at=near: five medkits by his character on his map server")
 	out = S.console("money @P3 a=500")
 	check(D.grants[1] and D.grants[1][1] == 3 and D.grants[1][2] == 500, "money @P3 a=500")
 	out = S.console("money a=500")
@@ -454,8 +464,11 @@ do
 		local by_console = false
 		for _, l in ipairs(D.dbg.said) do if l:find("[debug] console", 1, true) then by_console = true end end
 		check(not by_console, "nothing said as 'console'")
+		local K = map_authority()
 		out = S.operator_console("spawn_item sec=medkit n=2 at=near", { cmd = "spawn_item" }, 3)
-		check(#D.created == 2 and D.created[1].t[1].x == 10, "spawn_item at=near: by the operator's character", tostring(out))
+		pump()
+		check(#D.created == 0 and #K.created == 2 and K.created[1].t[1].x == 10,
+			"spawn_item at=near: on the operator's map server", tostring(out))
 		out = S.operator_console("help", { cmd = "help" }, 3)
 		check(type(out) == "string" and out:find("spawn_item", 1, true) ~= nil, "help works for the operator")
 		out = S.operator_console("money a=1", { cmd = "money" }, 99)

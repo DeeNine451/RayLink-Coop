@@ -16,21 +16,21 @@ using coop::mirror::Placement;
 TEST(mirror_child_follows_holder_here)
 {
 	// the bug: offline on the host, the holder online and on the server here
-	CHECK_EQ(placement(true, false, true, true), Placement::WithHolder);
+	CHECK_EQ(placement(true, false, true, true, true, true, true), Placement::WithHolder);
 	// online on the host, the same
-	CHECK_EQ(placement(true, true, true, true), Placement::WithHolder);
+	CHECK_EQ(placement(true, true, true, true, true, true, true), Placement::WithHolder);
 	// the holder offline here: the child stays offline in it, whatever the host's flag (it comes online with it)
-	CHECK_EQ(placement(true, true, false, true), Placement::Offline);
-	CHECK_EQ(placement(true, false, false, true), Placement::Offline);
-	CHECK_EQ(placement(true, true, false, false), Placement::Offline);
-	CHECK_EQ(placement(true, false, false, false), Placement::Offline);
+	CHECK_EQ(placement(true, true, false, true, true, true, true), Placement::Offline);
+	CHECK_EQ(placement(true, false, false, true, true, true, true), Placement::Offline);
+	CHECK_EQ(placement(true, true, false, false, true, true, true), Placement::Offline);
+	CHECK_EQ(placement(true, false, false, false, true, true, true), Placement::Offline);
 }
 
 // A holder that says online but has no server entity cannot take a child online: it is told apart for the log.
 TEST(mirror_child_of_a_broken_holder)
 {
-	CHECK_EQ(placement(true, true, true, false), Placement::HolderBroken);
-	CHECK_EQ(placement(true, false, true, false), Placement::HolderBroken);
+	CHECK_EQ(placement(true, true, true, false, true, true, true), Placement::HolderBroken);
+	CHECK_EQ(placement(true, false, true, false, true, true, true), Placement::HolderBroken);
 }
 
 // A free entity: the host's online set decides (the switch manager brings it in), the holder flags mean nothing.
@@ -39,8 +39,8 @@ TEST(mirror_free_entity_follows_the_host)
 	for (int holder = 0; holder < 4; ++holder)
 	{
 		const bool online = (holder & 1) != 0, on_server = (holder & 2) != 0;
-		CHECK_EQ(placement(false, true, online, on_server), Placement::SwitchVote);
-		CHECK_EQ(placement(false, false, online, on_server), Placement::Offline);
+		CHECK_EQ(placement(false, true, online, on_server, true, true, true), Placement::SwitchVote);
+		CHECK_EQ(placement(false, false, online, on_server, true, true, true), Placement::Offline);
 	}
 }
 
@@ -52,14 +52,14 @@ TEST(mirror_free_entity_outside_the_level_registry_comes_online_now)
 	for (int holder = 0; holder < 4; ++holder)
 	{
 		const bool online = (holder & 1) != 0, on_server = (holder & 2) != 0;
-		CHECK_EQ(placement(false, true, online, on_server, false), Placement::OnlineNow);
-		CHECK_EQ(placement(false, false, online, on_server, false), Placement::Offline);
-		CHECK_EQ(placement(false, true, online, on_server, true), Placement::SwitchVote);
-		CHECK_EQ(placement(false, false, online, on_server, true), Placement::Offline);
+		CHECK_EQ(placement(false, true, online, on_server, false, true, true), Placement::OnlineNow);
+		CHECK_EQ(placement(false, false, online, on_server, false, true, true), Placement::Offline);
+		CHECK_EQ(placement(false, true, online, on_server, true, true, true), Placement::SwitchVote);
+		CHECK_EQ(placement(false, false, online, on_server, true, true, true), Placement::Offline);
 		// the host's flag is no word on this level (a map server, a player on another level): the vote, as before
-		CHECK_EQ(placement(false, true, online, on_server, false, false), Placement::SwitchVote);
-		CHECK_EQ(placement(false, true, online, on_server, true, false), Placement::SwitchVote);
-		CHECK_EQ(placement(false, false, online, on_server, false, false), Placement::Offline);
+		CHECK_EQ(placement(false, true, online, on_server, false, false, true), Placement::SwitchVote);
+		CHECK_EQ(placement(false, true, online, on_server, true, false, true), Placement::SwitchVote);
+		CHECK_EQ(placement(false, false, online, on_server, false, false, true), Placement::Offline);
 	}
 }
 
@@ -91,8 +91,8 @@ TEST(mirror_child_ignores_the_registry_flag)
 	{
 		const bool host_online = (bits & 1) != 0, holder_online = (bits & 2) != 0, on_server = (bits & 4) != 0;
 		const bool in_registry = (bits & 8) != 0, this_level = (bits & 16) != 0;
-		CHECK_EQ(placement(true, host_online, holder_online, on_server, in_registry, this_level),
-		    placement(true, host_online, holder_online, on_server));
+		CHECK_EQ(placement(true, host_online, holder_online, on_server, in_registry, this_level, true),
+		    placement(true, host_online, holder_online, on_server, true, true, true));
 	}
 }
 

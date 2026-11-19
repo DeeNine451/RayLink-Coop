@@ -104,9 +104,9 @@ std::string refused(const Writer& w)
 LevelMapMsg sample_map()
 {
 	LevelMapMsg m;
-	m.flags = LevelMapMsg::Split | LevelMapMsg::StoryTogether;
+	m.flags = LevelMapMsg::Split;
 	m.players = {{0, 3, kHelloRolePlayer}, {1, 3, kHelloRolePlayer}, {2, 7, kHelloRolePlayer}};
-	m.servers = {{3, LevelMapMsg::HostProcess, uint8_t(ServerState::Ready)},
+	m.servers = {{3, LevelMapMsg::MapServerProcess, uint8_t(ServerState::Ready)},
 	    {7, LevelMapMsg::MapServerProcess, uint8_t(ServerState::Loading)}};
 	m.gates = {{3, 0, ""}, {9, 2, "st_coop_gate_story"}};
 	return m;
@@ -190,12 +190,11 @@ TEST(levels_wire_map_limits)
 	std::vector<std::vector<uint8_t>> servers8, servers9;
 	for (uint16_t l = 0; l < 9; ++l)
 	{
-		// one host process at the most: the rest are map servers
-		servers9.push_back(server_row(l, l == 0 ? LevelMapMsg::HostProcess : LevelMapMsg::MapServerProcess, 1));
+		servers9.push_back(server_row(l, LevelMapMsg::MapServerProcess, 1));
 		if (l < 8)
 			servers8.push_back(servers9.back());
 	}
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, servers8)), std::string("read")); // the host + 7 map servers
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, servers8)), std::string("read")); // 8 map servers
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, servers9)), std::string("refused"));
 
 	std::vector<std::string> gates128, gates129;
@@ -214,7 +213,7 @@ TEST(levels_wire_map_limits)
 	for (uint32_t p = 0; p < 9; ++p)
 		at_limit.players.push_back({p, 1, 1, 500, 1000});
 	for (uint16_t l = 0; l < 8; ++l)
-		at_limit.servers.push_back({l, l == 0 ? uint8_t(LevelMapMsg::HostProcess) : uint8_t(LevelMapMsg::MapServerProcess), 1});
+		at_limit.servers.push_back({l, uint8_t(LevelMapMsg::MapServerProcess), 1});
 	for (uint16_t l = 0; l < 128; ++l)
 		at_limit.gates.push_back({l, 1, ""});
 	check_write_at_limit("LevelMap with 9 players, 8 servers, 128 gates", at_limit);
@@ -237,8 +236,10 @@ TEST(levels_wire_map_limits)
 TEST(levels_wire_map_bad_rows)
 {
 	const auto ok_player = player_row(1, 4, 0);
-	// flags: only the two known bits
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(3, {}, {})), std::string("read"));
+	// flags: only the known bit; bit 2 stays reserved (the story levels together of the hybrid, build 57 and before)
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(1, {}, {})), std::string("read"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(2, {}, {})), std::string("refused"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(3, {}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(4, {}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0x80, {}, {})), std::string("refused"));
 
@@ -251,15 +252,14 @@ TEST(levels_wire_map_bad_rows)
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 1)}, {})), std::string("read"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 1, kNoObject)}, {})), std::string("read")); // no character yet
 
-	// servers: a real level, listed once; 0 host process (one), 1 map server; the state is one of four
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 0, 3)})), std::string("read"));
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 0, 4)})), std::string("refused"));
+	// servers: a real level, listed once; 1 map server (0 stays reserved: the host's process of the hybrid); the state is one of four
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 1, 3)})), std::string("read"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 1, 4)})), std::string("refused"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 0, 1)})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 2, 1)})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(kNoLevel, 1, 1)})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 1, 1), server_row(4, 1, 1)})), std::string("refused"));
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 0, 1), server_row(5, 0, 1)})),
-	    std::string("refused")); // two host processes
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 0, 1), server_row(5, 1, 1)})), std::string("read"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {server_row(4, 1, 1), server_row(5, 1, 1)})), std::string("read"));
 
 	// gates: a real level, listed once; the reason is empty or a name (it picks a string id)
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {}, {}, {gate_row(4, 2, "st_gate-1.x")})), std::string("read"));

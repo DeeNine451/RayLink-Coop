@@ -278,14 +278,12 @@ local function lcall(f, ...)
 	return nil
 end
 
--- Does this process lead the level `lid`? World server: the host's process leads it (led_by_host_process); a map server: its own
--- level; without split levels one process leads everything.
 local function leads(lid)
 	local l = levels_api()
 	if not (l and lcall(l.split) == true) then return true end
 	if lid == nil then return false end
 	if is_map_server() then return lcall(l.my_level) == lid end
-	return lcall(l.led_by_host_process, lid) == true
+	return false
 end
 
 -- -> nil | { peer, nick, character, level, here, link, standing, object() }

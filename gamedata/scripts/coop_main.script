@@ -402,10 +402,8 @@ local function level_open(name)
 	return name ~= nil and lw ~= nil and lw.valid_levels ~= nil and lw.valid_levels[name] == true and not NO_EMISSION[name]
 end
 
--- The world server: an open level somebody stands on, the host's own first.
+-- The world server chooses an open map from the players' reported locations.
 local function open_level_of_a_player()
-	local here = level.name()
-	if level_open(here) then return here end
 	local l = api.levels
 	for _, p in ipairs(players()) do
 		local name = not p.is_self and l.level_of_player and l.level_name and l.level_name(l.level_of_player(p.id))
@@ -466,15 +464,15 @@ local function with_level_name(name, fn, ...)
 	return unpack(res, 2)
 end
 
--- The world server, with split levels: a host under ground does not stop the world's emission, and he plays nothing of it there.
+-- The world server keeps the schedule from its service level. Map servers run the effects on their own maps.
 -- `field`: the manager's length; `finish`: how the stock ends it.
 local function schedule_around(cls, field, finish)
 	local start, update = cls.start, cls.update
 	cls.start = function(self, ...)
 		if not split_on() then return start(self, ...) end
 		local name = open_level_of_a_player()
-		if not name or name == level.name() then return start(self, ...) end
-		log("emission schedule: the host is on a closed level, %s is open", name)
+		if not name then return start(self, ...) end
+		log("emission schedule: %s is open", name)
 		return with_level_name(name, start, self, ...)
 	end
 	cls.update = function(self, ...)
@@ -534,8 +532,8 @@ local function host_env_tick()
 	local split = split_on()
 	for _, p in ipairs(players()) do
 		if not p.is_self then
-			-- with split levels a player elsewhere has no object here: his machine judges his shelter, the authority of his level his fate
-			local own = split and api.levels.on_host_level ~= nil and not api.levels.on_host_level(p.id)
+			-- Server clients use their own cover. Their map server judges the consequences.
+			local own = split
 			local cover = true
 			if active and not own then
 				local obj = p.avatar_id and level.object_by_id(p.avatar_id)

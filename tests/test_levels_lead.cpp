@@ -83,22 +83,15 @@ struct Rig
 // ---------------------------------------------------------------- who computes a level
 
 // The owner's decision (2026-10-24, again 2026-11-01): the maps are computed on the host's PC, a client never is an authority.
-TEST(server_the_host_on_a_level_is_its_server_even_when_a_client_came_first)
-{
-	Table t;
-	t.set(seat(1, kGarbage));
-	t.set(seat(0, kGarbage));
-	CHECK(t.server_of(kGarbage) == Server::HostProcess);
-}
-
+// Owner 2026-11-18: no hybrid. The world server plays nobody and leads no level: every level with players has a map server.
 TEST(server_a_level_of_clients_alone_has_a_map_server_however_many_there_are)
 {
 	Table t;
-	t.set(seat(0, kCordon));
+	t.set(seat(0, kCordon, true, /*plays*/ false)); // the world server's own seat
 	t.set(seat(2, kGarbage));
 	t.set(seat(1, kGarbage));
 	CHECK(t.server_of(kGarbage) == Server::MapServer);
-	CHECK(t.server_of(kCordon) == Server::HostProcess);
+	CHECK(t.server_of(kCordon) == Server::None);
 	CHECK(t.server_of(kAgroprom) == Server::None);
 	CHECK(t.server_of(kNoLevel) == Server::None);
 	t.remove(2);
@@ -112,6 +105,17 @@ TEST(server_a_seat_that_does_not_play_keeps_no_level_served)
 	Table t;
 	t.set(seat(1, kGarbage, true, false));
 	CHECK(t.server_of(kGarbage) == Server::None);
+}
+
+// Seat 0 that plays is a player like any other (no host's process leads a level any more): his level is a map server's.
+TEST(server_seat_zero_that_plays_is_led_by_a_map_server_too)
+{
+	Table t;
+	t.set(seat(1, kGarbage));
+	t.set(seat(0, kGarbage));
+	CHECK(t.server_of(kGarbage) == Server::MapServer);
+	CHECK_EQ(t.map_players(kGarbage), uint32_t(2));
+	CHECK_EQ(t.map_server_levels(), (std::vector<uint16_t>{kGarbage}));
 }
 
 // ---------------------------------------------------------------- the verdict
@@ -380,55 +384,6 @@ TEST(keeper_a_journal_brings_a_release_in_flight_through_a_load)
 	same.connect(0x101);
 	CHECK(!same.resume("[coop_xfer]\nv = 9\n"));
 	CHECK(same.connected(0x101));
-}
-
-// R13, the host's move: the process reloads, the map server lives. The book is not touched, whatever a save of it says.
-TEST(keeper_the_book_goes_through_a_reload_that_keeps_the_map_server)
-{
-	Rig r;
-	r.take(50, 10);
-	r.take(51, 20);
-	const uint32_t gen = r.keeper.ledger().gen(50);
-	const std::vector<uint16_t> marks = r.keeper.marks();
-	CHECK_EQ(marks.size(), size_t(2)); // the new simulator hears of both before its first update
-	CHECK(r.keeper.connected(r.peer));
-	CHECK(r.keeper.away(50));
-	CHECK_EQ(r.keeper.ledger().gen(50), gen);
-	// what the map server does meanwhile waits and then runs as it would have
-	r.holder.take_events();
-	r.to_world(r.holder.want_offline(50, state_of(77), r.now));
-	CHECK(!r.keeper.away(50));
-	CHECK(r.saw(Keeper::Kind::Unmark, 50));
-	CHECK(r.keeper.ledger().owner(51) != xfer::kWorld);
-}
-
-// R13: the book knows a grant the save does not; the object is marked, and the commit that comes after the reload finds it as it was.
-TEST(keeper_a_grant_open_at_the_save_goes_on_after_the_reload)
-{
-	Rig r;
-	const xfer::Bytes fresh = state_of(3);
-	std::vector<xfer::Packet> down;
-	for (const xfer::Packet& p : r.holder.want_online(60, r.now))
-		down = r.keeper.on_up(r.peer, p, &fresh, r.now);
-	r.drain();
-	CHECK(r.keeper.away(60));
-	CHECK_EQ(r.keeper.marks().size(), size_t(1));
-	r.to_client(down); // parked until the world is back: the commit comes now
-	CHECK(r.keeper.ledger().owner(60) != xfer::kWorld);
-	CHECK_EQ(r.keeper.ledger().journal_size(), size_t(0));
-}
-
-// R13: the map server of the level the host goes to did not hand everything over in its 15 s: it does not stay, its objects come home.
-TEST(keeper_a_map_server_that_does_not_stay_brings_its_objects_home_in_the_new_world)
-{
-	Rig r;
-	r.take(70, 1);
-	r.changes.clear();
-	CHECK_EQ(r.keeper.marks().size(), size_t(1));
-	r.keeper.disconnect(r.peer, r.now);
-	r.drain();
-	CHECK(r.saw(Keeper::Kind::Unmark, 70));
-	CHECK(r.keeper.marks().empty());
 }
 
 TEST(keeper_a_release_brings_the_state_home_once)

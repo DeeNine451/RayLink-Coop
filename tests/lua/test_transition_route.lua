@@ -327,7 +327,7 @@ frames(MW, 600)
 check(#MW.asked == 1, "a route of the new level is seen without waiting for the next list")
 
 -- ================================================================ a scripted level change
-print("== ChangeLevel into a level entered together: no darkening before the go")
+print("== ChangeLevel: co-op board, server solo exits")
 do
 	local LEVEL_OF = { [10] = "l02_garbage", [20] = "l13u_warlab" }
 	local Mc = machine()
@@ -335,7 +335,7 @@ do
 	Mc.R.on_game_start()
 	Mc.env.game_graph = function() return { vertex = function(_, v) return { level_id = function() return v end } end } end
 	Mc.env.alife = function() return { level_name = function(_, l) return LEVEL_OF[l] end } end
-	Mc.split, Mc.players = true, { { id = 0 }, { id = 1 } }
+	Mc.split, Mc.players = true, { { id = 1 }, { id = 2 } } -- peer 0 is the world server ghost
 	Mc.env.coop.players = function() return Mc.players end
 	Mc.env.coop.levels = { split = function() return Mc.split end, gate_of = function(n) return n == "l13u_warlab" and "together" or "free" end }
 	local function trip(gv, anim)
@@ -344,10 +344,10 @@ do
 		return Mc.fx[1]
 	end
 	local t = trip(20, true)
-	check(t and t.gv == 20 and not t.anim, "split levels: into a level entered together: no fade, it goes to the board at once")
+	check(t and t.gv == 20 and t.anim == true, "server: the former story gate uses the stock fade")
 	t = trip(10, true)
 	check(t and t.anim == true, "a free level: the stock fade: he goes alone")
-	Mc.split = false
+	Mc.split, Mc.players = false, { { id = 0 }, { id = 1 } }
 	t = trip(10, true)
 	check(t and not t.anim, "no split levels: the group goes together wherever it goes")
 	Mc.players = { { id = 0 } }

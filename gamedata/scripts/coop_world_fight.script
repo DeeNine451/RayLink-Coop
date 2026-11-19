@@ -104,12 +104,10 @@ end
 local mine = {} -- client: local ids this script put into the table
 local told = nil -- client: the list of the map server of his level
 
--- Split levels: the map server of this player's level tells him; a key of the world server is from the level he came from.
-local function on_map_server_level()
-	local l = api and api.levels
-	if not (l and l.split and l.split() == true and l.my_level and l.led_by_host_process) then return false end
-	local level = l.my_level()
-	return level ~= nil and l.led_by_host_process(level) ~= true
+-- A co-op client takes the host's session list. Other clients get the list from their map server.
+local function follows_host()
+	local mode = rawget(_G, "coop_mode") or coop_mode
+	return mode == nil or mode.group_travels()
 end
 
 local function client_tick()
@@ -117,7 +115,7 @@ local function client_tick()
 	local ci = _G["xr_combat_ignore"]
 	if not (sync and ci and type(ci.fighting_with_actor_npcs) == "table") then return end
 	local list = told
-	if not on_map_server_level() then list = sync.get("session", KEY_PREFIX .. tostring(P.self_peer())) end
+	if follows_host() then list = sync.get("session", KEY_PREFIX .. tostring(P.self_peer())) end
 	local want = {}
 	if type(list) == "table" then
 		for _, hid in ipairs(list) do

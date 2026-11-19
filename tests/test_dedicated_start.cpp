@@ -1,9 +1,8 @@
 // Anomaly Coop unit tests: the dedicated host brings its session up by itself and runs hidden (docs/plans/2026-11-12-split-levels-no-reloads.md
-// stage 1, xrCoop/coop_dedicated_rules.h), and why a player was not kept in the host's soft move (stage 1b, xrCoop/coop_soft_move.h).
+// stage 1, xrCoop/coop_dedicated_rules.h).
 #include "test_util.h"
 
 #include "coop_dedicated_rules.h"
-#include "coop_soft_move.h"
 #include "coop_world_server_rules.h"
 
 #include <cstring>
@@ -251,98 +250,6 @@ TEST(dedicated_start_a_port_that_stays_busy_gives_up_too)
 		now += 1000;
 	}
 	CHECK(gave_up);
-}
-
-// ---------------------------------------------------------------- 1b: why a player is not kept in the soft move
-
-namespace
-{
-softmove::Facts kept_player()
-{
-	softmove::Facts f;
-	f.joined = true;
-	f.known = true;
-	f.proxy = true;
-	f.server_ready = true;
-	f.server = softmove::ServerVerdict::Kept;
-	return f;
-}
-} // namespace
-
-TEST(soft_why_the_server_verdict_agrees_with_keeps_server)
-{
-	for (int soft = 0; soft < 2; ++soft)
-		for (int ready = 0; ready < 2; ++ready)
-			for (int same = 0; same < 2; ++same)
-			{
-				const uint16_t level = 7, target = same ? 7 : 8;
-				const softmove::ServerVerdict v = softmove::server_verdict(soft != 0, ready != 0, level, target);
-				CHECK_EQ(v == softmove::ServerVerdict::Kept, softmove::keeps_server(soft != 0, ready != 0, level, target));
-			}
-	CHECK(softmove::server_verdict(false, true, 7, 8) == softmove::ServerVerdict::SwitchOff);
-	CHECK(softmove::server_verdict(true, true, 8, 8) == softmove::ServerVerdict::Target);
-	CHECK(softmove::server_verdict(true, false, 7, 8) == softmove::ServerVerdict::NotLeading);
-}
-
-TEST(soft_why_a_kept_player_stays)
-{
-	CHECK(softmove::stays(kept_player()));
-	CHECK(softmove::why_reloads(kept_player()) == softmove::Reload::Stays);
-}
-
-TEST(soft_why_each_reason_of_a_reload_has_its_verdict)
-{
-	using softmove::Reload;
-	struct Case
-	{
-		int change;
-		Reload want;
-	};
-	const Case cases[] = {
-	    {0, Reload::NotJoined}, {1, Reload::NotInWorld}, {2, Reload::NoCharacter}, {3, Reload::Loading}, {4, Reload::Joining},
-	    {5, Reload::Choosing}, {6, Reload::OnTarget}, {7, Reload::SwitchOff}, {8, Reload::NoServer}, {9, Reload::ServerNotLeading},
-	    {10, Reload::OnTarget}, {11, Reload::ServerNotKept},
-	};
-	for (const Case& c : cases)
-	{
-		softmove::Facts f = kept_player();
-		switch (c.change)
-		{
-		case 0: f.joined = false; break;
-		case 1: f.known = false; f.proxy = false; break;
-		case 2: f.proxy = false; break;
-		case 3: f.loading = true; break;
-		case 4: f.joining = true; break;
-		case 5: f.choosing = true; break;
-		case 6: f.on_target = true; break;
-		case 7: f.server_ready = false; f.server = softmove::ServerVerdict::SwitchOff; break;
-		case 8: f.server_ready = false; f.server = softmove::ServerVerdict::None; break;
-		case 9: f.server_ready = false; f.server = softmove::ServerVerdict::NotLeading; break;
-		case 10: f.server_ready = false; f.server = softmove::ServerVerdict::Target; break;
-		case 11: f.server_ready = false; f.server = softmove::ServerVerdict::Kept; break; // facts that disagree: said plainly
-		}
-		CHECK(!softmove::stays(f));
-		CHECK(softmove::why_reloads(f) == c.want);
-	}
-}
-
-TEST(soft_why_the_first_reason_wins)
-{
-	softmove::Facts f = kept_player();
-	f.choosing = true;
-	f.server_ready = false;
-	f.server = softmove::ServerVerdict::SwitchOff;
-	CHECK(softmove::why_reloads(f) == softmove::Reload::Choosing);
-}
-
-TEST(soft_why_every_verdict_has_words)
-{
-	for (int r = int(softmove::Reload::Stays); r <= int(softmove::Reload::ServerNotKept); ++r)
-	{
-		const char* text = softmove::reload_text(softmove::Reload(r));
-		CHECK(text != nullptr && std::strlen(text) > 3);
-	}
-	CHECK(std::string(softmove::reload_text(softmove::Reload::SwitchOff)).find("coop_soft_host_move") != std::string::npos);
 }
 
 // ---------------------------------------------------------------- -coop_stage (plan 2026-11-12 stage 5)

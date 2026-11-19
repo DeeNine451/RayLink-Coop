@@ -2090,9 +2090,7 @@ local function load_save(stem)
 	end
 end
 
--- A save of a world hosted in this game with nobody at the window: -coop_world_auto of a world that is no world-server world
--- (coop_world_wait.auto_load; the launcher's "Play" of a host's own world, owner 2026-11-13). What the "Play" of the window does
--- for such a save: the ring of the game, a host pending, the save loaded. -> true | false, why.
+-- Hosts a co-op save when the launcher asks the game to load it.
 function host_save(id, stem, port)
 	if api.is_active() then return false, "a session is running" end
 	choose_ring(id)
@@ -2107,32 +2105,75 @@ function host_save(id, stem, port)
 	return true
 end
 
--- A save of a world of the new split mode (stage 6b; "World as a separate process" on in its record, owner 2026-11-13): its
--- world server is started on this PC and the waiting window joins it (coop_world_wait); nothing is loaded in this game. Every
--- other world, the old split mode too, loads in this game as always. -> true when the save was handled here.
-function UICoopMenu:ContinueSplit(stem, port)
-	local W = module_of("coop_world_wait")
-	if not W then return false end
-	local plan, card = W.plan_for_game(self.sel_id)
-	if plan ~= "server" then return false end
-	local name = W.card_name(card)
-	local ok, why = W.start_load(stem, port, name)
-	if not ok then
-		self:Failed(why)
-		return true
+local function launcher_world(record)
+	local values = type(record) == "table" and record.values
+	local v = type(values) == "table" and values["c|coop_world_server"]
+	return v == true or tonumber(v) == 1
+end
+
+local function save_kind(id, stem)
+	local gs = module_of("coop_game_settings")
+	if not gs then return false, id end
+	if type(gs.game_of_save) == "function" then
+		local ok, save_id, record = pcall(gs.game_of_save, stem)
+		if ok then
+			id = id or save_id
+			if launcher_world(record) then return true, id end
+		else
+			log("! cannot read the record of '%s': %s", tostring(stem), tostring(save_id))
+		end
 	end
-	log("the world server opens '%s' on port %d", tostring(stem), port)
-	local owner = self.owner
-	self:Close()
-	W.open(owner, { kind = "load", name = name, save = stem, port = port })
-	return true
+	if id == nil or type(gs.load_card) ~= "function" then return false, id end
+	local ok, card = pcall(gs.load_card, id)
+	if not ok then log("! cannot read card '%s': %s", tostring(id), tostring(card)) end
+	return ok and launcher_world(card), id
+end
+
+local auto_hooked = false
+local auto_done = false
+
+-- The first finished main menu frame can load a save. During menu construction "main_menu off" has no menu to close.
+local function auto_host_save()
+	if auto_done then return end
+	auto_done = true
+	local command = rawget(_G, "command_line")
+	local line = type(command) == "function" and command() or ""
+	local stem = type(line) == "string" and line:match("%f[%S]%-coop_world_auto%s+(%S+)")
+	-- A local save stem is embedded in the stock start command; reject path and command delimiters.
+	if not stem or stem == "new" or #stem > 200 or stem:sub(1, 1) == "-" then return end
+	if stem:find('[\\/:*?"<>|();%c]') or stem:find("..", 1, true) then return end
+	if level_loaded() or api.is_active() then return end
+	local server, id = save_kind(nil, stem)
+	if server then
+		log("%s", tr("st_srv_world_from_launcher"))
+		return
+	end
+	local ok, why = host_save(id, stem, check_port(get_port()) or DEFAULT_PORT)
+	if not ok then log("! cannot host '%s': %s", stem, tostring(why)) end
+end
+
+local function attach_auto_host()
+	if auto_hooked then return end
+	local m = module_of("ui_main_menu")
+	local cls = m and m.main_menu
+	if cls == nil or type(cls.Update) ~= "function" then return end
+	local stock = cls.Update
+	cls.Update = function(self, ...)
+		stock(self, ...)
+		local ok, err = pcall(auto_host_save)
+		if not ok then log("! cannot auto-load the co-op save: %s", tostring(err)) end
+	end
+	auto_hooked = true
 end
 
 -- Pending host + a way to get a level: the stock new game screen, or a save of this game.
 function UICoopMenu:HostAfter(start, stem, title)
+	if start == "save" and save_kind(self.sel_id, stem) then
+		self.local_error = tr("st_srv_world_from_launcher")
+		return self:Refresh()
+	end
 	local port = self:PrepareHost()
 	if not port then return end
-	if start == "save" and self:ContinueSplit(stem, port) then return end
 	choose_ring(start == "save" and self.sel_id or nil) -- a new game has no id yet: its record names the ring when it is in force
 	local ok, why = api.host_when_ready(port)
 	if not ok then return self:Failed(why) end
@@ -2218,14 +2259,6 @@ end
 function UICoopMenu:OnDisconnect()
 	self.local_error = nil
 	api.disconnect()
-	-- the creator of a world that runs on this PC leaves it: the world server saves and quits (plan 3.5)
-	local W = module_of("coop_world_wait")
-	if W and W.owns_world() then
-		local owner = self.owner
-		self:Close()
-		W.leave(owner)
-		return
-	end
 	self:Refresh()
 end
 
@@ -2359,7 +2392,6 @@ function on_main_menu_init(menu)
 	if not ok then log("! main menu hook failed: %s", tostring(err)) end
 	local okt, errt = pcall(touch_map, menu)
 	if not okt then log("! the map is not touched: %s", tostring(errt)) end
-	-- the world server of this game: the end of its session, -coop_world_auto (coop_world_wait, stage 6b)
-	local okw, errw = pcall(function() coop_world_wait.attach(menu) end)
-	if not okw then log("! the world server's menu hook: %s", tostring(errw)) end
+	local oka, erra = pcall(attach_auto_host)
+	if not oka then log("! cannot install the co-op auto-load hook: %s", tostring(erra)) end
 end

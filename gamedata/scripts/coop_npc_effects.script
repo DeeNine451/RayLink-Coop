@@ -255,18 +255,16 @@ local function client_loop_start(id, theme)
 	client_loops[key] = { id, theme }
 end
 
--- Split levels: the map server of this player's level tells him; a key of the world server is from the level he came from.
-local function on_map_server_level()
-	local l = api and api.levels
-	if not (l and l.split and l.split() == true and l.my_level and l.led_by_host_process) then return false end
-	local level = l.my_level()
-	return level ~= nil and l.led_by_host_process(level) ~= true
+-- A co-op client takes the host's session list. Other clients get the list from their map server.
+local function follows_host()
+	local mode = rawget(_G, "coop_mode") or coop_mode
+	return mode == nil or mode.group_travels()
 end
 
 local function client_loops_tick()
 	local sync = api and api.sync
 	local list = level_loops
-	if not on_map_server_level() then list = sync and sync.get("session", KEY_LOOPS) end
+	if follows_host() then list = sync and sync.get("session", KEY_LOOPS) end
 	if type(list) ~= "table" then return end
 	local want = {}
 	for _, entry in ipairs(list) do

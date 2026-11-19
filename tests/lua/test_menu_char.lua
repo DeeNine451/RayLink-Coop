@@ -915,7 +915,7 @@ STRINGS.k00_marsh = "Great Swamps"
 STRINGS.l01_escape = "Cordon"
 check(STRINGS.st_coop_char_where_start == "You will appear at: %s"
 	and STRINGS.st_coop_char_where_near == "You will appear next to the host"
-	and STRINGS.st_coop_char_where_camp:find("another map", 1, true) and STRINGS.st_coop_char_where_split,
+	and STRINGS.st_coop_char_where_camp:find("another map", 1, true) and not STRINGS.st_coop_char_where_split,
 	"the strings of the 'where' line are in the English table")
 
 local starts_g = mg.faction_starts("csky", false)
@@ -944,16 +944,16 @@ check(asked == "dolg@l01_escape", "the camp question names the faction and the h
 
 local main, note = mg.where_text("csky", "l01_escape", false)
 check(main == "You will appear at: Rookie Village (Cordon)"
-	and note == "For now all players are on the host's map. Your own map comes with the \"split maps\" update.",
+	and note == nil,
 	"Clear Sky on Cordon: the village by its stock name, and why not the faction's base")
 main, note = mg.where_text("csky", "k00_marsh", false)
-check(main == "You will appear at: Hidden Base (Great Swamps)" and note ~= nil,
+check(main == "You will appear at: Hidden Base (Great Swamps)" and note == nil,
 	"Clear Sky on the Great Swamps: the base; the village of Cordon is the other map")
 main, note = mg.where_text("stalker", "l01_escape", true)
 check(main == "You will appear at: Rookie Village (Cordon)" and note == nil,
 	"story mode lists one stalker start, all on the host's map: no note about other maps")
 main, note = mg.where_text("army", "l01_escape", false)
-check(main == "You will appear at: Southern Checkpoint (Cordon)" and note ~= nil,
+check(main == "You will appear at: Southern Checkpoint (Cordon)" and note == nil,
 	"Army on Cordon: the checkpoint; Agroprom is another map")
 STRINGS.ui_st_hidden_base = nil
 main = mg.where_text("csky", "k00_marsh", false)
@@ -970,12 +970,16 @@ main = mg.where_text("dolg", "l01_escape", false, function() return false end)
 check(main == "You will appear next to the host", "no start, no camp")
 check(mg.where_text("csky", nil, false) == nil, "the host's map unknown: nothing to say")
 
+local server_kind, server_starts = mg.start_preview("csky", "", false)
+check(server_kind == "start" and #server_starts.here > 0 and #server_starts.away == 0,
+	"server offer without a host map lists the faction's starts")
+
 -- the string tables: every id in both languages, CRLF kept, the Russian one in cp1251
 for _, lang in ipairs({ "eng", "rus" }) do
 	local fh = assert(io.open(ROOT .. "configs/text/" .. lang .. "/st_coop_menu.xml", "rb"))
 	local src = fh:read("*a")
 	fh:close()
-	for _, id in ipairs({ "start", "camp", "near", "camp_or_near", "split" }) do
+	for _, id in ipairs({ "start", "camp", "near", "camp_or_near" }) do
 		check(src:find('<string id="st_coop_char_where_' .. id .. '">', 1, true) ~= nil, lang .. " has st_coop_char_where_" .. id)
 	end
 	check(src:find("\r\n", 1, true) ~= nil and not src:find("[^\r]\n"), lang .. " string table keeps CRLF line ends")
@@ -991,8 +995,8 @@ check(mg.join_offer(2, 700, "l01_escape", "", 0, "stalker") == true, "the offer 
 local gw = mg.GUI
 mg.join_offer(2, 700, "l01_escape", "", 0, "csky")
 check(gw.where.text:find("You will appear at: Rookie Village (Cordon)", 1, true)
-	and gw.where.text:find("split maps", 1, true) and gw.where.text:find("host's map", 1, true),
-	"window, Clear Sky on Cordon: the village and the split-maps note")
+	and not gw.where.text:find("split maps", 1, true),
+	"window, Clear Sky on Cordon: the village without the hybrid note")
 mg.join_offer(2, 700, "l01_escape", "", 0, "army")
 check(gw.where.text:find("Southern Checkpoint (Cordon)", 1, true), "window, a faction with a start on the host's map")
 mg.camp_known = function() return false end

@@ -682,26 +682,6 @@ TEST(transition_message_numbers_and_directions)
 	CHECK_EQ(kProtocolVersion, 32u); // 30 atomic replacement; older peers are refused by the handshake
 }
 
-// F3a, the host went alone and every player loads where he stands (plan §1.5): nobody waits for a level that is not his.
-TEST(prepared_load_by_map_enters_level_by_level)
-{
-	using Peers = std::vector<uint32_t>;
-	transition::PreparedLoad l;
-	l.start(5, {0, 1, 2}, 1000);
-	bool garbage_up = false;
-	const auto map_ready = [&garbage_up](uint32_t peer) { return peer != 2 || garbage_up; };
-	CHECK(l.take_entering_by_map(map_ready).empty()); // the server's world is not up: nobody enters a world that is not there
-	l.ready(1, 5);
-	l.ready(2, 5);
-	l.world_up(2000);
-	CHECK(l.take_entering_by_map(map_ready) == (Peers{0, 1})); // 2's map server is not up: the others do not wait for it
-	CHECK(l.take_entering_by_map(map_ready).empty());
-	CHECK(!l.finished());
-	garbage_up = true;
-	CHECK(l.take_entering_by_map(map_ready) == (Peers{2}));
-	CHECK(l.finished());
-}
-
 TEST(transition_vote_round_trip)
 {
 	VoteMsg v;
@@ -1164,154 +1144,10 @@ TEST(together_the_leading_exit_is_known_before_the_tick)
 	CHECK_EQ(goal, transition::goal_of_exit(90));
 }
 
-TEST(together_on_target_not_counted)
-{
-	// The together entry (split levels): who already stands on the level the exit leads to does not go, is not waited for and
-	// has no row; a claim of his means nothing.
-	Board b;
-	auto m = party({0, 1, 2, 3}); // 3 is still on his way: the board waits
-	m[2].on_target = true;
-	b.claim(0, kA, 0);
-	b.claim(1, kA, 0);
-	Status s = b.tick(m, kNear, 10);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	CHECK_EQ(s.ready, 2u);
-	CHECK_EQ(s.total, 3u);
-	CHECK_EQ(s.rows.size(), size_t(3));
-	CHECK_EQ(row_of(s, 2).id, 0xdeadbeefu);
-	b.claim(2, kA, 20);
-	s = b.tick(m, kNear, 30);
-	CHECK(!b.claimed(2));
-	CHECK_EQ(s.total, 3u);
-	m[2].on_target = false; // he left that level: he is waited for again
-	s = b.tick(m, kNear, 40);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	CHECK_EQ(s.total, 4u);
-	CHECK_EQ(int(row_of(s, 2).mark), int(Mark::Away));
-	m[2].on_target = true;
-	b.claim(3, kA, 50); // the one who was missing: the group goes without the one already there
-	s = b.tick(m, kNear, 60);
-	CHECK(s.go);
-	CHECK_EQ(s.total, 3u);
-}
-
-TEST(together_no_yes_from_another_map)
-{
-	// Owner 2026-11-02: a yes counts only when everybody stands on one map. Who is on another map cannot say it, whatever he sends.
-	Board b;
-	VoteFacts there;
-	there.in_world = true;
-	there.exit_known = true;
-	there.other_map = true;
-	CHECK(apply_vote(b, 1, vote_ready(kA), there, 0) == Verdict::OtherMap);
-	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), there, 0) == Verdict::OtherMap);
-	CHECK(apply_vote(b, 1, vote_of(VoteRoute, kA, 40), there, 0) == Verdict::OtherMap);
-	CHECK(!b.claimed(1));
-	// on the exit's own map the same vote needs the distance
-	VoteFacts here = there;
-	here.other_map = false;
-	CHECK(apply_vote(b, 1, vote_ready(kA), here, 30) == Verdict::TooFar);
-	// a client on a map server's level: the host has only his record, it comes once a second: near the exit is enough
-	here.far_place = true;
-	CHECK(apply_vote(b, 1, vote_ready(kA), here, 40) == Verdict::Claimed);
-}
-
-TEST(together_one_on_another_map_holds_the_group_without_a_limit)
-{
-	// Nothing lets the group go without him: not the clock, not the chat's /go.
-	Board b;
-	auto m = party({0, 1, 2});
-	m[2].other_map = true;
-	b.claim(0, kA, 0);
-	b.claim(1, kA, 0);
-	uint64_t now = 10;
-	Status s = b.tick(m, kNear, now);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	CHECK_EQ(s.ready, 2u);
-	CHECK_EQ(s.total, 3u);
-	CHECK_EQ(int(row_of(s, 2).mark), int(Mark::Away));
-	CHECK(row_of(s, 2).other_map);
-	for (; now < 3600000u; now += 4000)
-	{
-		b.claim(1, kA, now); // his refresh
-		s = b.tick(m, kNear, now);
-		CHECK(!s.go);
-	}
-	b.force(kA);
-	s = b.tick(m, kNear, now);
-	CHECK(!s.go);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	// he came to the exit's map: a loading player of that map is no reason to stop, he runs up or says yes
-	m[2].other_map = false;
-	s = b.tick(m, kNear, now + 1);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	b.consent(2, kA, now + 2);
-	s = b.tick(m, kNear, now + 3);
-	CHECK(s.go);
-}
-
-TEST(together_a_loader_on_another_map_has_no_minute)
-{
-	Board b;
-	auto m = party({0, 1});
-	m[1].other_map = true;
-	m[1].in_world = false;
-	b.claim(0, kA, 0);
-	CHECK(!b.tick(m, kNear, 0).go);
-	const Status s = b.tick(m, kNear, kLoadWaitMs + 1000);
-	CHECK(!s.go);
-	CHECK_EQ(int(s.state), int(State::Waiting));
-	CHECK_EQ(s.load_ms, 0u);
-	// the same player on the exit's map still has his minute
-	Board c;
-	auto n = party({0, 1});
-	n[1].in_world = false;
-	c.claim(0, kA, 0);
-	CHECK(!c.tick(n, kNear, 0).go);
-	CHECK(c.tick(n, kNear, kLoadWaitMs + 1000).go);
-}
-
-TEST(together_a_yes_from_afar_needs_everybody_on_one_map)
-{
-	Board b;
-	b.claim(0, kA, 0);
-	VoteFacts far_off;
-	far_off.in_world = true;
-	far_off.exit_known = true;
-	far_off.dist = 300.f;
-	far_off.others_away = true;
-	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), far_off, 10) == Verdict::OtherMap);
-	CHECK(!b.claimed(1));
-	// running up to the exit is always open
-	VoteFacts at = far_off;
-	at.dist = 1.f;
-	CHECK(apply_vote(b, 1, vote_ready(kA), at, 20) == Verdict::Claimed);
-	CHECK(b.release(1));
-	far_off.others_away = false;
-	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), far_off, 30) == Verdict::Claimed);
-	// a yes given stays when somebody walks off: his refresh is no new yes
-	far_off.others_away = true;
-	CHECK(apply_vote(b, 1, vote_of(VoteConsent, kA), far_off, 40) == Verdict::Refreshed);
-	// the yes to a trip is the same
-	Board g;
-	g.start_guide(0, 0, Trip::Waits);
-	VoteFacts yes;
-	yes.in_world = true;
-	yes.guide_running = true;
-	yes.others_away = true;
-	CHECK(apply_vote(g, 1, vote_ready(kNoChanger), yes, 10) == Verdict::OtherMap);
-	yes.others_away = false;
-	yes.other_map = true;
-	CHECK(apply_vote(g, 1, vote_ready(kNoChanger), yes, 10) == Verdict::OtherMap);
-	yes.other_map = false;
-	CHECK(apply_vote(g, 1, vote_ready(kNoChanger), yes, 10) == Verdict::Claimed);
-}
-
 TEST(transition_a_trip_that_waits_has_no_limit)
 {
 	Board b;
-	auto m = party({0, 1});
-	m[1].other_map = true;
+	auto m = party({0, 1}); // 1 never says yes
 	b.start_guide(0, 0, Trip::Waits);
 	const Status s = b.tick(m, kNear, 3600000u);
 	CHECK_EQ(int(s.state), int(State::Waiting));
@@ -1370,76 +1206,29 @@ TEST(transition_a_second_trip_does_not_take_the_first_ones_place)
 
 TEST(transition_movers_of_a_group)
 {
-	// who goes with the group
+	// who goes with the group: everybody in the world whose character is known (the co-op: one map for everybody)
 	MoverFacts f;
 	f.joined = true;
 	f.known = true;
 	f.proxy = true;
-	f.on_host_level = true;
-	CHECK(goes_with_the_group(f, false));
-	f.on_host_level = false;
-	CHECK(!goes_with_the_group(f, false)); // a level change of the host's level alone
-	CHECK(goes_with_the_group(f, true)); // split levels: wherever he stands
+	CHECK(goes_with_the_group(f));
 	f.loading = true;
-	CHECK(!goes_with_the_group(f, true));
+	CHECK(!goes_with_the_group(f));
 	f.loading = false;
 	f.joining = true;
-	CHECK(!goes_with_the_group(f, true));
+	CHECK(!goes_with_the_group(f));
 	f.joining = false;
 	f.choosing = true;
-	CHECK(!goes_with_the_group(f, true));
+	CHECK(!goes_with_the_group(f));
 	f.choosing = false;
 	f.proxy = false;
-	CHECK(!goes_with_the_group(f, true));
-	// live 39.10: "the group moves", and the client came up where he stood. A mover is put on the new level unless he stands on it already.
-	constexpr uint16_t kOld = 1, kArrival = 2, kNoSeat = 0xffff;
-	CHECK(mover_is_placed(true, kOld, kArrival));
-	CHECK(!mover_is_placed(true, kArrival, kArrival));
-	CHECK(mover_is_placed(false, kOld, kArrival));
-	CHECK(mover_is_placed(false, kArrival, kArrival)); // no split levels: one level for everybody, the group moves
-	CHECK(mover_is_placed(true, kNoSeat, kArrival)); // a seat nobody knows is no reason to leave him behind
-	CHECK(mover_is_placed(true, kNoSeat, kNoSeat));
-}
-
-TEST(together_row_flags)
-{
-	Board b;
-	auto m = party({0, 1, 2});
-	m[2].other_map = true;
-	b.claim(0, kA, 0);
-	const Status s = b.tick(m, kNear, 10);
-	CHECK(!row_of(s, 0).other_map);
-	CHECK(!row_of(s, 1).other_map);
-	CHECK(row_of(s, 2).other_map);
-	CHECK_EQ(int(row_of(s, 2).mark), int(Mark::Away));
-	const StateMsg msg = state_message(s, "l01_escape");
-	Writer w;
-	msg.write(w);
-	// the flag rides in the high bit of the mark byte: the layout of protocol 10 (7 bytes a row) stays
-	StateMsg plain = msg;
-	for (Row& r : plain.rows)
-		r.other_map = false;
-	Writer w0;
-	plain.write(w0);
-	CHECK_EQ(w.size(), w0.size());
-	CHECK(w.data() != w0.data());
-	Reader r = reader_of(w);
-	StateMsg back;
-	CHECK(back.read(r));
-	CHECK_EQ(back.rows.size(), size_t(3));
-	if (back.rows.size() == 3)
-	{
-		CHECK(!back.rows[0].other_map);
-		CHECK(!back.rows[1].other_map);
-		CHECK(back.rows[2].other_map);
-		CHECK_EQ(int(back.rows[2].mark), int(Mark::Away));
-	}
-	// a mark nobody knows is refused with the flag set as without it
-	std::vector<uint8_t> bytes(w.data());
-	bytes[bytes.size() - 3] = uint8_t(kRowOtherMap | 77); // the mark byte of the last row (u32 id, u8 mark, u16 dist)
-	Reader r2(bytes.data(), bytes.size());
-	StateMsg bad;
-	CHECK(!bad.read(r2));
+	CHECK(!goes_with_the_group(f));
+	f.proxy = true;
+	f.known = false;
+	CHECK(!goes_with_the_group(f));
+	f.known = true;
+	f.joined = false;
+	CHECK(!goes_with_the_group(f));
 }
 
 // 2026-10-24: "comes along" rides in the next bit of the mark byte (kRowConsent), the 7 bytes a row stay.
@@ -1447,20 +1236,17 @@ TEST(transition_rows_say_who_comes_along)
 {
 	Board b;
 	auto m = party({0, 1, 2, 3});
-	m[2].other_map = true;
 	b.claim(0, kA, 0);
 	b.consent(1, kA, 0);
 	b.consent(2, kA, 0);
 	const Status s = b.tick(m, kNear, 10);
 	CHECK(!row_of(s, 0).consent);
 	CHECK(row_of(s, 1).consent);
-	CHECK(!row_of(s, 2).consent && row_of(s, 2).other_map); // no yes counts from another map
-	CHECK(!b.claimed(2));
+	CHECK(row_of(s, 2).consent);
 	CHECK(!row_of(s, 3).consent);
 	CHECK_EQ(int(row_of(s, 1).mark), int(Mark::Ready));
-	StateMsg msg = state_message(s, "l01_escape");
-	msg.rows[2].consent = true; // both bits on one row: the wire has room for them
-	msg.rows[2].mark = Mark::Ready;
+	CHECK_EQ(int(row_of(s, 2).mark), int(Mark::Ready));
+	const StateMsg msg = state_message(s, "l01_escape");
 	Writer w;
 	msg.write(w);
 	CHECK_EQ(w.size(), size_t(28 + 4 * 7)); // the head with "l01_escape" (as sample_state's 42 = 28 + 2 x 7), 7 a row
@@ -1468,12 +1254,18 @@ TEST(transition_rows_say_who_comes_along)
 	StateMsg back;
 	CHECK(back.read(r));
 	REQUIRE(back.rows.size() == 4);
-	CHECK(!back.rows[0].consent && !back.rows[0].other_map);
-	CHECK(back.rows[1].consent && !back.rows[1].other_map);
-	CHECK(back.rows[2].consent && back.rows[2].other_map);
+	CHECK(!back.rows[0].consent);
+	CHECK(back.rows[1].consent);
+	CHECK(back.rows[2].consent);
 	CHECK_EQ(int(back.rows[2].mark), int(Mark::Ready));
 	CHECK(!back.rows[3].consent);
 	CHECK_EQ(int(back.rows[3].mark), int(Mark::Away));
+	// the high bit of the mark byte stays reserved (another map, the hybrid of build 57 and before): a row with it is refused
+	std::vector<uint8_t> bytes(w.data());
+	bytes[bytes.size() - 3] = uint8_t(0x80 | uint8_t(Mark::Away)); // the mark byte of the last row (u32 id, u8 mark, u16 dist)
+	Reader r2(bytes.data(), bytes.size());
+	StateMsg bad;
+	CHECK(!bad.read(r2));
 }
 
 // ---------------------------------------------------------------- F3a T8: the simultaneous load, the server's side

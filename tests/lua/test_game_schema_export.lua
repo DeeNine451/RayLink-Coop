@@ -68,8 +68,12 @@ check(kit.shownIf and kit.shownIf.key == "c|coop_death_mode" and #kit.shownIf.an
 	"shown_if is carried as raw values")
 local loot = X.export_item(sc, sc.item("o|coop/coop_session/loot_claim"), tr_all)
 check(loot.options[1].raw == "false" and loot.options[2].raw == "true" and loot.default == "true", "a check (option): false, true")
-local story = X.export_item(sc, sc.item("c|coop_story_together"), tr_all)
-check(story.shownIf and story.shownIf.any[1] == "1", "shown_if of a console flag: \"1\"")
+-- The live catalog has no condition on a console flag after S2. Exercise its export using an existing check item.
+local downed = setmetatable({ shown_if = { key = "c|coop_friendly_fire", any = { true } } },
+	{ __index = assert(sc.item("c|coop_npc_finish_downed")) })
+local conditional = X.export_item(sc, downed, tr_all)
+check(conditional.kind == "check" and conditional.shownIf and conditional.shownIf.key == "c|coop_friendly_fire"
+	and conditional.shownIf.any[1] == "1", "shown_if of a console flag: \"1\"")
 local share = X.export_item(sc, sc.item("c|coop_death_share"), tr_all)
 check(share.kind == "list" and #share.options == 4 and share.options[1].raw == "50" and share.default == "100"
 	and share.shownIf.any[1] == "drop" and share.shownIf.any[2] == "lose", "a list: raws in the catalog's order, default, shown_if")
@@ -122,6 +126,8 @@ for line in file:gmatch("[^\n]+") do
 	end
 end
 check(#items > 0, "the file has items (" .. #items .. ")")
+check(not file:find('"key":"c|coop_split_levels"', 1, true) and not file:find('"key":"c|coop_story_together"', 1, true)
+	and not file:find('"key":"c|coop_world_server"', 1, true), "retired world flags are absent from the launcher form")
 
 -- coop_dedicated in an environment of its own, with the real catalog and record, as tests\lua\test_dedicated.lua loads it
 local SAFE = {}
