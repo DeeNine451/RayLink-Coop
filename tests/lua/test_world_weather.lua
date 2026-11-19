@@ -97,6 +97,9 @@ end
 print("== the weather of a map server")
 do
 	local H, C = world_pair()
+	H.env.coop.is_dedicated = function() return true end
+	H.env.coop.players = function() return {} end
+	C.env.coop.players = function() return {} end
 	C.env.coop.is_map_server = function() return true end
 	C.env.coop.is_mirror = function() return false end
 	local wh, wc = stock_weathers(H, 100), stock_weathers(C, 200)
@@ -200,23 +203,33 @@ do
 	WC.on_game_start()
 	local mine = "(1.000000, 0.300000, 0.000000)"
 	C.console.ssfx_wetness_multiplier = mine
+	local group = false
+	local host_rows, client_rows = H.env.coop.players, C.env.coop.players
+	H.env.coop.is_dedicated = function() return not group end
+	H.env.coop.players = function()
+		return group and host_rows() or { { id = 1, avatar_id = 500, level = 2 } }
+	end
+	C.env.coop.players = function()
+		return group and client_rows() or { { id = 1, avatar_id = 0, level = 2, is_self = true } }
+	end
+	C.env.coop_mode = { group_travels = function() return group end }
 	C.env.coop.levels = {
-		split = function() return true end,
+		split = function() return not group end,
 		my_level = function() return 2 end,
-		level_of_player = function(p) return p == 0 and 1 or 2 end,
+		level_of_player = function(p) if p ~= 0 then return 2 end end,
 	}
 	H.wet, C.wet = 0.9, 0
 	step(H, C)
 	step(H, C)
 	check(C.console.ssfx_wetness_multiplier == mine, "a map server's level has its own rain: its wetness is not steered")
-	C.env.coop.levels.level_of_player = function() return 2 end
+	group = true
 	step(H, C)
 	step(H, C)
-	check(C.console.ssfx_wetness_multiplier ~= mine, "on the host's level it follows the host again")
-	C.env.coop.levels.level_of_player = function(p) return p == 0 and 1 or 2 end
+	check(C.console.ssfx_wetness_multiplier ~= mine, "a co-op client follows the playing host's wetness")
+	group = false
 	step(H, C)
 	step(H, C)
-	check(C.console.ssfx_wetness_multiplier:find("^%(1"), "and the player's numbers come back when the host leaves")
+	check(C.console.ssfx_wetness_multiplier == mine, "a server client keeps his map's wetness")
 	-- plan 2026-11-12: a world server's seat is in no level map (level_of_player(0) is nil) and plays nowhere: the client keeps his
 	-- own wetness, as when its seat stood on "fake_start"
 	C.env.coop.levels.level_of_player = function(p) if p ~= 0 then return 2 end end

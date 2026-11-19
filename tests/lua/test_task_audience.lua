@@ -9,29 +9,34 @@ local SCRIPTS = { "coop_reward_group", "coop_tasks", "coop_task_audience" }
 local BRIDGE = 0x101
 
 local W = {
-	split = true, dedicated = false,
-	fac = { [0] = "stalker", [500] = "dolg", [501] = "dolg", [502] = "stalker", [503] = "dolg" },
+	split = true,
+	fac = { [509] = "stalker", [500] = "dolg", [501] = "dolg", [502] = "stalker", [503] = "dolg" },
 	rel = {}, gw = {},
 	eng = {}, eng_calls = 0, resent = {},
-	members = { { id = 500, peer = 1, in_world = true }, { id = 501, peer = 2, in_world = true } },
+	members = { { id = 500, peer = 1, in_world = true }, { id = 501, peer = 2, in_world = true },
+		{ id = 509, peer = 9, in_world = true } },
 }
 
 local Hm = machine("host", 0)
 local e = Hm.env
 
--- the world: three players, the host plays (a listen world server)
-Hm.players = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, avatar_id = 500 }, { id = 2, avatar_id = 501 } }
-Hm.new_obj(500, "coop_player_avatar", vec(10, 0, 0))
-Hm.new_obj(501, "coop_player_avatar", vec(20, 0, 0))
+-- The world server's service actor is a ghost. Three clients supply the audience.
+Hm.players = { { id = 9, avatar_id = 509 }, { id = 1, avatar_id = 500 }, { id = 2, avatar_id = 501 } }
 Hm.share = 0
 Hm.ObjMT.money = function(self) return self._money or 0 end
 e.get_console = function()
 	return { get_integer = function(_, name) return name == "coop_share_rewards" and Hm.share or 0 end }
 end
 e.ini_sys.r_bool_ex = function(_, sec, key, def) return def end
-e.coop.is_dedicated = function() return W.dedicated end
+e.coop.is_dedicated = function() return W.split end
 e.coop.members = function() return W.members end
-e.coop.levels = { map_servers = function() return { { bridge = BRIDGE, level = 9 } } end, level_of_player = function() return nil end }
+e.coop.levels = {
+	split = function() return W.split end,
+	my_level = function() return 7 end,
+	map_servers = function() return { { bridge = BRIDGE, level = 9 } } end,
+	level_of_player = function(peer) if peer ~= 0 then return 9 end end,
+	carried = function() return {} end,
+}
 local function engine_binding(id, t)
 	W.eng_calls = W.eng_calls + 1
 	if t == nil then
@@ -78,12 +83,19 @@ SE[802] = se({ player_id = "army", commander_id = function() return 703 end })
 SE[704] = stalker("monster")
 SE[705] = stalker("freedom")
 SE[706] = stalker("stalker")
+local function body_record(id, x)
+	SE[id] = { id = id, position = vec(x, 0, 0), m_level_vertex_id = 2, m_game_vertex_id = 9, alive = function() return true end }
+end
+body_record(500, 10)
+body_record(501, 20)
+body_record(509, 5)
 local stock_alife_object = e.alife_object
 e.alife_object = function(id) return SE[id] or stock_alife_object(id) end
 
 for _, id in ipairs({ "t_side1", "t_side2", "t_side3", "t_free", "t_gated", "t_none", "t_monster", "t_off", "t_noeng", "t_thr",
 	"t_gw", "drx_sl_bar_task_1", "lttz_hb_task", "drx_sl_esc_m_trader_cf_task_1", "t_money", "t_group" }) do Hm.ini[id] = {} end
 
+load_script(Hm, "coop_quests_core")
 for _, n in ipairs(SCRIPTS) do load_script(Hm, n) end
 for _, n in ipairs(SCRIPTS) do e[n].on_game_start() end
 fire(Hm, "actor_on_first_update")
@@ -204,8 +216,8 @@ do
 	give(2, "t_side1", 700) -- B (dolg) takes it from a bandit
 	local rec = AUD.record("t_side1")
 	check(rec ~= nil and rec.k == "side" and rec.gf == "bandit" and rec.t == 501, "a side record with the giver's faction and the taker")
-	check(rec and rec.inn[501] and rec.inn[0] and rec.out[500], "taker in, host (stalker) in, A (dolg) out")
-	check(same(W.eng.t_side1, { 0, 501 }), "the engine got the audience before the first state")
+	check(rec and rec.inn[501] and rec.inn[509] and rec.out[500], "taker in, stalker D in, A (dolg) out")
+	check(same(W.eng.t_side1, { 509, 501 }), "the engine got the audience before the first state")
 	tick(Hm)
 	local to = targets("coop_tl", "t_side1", side_mark + 1)
 	check(to[2] == 1 and to[BRIDGE] == 1, "the state goes to the taker and to the bridge")
@@ -215,11 +227,11 @@ end
 print("== the threshold is the stock's: relation + goodwill <= -1000")
 do
 	W.rel["bandit>dolg"] = -999
-	give(0, "t_thr", 700)
+	give(9, "t_thr", 700)
 	check(AUD.record("t_thr").inn[500] == true, "-999 is not an enemy")
 	W.rel["bandit>dolg"] = -800
 	W.gw["bandit>500"] = -200
-	give(0, "t_gw", 700)
+	give(9, "t_gw", 700)
 	check(AUD.record("t_gw").out[500] == true and AUD.record("t_gw").inn[501] == true, "goodwill counts: -800 - 200 is out, his own 0 is in")
 	W.gw["bandit>500"] = nil
 	W.rel["bandit>dolg"] = -1000
@@ -247,15 +259,15 @@ do
 	give(1, "drx_sl_bar_task_1", nil) -- A (dolg) takes it
 	local r = AUD.record("drx_sl_bar_task_1")
 	check(r and r.k == "story" and r.sf == "dolg", "the taker's true faction")
-	check(r and r.inn[500] and r.inn[501] and r.out[0], "dolg in (A, B), the stalker host out")
+	check(r and r.inn[500] and r.inn[501] and r.out[509], "dolg in (A, B), stalker D out")
 	e.coop_storyline = { owner_of_task = function(id) return id == "lttz_hb_task" and "stalker" or nil end }
 	give(1, "lttz_hb_task", nil)
 	r = AUD.record("lttz_hb_task")
-	check(r and r.sf == "stalker" and r.inn[0] and r.inn[500] and r.out[501], "coop_storyline's owner: stalkers and the taker")
+	check(r and r.sf == "stalker" and r.inn[509] and r.inn[500] and r.out[501], "coop_storyline's owner: stalkers and the taker")
 	e.coop_storyline = nil
 	give(1, CF, nil)
 	r = AUD.record(CF)
-	check(r and r.k == "cf" and r.inn[500] and r.out[501] and r.out[0], "a cf task: its taker alone")
+	check(r and r.k == "cf" and r.inn[500] and r.out[501] and r.out[509], "a cf task: its taker alone")
 	check(same(W.eng[CF], { 500 }), "the engine got only the taker")
 end
 
@@ -277,9 +289,11 @@ do
 	local shown = e.news_manager.send_task(Hm.actor, "new", tsk)
 	local to = targets("coop_tn", CF, mark + 1)
 	check(to[1] == 1 and to[BRIDGE] == 1 and to[2] == nil and to[-1] == nil, "the task line goes to the taker and the bridge only")
-	check(shown == true, "the host player, out of it, gets no line here")
+	check(shown == true, "the service actor gets no line")
 	tsk = { get_id = function() return "t_side1" end, get_title = function() return "s" end }
-	check(e.news_manager.send_task(Hm.actor, "new", tsk) ~= true, "a task the host sees: the stock line follows")
+	mark = #Hm.sent
+	check(e.news_manager.send_task(Hm.actor, "new", tsk) == true
+		and targets("coop_tn", "t_side1", mark + 1)[9] == 1, "D gets the line for a task in his audience")
 end
 
 -- ---------------------------------------------------------------- requests
@@ -344,14 +358,14 @@ print("== a late joiner is judged once at his join, per character")
 do
 	Hm.players[#Hm.players + 1] = { id = 3, avatar_id = 502 } -- C, a stalker
 	W.members[#W.members + 1] = { id = 502, peer = 3, in_world = true }
-	Hm.new_obj(502, "coop_player_avatar", vec(30, 0, 0))
+	body_record(502, 30)
 	local mark = #Hm.sent
 	tick(Hm)
 	check(targets("coop_tl", "t_side1", 1)[3] == nil and AUD.record("t_side1").inn[502] == nil, "unjudged: nothing yet")
 	Hm.handlers.coop_tl_req("", 3)
 	check(AUD.record("t_side1").inn[502] == true and AUD.record("drx_sl_bar_task_1").out[502] == true, "judged at his first sync")
 	check(W.resent[#W.resent] == 3, "the engine sends him his task list again")
-	check(same(W.eng.t_side1, { 0, 501, 502 }), "and has him in the audience")
+	check(same(W.eng.t_side1, { 509, 501, 502 }), "and has him in the audience")
 	check(targets("coop_tl", "t_side1", mark + 1)[3] == 1, "his sync has the side task")
 	check(targets("coop_tl", "drx_sl_bar_task_1", mark + 1)[3] == nil, "not the dolg storyline")
 	-- a reconnect: the same character on another peer slot is not judged again
@@ -400,8 +414,8 @@ do
 	local paid = {}
 	for _, c in ipairs(Hm.money_calls) do if c.ok ~= false then paid[c.peer] = (paid[c.peer] or 0) + (c.n or 0) end end
 	check(paid[1] == nil, "A (out) gets no money")
-	check((paid[2] or 0) > 0 and (paid[4] or 0) > 0 and Hm.actor:money() > before, "B, C and the host share it")
-	check(same(seen, { 0, 501, 502 }), "personal effects for the audience only (" .. table.concat(seen, ",") .. ")")
+	check((paid[2] or 0) > 0 and (paid[4] or 0) > 0 and (paid[9] or 0) > 0 and Hm.actor:money() == before, "B, C and D share it; the ghost receives nothing")
+	check(same(seen, { 509, 501, 502 }), "personal effects for the audience only (" .. table.concat(seen, ",") .. ")")
 
 	-- coop_share_rewards 2: the reward group cut to the audience
 	Hm.share = 2
@@ -414,19 +428,17 @@ do
 	for _, c in ipairs(Hm.money_calls) do if c.ok ~= false then paid[c.peer] = (paid[c.peer] or 0) + (c.n or 0) end end
 	check(paid[1] == nil and (paid[2] or 0) > 0, "the group's money skips A")
 
-	-- a recipient who is out (the host player turned the cf task in at the giver): the taker gets it
+	-- a recipient who is out (player D turned the cf task in at the giver): the taker gets it
 	Hm.share = 0
 	Hm.on_complete[CF] = function() e.dialogs.relocate_money(Hm.actor, 500, "in") end
 	for i = #Hm.money_calls, 1, -1 do Hm.money_calls[i] = nil end
 	local hm = Hm.actor:money()
 	give(1, CF, nil) -- given anew: nobody has turned it in
-	Hm.talking = true -- the host player turns it in at the giver
-	Hm.tm:set_task_completed(CF)
-	Hm.talking = false
+	CT.run_as(9, function() Hm.tm:set_task_completed(CF) end)
 	engine_check()
 	paid = {}
 	for _, c in ipairs(Hm.money_calls) do if c.ok ~= false then paid[c.peer] = (paid[c.peer] or 0) + (c.n or 0) end end
-	check(paid[1] == 500 and Hm.actor:money() == hm, "the cf task's money goes to its taker, not to the host who is out")
+	check(paid[1] == 500 and paid[9] == nil and Hm.actor:money() == hm, "the cf task's money goes to its taker, not to D, who is out")
 end
 
 -- ---------------------------------------------------------------- prune, re-give
@@ -465,7 +477,7 @@ do
 	fire(Hm, "load_state", md)
 	check(next(W.eng) == nil, "nothing pushed during the load")
 	local r = AUD.record("t_side2")
-	check(r and r.k == "side" and r.gf == "bandit" and r.t == 500 and r.inn[500] and r.out[501] and r.out[0], "the record is whole")
+	check(r and r.k == "side" and r.gf == "bandit" and r.t == 500 and r.inn[500] and r.out[501] and r.out[509], "the record is whole")
 	tick(Hm)
 	check(W.eng.t_side2 ~= nil and W.eng.lttz_hb_task ~= nil, "pushed to the engine on the first tick after the load")
 	local n = W.eng_calls
@@ -476,10 +488,8 @@ end
 -- ---------------------------------------------------------------- dedicated
 print("== a dedicated world server: peer 0 is nobody")
 do
-	W.dedicated = true
 	local tsk = { get_id = function() return "lttz_hb_task" end, get_title = function() return "l" end }
 	check(e.news_manager.send_task(Hm.actor, "new", tsk) == true, "no line on its ghost for a task with an audience")
-	W.dedicated = false
 end
 
 for _, id in ipairs({ "t_fin1", "t_fin2", "t_fin3", "t_fin4", "t_run", "t_eng", "lttz_hb_d5" }) do Hm.ini[id] = {} end
@@ -506,7 +516,7 @@ do
 	finish_task("t_fin1")
 	r = AUD.record("t_fin1")
 	check(r ~= nil and r.fin == true and r.inn[501] == true and r.out[500] == true, "finished: the record stays, marked finished")
-	check(W.eng.t_fin1 ~= nil and same(W.eng.t_fin1, { 0, 501, 502 }), "the engine's entry stays: A is not sent the finished task")
+	check(W.eng.t_fin1 ~= nil and same(W.eng.t_fin1, { 509, 501, 502 }), "the engine's entry stays: A is not sent the finished task")
 	check(AUD.sees_character("t_fin1", 500) == false and AUD.sees_character("t_fin1", 501) == true,
 		"A does not see it, B does (same ids)")
 
@@ -515,7 +525,7 @@ do
 	W.fac[504] = "stalker"
 	Hm.players[#Hm.players + 1] = { id = 5, avatar_id = 504 }
 	W.members[#W.members + 1] = { id = 504, peer = 5, in_world = true }
-	Hm.new_obj(504, "coop_player_avatar", vec(40, 0, 0))
+	body_record(504, 40)
 	Hm.handlers.coop_tl_req("", 5)
 	check(AUD.record("t_run").inn[504] == true and set(W.eng.t_run)[504] == true, "a running task: the late joiner is judged in")
 	check(AUD.record("t_fin1") ~= nil and AUD.record("t_fin1").inn[504] == nil and W.eng.t_fin1 ~= nil and not set(W.eng.t_fin1)[504],
@@ -532,7 +542,8 @@ do
 	-- a new give of that id is a new task: judged anew, whoever asks (the engine's give refuses only a running task too)
 	tq(H.encode({ op = "give", i = "t_fin1", g = 700 }), 1)
 	r = AUD.record("t_fin1")
-	check(Hm.tm.task_info.t_fin1 ~= nil and r and not r.fin and r.t == 500 and r.inn[500] == true, "a re-give recomputes the record")
+	check(Hm.tm.task_info.t_fin1 ~= nil and r and not r.fin and r.t == 500 and r.inn[500] == true,
+		"a re-give recomputes the record (last log: " .. tostring(Hm.log[#Hm.log]) .. ")")
 	finish_task("t_fin1")
 
 	-- the late joiner's list does not start listing the finished task, nor the lists of the others
@@ -557,7 +568,7 @@ do
 	fire(Hm, "load_state", md)
 	tick(Hm)
 	check(AUD.record("t_fin2") and AUD.record("t_fin2").fin == true, "it comes back finished")
-	check(W.eng.t_fin2 ~= nil and same(W.eng.t_fin2, { 0, 501, 502, 504 }), "and the engine has its audience again")
+	check(W.eng.t_fin2 ~= nil and same(W.eng.t_fin2, { 509, 501, 502, 504 }), "and the engine has its audience again")
 	check(W.eng.t_run ~= nil, "the running ones as before")
 end
 

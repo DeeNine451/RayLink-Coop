@@ -323,6 +323,7 @@ print("== the operator of a world server (plan 2026-11-12 s.2.3): his switch is 
 reset()
 DEBUG.on = false
 RIGHTS, OPS = true, {}
+coop.server_link = function() return { id = 0, nick = "world", plays = false, operator = RIGHTS } end
 coop.has_host_rights = function() return ROLE == "host" or RIGHTS end
 coop.operator_command = function(line)
 	if not RIGHTS then return false, "not_operator" end
@@ -343,7 +344,7 @@ RIGHTS = false
 DEBUG.on = false
 w = press_f7()
 check(w.registered.btn_server_toggle == nil, "a client without the host's rights: no on/off button")
-coop.has_host_rights, coop.operator_command = nil, nil
+coop.has_host_rights, coop.operator_command, coop.server_link = nil, nil, nil
 DEBUG.on = false
 
 -------------------------------------------------------------------------------

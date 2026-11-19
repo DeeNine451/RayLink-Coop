@@ -3,7 +3,8 @@
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
 print("== split levels: who runs a request of a player")
-make_actor(vec3(0, 0, 0))
+make_actor(vec3(0, 0, 0)) -- service actor of the world server
+coop.is_dedicated = function() return MODE == "host" end
 start_all()
 local C = coop_mods_core
 local HANDLED = {}
@@ -17,8 +18,12 @@ check(#HANDLED == 0 and #SENT == 1, "the world server does not run a request of 
 check(SENT[1].name == "mods.lvl_req" and SENT[1].target == 0x101, "it goes to the map server of his level")
 local passed = SENT[1].payload
 check(coop_main.decode(passed).a == "5" or coop_main.decode(passed).a == 5, "with what he asked")
+-- The local player request is a separate co-op case.
+local server_levels = coop.levels
+coop.levels, coop.is_dedicated = nil, function() return false end
 coop_main.on_event("mods.lvl_req", coop_main.encode({ a = 6 }), 2)
-check(#HANDLED == 1 and HANDLED[1].from == 2, "a player on the host's level: here, as always")
+coop.levels, coop.is_dedicated = server_levels, function() return MODE == "host" end
+check(#HANDLED == 1 and HANDLED[1].from == 2, "a co-op player's request runs on the host")
 HANDLED = {}
 coop_main.on_event("mods.wld_req", coop_main.encode({ a = 7 }), 1)
 check(#HANDLED == 1 and HANDLED[1].from == 1, "\"world\": on the world server, wherever he stands")

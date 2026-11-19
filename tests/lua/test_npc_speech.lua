@@ -227,5 +227,34 @@ do
 	check(#stopped == 2 and stopped[2] == 306, "a theme that is a userdata, as in the game, is stopped too")
 end
 
+print("== Server: looped sounds use their map server's list")
+do
+	local H, C = world_pair()
+	H.env.coop.is_dedicated = function() return true end
+	H.env.coop.players = function() return { { id = 1, avatar_id = 500, level = 2 } } end
+	C.env.coop.players = function() return { { id = 1, avatar_id = 0, is_self = true, level = 2 } } end
+	C.env.coop.server_link = function() return { id = 0, plays = false } end
+	C.env.coop_mode = { group_travels = function() return false end }
+	stock(C, 12345)
+	online(C, 306, 20, "stalker")
+	online(C, 307, 20, "stalker")
+	local played, stopped = {}, {}
+	C.env.sound_theme.theme.gen_hum = { class_id = "looped_sound" }
+	C.env.xr_sound.looped_sound = {}
+	C.env.xr_sound.play_sound_looped = function(id, theme) played[id] = theme end
+	C.env.xr_sound.stop_sound_looped = function(id) stopped[id] = true end
+	load_script(C, "coop_npc_effects").on_game_start()
+	H.env.coop.sync.set("session", "npc.loops", { "307|gen_hum" })
+	C.effects["npc.loops"]({ "306|gen_hum" }, 0)
+	NOW = NOW + 3000
+	C.fire("actor_on_update")
+	check(played[306] == "gen_hum" and played[307] == nil,
+		"the client uses the map server broadcast instead of the world's session value")
+	C.effects["npc.loops"]({}, 0)
+	NOW = NOW + 3000
+	C.fire("actor_on_update")
+	check(stopped[306] and not stopped[307], "an empty map server list stops the previous loop")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

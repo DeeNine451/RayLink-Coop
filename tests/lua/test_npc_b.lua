@@ -589,6 +589,13 @@ SM.try_respawn(far_smart)
 check(far_smart.respawned == true, "far from every player: respawns")
 
 print("== coop_npc_compat: a player on a map server's level is a record on the world server, and he counts")
+H.env.coop.is_dedicated = function() return true end
+local world_players = H.env.coop.players
+H.env.coop.players = function()
+	local out = {}
+	for _, p in ipairs(world_players()) do if p.id ~= 0 then out[#out + 1] = p end end
+	return out
+end
 H.objects[500] = nil -- he stands on a map server's level: no game object here
 H.env.coop_npc_players.invalidate()
 RECORD.m_game_vertex_id = 2

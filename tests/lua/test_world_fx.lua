@@ -311,5 +311,141 @@ do
 	check(#C.parts == 1 and C.casts == nil, "on a client the stand-ins are stock calls")
 end
 
+local MK = 0x101
+local LEVEL_MK = 2
+
+-- The map server as the engine has it: l_set refuses the session, l_broadcast takes the players of its level.
+local function map_server()
+	local K = machine("client", MK, { [MK] = 0, [1] = 500 })
+	local E = K.env
+	E.coop.is_map_server = function() return true end
+	E.coop.is_mirror = function() return false end
+	K.refused, K.casts = 0, {}
+	E.coop.sync = {
+		set = function()
+			K.refused = K.refused + 1
+			return false, "not allowed"
+		end,
+		get = function() return nil end,
+		on = function() return true end,
+		broadcast = function(name, args, opts)
+			if K.cast_refusal then return false, K.cast_refusal end
+			for _, v in pairs(args) do
+				if type(v) == "table" then return false, "bad value" end -- to_value: no table in a table
+			end
+			K.casts[#K.casts + 1] = { name = name, args = args, opts = opts }
+			return true, 1
+		end,
+	}
+	load_script(K, "coop_npc_players")
+	return K
+end
+
+-- What Mk casts comes out on the client with from = 0, its events too: the world relays them, the player knows no other process.
+local function deliver(K, C)
+	local list = K.casts
+	K.casts = {}
+	for _, c in ipairs(list) do
+		local fn = C.effects[c.name]
+		if fn and (c.opts == nil or c.opts.to == nil or c.opts.to == C.peer) then fn(c.args, 0) end
+	end
+	for _, q in ipairs(QUEUE) do
+		if q.from == MK then q.from = 0 end
+	end
+	pump()
+	world_pump()
+end
+
+local function fired(M) M.fire("actor_on_update") end
+
+print("== who fights a player on a map server's level")
+do
+	local function stage()
+		local H, C = world_pair()
+		H.env.coop.is_dedicated = function() return true end
+		H.env.coop.players = function() return { { id = 1, avatar_id = 500, level = LEVEL_MK } } end
+		C.env.coop.players = function() return { { id = 1, avatar_id = 0, is_self = true, level = LEVEL_MK } } end
+		C.env.coop.server_link = function() return { id = 0, plays = false } end
+		C.env.coop_mode = { group_travels = function() return false end }
+		local K = map_server()
+		for _, M in ipairs({ H, C, K }) do
+			M.env.vector = vector
+			M.env.xr_combat_ignore = { fighting_with_actor_npcs = {} }
+		end
+		local fighting = {}
+		K.env.coop_npc_combat = { _state = function() return { fighting = fighting } end }
+		K.add(make_obj(500, 0, 0, 0))
+		for _, id in ipairs({ 700, 701 }) do
+			K.add(make_obj(id, 10, 0, 0))
+			C.add(make_obj(id, 10, 0, 0))
+		end
+		load_script(K, "coop_world_fight").on_game_start()
+		local FC = load_script(C, "coop_world_fight")
+		FC.on_game_start()
+		K.env.coop_npc_players.invalidate()
+		return H, C, K, fighting, FC
+	end
+	local function tick(K, C)
+		NOW = NOW + 1100
+		K.env.coop_npc_players.invalidate()
+		fired(K)
+		deliver(K, C)
+		fired(C)
+	end
+
+	local H, C, K, fighting = stage()
+	local ct = C.env.xr_combat_ignore.fighting_with_actor_npcs
+	fighting[700] = { [500] = true }
+	tick(K, C)
+	check(ct[700] == true, "the NPC that fights him is in his table: the combat music starts")
+	check(K.refused == 0, "the map server writes nothing the engine refuses")
+	fighting[700], fighting[701] = nil, { [500] = true }
+	tick(K, C)
+	check(ct[700] == nil and ct[701] == true, "the table follows the map server's list")
+	fighting[701] = nil
+	tick(K, C)
+	check(ct[701] == nil, "the fight is over: the table is empty")
+
+	-- the world server's key of this player is from the level he left
+	H.env.coop.sync.set("session", "world.fight.1", { 700 })
+	tick(K, C)
+	check(ct[700] == nil, "a key left on the world server by the level he came from is not read here")
+
+	-- he left the level and came back with a new Lua state: he is told again
+	fighting[700] = { [500] = true }
+	tick(K, C)
+	local player = K.objects[500]
+	K.objects[500] = nil
+	tick(K, C)
+	K.objects[500] = player
+	C.env.xr_combat_ignore.fighting_with_actor_npcs = {}
+	local FC2 = load_script(C, "coop_world_fight")
+	FC2.on_game_start()
+	tick(K, C)
+	check(C.env.xr_combat_ignore.fighting_with_actor_npcs[700] == true, "a player who came back hears the fight that goes on")
+
+	-- a refusal is said, not swallowed
+	K.cast_refusal = "too many"
+	fighting[701] = { [500] = true }
+	tick(K, C)
+	local said = false
+	for _, line in ipairs(K.log) do
+		if line:find("too many", 1, true) then said = true end
+	end
+	check(said, "a list the engine refused is in the log")
+	K.cast_refusal = nil
+
+	-- A co-op player still reads the session key.
+	local H2, C2 = world_pair()
+	C2.env.vector = vector
+	C2.env.xr_combat_ignore = { fighting_with_actor_npcs = {} }
+	C2.add(make_obj(700, 10, 0, 0))
+	load_script(C2, "coop_world_fight").on_game_start()
+	H2.env.coop.sync.set("session", "world.fight.1", { 700 })
+	NOW = NOW + 1100
+	fired(C2)
+	check(C2.env.xr_combat_ignore.fighting_with_actor_npcs[700] == true, "co-op reads the playing host's fight list")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

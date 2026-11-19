@@ -32,16 +32,17 @@ for _, n in ipairs(REAL) do have_gamma = have_gamma and have_file(gamma(n)) end
 if not have_gamma then print("  (GAMMA scripts not found: the real-file checks are skipped)") end
 
 -- host with a client at 500; the shared layers coop_mods_nta stands on
-local function host_world()
+local function host_world(dedicated)
 	reset_world()
-	local H = machine("host", 0, { [0] = 0, [1] = 500 })
+	local H = machine("host", 0, dedicated and { [1] = 500 } or { [0] = 0, [1] = 500 })
 	local E = H.env
+	E.coop.is_dedicated = function() return dedicated == true end
 	H.TP = {}
 	E.coop_npc_players = load_script(H, "coop_npc_players")
 	E.coop_mods_core = load_script(H, "coop_mods_core")
 	E.coop_quests_core = load_script(H, "coop_quests_core")
 	E.LIFE = {}
-	E.coop.life_of = function(id) return E.LIFE[id] or "alive" end
+	E.coop.life_of = function(id) return E.LIFE[id] or (dedicated and id == 0 and "dead" or "alive") end
 	E.getFS = function() return { exist = function() return false end, update_path = function(_, _, file) return GAMMA_DIR .. BS .. file end } end
 	E.character_community = function(o) return o:character_community() end
 	E.task_status_functor, E.task_functor, E.xr_effects = {}, {}, {}
@@ -77,7 +78,7 @@ local function host_world()
 		obj_position_to_spawn_config_partial = function(o) return { vector = o:position() } end,
 		set_timeout = function(cb) E.NTA_TIMER = cb end,
 	}
-	E.LEVEL = "l03_agroprom"
+	E.LEVEL = dedicated and "fake_start" or "l03_agroprom"
 	E.level.name = function() return E.LEVEL end
 	E.CreateTimeEvent = function(a, b, t, f, ...) H.timers = H.timers or {}; H.timers[#H.timers + 1] = { name = tostring(b), f = f, p = { ... } } end
 	H.add(make_obj(500, 0, 0, 0, { _name = "client", _comm = "actor_stalker" }))
@@ -294,7 +295,7 @@ end
 
 print("== Urgent Orders: the check of the first update looks at the level of each player")
 do
-	local H, E = host_world()
+	local H, E = host_world(true)
 	local at = {}
 	E.tasks_urgent_orders = { is_from_duty = function() return false end, is_from_army = function() return false end,
 		actor_on_first_update = function() at[#at + 1] = E.PEER_SEEN end }
@@ -305,8 +306,20 @@ do
 	E.coop.levels = {
 		split = function() return true end,
 		my_level = function() return 1 end,
-		level_of_player = function(p) return p == 1 and 2 or 1 end,
+		carried = function() return {} end,
+		level_of_player = function(p) if p == 1 or p == 2 then return 2 end end,
 	}
+	H.objects[500] = nil
+	E.SE[500] = { position = vec(0, 0, 0), m_game_vertex_id = 2, m_level_vertex_id = 3,
+		alive = function() return true end, community = function() return "actor_stalker" end }
+	local players = E.coop.players
+	E.coop.players = function()
+		local list = players()
+		list[#list + 1] = { id = 2, avatar_id = 501 }
+		return list
+	end
+	E.SE[501] = { position = vec(1, 0, 0), m_game_vertex_id = 2, m_level_vertex_id = 3,
+		alive = function() return true end, community = function() return "actor_stalker" end }
 	E.coop_quests_core.with_level_of = function(peer, fn, ...)
 		E.PEER_SEEN = peer
 		return fn(...)
@@ -346,16 +359,25 @@ do
 	check(uo.is_from_duty(), "a running task says whose it is, wherever the group is")
 	E.TASKS.bar_dolg_leader_task_urgent_orders = nil
 	check(OFIRST >= 1, "the check of the first update runs when a player is seen")
-	-- split levels: the faction's level is the level the player stands on, not the world server's
+	-- Server: the world checks the map-server record of the Duty player.
+	local player, roster, dedicated = H.objects[500], E.coop.players, E.coop.is_dedicated
+	H.objects[500] = nil
+	E.coop.is_dedicated = function() return true end
+	E.coop.players = function() return { { id = 1, avatar_id = 500 } } end
+	E.SE[500] = { position = vec(0, 0, 0), m_game_vertex_id = 2, m_level_vertex_id = 3,
+		alive = function() return true end, community = function() return "actor_dolg" end }
 	E.coop.levels = {
 		split = function() return true end,
 		my_level = function() return 1 end,
-		level_of_player = function(p) return p == 1 and 2 or 1 end,
+		level_of_player = function(p) if p == 1 then return 2 end end,
+		carried = function() return {} end,
 	}
-	E.alife = function() return { level_name = function(_, l) return l == 2 and "l05_bar" or "l01_escape" end } end
-	E.LEVEL = "l01_escape"
-	check(uo.is_from_duty(), "a Duty player at the Bar of a map server, the host elsewhere: Duty's Urgent Orders")
+	E.alife = function() return { level_name = function(_, l) return l == 2 and "l05_bar" or "fake_start" end } end
+	E.LEVEL = "fake_start"
+	check(uo.is_from_duty(), "a Duty player at the Bar of a map server starts Duty's Urgent Orders")
 	E.coop.levels = nil
+	H.objects[500], E.coop.players, E.coop.is_dedicated = player, roster, dedicated
+	E.SE[500], E.LEVEL = nil, "l03_agroprom"
 	H.objects[500]._comm = "actor_isg"
 	check(E.dialogs.actor_true_isg() == true, "an ISG client")
 	E.xr_effects.lttz_set_squad_enemy_to_actor()
@@ -486,8 +508,8 @@ end
 
 print("== a status pass for a player on another level: his level, his place")
 do
-	local H, E = host_world()
-	local LV = { [1] = "l03_agroprom", [2] = "l02_garbage" }
+	local H, E = host_world(true)
+	local LV = { [1] = "l03_agroprom", [2] = "l02_garbage", [3] = "fake_start" }
 	E.game_graph = function() return { vertex = function(_, v) return { level_id = function() return v end } end } end
 	local sim = {}
 	function sim:level_name(l) return LV[l] end
@@ -501,8 +523,8 @@ do
 		alive = function() return true end, community = function() return "actor_stalker" end }
 	E.coop.levels = {
 		split = function() return true end,
-		my_level = function() return 1 end,
-		level_of_player = function(peer) return peer == 1 and E.HIS_LEVEL or 1 end,
+		my_level = function() return 3 end,
+		level_of_player = function(peer) if peer == 1 then return E.HIS_LEVEL end end,
 		carried = function() return {} end,
 		map_servers = function() return { { bridge = 0x101, level = 2 } } end,
 	}
@@ -520,12 +542,12 @@ do
 	local fn = E.task_status_functor.hold_the_ground_task_status_functor
 	local tsk = { stage = 0 }
 	local r = fn(tsk, "t")
-	check(#passes == 2, "the host's pass and his")
-	check(passes[1][1] == "l03_agroprom" and passes[1][2] == 0, "the host on his own level")
-	check(passes[2][1] == "l02_garbage" and passes[2][2] == 500, "he on his")
+	check(#passes == 1, "only the player's pass reaches the positional check")
+	check(passes[1] and passes[1][2] ~= 0, "the ghost does not get a task pass")
+	check(passes[1] and passes[1][1] == "l02_garbage" and passes[1][2] == 500, "the player is checked on his map")
 	check(tsk.stage == 1, "his pass moves the stage: a positional task starts on a map server's level")
-	check(r == nil, "and the host's fail does not end it")
-	check(E.level.name() == "l03_agroprom", "the far view is closed")
+	check(r == nil, "and the check stays in progress")
+	check(E.level.name() == "fake_start", "the far view returns to the service level")
 	tsk.stage = 2
 	E.SE[500].m_game_vertex_id = 1
 	E.HIS_LEVEL = 1

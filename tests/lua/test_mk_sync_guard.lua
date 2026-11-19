@@ -174,5 +174,12 @@ do
 	check(on_msg:find("g_coop_friendly_fire", 1, true) ~= nil and on_msg:find("set_finish_downed", 1, true) ~= nil, "a map server takes them")
 end
 
+print("== server clients have no playing world host")
+for _, name in ipairs({ "coop_world_fight", "coop_npc_effects", "coop_world_weather" }) do
+	local src = read("gamedata/scripts/" .. name .. ".script") or ""
+	check(src:find("group_travels()", 1, true) ~= nil and src:find("led_by_host_process", 1, true) == nil,
+		name .. ": uses group travel policy for the host's shared effects")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

@@ -4,7 +4,8 @@
 MODE = "host"
 dofile("tests/lua/support/stubs.lua")
 
-local LEVELS = { [10] = 1, [20] = 2 } -- game vertex -> level
+coop.is_dedicated = function() return true end
+local LEVELS = { [10] = 1, [20] = 2, [30] = 3 } -- game vertex -> level
 game_graph = function()
 	return { vertex = function(_, v) return { level_id = function() return LEVELS[v] end } end }
 end
@@ -15,9 +16,10 @@ local CARRIED = {
 }
 local RECORDS = {
 	[500] = { position = vec(5, 0, 5), m_level_vertex_id = 77, m_game_vertex_id = 20, alive = function() return true end },
+	[510] = { position = vec(1, 0, 1), m_level_vertex_id = 10, m_game_vertex_id = 10, alive = function() return true end },
 	[901] = { parent_id = 500, section_name = function() return "quest_doc" end },
 	[70] = { position = vec(100, 0, 100), m_game_vertex_id = 20 }, -- a target on his level
-	[71] = { position = vec(100, 0, 100), m_game_vertex_id = 10 }, -- a target on the host's
+	[71] = { position = vec(100, 0, 100), m_game_vertex_id = 10 }, -- a target on the other player's map
 }
 alife_object = function(id) return RECORDS[id] end
 local RELEASED, MADE = {}, {}
@@ -27,14 +29,14 @@ ini_sys = { r_float_ex = function(_, sec, key) return key == "max_uses" and sec 
 
 coop.levels = {
 	split = function() return true end,
-	my_level = function() return 1 end,
-	level_of_player = function(peer) return peer == 1 and 2 or 1 end,
+	my_level = function() return 3 end,
+	level_of_player = function(peer) return ({ [1] = 2, [2] = 1 })[peer] end,
 	carried = function(id) return CARRIED[id] or {} end,
 }
 local ACTOR = { }
 function ACTOR:id() return 0 end
 function ACTOR:position() return vec(1, 0, 1) end
-function ACTOR:game_vertex_id() return 10 end
+function ACTOR:game_vertex_id() return 30 end
 function ACTOR:alive() return true end
 db = db or {}
 db.actor = ACTOR
@@ -44,7 +46,7 @@ level.object_by_id = function(id) return id == 0 and ACTOR or nil end
 print("== far_body")
 load_script_file("coop_quests_core")
 local qc = coop_quests_core
-check(qc.far_body(0, 500) == nil, "a player on this level has no far body")
+check(qc.far_body(0, 0) == nil, "the world server ghost has no far body")
 local far = qc.far_body(1, 500)
 check(far and far.far == true and far:id() == 500, "a player on another level has one")
 check(far:position().x == 5 and far:level_vertex_id() == 77 and far:game_vertex_id() == 20, "it stands where his record stands")
@@ -68,39 +70,41 @@ check(far:object("bandage"):get_remaining_uses() == 3, "uses of a record: the se
 n = 0
 far:iterate_inventory(function() n = n + 1; return true end, nil)
 check(n == 1, "true stops the walk, as in the engine")
-far:transfer_item(doc, ACTOR)
-check(RELEASED[1] == 901 and MADE[1].section == "quest_doc" and MADE[1].to == ACTOR, "handing over: the record goes, a new one is made at the other end")
+local receiver = { id = function() return 600 end }
+far:transfer_item(doc, receiver)
+check(RELEASED[1] == 901 and MADE[1].section == "quest_doc" and MADE[1].to == receiver, "handing over: the record goes, a new one is made at the other end")
 -- the quest audit, 2026-11-13: the stock pays a fetch task by the item's condition (cost * con^2); a new whole item was made
 check(MADE[1].t and MADE[1].t.cond == 0.8, "as worn as the one that went: a worn item is not paid as a new one")
-far:transfer_item(far:object("bandage"), ACTOR)
+far:transfer_item(far:object("bandage"), receiver)
 check(MADE[2].section == "bandage" and MADE[2].t == nil, "a whole item: made the stock's plain way")
 
 coop.levels.split = function() return false end
 check(qc.far_body(1, 500) == nil, "split levels off: nobody is far")
 coop.levels.split = function() return true end
 
+coop.avatar_of = function(peer) return ({ [1] = 500, [2] = 510 })[peer] end
+coop.players = function()
+	return { { id = 1, nick = "A", avatar_id = 500 }, { id = 2, nick = "B", avatar_id = 510 } }
+end
+
 print("== bodies and the nearest on a level")
 local ids = {}
 for _, c in ipairs(qc.bodies()) do ids[c.id] = c end
-check(ids[0] and ids[500] and ids[500].obj.far == true and ids[500].peer == 1, "bodies: the actor and the player elsewhere")
+check(not ids[0] and ids[510] and ids[500] and ids[500].obj.far == true and ids[500].peer == 1, "bodies: both remote players, no ghost")
 local on_chars = false
 for _, c in ipairs(qc.characters()) do on_chars = on_chars or c.id == 500 end
 check(not on_chars, "characters() stays what it was: objects on this level")
 local who, peer, d = qc.nearest_body(RECORDS[70])
-check(who and who:id() == 500 and peer == 1, "a target on his level: he is the nearest, whatever the coordinates of the host")
+check(who and who:id() == 500 and peer == 1, "a target on his level: he is the nearest, regardless of the other player")
 check(d == 95 * 95 * 2, "and his distance")
 who = qc.nearest_body(RECORDS[71])
-check(who and who:id() == 0, "a target on the host's level: not him, though his coordinates are nearer")
+check(who and who:id() == 510, "a target on B's level: the other map is irrelevant")
 check(qc.nearest_body({ position = vec(0, 0, 0), m_game_vertex_id = 30 }) == nil, "nobody on that level: nil")
 check(qc.nearest_body(nil) == nil, "no target: nil")
 local _, _, flat = qc.nearest_body({ position = vec(5, 40, 5), m_game_vertex_id = 20 }, true)
 check(flat == 0, "flat ignores height")
 
 print("== the group's inventory in coop_tasks")
-coop.avatar_of = function(peer) return peer == 1 and 500 or nil end
-coop.players = function()
-	return { { id = 0, nick = "host", is_self = true, avatar_id = 0 }, { id = 1, nick = "c", is_self = false, avatar_id = 500 } }
-end
 ACTOR.iterate_inventory = function() end
 ACTOR.object = function() return nil end
 IsItem = function() return nil end
