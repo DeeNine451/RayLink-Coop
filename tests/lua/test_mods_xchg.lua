@@ -133,6 +133,135 @@ if name == "hostplay" or name == "srv_map" then
 	tick(10500)
 	check(X.reserved(y:id()) == nil, who .. ": ... is free again after the hold (10 s)")
 
+	-- Opt-in exchanges keep the reply pending and reserve both spent and unspent inputs until completion.
+	local commits_after, awards, deferred_rollbacks = 0, 0, 0
+	local function deferred_spec()
+		return {
+			reserve = function(t, from, body)
+				local spent = { t.i, t.j }
+				if t.overflow then
+					for id = 60000, 60063 do spent[#spent + 1] = id end
+				end
+				return { ids = { t.keep }, spent = spent }
+			end,
+			commit = function(t, from, body, token)
+				commits_after = commits_after + 1
+				if t.refuse then return false, "no" end
+				return true, from + 10
+			end,
+			after_gone = function(t, from, body, token, result)
+				if t.fail_award then return false, "award_failed" end
+				awards = awards + 1
+				return true, { award = result, peer = from, body = body and body:id(), input = token.spent[1] }
+			end,
+			rollback = function() deferred_rollbacks = deferred_rollbacks + 1 end,
+		}
+	end
+	check(X.serve("deferred", deferred_spec()), who .. ": serves a deferred exchange")
+	check(X.serve("invalid_deferred", { commit = function() end, after_gone = true }) == false,
+		who .. ": after_gone must be a function")
+	local first, second, keep = item(500):id(), item(500):id(), item(500):id()
+	local deferred = { k = "deferred", o = "1:7:31", i = first, j = second, keep = keep }
+	local before = answers()
+	request(deferred, 1)
+	check(answers() == before and commits_after == 1 and awards == 0,
+		who .. ": successful commit does not award or send a terminal reply while inputs remain")
+	request(deferred, 1)
+	a, target = last_answer()
+	check(answers() == before + 1 and target == 1 and a.o == deferred.o and a.ok == false and a.pending == true
+		and a.why == "busy" and commits_after == 1 and awards == 0,
+		who .. ": a duplicate during the wait gets a non-terminal busy response")
+	SE[first] = nil
+	tick()
+	check(answers() == before + 1 and awards == 0, who .. ": unregistering the server object alone is insufficient")
+	OBJ[first] = nil
+	tick()
+	check(answers() == before + 1 and awards == 0 and X.reserved(first) == deferred.o
+		and X.reserved(second) == deferred.o and X.reserved(keep) == deferred.o,
+		who .. ": one removal does not release any reservation or finalize the exchange")
+	request({ k = "deferred", o = "1:7:32", i = second }, 1)
+	a = last_answer()
+	check(a.o == "1:7:32" and a.ok == false and a.why == "reserved" and commits_after == 1,
+		who .. ": a different op cannot spend an input while the first waits")
+	release_id(second)
+	tick()
+	a, target = last_answer()
+	check(answers() == before + 3 and target == 1 and a.o == deferred.o and a.ok == true and a["r.award"] == 11
+		and a["r.peer"] == 1 and a["r.body"] == 500 and a["r.input"] == first and awards == 1
+		and X.reserved(first) == nil and X.reserved(second) == nil and X.reserved(keep) == nil,
+		who .. ": all gone runs the follow-up once and sends its result")
+	request(deferred, 1)
+	a = last_answer()
+	check(answers() == before + 4 and a.ok == true and a["r.award"] == 11 and a.pending == nil and awards == 1
+		and commits_after == 1, who .. ": a repeat after completion gets the cached final success")
+
+	local stuck = item(500):id()
+	local expiring = { k = "deferred", o = "1:7:33", i = stuck, keep = keep }
+	before = answers()
+	request(expiring, 1)
+	tick(9999)
+	check(answers() == before and X.reserved(stuck) == expiring.o and awards == 1,
+		who .. ": waits the full ten seconds if the object is still present")
+	tick(1)
+	a = last_answer()
+	check(answers() == before + 1 and a.o == expiring.o and a.ok == false and a.why == "gone_timeout"
+		and a.pending == nil and awards == 1 and X.reserved(stuck) == nil and X.reserved(keep) == nil
+		and deferred_rollbacks == 1, who .. ": expiry answers without awarding and releases the reservations")
+	release_id(stuck)
+	tick()
+	request(expiring, 1)
+	a = last_answer()
+	check(answers() == before + 2 and a.why == "gone_timeout" and awards == 1 and commits_after == 2,
+		who .. ": a late disappearance or retry cannot turn the cached timeout into an award")
+
+	local gone = item(500):id()
+	request({ k = "deferred", o = "1:7:34", i = gone, fail_award = true }, 1)
+	release_id(gone)
+	tick()
+	a = last_answer()
+	check(a.o == "1:7:34" and a.ok == false and a.why == "award_failed" and X.reserved(gone) == nil
+		and deferred_rollbacks == 1, who .. ": a refusal from the follow-up is terminal after a successful commit")
+	request({ k = "deferred", o = "1:7:35", i = keep, refuse = true }, 1)
+	a = last_answer()
+	check(a.o == "1:7:35" and a.why == "no" and awards == 1 and deferred_rollbacks == 2 and X.reserved(keep) == nil,
+		who .. ": failed commit rolls back without waiting or awarding")
+	request({ k = "deferred", o = "1:7:36", i = keep, overflow = true }, 1)
+	a = last_answer()
+	check(a.o == "1:7:36" and a.why == "spent_ids" and commits_after == 4 and deferred_rollbacks == 3,
+		who .. ": refuses an exchange whose spent list cannot all be reserved")
+	request({ k = "deferred", o = "1:7:37", keep = keep }, 1)
+	a = last_answer()
+	check(a.o == "1:7:37" and a.ok == true and a["r.award"] == 11 and awards == 2 and X.reserved(keep) == nil,
+		who .. ": the follow-up can finish immediately when there are no spent ids")
+
+	local unseen = item(500):id()
+	request({ k = "deferred", o = "1:7:38", i = unseen }, 1)
+	release_id(unseen)
+	local lookup = alife_object
+	alife_object = function() error("lookup failed") end
+	before = answers()
+	tick()
+	alife_object = lookup
+	check(answers() == before and awards == 2, who .. ": a lookup error cannot confirm disappearance")
+	tick(10000)
+	a = last_answer()
+	check(a.o == "1:7:38" and a.why == "gone_timeout" and awards == 2,
+		who .. ": a disappearance first confirmed after the deadline cannot award")
+
+	local avatar_error = item(500):id()
+	local failed_body = { k = "deferred", o = "1:7:39", i = avatar_error }
+	request(failed_body, 1)
+	release_id(avatar_error)
+	local find_avatar = coop_mods_core.avatar
+	coop_mods_core.avatar = function() error("avatar lookup failed") end
+	local updated = pcall(tick)
+	coop_mods_core.avatar = find_avatar
+	a = last_answer()
+	check(updated and a.o == failed_body.o and a.ok == false and a.why == "error" and awards == 2
+		and X.reserved(avatar_error) == nil, who .. ": an avatar lookup error at completion finalizes the failure")
+	request(failed_body, 1)
+	check(last_answer().why == "error" and awards == 2, who .. ": a retry cannot revive the failed follow-up")
+
 	-- a commit that fails or raises: rolled back, answered ok = false, nothing stays reserved
 	commits, rollbacks = N.commit, N.rollback
 	request({ k = "demo", o = "1:7:4", i = it:id(), boom = true }, 1)
@@ -227,6 +356,24 @@ if name == "hostplay" or name == "srv_map" then
 		release_id(spent:id())
 		tick()
 
+		local own_deferred = item(0):id()
+		local deferred_cb = {}
+		X.ask("deferred", { i = own_deferred, key = own_deferred },
+			function(ok, r, reason) deferred_cb[#deferred_cb + 1] = { ok, r, reason } end)
+		check(#deferred_cb == 0 and X.busy("deferred", own_deferred),
+			"co-op host: its own deferred request stays pending after ask")
+		release_id(own_deferred)
+		tick()
+		tick()
+		local result = deferred_cb[1] and deferred_cb[1][2]
+		check(#deferred_cb == 1 and deferred_cb[1][1] == true and type(result) == "table" and result.award == 10
+			and result.body == 0 and not X.busy("deferred", own_deferred)
+			and sent_count("mods.xchg") == xchg_before, "co-op host: its own deferred request finishes once and stays off the wire")
+		X.ask("deferred", { i = own:id() }, function(ok, r, reason) deferred_cb[#deferred_cb + 1] = { ok, r, reason } end)
+		tick(10000)
+		check(#deferred_cb == 2 and deferred_cb[2][1] == false and deferred_cb[2][3] == "gone_timeout",
+			"co-op host: the decider's expiry settles its own request at ten seconds")
+
 		-----------------------------------------------------------------------
 		-- the co-op client's side
 		-----------------------------------------------------------------------
@@ -258,6 +405,27 @@ if name == "hostplay" or name == "srv_map" then
 		deliver(ans, 0) -- the answer twice: the callback once
 		check(#cg == 1 and cg[1][1] == true and cg[1][2] == mine:id() and not X.busy("demo", mine:id()),
 			"client: the answer calls cb(ok, r) exactly once and ends the op")
+		local remote = item(500):id()
+		local remote_cb = {}
+		X.set_timeout("deferred", 15000)
+		X.ask("deferred", { i = remote, key = remote },
+			function(ok, r, reason) remote_cb[#remote_cb + 1] = { ok, r, reason } end)
+		_, raw = sent("mods.xchg")
+		as_host()
+		deliver(raw, 1)
+		deliver(raw, 1)
+		_, ans = sent("mods.xchg_r")
+		as_client()
+		deliver(ans, 0)
+		check(#remote_cb == 0 and X.busy("deferred", remote), "client: a retry's busy response leaves the original op pending")
+		as_host()
+		tick(10000)
+		_, ans = sent("mods.xchg_r")
+		as_client()
+		deliver(ans, 0)
+		deliver(ans, 0)
+		check(#remote_cb == 1 and remote_cb[1][1] == false and remote_cb[1][3] == "gone_timeout"
+			and not X.busy("deferred", remote), "client: receives the decider timeout once with a longer player timeout")
 		-- an answer from a peer other than the host is not taken
 		local cg2 = {}
 		local cop2 = X.ask("demo", { key = "z" }, function(ok, r, why) cg2[#cg2 + 1] = why end)
@@ -354,6 +522,16 @@ elseif name == "srv_world" then
 	local t, raw = sent("mods.xchg")
 	check(t and t._peer == 1 and t.o == "1:7:1" and raw.target == mode_set.bridge and N.commit == commits and answers() == 0,
 		"world server: the request is passed to the map server of his map, not committed here")
+	local phases = 0
+	X.serve("deferred", {
+		commit = function() phases = phases + 1 return true end,
+		after_gone = function() phases = phases + 1 return true end,
+	})
+	request({ k = "deferred", o = "1:7:2", i = it:id() }, 1)
+	t, raw = sent("mods.xchg")
+	tick(10000)
+	check(t and t._peer == 1 and t.o == "1:7:2" and raw.target == mode_set.bridge and phases == 0 and answers() == 0,
+		"world server: the map server also owns deferred exchanges")
 	local before = #SENT
 	check(X.ask("demo", { i = it:id() }, function() end) == nil and #SENT == before, "world server: its ghost asks nothing")
 else
