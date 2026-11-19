@@ -11,8 +11,10 @@
 	                                                           itself since round 3: d is for a host of build 56)
 	  mods.hf_pickup   client -> host  { o object }            pack furniture up (the mod's own pickup, run with
 	                                                           the requester's character as the actor)
+	  mods.hf_takeall  client -> host  { o box }               pack an empty, registered HF stash up
+	  mods.hf_freeze   client -> host  { o object, f boolean } set furniture physics; hf_data carries is_frozen
 	  mods.hf_lamp     client -> host  { o, on }               lamp on/off (tools already used by the client)
-	  mods.hf_refuel   client -> host  { o }                   lamp refuelled (fuel already used by the client)
+	  mods.hf_refuel   client -> host  { o, i fuel }           refill a lamp; hf_data carries the confirmed condition
 	  mods.hf_box      client -> host  { k kind, o owner }     the hidden box of a workbench / stove / harvester
 	  mods.hf_box_r    host -> client  { k, o, b box | -1 }    answer; the client opens the box when it is online
 	                                                           (the host watches a harvester's box: a client's artefact starts it)
@@ -56,9 +58,14 @@ local function wrapper_of(id)
 	return ok and w or nil
 end
 
-local function wrapper_fuel(lamp_id)
-	local w = wrapper_of(lamp_id)
-	if w then w.fuel = 1.0 end -- the binder keeps fuel in itself, on every machine
+near_ok = near
+wrapper = wrapper_of
+
+local function wrapper_fuel(w, condition)
+	if not (w and type(condition) == "number" and condition == condition) then return end
+	local fuel = math.max(0, math.min(1, condition))
+	if type(w.fuel) == "number" then w.fuel = fuel end
+	if type(w.condition) == "number" then w.condition = fuel end
 end
 
 -------------------------------------------------------------------------------
@@ -77,14 +84,20 @@ end
 -- goes through as before, in "refuse" nothing is lit or refuelled.
 -- Facts: Co-op, the host's copy of the player's character and his items; Server, the map server of his level (C().on "host"
 -- passes the request there) with the same facts.
--- wait: client, item -> { at, kind, lamp }; done: client, item -> until (the host took it, its removal is on its way); left: host
+-- wait: client, item -> { at, kind }; done: client, item -> until (the host took it, its removal is on its way); left: host
 local spend = { wait = {}, done = {}, left = {}, ACK_MS = 15000, TOOL_STEP = 0.05, STEP_SLACK = 0.001 }
+local fuel_revision = setmetatable({}, { __mode = "k" }) -- wrapper -> most recent authoritative condition message
 
 local function trust(name, ok, fmt, ...)
 	local found, t = pcall(function() return _G.coop_trust end)
 	if not (found and type(t) == "table" and type(t.pass) == "function") then return true end
 	local good, res = pcall(t.pass, name, ok, fmt, ...)
 	return not good or res ~= false
+end
+
+local function object_id(value)
+	local id = tonumber(value)
+	if id and id > 0 and id < 65535 and id == math.floor(id) then return id end
 end
 
 -- The tools a lamp needs (ui_furniture_light.toggle_light): its require_tool list, and matches for the old require_matches.
@@ -170,8 +183,9 @@ local function client_ask(verb, t, obj, kind, lamp_id)
 	local id = obj:id()
 	if spend.wait[id] or spend.done[id] then return false end
 	t.i = C().hid(id)
+	local lamp = lamp_id and wrapper_of(lamp_id)
 	if not C().to_host(verb, t) then return false end
-	spend.wait[id] = { at = time_global() + spend.ACK_MS, kind = kind, lamp = lamp_id }
+	spend.wait[id] = { at = time_global() + spend.ACK_MS, kind = kind, lamp = lamp, revision = lamp and fuel_revision[lamp] }
 	return true
 end
 
@@ -198,12 +212,15 @@ local function client_item_answer(t)
 	elseif t.r == "no" then
 		log("the host refused the %s of item %d: nothing spent", w.kind == "fuel" and "refuel" or "light", id)
 		return
-	else
+	elseif t.r == "took" then
 		-- "took": the host's removal (an entity release) and this answer (a Lua event) take separate channels; until the removal
 		-- is here the item is still in this inventory and must not be named again (round 3, R2-S1, as the mine's spent)
 		spend.done[id] = time_global() + spend.ACK_MS
+	else
+		return
 	end
-	if w.kind == "fuel" then wrapper_fuel(w.lamp) end
+	-- An item reply also confirms a refill. A newer hf_data condition takes precedence if it arrived first.
+	if w.lamp and fuel_revision[w.lamp] == w.revision then wrapper_fuel(w.lamp, 1.0) end
 end
 
 -- Client: no answer in ACK_MS (a host of build 56 lit or refuelled on our word): spent here, as build 56 did. An item the host
@@ -219,7 +236,8 @@ local function client_spend_tick()
 			spend.wait[id] = nil
 			log("no answer to the %s of item %d in %d s: spent here (a host of build 56?)", w.kind, id, spend.ACK_MS / 1000)
 			spend_here(level.object_by_id(id), w.kind)
-			if w.kind == "fuel" then wrapper_fuel(w.lamp) end
+			-- Keep the old timeout fallback for a lamp for which the host has never sent a condition.
+			if w.lamp and not fuel_revision[w.lamp] then wrapper_fuel(w.lamp, 1.0) end
 		end
 	end
 end
@@ -303,19 +321,31 @@ end
 -------------------------------------------------------------------------------
 local data_orig = {} -- update_data / delete_data originals
 
+local function refresh_frozen_menu(w)
+	local pf = C().mod("placeable_furniture")
+	local refresh = C().fn(pf, "update_radial_gui")
+	local menu = pf and pf.RadialGUI
+	local target = C().fn(pf, "get_wrapper_at_crosshair")
+	if refresh and menu and menu:IsShown() and target and rawequal(target(), w) then refresh(w) end
+end
+
 local function host_publish_data(id)
 	local hm = C().mod("hf_obj_manager")
 	local get = hm and C().fn(hm, "get_data")
 	if not get then return end
 	local ok, d = pcall(get, id)
 	local s = ok and type(d) == "table" and C().ser(d) or nil
+	local wire_id = C().hid(id)
+	if not wire_id then return end
 	if s and #s < 4500 then -- encode may triple it
-		C().publish("hf_data", { o = id, d = s })
+		C().publish("hf_data", { o = wire_id, d = s })
 	elseif not (ok and d) then
-		C().publish("hf_data", { o = id, x = true })
+		C().publish("hf_data", { o = wire_id, x = true })
 	end
 	st.data_out = st.data_out + 1
 end
+
+publish = host_publish_data
 
 local function scalar_table(d, max)
 	if type(d) ~= "table" then return nil end
@@ -334,11 +364,28 @@ end
 local function client_data(t)
 	local id = C().lid(tonumber(t.o))
 	if not (id and data_orig.update and data_orig.delete) then return end
+	-- A map authority can hear the world's relay of its own update. Keep the live state on that map.
+	if coop_mode.leads_here() and level.object_by_id(id) then return end
 	st.data_in = st.data_in + 1
-	pcall(data_orig.delete, id)
-	if t.x == true then return end
+	if t.x == true then
+		pcall(data_orig.delete, id)
+		return
+	end
 	local d = C().deser(t.d)
-	if type(d) == "table" and next(d) then pcall(data_orig.update, id, d) end
+	if type(d) ~= "table" then return end
+	pcall(data_orig.delete, id)
+	pcall(data_orig.update, id, d)
+	if not coop_mode.is_player_mirror() then return end
+	local w = wrapper_of(id)
+	if not w then return end
+	if type(d.condition) == "number" then
+		fuel_revision[w] = d
+		wrapper_fuel(w, d.condition)
+	end
+	if type(d.is_frozen) == "boolean" then
+		w.is_frozen = d.is_frozen
+		refresh_frozen_menu(w)
+	end
 end
 
 local function install_data_mirror()
@@ -348,7 +395,7 @@ local function install_data_mirror()
 		data_orig.update = orig
 		return function(id, ...)
 			local r = orig(id, ...)
-			if C().is_host() then host_publish_data(id) end
+			if coop_mode.leads_here() or coop_mode.decides_world() then host_publish_data(id) end
 			return r
 		end
 	end)
@@ -366,6 +413,183 @@ local function install_data_mirror()
 		elseif C().is_bridge(from) then -- a map server changed it: the world's save keeps it, every machine hears it
 			client_data(t)
 			C().to_all("hf_data", t)
+		end
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- Empty HF stashes: one operation on the map that has the box and the requester.
+-------------------------------------------------------------------------------
+local packing = {}
+
+local function is_hf_stash(obj)
+	return obj and ini_sys:r_string_ex(obj:section(), "placeable_type") == "stash"
+end
+
+local function run_level_action(verb, action, t)
+	if coop_mode.leads_here() and coop_mode.actor_is_player() then
+		return action(t, C().self_peer())
+	end
+	if coop_mode.is_player_mirror() then return C().to_host(verb, t) end
+end
+
+local function pack_stash(box, player, book, section)
+	local id = box:id()
+	local request = { stash_id = id, cancel = false }
+	local ok, err = C().as_player(player, SendScriptCallback, "actor_on_stash_remove", request)
+	if not ok then C().report("hf", "stash removal callback", err) end
+	if not ok or request.cancel or not box:is_inv_box_empty() then return false end
+
+	-- Reserve the return item before deleting the box. Roll it back if the box is still there.
+	local item = alife_create_item(section, player)
+	if not item then return false end
+	local released, release_error = pcall(alife_release_id, id)
+	if not released then C().report("hf", "stash release", release_error) end
+	if alife_object(id) then
+		alife_release_id(item.id)
+		return false
+	end
+
+	book[id] = nil
+	local items = C().mod("coop_mods_items")
+	local note_owner = C().fn(items, "note_stash_owner")
+	if note_owner then note_owner(id, nil) end
+	level.map_remove_object_spot(id, "treasure")
+	if not coop_mode.decides_world() then
+		-- The world's stash book is sent to observers by the existing (chunked for large lists) m_data sync.
+		C().publish("stash_book", { b = C().hid(id), x = true })
+	end
+	st.pickup = st.pickup + 1
+	return true
+end
+
+local function host_takeall(t, from)
+	local wire_id = object_id(t.o)
+	local id = wire_id and object_id(C().lid(wire_id))
+	if not trust("hf_takeall_id", id ~= nil, "player #%s: invalid HF stash id", tostring(from)) or not id then return end
+	if packing[id] then return end
+	local box, player = level.object_by_id(id), C().avatar(from)
+	local book = m_data().player_created_stashes
+	local section = type(book) == "table" and book[id]
+	local matches = is_hf_stash(box) and type(section) == "string" and ini_sys:section_exist(section)
+		and ini_sys:r_string_ex(box:section(), "item_section") == section and IsInvbox(box) and alife_object(id) ~= nil
+	if not trust("hf_takeall_section", matches, "player #%s: box %d is not a registered HF stash", tostring(from), id)
+		or not matches then return end
+	if not trust("hf_takeall_near", player and near(box, player), "player #%s: stash %d is out of reach", tostring(from), id)
+		or not player then return end
+	local empty = box:is_inv_box_empty()
+	if not trust("hf_takeall_empty", empty, "player #%s: stash %d still has items", tostring(from), id) or not empty then return end
+
+	packing[id] = true
+	local ok, packed = pcall(pack_stash, box, player, book, section)
+	packing[id] = nil
+	if not ok then C().report("hf", "packing stash", packed) end
+	return ok and packed
+end
+
+local function install_takeall()
+	if not C().mod("hf_monkeypatches") then return end
+	local ui = C().mod("ui_inventory")
+	if not ui then return end
+	C().wrap(ui.UIInventory, "LMode_TakeAll", "hf_monkeypatches.UIInventory.LMode_TakeAll", function(orig)
+		return function(self, ...)
+			if not C().active() then return orig(self, ...) end
+			local box, bag = self:GetPartner(), self.CC["npc_bag"]
+			if not (bag and is_hf_stash(box)) or next(bag.indx_id) then return orig(self, ...) end
+			if run_level_action("hf_takeall", host_takeall, { o = C().hid(box:id()) }) then hide_hud_inventory() end
+		end
+	end)
+	C().on("hf_takeall", host_takeall, "host")
+	C().set_limit("hf_takeall", 5, 1)
+end
+
+local function install_frozen()
+	local b = C().mod("bind_hf_base")
+	local hm = C().mod("hf_obj_manager")
+	local cls = b and b.hf_binder_wrapper
+	local set_frozen = C().fn(cls, "set_frozen")
+	if not (set_frozen and hm and C().fn(hm, "update_data") and C().fn(hm, "get_data")) then return end
+	local function host_frozen(t, from)
+		local wire_id = object_id(t.o)
+		local id = wire_id and object_id(C().lid(wire_id))
+		local valid = id ~= nil and type(t.f) == "boolean"
+		if not trust("hf_freeze_args", valid, "player #%s: invalid freeze request", tostring(from)) or not valid then return end
+		local w, player = wrapper_of(id), C().avatar(from)
+		local d = w and hm.get_data(id)
+		local movable = type(d) == "table" and not d.is_world_obj and w.object ~= nil
+		if not trust("hf_freeze_object", movable, "player #%s: furniture %d cannot be frozen or unfrozen", tostring(from), id)
+			or not movable then return end
+		if not trust("hf_freeze_near", player and near(w.object, player), "player #%s: furniture %d is out of reach", tostring(from), id)
+			or not player then return end
+		set_frozen(w, t.f)
+		if w.is_frozen == t.f then
+			hm.update_data(id, { is_frozen = t.f })
+			if coop_mode.actor_is_player() then refresh_frozen_menu(w) end
+		end
+	end
+	local function request_frozen(orig)
+		return function(self, value, ...)
+			if not C().active() then return orig(self, value, ...) end
+			if self.object then
+				return run_level_action("hf_freeze", host_frozen, { o = C().hid(self.object:id()), f = value })
+			end
+		end
+	end
+	C().wrap(cls, "set_frozen", "bind_hf_base.hf_binder_wrapper.set_frozen", request_frozen)
+	-- LuaBind copies methods at class declaration. Later classes inherit our wrapper already.
+	for module, member in pairs({
+		bind_alarm_system = "alarm_system_wrapper",
+		bind_artifact_harvester = "artifact_harvester_wrapper",
+		bind_digital_clock_furniture = "haru_placeable_digital_clock_wrapper",
+		bind_hideout_cat = "hideout_cat_wrapper",
+		bind_light_furniture = "placeable_light_wrapper",
+		bind_table_fan = "haru_placeable_fan_wrapper",
+		bind_trading_computer = "trading_computer_wrapper",
+		bind_workshop_furniture = "hf_workshop_wrapper",
+		placeable_radio = "placeable_radio_wrapper",
+	}) do
+		local mod = rawget(_G, module) and C().mod(module)
+		local subclass = mod and mod[member]
+		if C().fn(subclass, "set_frozen") == set_frozen then
+			C().wrap(subclass, "set_frozen", module .. "." .. member .. ".set_frozen", request_frozen)
+		end
+	end
+	C().wrap(b, "freeze_obj", "bind_hf_base.freeze_obj", function(orig)
+		return function(id, ...)
+			if not C().active() then return orig(id, ...) end
+			local d, w = hm.get_data(id), wrapper_of(id)
+			if coop_mode.leads_here() and w and d and d.is_frozen == false and not d.is_world_obj then
+				if not w.object:get_physics_shell() then return false end
+				set_frozen(w, false)
+				return true
+			end
+			local frozen = orig(id, ...)
+			if coop_mode.is_player_mirror() and w and d and type(d.is_frozen) == "boolean" then w.is_frozen = d.is_frozen end
+			return frozen
+		end
+	end)
+	C().on("hf_freeze", host_frozen, "host")
+	C().set_limit("hf_freeze", 5, 2)
+end
+
+local function install_lamp_mirror()
+	local b = C().mod("bind_light_furniture")
+	local cls = b and b.placeable_light_wrapper
+	C().wrap(cls, "save_data", "bind_light_furniture.placeable_light_wrapper.save_data", function(orig)
+		return function(self, ...)
+			if not C().active() or coop_mode.leads_here() then return orig(self, ...) end
+		end
+	end)
+	C().wrap(cls, "update", "bind_light_furniture.placeable_light_wrapper.update", function(orig)
+		return function(self, ...)
+			if not (C().active() and coop_mode.is_player_mirror()) then return orig(self, ...) end
+			-- The stock visual update still runs. Its infinite-fuel branch skips the consumption step.
+			local previous = self.infinite_fuel
+			self.infinite_fuel = true
+			local ok, result = pcall(orig, self, ...)
+			self.infinite_fuel = previous
+			if not ok then error(result, 0) end
+			return result
 		end
 	end)
 end
@@ -622,7 +846,7 @@ local function install_furniture()
 							for _, tool in ipairs(tools) do
 								local it, b = spend.free_item(tool)
 								if it then
-									client_ask("hf_lamp", { o = C().hid(obj_id), on = true }, it, "tool", obj_id)
+									client_ask("hf_lamp", { o = C().hid(obj_id), on = true }, it, "tool")
 									return
 								end
 								busy = busy or b
@@ -690,31 +914,30 @@ local function install_furniture()
 			answer(r)
 		end, "host")
 
-		C().wrap(light.UIFurnitureLight, "Refuel", "ui_furniture_light.UIFurnitureLight.Refuel", function(orig)
-			return function(self, ...)
-				if not C().is_client() then return orig(self, ...) end
-				local fuel = ini_sys:r_string_ex(self.section or "", "fuel_section") or "charcoal"
-				local item, busy = spend.free_item(fuel) -- round 3 (R2-S1): not one that waits or that the host took already
-				if item then
-					-- round 2: the host checks and spends the fuel and answers; the lamp is full here at its answer
-					client_ask("hf_refuel", { o = C().hid(self.light_id) }, item, "fuel", self.light_id)
-				elseif not busy then
-					C().hud("st_coop_mods_hf_no_fuel", "I don't have any fuel for this.")
-				end
-				pcall(function() self:Close() end)
-			end
-		end)
-		C().on("hf_refuel", function(t, from)
-			local id = C().lid(tonumber(t.o))
-			local obj = type(id) == "number" and level.object_by_id(id)
+		local function host_refuel(t, from)
+			local wire_id = object_id(t.o)
+			local id = wire_id and object_id(C().lid(wire_id))
+			local obj = id and level.object_by_id(id)
 			local who = C().avatar(from)
-			local iid = tonumber(t.i)
+			local iid = object_id(t.i)
+			local own = coop_mode.actor_is_player() and from == C().self_peer()
 			local function answer(r)
-				if iid and r then C().to_peer(from, "hf_item_r", { i = iid, r = r }) end
+				if not own and iid and r then C().to_peer(from, "hf_item_r", { i = iid, r = r }) end
 			end
-			if not (obj and who and near(obj, who)) then
-				answer("no")
-				return refuse("hf_refuel", from, "unknown or far lamp")
+			local w = obj and wrapper_of(id)
+			local is_lamp = obj and (ini_sys:r_string_ex(obj:section(), "placeable_type") == "light"
+				or (w and (type(w.fuel) == "number" or type(w.condition) == "number")))
+			if not trust("hf_refuel_object", is_lamp, "player #%s: invalid lamp id", tostring(from)) or not is_lamp then
+				return answer("no")
+			end
+			if not trust("hf_refuel_near", who and near(obj, who), "player #%s: lamp %d is out of reach", tostring(from), id)
+				or not who then return answer("no") end
+			local hm = C().mod("hf_obj_manager")
+			local update = C().fn(hm, "update_data")
+			if not update then return answer("no") end
+			if not iid and t.i ~= nil then
+				trust("hf_refuel_item", false, "player #%s: invalid fuel item id", tostring(from))
+				return answer("no")
 			end
 			local r = nil
 			if t.i == nil then
@@ -732,16 +955,40 @@ local function install_furniture()
 					tostring(from), tostring(id), tostring(iid), tostring(why)) then
 					return answer("no")
 				end
-				r = ok and host_spend(item, "fuel") or "left" -- a failed check in "log": his copy, as build 56
+				if ok and own then
+					spend_here(item, "fuel")
+				else
+					r = ok and host_spend(item, "fuel") or "left" -- a failed check in "log": his copy, as build 56
+				end
 			end
-			local w = wrapper_of(id)
-			local hm = C().mod("hf_obj_manager")
-			if w then w.fuel = 1.0 elseif hm and hm.update_data then hm.update_data(id, { condition = 1.0 }) end
+			wrapper_fuel(w, 1.0)
+			update(id, { condition = 1.0 })
 			answer(r)
-		end, "host")
+		end
+		C().wrap(light.UIFurnitureLight, "Refuel", "ui_furniture_light.UIFurnitureLight.Refuel", function(orig)
+			return function(self, ...)
+				if not C().active() then return orig(self, ...) end
+				local fuel = ini_sys:r_string_ex(self.section or "", "fuel_section") or "charcoal"
+				local item, busy = spend.free_item(fuel)
+				if item then
+					local t = { o = C().hid(self.light_id) }
+					if coop_mode.leads_here() and coop_mode.actor_is_player() then
+						t.i = C().hid(item:id())
+						host_refuel(t, C().self_peer())
+					elseif coop_mode.is_player_mirror() then
+						client_ask("hf_refuel", t, item, "fuel", self.light_id)
+					end
+				elseif not busy then
+					C().hud("st_coop_mods_hf_no_fuel", "I don't have any fuel for this.")
+				end
+				pcall(function() self:Close() end)
+			end
+		end)
+		C().on("hf_refuel", host_refuel, "host")
 		C().on("hf_item_r", client_item_answer, "client")
 		RegisterScriptCallback("actor_on_update", client_spend_tick)
 		C().set_limit("hf_lamp", 6, 2)
+		C().set_limit("hf_refuel", 5, 2)
 	end
 
 	-- workbench box
@@ -1257,6 +1504,9 @@ function on_game_start()
 	start_step("install_stove", install_stove)
 	start_step("install_gadgets", install_gadgets)
 	start_step("install_data_mirror", install_data_mirror)
+	start_step("install_takeall", install_takeall)
+	start_step("install_frozen", install_frozen)
+	start_step("install_lamp_mirror", install_lamp_mirror)
 	start_step("install_radio", install_radio)
 	if #installed == 0 then return end
 	C().on("hf_box", host_box, "host")
