@@ -1,0 +1,141 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - F4 G8-1b (m07:2): use the distance to a player on the squad's map for ZCP's SMR seek.
+
+	G.A.M.M.A. ZCP 1.4 Balanced Spawns measures dist_to_actor to sim:actor() in sim_squad_scripted.script:227-229.
+	With SMR seek enabled, generic_update uses that distance to decide if an online zombied or mutant squad attempts
+	target 0 (get_help_target_id, lines 267-274). The stock actor rejects it in a normal world, so a squad in seek
+	range breaks off its stay at the smart terrain and selects a target again.
+
+	On a process running the squad, use the nearest living player's distance for generic_update and restore the
+	stock distance for other readers. The co-op host and the map server use the player bodies they have; where only
+	an ALife record exists, use its game vertex to check the map. Skip ghosts and joining players.
+	Install only when ZCP's seek rule is present. Single player and player mirrors use the stock distance.
+--]]
+
+local type, ipairs, pcall, error, tostring = type, ipairs, pcall, error, tostring
+local math_huge = math.huge
+
+local TAG = "sim_target"
+local help = nil -- ZCP's file-local get_help_target_id
+local installed = false
+local seeks = 0
+
+local function C() return coop_mods_core end
+
+local function level_of(gvid)
+	if type(gvid) ~= "number" then return nil end
+	local ok, lid = pcall(function() return game_graph():vertex(gvid):level_id() end)
+	if ok then return lid end
+	return nil
+end
+
+-- A downed player is still present: the record's own life, as coop_npc_compat record_is_alive.
+local function record_alive(se)
+	local ok, alive = pcall(se.alive, se)
+	return not ok or alive ~= false
+end
+
+-- Distance of the nearest living player on the squad's map, or math.huge if there is none.
+local function nearest_distance(squad)
+	local lid = level_of(squad.m_game_vertex_id)
+	if lid == nil then return math_huge end
+	local pos = squad.position
+	local best = math_huge
+	for _, o in ipairs(coop_npc_players.everyone()) do
+		if level_of(o:game_vertex_id()) == lid and coop_mode.where(coop_npc_players.peer_of(o)) ~= "joining" then
+			local d = pos:distance_to(o:position())
+			if d < best then best = d end
+		end
+	end
+	for _, p in ipairs(C().players()) do
+		local id = p.avatar_id
+		if not p.is_self and type(id) == "number" and not level.object_by_id(id) and coop_mode.where(p.id) ~= "joining" then
+			local se = alife_object(id)
+			if se and record_alive(se) and level_of(se.m_game_vertex_id) == lid then
+				local d = pos:distance_to(se.position)
+				if d < best then best = d end
+			end
+		end
+	end
+	return best
+end
+
+local function upvalue_in(f, name, depth)
+	if type(f) ~= "function" or depth > 4 then return nil end
+	for i = 1, 255 do
+		local n, v = debug.getupvalue(f, i)
+		if n == nil then break end
+		if n == name and type(v) == "function" then return v end
+	end
+	for i = 1, 255 do
+		local n, v = debug.getupvalue(f, i)
+		if n == nil then break end
+		if type(v) == "function" then
+			local found = upvalue_in(v, name, depth + 1)
+			if found then return found end
+		end
+	end
+	return nil
+end
+
+-- ZCP's rule sends the squad at 0 because of the seek when it stands `dist` from "the actor" (a task's target taken out
+-- of the question). At dist 0 it says whether the seek can apply at all (seek on, online, zombied or mutant).
+local function seek_sends(squad, dist)
+	local task, saved = squad.task_target_id, squad.dist_to_actor
+	squad.task_target_id, squad.dist_to_actor = nil, dist
+	local ok, id = pcall(help, squad)
+	squad.task_target_id, squad.dist_to_actor = task, saved
+	return ok and id == 0
+end
+
+local function restore_distance(squad, saved, ok, ...)
+	squad.dist_to_actor = saved
+	if not ok then error((...), 0) end
+	return ...
+end
+
+local function make_update(gu)
+	return function(self, ...)
+		if not C().active() or coop_mode.is_player_mirror() then return gu(self, ...) end
+		if not seek_sends(self, 0) then return gu(self, ...) end
+
+		local ok, d = pcall(nearest_distance, self)
+		if not ok then
+			C().report(TAG, "nearest player", d)
+			return gu(self, ...)
+		end
+		if d < math_huge and seek_sends(self, d) then seeks = seeks + 1 end
+
+		local saved = self.dist_to_actor
+		self.dist_to_actor = d
+		return restore_distance(self, saved, pcall(gu, self, ...))
+	end
+end
+
+local function install()
+	if installed then return end
+	local squads = C().mod("sim_squad_scripted")
+	local cls = squads and squads.sim_squad_scripted
+	local gu = cls and C().fn(cls, "generic_update")
+	if not gu then return end
+	help = upvalue_in(gu, "get_help_target_id", 1)
+	if not help then
+		C().log(TAG, "sim_squad_scripted has no get_help_target_id under generic_update: squads seek as they are")
+		return
+	end
+	installed = C().wrap(cls, "generic_update", "npc.sim_target.generic_update", make_update)
+end
+
+function status()
+	return string.format("%s | seeks %d", installed and "wrapped" or "not wrapped", seeks)
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5).
+function on_game_start()
+	local ok, err = pcall(function()
+		install()
+		if installed then C().status_line(TAG, status) end
+	end)
+	if not ok then printf("! [coop_npc_sim_target] start failed: %s", tostring(err)) end
+end
