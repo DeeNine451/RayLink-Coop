@@ -1,0 +1,538 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - one-shot exchanges between a player and the process that decides for him
+	(gamedata\scripts\coop_mods_xchg.script), F4 G4-1 (TZ R19, build 57; review group G4 "item actions finish before they
+	are confirmed"). The shared protocol of the G4 adapters (coop_mods_xchg_<mod>.script): an operation with a stable id,
+	the items it uses reserved, the client's word checked, committed once, refused or rolled back, and helpers that tie a
+	debit to a confirmed world change. Core: it never asks which mode it runs in; the delivery is the mode's
+	(coop_mods_core.on "host" / "player", docs\MODES.md section 4).
+
+	Player side (any process with a player of its own, the co-op host's included):
+		ask(kind, t, cb) -> op | nil     sends mods.xchg { k = kind, o = op, ...t } to the decider of his level and keeps
+		                                 the op pending; nil outside a session, on a server's ghost, when it cannot be sent.
+		                                 op = "<own peer>:<world epoch>:<counter>". cb(ok, r, why) runs exactly once: on
+		                                 the answer, or cb(false, nil, "timeout") when none came in time. Fields k and o
+		                                 of t are the envelope's; t.key names what the op is about (busy below).
+		                                 On the co-op host's own player (this process leads its map and its actor is a
+		                                 player) the same dispatcher runs directly with from = own peer, and cb runs
+		                                 before ask returns.
+		busy(kind, key) -> bool          an op of that kind and key is pending (key nil: any op of the kind): the
+		                                 adapter refuses a repeated click or key press with it
+		set_timeout(kind, ms)            the player's wait for that kind (default 10 s, 1..120 s)
+	Decider side (the co-op host; in the server mode the map server of the requester's map, the world server relays):
+		serve(kind, spec) -> bool        spec = { check(t, from, who) -> ok, why       the client's word (coop_trust)
+		                                          reserve(t, from, who) -> token | nil, why
+		                                          commit(t, from, who, token) -> ok, r  runs once; false or an error:
+		                                          rollback(t, from, who, token) }       rollback, answer ok = false
+		                                 commit is required, the others optional. `who` = the requester's character
+		                                 here (coop_mods_core.avatar), nil when it is not here. token.ids: item ids
+		                                 reserved while the op runs (one already reserved by another op: refused
+		                                 "reserved", rolled back); token.spent: items the op removes, reserved until they
+		                                 are gone (after_gone) or 10 s passed, so no other op spends them on the way.
+		                                 r: a number, string or boolean, or a flat table of them (string keys).
+		reserved(id) -> op | nil         the op that holds that item
+		wire_id(v) -> local id | nil     an object id a client sent: a whole number 1..65534 (host numbering) -> local
+	Rules on the decider: one dispatcher, coop_mods_core.on("xchg", ..., "host"); a request without a valid op id is
+	dropped (coop_trust.guard "xchg_op"), an exchange nobody serves is answered "kind" (guard "xchg_kind"); the check goes
+	through coop_trust.pass("xchg_" .. kind) before any refusal ("log": a failed check is logged and let through); a
+	repeated (sender, op) gets the stored answer for 5 minutes and never runs again; reservations are always on. The
+	answer, mods.xchg_r { o, ok, why, r | r.<k> }, goes to the sender (coop_mods_core.to_peer: the world server relays a
+	map server's answer) and is taken where coop_mods_core.on "player" delivers it (from 0).
+	Completion helpers (polled in actor_on_update, no busy loops):
+		after_gone(id, fn, timeout_ms)                fn(true) once the server object and the game object are gone,
+		                                              fn(false) on the timeout (default 10 s)
+		after_made(section, parent_id, fn, timeout_ms) fn(id) once a new item of that section is in the parent (online
+		                                              here; items there at the call do not count), fn(nil) on the timeout
+	Wire: mods.xchg (player -> decider, limit 20 at once, 5 a second per sender), mods.xchg_r (decider -> player).
+	Nothing is saved: pending ops, answers and reservations live in this Lua state only.
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, pairs, ipairs, pcall, tostring, tonumber, next = type, pairs, ipairs, pcall, tostring, tonumber, next
+local math_floor, string_sub = math.floor, string.sub
+
+local VERB, ANSWER = "xchg", "xchg_r"
+local DEFAULT_WAIT_MS = 10000
+local DEDUPE_MS = 300000 -- an answer is kept 5 minutes for a repeated op
+local HOLD_MS = 10000    -- a spent item stays reserved until it is gone, at most this long
+local GONE_MS = 10000
+local MADE_POLL_MS = 100
+local SWEEP_MS = 10000
+local OP_MAX, KIND_MAX, WHY_MAX, TEXT_MAX, R_MAX, IDS_MAX = 40, 32, 64, 1000, 32, 64
+
+stats = { asked = 0, answered = 0, timeouts = 0, late = 0, served = 0, repeats = 0, refused = 0, conflicts = 0,
+	rolled_back = 0, errors = 0, dropped = 0, gone = 0, made = 0, watch_timeouts = 0 }
+
+local function C() return coop_mods_core end
+local function log(fmt, ...) C().log("xchg", fmt, ...) end
+
+local function trust_pass(name, ok, fmt, ...)
+	local found, t = pcall(function() return coop_trust end)
+	if not (found and type(t) == "table" and type(t.pass) == "function") then return true end
+	local good, res = pcall(t.pass, name, ok, fmt, ...)
+	return not good or res ~= false
+end
+
+local function trust_guard(name, ok, fmt, ...)
+	local found, t = pcall(function() return coop_trust end)
+	if not (found and type(t) == "table" and type(t.guard) == "function") then return ok == true end
+	local good, res = pcall(t.guard, name, ok, fmt, ...)
+	if not good then return ok == true end
+	return res == true
+end
+
+-- a short word for a reason: letters, digits, blank and _ - . : only, at most WHY_MAX characters
+local function word(v, default)
+	if type(v) ~= "string" or v == "" then return default end
+	v = string_sub(v, 1, WHY_MAX)
+	if not v:match("^[%w_%-%.: ]+$") then return default end
+	return v
+end
+
+local function valid_kind(kind)
+	return type(kind) == "string" and #kind <= KIND_MAX and kind:match("^[%w_]+$") ~= nil
+end
+
+-- An object id a client sent: a whole number 1..65534 in host numbering, as a local id here; nil otherwise.
+function wire_id(v)
+	if type(v) ~= "number" or v ~= v or v < 1 or v >= 65535 or v ~= math_floor(v) then return nil end
+	local id = C().lid(v)
+	if type(id) ~= "number" or id < 0 or id >= 65535 then return nil end
+	return id
+end
+
+local function valid_id(v)
+	return type(v) == "number" and v == v and v >= 0 and v < 65535 and v == math_floor(v)
+end
+
+-------------------------------------------------------------------------------
+-- Completion helpers
+-------------------------------------------------------------------------------
+local watches = {} -- { gone = id | made = section, parent, fn, deadline, known, next_at }
+
+local function gone_here(id)
+	local ok1, se = pcall(alife_object, id)
+	if ok1 and se ~= nil then return false end
+	local ok2, obj = pcall(level.object_by_id, id)
+	return not (ok2 and obj ~= nil)
+end
+
+-- ids of the items of `section` in the parent, or nil when the parent is not online here
+local function items_in(parent_id, section)
+	local ok, parent = pcall(level.object_by_id, parent_id)
+	if not (ok and parent) then return nil end
+	local found = {}
+	pcall(function()
+		parent:iterate_inventory(function(_, item)
+			if item and item:section() == section then found[item:id()] = true end
+		end)
+	end)
+	return found
+end
+
+function after_gone(id, fn, timeout_ms)
+	if not valid_id(id) or type(fn) ~= "function" then return false end
+	local ms = tonumber(timeout_ms) or GONE_MS
+	watches[#watches + 1] = { gone = id, fn = fn, deadline = time_global() + ms }
+	return true
+end
+
+function after_made(section, parent_id, fn, timeout_ms)
+	if type(section) ~= "string" or section == "" or not valid_id(parent_id) or type(fn) ~= "function" then return false end
+	local ms = tonumber(timeout_ms) or GONE_MS
+	watches[#watches + 1] = { made = section, parent = parent_id, fn = fn, deadline = time_global() + ms,
+		known = items_in(parent_id, section), next_at = 0 }
+	return true
+end
+
+-- a new item of the section in the parent, or nil
+local function new_item(w)
+	local now_in = items_in(w.parent, w.made)
+	if not now_in then return nil end
+	if not w.known then
+		w.known = now_in -- the parent came online only now: what it has is what was there
+		return nil
+	end
+	for id in pairs(now_in) do
+		if not w.known[id] then return id end
+	end
+	return nil
+end
+
+local function finish(w, ...)
+	local ok, e = pcall(w.fn, ...)
+	if not ok then C().report("xchg", w.gone and "after_gone" or "after_made", e) end
+end
+
+local function watch_tick(now)
+	if not watches[1] then return end
+	local keep, due = {}, {}
+	for _, w in ipairs(watches) do
+		if w.gone then
+			if gone_here(w.gone) then
+				stats.gone = stats.gone + 1
+				due[#due + 1] = { w, true }
+			elseif now >= w.deadline then
+				stats.watch_timeouts = stats.watch_timeouts + 1
+				due[#due + 1] = { w, false }
+			else
+				keep[#keep + 1] = w
+			end
+		else
+			local id = nil
+			if now >= w.next_at then
+				w.next_at = now + MADE_POLL_MS
+				id = new_item(w)
+			end
+			if id then
+				stats.made = stats.made + 1
+				due[#due + 1] = { w, id }
+			elseif now >= w.deadline then
+				stats.watch_timeouts = stats.watch_timeouts + 1
+				due[#due + 1] = { w, nil }
+			else
+				keep[#keep + 1] = w
+			end
+		end
+	end
+	watches = keep
+	for _, d in ipairs(due) do finish(d[1], d[2]) end
+end
+
+-------------------------------------------------------------------------------
+-- Decider side
+-------------------------------------------------------------------------------
+local served = {} -- kind -> spec
+local done = {}   -- "<from>|<op>" -> { at, ans }
+local held = {}   -- item id -> { op, key }
+local next_sweep = 0
+
+function serve(kind, spec)
+	if not valid_kind(kind) or type(spec) ~= "table" or type(spec.commit) ~= "function" then return false end
+	for _, k in ipairs({ "check", "reserve", "rollback" }) do
+		if spec[k] ~= nil and type(spec[k]) ~= "function" then return false end
+	end
+	if served[kind] and served[kind] ~= spec then log("exchange %s is served by a new spec", kind) end
+	served[kind] = spec
+	return true
+end
+
+function reserved(id)
+	local h = held[id]
+	return h and h.op or nil
+end
+
+local function free(id, key)
+	local h = held[id]
+	if h and h.key == key then held[id] = nil end
+end
+
+-- token.ids and token.spent as sets of valid ids (at most IDS_MAX); spent is a subset of all
+local function ids_of(token)
+	local all, spent = {}, {}
+	if type(token) ~= "table" then return all, spent end
+	local n = 0
+	for _, field in ipairs({ "ids", "spent" }) do
+		local list = token[field]
+		if type(list) == "table" then
+			for _, id in ipairs(list) do
+				if valid_id(id) and n < IDS_MAX then
+					if not all[id] then n = n + 1 end
+					all[id] = true
+					if field == "spent" then spent[id] = true end
+				end
+			end
+		end
+	end
+	return all, spent
+end
+
+local function scalar(v)
+	local tv = type(v)
+	if tv == "number" then return v == v end
+	if tv == "boolean" then return true end
+	return tv == "string" and #v <= TEXT_MAX
+end
+
+-- the answer: { o, ok, why } with r as "r" (a scalar) or "r.<k>" (a flat table)
+local function answer(op, ok, why, r)
+	local a = { o = op, ok = ok == true }
+	if not a.ok then a.why = word(why, "refused") end
+	if a.ok and r ~= nil then
+		if type(r) == "table" then
+			local n = 0
+			for k, v in pairs(r) do
+				if type(k) == "string" and #k <= KIND_MAX and scalar(v) and n < R_MAX then
+					a["r." .. k] = v
+					n = n + 1
+				end
+			end
+		elseif scalar(r) then
+			a.r = r
+		end
+	end
+	return a
+end
+
+local function call(spec, k, ...)
+	local f = spec[k]
+	if not f then return true end
+	local ok, a, b = pcall(f, ...)
+	if ok then return true, a, b end
+	stats.errors = stats.errors + 1
+	C().report("xchg", k, a)
+	return false
+end
+
+local function rollback(spec, t, from, who, token)
+	stats.rolled_back = stats.rolled_back + 1
+	call(spec, "rollback", t, from, who, token)
+end
+
+-- check -> reserve -> commit once; returns the answer
+local function run(spec, kind, t, from, op, key)
+	local who = C().avatar(from)
+	local good, ok, why = true, true, nil
+	if spec.check then
+		good, ok, why = call(spec, "check", t, from, who)
+		if not good then ok, why = false, "error" end
+	end
+	if not trust_pass("xchg_" .. kind, ok == true, "player #%s, op %s: %s", tostring(from), op, word(why, "check failed")) then
+		stats.refused = stats.refused + 1
+		return answer(op, false, word(why, "refused"))
+	end
+	local token, rwhy = true, nil
+	if spec.reserve then
+		good, token, rwhy = call(spec, "reserve", t, from, who)
+		if not good then return answer(op, false, "error") end
+		if token == nil or token == false then
+			stats.refused = stats.refused + 1
+			return answer(op, false, word(rwhy, "reserved"))
+		end
+	end
+	local all, spent = ids_of(token)
+	for id in pairs(all) do
+		local h = held[id]
+		if h and h.key ~= key then
+			stats.conflicts = stats.conflicts + 1
+			rollback(spec, t, from, who, token)
+			return answer(op, false, "reserved")
+		end
+	end
+	for id in pairs(all) do held[id] = { op = op, key = key } end
+	local r
+	good, ok, r = call(spec, "commit", t, from, who, token)
+	if not good or ok ~= true then
+		rollback(spec, t, from, who, token)
+		for id in pairs(all) do free(id, key) end
+		return answer(op, false, good and word(r, "failed") or "error")
+	end
+	for id in pairs(all) do
+		if spent[id] then
+			after_gone(id, function() free(id, key) end, HOLD_MS)
+		else
+			free(id, key)
+		end
+	end
+	stats.served = stats.served + 1
+	return answer(op, true, nil, r)
+end
+
+local function sweep(now)
+	if now < next_sweep then return end
+	next_sweep = now + SWEEP_MS
+	for k, d in pairs(done) do
+		if now - d.at > DEDUPE_MS then done[k] = nil end
+	end
+end
+
+-- One request t from `from`; reply(answer) delivers it. The same function for a request from the wire and for the
+-- co-op host's own player.
+local function dispatch(t, from, reply)
+	if type(t) ~= "table" or type(from) ~= "number" then return end
+	local op, kind = t.o, t.k
+	local op_ok = type(op) == "string" and #op <= OP_MAX and op:match("^%d+:%d+:%d+$") ~= nil
+	if not trust_guard("xchg_op", op_ok, "player #%s: an exchange without a valid operation id", tostring(from)) then
+		stats.dropped = stats.dropped + 1
+		return
+	end
+	local now = time_global()
+	sweep(now)
+	local key = tostring(from) .. "|" .. op
+	local d = done[key]
+	if d and now - d.at <= DEDUPE_MS then
+		stats.repeats = stats.repeats + 1
+		return reply(d.ans)
+	end
+	local spec = valid_kind(kind) and served[kind] or nil
+	local ans
+	if not trust_guard("xchg_kind", spec ~= nil, "player #%s, op %s: no such exchange here", tostring(from), op) then
+		stats.refused = stats.refused + 1
+		ans = answer(op, false, "kind")
+	else
+		ans = run(spec, kind, t, from, op, key)
+	end
+	done[key] = { at = now, ans = ans }
+	return reply(ans)
+end
+
+local function from_wire(t, from)
+	dispatch(t, from, function(ans) C().to_peer(from, ANSWER, ans) end)
+end
+
+-------------------------------------------------------------------------------
+-- Player side
+-------------------------------------------------------------------------------
+local pending = {} -- op -> { kind, key, started, deadline, cb }
+local waits = {}   -- kind -> ms
+local seq = 0
+local base = nil
+
+local function counter()
+	if not base then
+		local ok, t = pcall(function() return os.time() end)
+		base = (ok and type(t) == "number") and (t % 100000) * 10000 or 0 -- a restarted Lua state starts elsewhere
+	end
+	seq = seq + 1
+	return base + seq
+end
+
+local function epoch()
+	if not (api and api.world_epoch) then return 0 end
+	local ok, e = pcall(api.world_epoch)
+	e = ok and tonumber(e) or nil
+	if not (e and e >= 0 and e == math_floor(e)) then return 0 end
+	return e
+end
+
+function set_timeout(kind, ms)
+	ms = tonumber(ms)
+	if not (valid_kind(kind) and ms) then return false end
+	waits[kind] = math.max(1000, math.min(120000, ms))
+	return true
+end
+
+function busy(kind, key)
+	for _, p in pairs(pending) do
+		if p.kind == kind and (key == nil or p.key == key) then return true end
+	end
+	return false
+end
+
+local function settle(op, ok, r, why)
+	local p = pending[op]
+	if not p then
+		stats.late = stats.late + 1
+		return
+	end
+	pending[op] = nil
+	if not p.cb then return end
+	local good, e = pcall(p.cb, ok, r, why)
+	if not good then C().report("xchg", "answer of " .. tostring(p.kind), e) end
+end
+
+-- an answer (from the wire, or from the dispatcher directly): its op, ok, why and r
+local function on_answer(t)
+	if type(t) ~= "table" or type(t.o) ~= "string" then return end
+	local op = t.o
+	if not pending[op] then
+		stats.late = stats.late + 1
+		return
+	end
+	stats.answered = stats.answered + 1
+	local r = t.r
+	if r == nil then
+		for k, v in pairs(t) do
+			if type(k) == "string" and string_sub(k, 1, 2) == "r." then
+				r = r or {}
+				r[string_sub(k, 3)] = v
+			end
+		end
+	end
+	if t.ok == true then
+		settle(op, true, r, nil)
+	else
+		settle(op, false, nil, word(t.why, "refused"))
+	end
+end
+
+function ask(kind, t, cb)
+	if not (C().active() and valid_kind(kind)) then return nil end
+	if t ~= nil and type(t) ~= "table" then return nil end
+	if not coop_mode.actor_is_player() then return nil end -- a server's ghost has no player to ask for
+	local msg = {}
+	for k, v in pairs(t or {}) do
+		local tv = type(v)
+		-- a field that cannot go as it is makes no request (a silently dropped field would change it)
+		if type(k) ~= "string" or not (tv == "string" or tv == "boolean" or (tv == "number" and v == v)) then return nil end
+		if k ~= "k" and k ~= "o" then msg[k] = v end
+	end
+	local me = C().self_peer()
+	local op = tostring(me) .. ":" .. tostring(epoch()) .. ":" .. tostring(counter())
+	msg.k, msg.o = kind, op
+	local now = time_global()
+	pending[op] = { kind = kind, key = t and t.key, started = now, deadline = now + (waits[kind] or DEFAULT_WAIT_MS),
+		cb = type(cb) == "function" and cb or nil }
+	stats.asked = stats.asked + 1
+	if coop_mode.leads_here() then
+		-- the co-op host's own player: this process decides for him, the same dispatcher, no wire
+		dispatch(msg, me, on_answer)
+		return op
+	end
+	if not C().to_host(VERB, msg) then
+		pending[op] = nil
+		return nil
+	end
+	return op
+end
+
+local function pending_tick(now)
+	if next(pending) == nil then return end
+	local late = {}
+	for op, p in pairs(pending) do
+		if now >= p.deadline then late[#late + 1] = op end
+	end
+	for _, op in ipairs(late) do
+		stats.timeouts = stats.timeouts + 1
+		settle(op, false, nil, "timeout")
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Start, status
+-------------------------------------------------------------------------------
+local function actor_on_update()
+	local now = time_global()
+	pending_tick(now)
+	watch_tick(now)
+end
+
+local function status()
+	local p, h, d, w = 0, 0, 0, 0
+	for _ in pairs(pending) do p = p + 1 end
+	for _ in pairs(held) do h = h + 1 end
+	for _ in pairs(done) do d = d + 1 end
+	w = #watches
+	return string.format("asked %d (answered %d, timeouts %d, late %d, pending %d) | served %d, repeats answered from the "
+		.. "cache %d, refused %d, reservation conflicts %d, rolled back %d, dropped %d, errors %d | reserved %d, answers kept %d, "
+		.. "watches %d (gone %d, made %d, timed out %d)", stats.asked, stats.answered, stats.timeouts, stats.late, p,
+		stats.served, stats.repeats, stats.refused, stats.conflicts, stats.rolled_back, stats.dropped, stats.errors, h, d, w,
+		stats.gone, stats.made, stats.watch_timeouts)
+end
+
+-- on_game_start must not throw (axr_main runs every script's on_game_start in one unprotected loop, W5)
+function on_game_start()
+	if not api then return end
+	local steps = {
+		function() C().on(VERB, from_wire, "host") end,
+		function() C().on(ANSWER, on_answer, "player") end,
+		function() C().set_limit(VERB, 20, 5) end,
+		function() RegisterScriptCallback("actor_on_update", actor_on_update) end,
+		function() C().status_line("xchg", status) end,
+	}
+	for i, step in ipairs(steps) do
+		local ok, e = pcall(step)
+		if not ok then printf("! [coop_mods_xchg] start step %d failed: %s", i, tostring(e)) end
+	end
+end
