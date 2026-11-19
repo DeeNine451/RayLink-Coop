@@ -28,6 +28,7 @@ record c|coop_world_server
 pstor coop_lost_gives
 mdata coop_arena
 mdata coop_arena_gear
+mdata coop_bounty
 mdata coop_game
 mdata coop_loot_claims
 mdata coop_mods_pdata

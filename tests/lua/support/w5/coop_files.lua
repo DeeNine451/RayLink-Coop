@@ -22,6 +22,7 @@ COOP_FILES = {
 	"coop_menu_options",
 	"coop_mode", -- S4: the mode facade (Core)
 	"coop_mods_core",
+	"coop_bounty", -- G18-3: bounty squads per character
 	"coop_mods_guard", -- B3 review round 1: client guards of mod item paths
 	"coop_mods_hf",
 	"coop_mods_items",

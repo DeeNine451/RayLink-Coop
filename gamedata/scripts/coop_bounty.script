@@ -1,0 +1,589 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - F4 G18-3 (s38:3, s38:6): the stock bounty squads (sim_squad_bounty.script) per character.
+
+	The stock (Anomaly 1.5.3; G.A.M.M.A.'s two providers of the file are off in the profile) keeps one bounty for db.actor: its
+	rank and reputation (:126, :132), its faction (:34), one cooldown and one list of squads (:220-239), and sends every squad
+	at "the actor" (:71), which is id 0. Its timers are the "host" domain (configs\coop_route_stock.ltx:75): the co-op host's
+	process judged its own character, the world server judged its ghost at fake_start. Its smarts are chosen 200 m away from
+	db.actor only (:45-46), so a squad could appear next to another player (s38:6, co-op).
+
+	In a session, on the process that decides the world (coop_mode.decides_world: the co-op host, the world server), the spawn
+	timer runs per character instead:
+	  - every player's character in the session is judged by its own rank and reputation (the object here, else its ALife record:
+	    the engine puts a player's progress on both, coop_story.cpp apply_progress), with the stock's danger tables;
+	  - each character has its own cooldown (the stock's delay from his first due tick, then from his last squad) and his own
+	    squads (at most the stock's number for him);
+	  - the faction is coop_faction.faction_of_character's (the group's in the co-op, his own in the server mode), its enemies
+	    from the stock's faction list send the squad;
+	  - the smart is on his map or a linked one (the map of his character, never of a ghost) and farther than the stock's
+	    spawn_distance from every player's character on the smart's map (s38:6);
+	  - the squad is made as the stock makes it (create_squad, "actor", rush) and kept in the stock's active_squads too
+	    (dynamic_news_manager's gossip, the stock's state timer).
+	A squad sent at "the actor" (assigned target 0) whose target is a character of ours goes to that character
+	(sim_squad_scripted:get_current_task): his object here, else his record. The squad of this process's own player character
+	(the co-op host's) stays the stock's. A process that only runs squads (a map server holding one online) knows the targets
+	from the world's decider (event below). Where the place in a session is the mode's: coop_mode.where says who is not placed yet.
+	Outside a session every wrapper calls the stock as it is; a player's mirror never runs the timer (the router drops it).
+
+	API (G18-4 builds on it):
+	  coop_bounty.target_of(squad_id) -> character id (this process's numbering), his peer | nil
+	  coop_bounty.squads_of(character_id) -> { [squad id] = section } (a copy)
+	  coop_bounty.records() -> { [character id] = { last = CTime | nil, squads = { [squad id] = section } } } (a copy; only
+	                           the world's decider keeps them current, another process has what its load gave it)
+	  coop_bounty.position_of(character_id) -> position, game vertex, level vertex, level id | nil (his object here, else his record)
+	  coop_bounty.status() -> one line (coop_status)
+	Saved (the world's decider, save_state): m_data.coop_bounty = { v = 1, c = { [character id] = { t = CTime table,
+	  s = { [squad id] = section } } } }. The stock's m_data.bounty_squad stays the stock's.
+	Event: mods.bounty_t  world's decider -> every machine with a copy of the world (coop_mode.publish), on change and every
+	  30 s while there are targets: { n, s<i> = squad id, c<i> = character id } in host numbering; listened to from peer 0 only.
+--]]
+
+local type, pairs, ipairs, pcall, tostring, tonumber, next = type, pairs, ipairs, pcall, tostring, tonumber, next
+local string_format, math_floor = string.format, math.floor
+
+local TAG = "bounty"
+local VERB = "bounty_t"
+local SAVE_KEY = "coop_bounty"
+local MAX_TARGETS = 64 -- squads in one list (the stock makes a few per player)
+local MAX_ID = 65534
+local PUBLISH_MS = 30000
+local LOOK_MS = 1000
+local TIMER_EV, TIMER_ACT = "cycle", "bounty_squad_spawn" -- the stock's time event (sim_squad_bounty.script:121, :299)
+
+local cfg = nil -- the stock's tables and numbers (file locals of sim_squad_bounty), nil: not installed
+local book = {} -- the world's decider: character id -> { last = CTime | nil, squads = { [squad id] = section } }
+local owner = {} -- the world's decider: squad id -> character id (built from records)
+local mirror = {} -- another process: squad id -> character id (local numbering), as the world's decider published it
+local dirty = false -- the targets changed since the last publication
+local next_publish = 0
+local next_look = 0 -- actor_on_update looks at the publication once a second
+local wrapped = { spawn = false, task = false }
+local stats = { passes = 0, spawned = 0, near = 0, no_smart = 0, no_faction = 0, redirected = 0, published = 0, received = 0,
+	dropped = 0, errors = 0 }
+
+local function C() return coop_mods_core end
+
+local function report(what, err)
+	stats.errors = stats.errors + 1
+	C().report(TAG, what, err)
+end
+
+local function valid_id(id)
+	return type(id) == "number" and id >= 0 and id <= MAX_ID and id == math_floor(id)
+end
+
+local function level_of(gvid)
+	if type(gvid) ~= "number" then return nil end
+	local ok, lid = pcall(function() return game_graph():vertex(gvid):level_id() end)
+	if ok then return lid end
+	return nil
+end
+
+local function count(t)
+	local n = 0
+	for _ in pairs(t) do n = n + 1 end
+	return n
+end
+
+-- This process's own player character (the co-op host's, a client's), nil for a ghost.
+local function own_character()
+	local a = db.actor
+	if a and coop_mode.actor_is_player() then return a end
+	return nil
+end
+
+-------------------------------------------------------------------------------
+-- Characters and where they stand
+-------------------------------------------------------------------------------
+-- Every player's character in the session, this process's own first: { id, peer, obj = his object here | nil }. A player who
+-- is not placed yet (joining) and a ghost are left out.
+local function characters()
+	local out, seen = {}, {}
+	local own = own_character()
+	if own then
+		local id = own:id()
+		out[1] = { id = id, peer = C().self_peer(), obj = own }
+		seen[id] = true
+	end
+	for _, p in ipairs(C().players()) do
+		local id = p.avatar_id
+		if not p.is_self and valid_id(id) and not seen[id] and type(p.id) == "number" and coop_mode.where(p.id) ~= "joining" then
+			seen[id] = true
+			out[#out + 1] = { id = id, peer = p.id, obj = level.object_by_id(id) }
+		end
+	end
+	return out
+end
+
+-- Position, game vertex, level vertex of a character: his object here, else his ALife record.
+local function place(c)
+	local o = c.obj
+	if o then
+		local ok, pos, gv, lv = pcall(function() return o:position(), o:game_vertex_id(), o:level_vertex_id() end)
+		if ok and pos and type(gv) == "number" then return pos, gv, lv end
+	end
+	local se = alife_object(c.id)
+	if se and se.position then return se.position, se.m_game_vertex_id, se.m_level_vertex_id end
+	return nil
+end
+
+local function object_of(id)
+	local own = own_character()
+	if own and own:id() == id then return own end
+	return level.object_by_id(id)
+end
+
+function position_of(id)
+	if not valid_id(id) then return nil end
+	local pos, gv, lv = place({ id = id, obj = object_of(id) })
+	if not pos then return nil end
+	return pos, gv, lv, level_of(gv)
+end
+
+-- How many squads his rank and reputation call for (the stock's spawn_timer, :123-135, for him).
+local function danger(c)
+	local who = c.obj or alife_object(c.id)
+	if not who then return 0 end
+	local n = 0
+	local rank = ranks.get_obj_rank_name(who)
+	if rank and cfg.ranks[rank] then n = n + (tonumber(cfg.ranks[rank]) or 0) end
+	local rep
+	if who.character_reputation then rep = who:character_reputation() elseif who.reputation then rep = who:reputation() end
+	if type(rep) == "number" then
+		local name = utils_obj.get_reputation_name(rep)
+		if name and cfg.reps[name] then n = n + (tonumber(cfg.reps[name]) or 0) end
+	end
+	return n
+end
+
+-- His community for the stock's enemy test: "actor_" .. the faction the world's decider gives him; without an answer, the
+-- community his object or record has (the stock reads db.actor's).
+local function community_of(c)
+	local cf = C().mod("coop_faction")
+	local f = cf and cf.faction_of_character and cf.faction_of_character(c.id)
+	if type(f) == "string" and f ~= "" then return "actor_" .. f end
+	local who = c.obj or alife_object(c.id)
+	if not who then return nil end
+	local comm
+	if who.character_community then comm = who:character_community() elseif who.community then comm = who:community() end
+	return type(comm) == "string" and comm or nil
+end
+
+-------------------------------------------------------------------------------
+-- Records
+-------------------------------------------------------------------------------
+local function reindex()
+	owner = {}
+	for id, rec in pairs(book) do
+		for sid in pairs(rec.squads) do owner[sid] = id end
+	end
+end
+
+local function record(id)
+	local rec = book[id]
+	if not rec then
+		rec = { squads = {} }
+		book[id] = rec
+	end
+	return rec
+end
+
+-- A squad that is gone (or whose id is another object now) leaves the records, as the stock's state timer cleans its table.
+local function clean()
+	for id, rec in pairs(book) do
+		for sid, section in pairs(rec.squads) do
+			local se = alife_object(sid)
+			local ok, sec = pcall(function() return se and se:section_name() end)
+			if not (ok and sec == section) then
+				rec.squads[sid] = nil
+				dirty = true
+			end
+		end
+		if rec.last == nil and next(rec.squads) == nil then book[id] = nil end
+	end
+	reindex()
+end
+
+-- The stock's own table (sim_squad_bounty.get_active_squads: a new table after its load) holds our squads too.
+local function sync_stock()
+	local m = C().mod("sim_squad_bounty")
+	local get = m and C().fn(m, "get_active_squads")
+	local t = get and get()
+	if type(t) ~= "table" then return end
+	for _, rec in pairs(book) do
+		for sid, section in pairs(rec.squads) do
+			if t[sid] == nil then t[sid] = section end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Publication of the targets (the world's decider) and its copy elsewhere
+-------------------------------------------------------------------------------
+local function publish(force)
+	if not (C().active() and coop_mode.decides_world()) then return end
+	local now = time_global()
+	if not (dirty or (force and next(owner) ~= nil) or (next(owner) ~= nil and now >= next_publish)) then return end
+	local t, n = {}, 0
+	for sid, cid in pairs(owner) do
+		local hs, hc = C().hid(sid), C().hid(cid)
+		if n < MAX_TARGETS and valid_id(hs) and valid_id(hc) then
+			n = n + 1
+			t["s" .. n], t["c" .. n] = hs, hc
+		end
+	end
+	t.n = n
+	if C().publish(VERB, t) then
+		stats.published = stats.published + 1
+		dirty = false
+		next_publish = now + PUBLISH_MS
+	end
+end
+
+-- Another process (side "client": from peer 0 only, on a machine with a copy of the world): the whole list replaces the copy.
+local function on_targets(t, from)
+	local n = tonumber(t.n)
+	local ok = n ~= nil and n >= 0 and n <= MAX_TARGETS and n == math_floor(n)
+	local list = {}
+	if ok then
+		for i = 1, n do
+			local sid, cid = C().lid(tonumber(t["s" .. i])), C().lid(tonumber(t["c" .. i]))
+			if not (valid_id(sid) and valid_id(cid)) then
+				ok = false
+				break
+			end
+			list[sid] = cid
+		end
+	end
+	local trust = C().mod("coop_trust")
+	if trust and trust.guard then ok = trust.guard("bounty_targets", ok, "a bounty target list from %s dropped", tostring(from)) end
+	if not ok then
+		stats.dropped = stats.dropped + 1
+		return
+	end
+	mirror = list
+	stats.received = stats.received + 1
+end
+
+-- The character a squad hunts here: the decider's records, another process's copy of them.
+local function hunted(sid)
+	if coop_mode.decides_world() then return owner[sid] end
+	return mirror[sid]
+end
+
+function target_of(sid)
+	if not valid_id(sid) then return nil end
+	local cid = hunted(sid)
+	if cid == nil then return nil end
+	return cid, C().peer_of(cid)
+end
+
+function squads_of(id)
+	local out = {}
+	local rec = book[id]
+	if rec then for sid, section in pairs(rec.squads) do out[sid] = section end end
+	return out
+end
+
+function records()
+	local out = {}
+	for id, rec in pairs(book) do
+		local squads = {}
+		for sid, section in pairs(rec.squads) do squads[sid] = section end
+		out[id] = { last = rec.last, squads = squads }
+	end
+	return out
+end
+
+-------------------------------------------------------------------------------
+-- The spawn pass (the stock's spawn_timer and try_spawn, per character)
+-------------------------------------------------------------------------------
+-- The stock's test of a smart: no squad of its own is on its way there (sim_squad_bounty.script:47-56).
+local function smart_free(smart)
+	local smrt = SIMBOARD.smarts[smart.id]
+	if not smrt then return false end
+	for k in pairs(smrt.squads) do
+		local squad = alife_object(k)
+		if squad and squad.current_target_id and squad.current_target_id == smart.id and not squad:get_script_target() then
+			return false
+		end
+	end
+	return true
+end
+
+-- s38:6: no player's character on the smart's map stands within the stock's spawn distance.
+local function far_from_players(smart, bodies)
+	local lid = level_of(smart.m_game_vertex_id)
+	for _, b in ipairs(bodies) do
+		if b.lid == lid and b.pos:distance_to(smart.position) <= cfg.distance then return false end
+	end
+	return true
+end
+
+local function spawn_for(c, rec, bodies)
+	local comm = community_of(c)
+	local enemies = {}
+	for i = 1, #cfg.factions do
+		local f = cfg.factions[i]
+		if comm and game_relations.is_factions_enemies(f, comm) then enemies[#enemies + 1] = f end
+	end
+	if #enemies == 0 then
+		stats.no_faction = stats.no_faction + 1
+		return
+	end
+	local section = cfg.squads[enemies[math.random(#enemies)]]
+	if type(section) ~= "string" then
+		stats.no_faction = stats.no_faction + 1
+		return
+	end
+	local at = { m_game_vertex_id = c.gv } -- his map (s38:3 in the server mode: never the ghost's fake_start)
+	local names = {}
+	for name, smart in pairs(SIMBOARD.smarts_by_names) do
+		if simulation_objects.is_on_the_same_level(at, smart) or simulation_objects.is_on_the_linked_level(at, smart) then
+			if not far_from_players(smart, bodies) then
+				stats.near = stats.near + 1
+			elseif smart_free(smart) then
+				names[#names + 1] = name
+			end
+		end
+	end
+	if #names == 0 then
+		stats.no_smart = stats.no_smart + 1
+		return
+	end
+	local name = names[math.random(#names)]
+	local sq = sim_board.get_sim_board():create_squad(SIMBOARD.smarts_by_names[name], section)
+	if not sq then return end
+	sq.scripted_target = "actor"
+	sq.rush_to_target = true
+	local sec = sq:section_name()
+	rec.squads[sq.id] = sec
+	rec.last = game.get_game_time()
+	owner[sq.id] = c.id
+	dirty = true
+	stats.spawned = stats.spawned + 1
+	local m = C().mod("sim_squad_bounty")
+	local get = m and C().fn(m, "get_active_squads")
+	local t = get and get()
+	if type(t) == "table" then t[sq.id] = sec end
+	C().log(TAG, "squad %s (%d) at %s hunts character %d (peer %s)", tostring(sec), sq.id, tostring(name), c.id, tostring(c.peer))
+end
+
+local function spawn_pass()
+	stats.passes = stats.passes + 1
+	clean()
+	local list = characters()
+	local bodies = {}
+	for _, c in ipairs(list) do
+		local pos, gv, lv = place(c)
+		local lid = level_of(gv)
+		if pos and lid ~= nil then
+			c.pos, c.gv, c.lv, c.lid = pos, gv, lv, lid
+			bodies[#bodies + 1] = c
+		end
+	end
+	local now = game.get_game_time()
+	for _, c in ipairs(bodies) do
+		local ok, num = pcall(danger, c)
+		if not ok then
+			report("danger of " .. tostring(c.id), num)
+			num = 0
+		end
+		if num > 0 then
+			local rec = record(c.id)
+			if not rec.last then
+				rec.last = now -- the stock starts the cooldown at the first due tick (:145-148)
+			elseif now:diffSec(rec.last) >= cfg.delay and count(rec.squads) < num then
+				local fine, err = pcall(spawn_for, c, rec, bodies)
+				if not fine then report("spawn for " .. tostring(c.id), err) end
+			end
+		end
+	end
+	sync_stock()
+	publish(true)
+end
+
+-------------------------------------------------------------------------------
+-- Wrappers
+-------------------------------------------------------------------------------
+local function make_spawn(orig)
+	return function(...)
+		-- single player (and a player's process before its session): the stock as it is
+		if not C().active() and coop_mode.actor_is_player() then return orig(...) end
+		-- the world's decider runs the bounties; elsewhere the event goes, as the router drops a host timer
+		if not coop_mode.decides_world() then return true end
+		pcall(ResetTimeEvent, TIMER_EV, TIMER_ACT, cfg.delay_spawn)
+		local ok, err = pcall(spawn_pass)
+		if not ok then report("spawn pass", err) end
+		return false
+	end
+end
+
+local function task_of(self)
+	local cid = hunted(self.id)
+	if cid == nil then return nil end
+	local own = own_character()
+	if own and own:id() == cid then return nil end -- "the actor" is he: the stock's
+	local _, gv, lv = place({ id = cid, obj = object_of(cid) })
+	if type(gv) ~= "number" or type(lv) ~= "number" then return nil end
+	return gv, lv
+end
+
+local function make_task(orig)
+	return function(self, ...)
+		if self.assigned_target_id ~= 0 or not C().active() or coop_mode.is_player_mirror() then return orig(self, ...) end
+		local ok, gv, lv = pcall(task_of, self)
+		if not ok then
+			report("task", gv)
+			return orig(self, ...)
+		end
+		if gv == nil then return orig(self, ...) end
+		stats.redirected = stats.redirected + 1
+		return CALifeSmartTerrainTask(gv, lv)
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Callbacks
+-------------------------------------------------------------------------------
+local function save_state(m_data)
+	if type(m_data) ~= "table" then return end
+	local c, any = {}, false
+	for id, rec in pairs(book) do
+		local row = { s = {} }
+		local has = false
+		if rec.last then
+			local ok, t = pcall(utils_data.CTime_to_table, rec.last)
+			if ok and type(t) == "table" then
+				row.t = t
+				has = true
+			end
+		end
+		for sid, section in pairs(rec.squads) do
+			row.s[sid] = section
+			has = true
+		end
+		if has then
+			c[id] = row
+			any = true
+		end
+	end
+	m_data[SAVE_KEY] = any and { v = 1, c = c } or nil
+end
+
+local function load_state(m_data)
+	book = {}
+	local d = type(m_data) == "table" and m_data[SAVE_KEY] or nil
+	if type(d) == "table" and type(d.c) == "table" then
+		for id, row in pairs(d.c) do
+			if valid_id(id) and type(row) == "table" then
+				local rec = { squads = {} }
+				if type(row.t) == "table" then
+					local ok, t = pcall(utils_data.CTime_from_table, row.t)
+					if ok and t then rec.last = t end
+				end
+				if type(row.s) == "table" then
+					for sid, section in pairs(row.s) do
+						if valid_id(sid) and type(section) == "string" then rec.squads[sid] = section end
+					end
+				end
+				book[id] = rec
+			end
+		end
+	end
+	reindex()
+	dirty = true
+end
+
+-- A squad that leaves the world leaves the targets at once, as the stock's own table does (sim_squad_bounty.script:242-244):
+-- its id may go to another squad sent at "the actor" before the next pass.
+local function server_entity_on_unregister(se_obj)
+	local sid = se_obj and se_obj.id
+	if type(sid) ~= "number" then return end
+	mirror[sid] = nil
+	local cid = owner[sid]
+	if cid == nil then return end
+	owner[sid] = nil
+	local rec = book[cid]
+	if rec then rec.squads[sid] = nil end
+	dirty = true
+end
+
+local function on_game_load()
+	sync_stock()
+end
+
+local function actor_on_update()
+	local now = time_global()
+	if now < next_look then return end
+	next_look = now + LOOK_MS
+	if dirty or next(owner) ~= nil then publish(false) end
+end
+
+-------------------------------------------------------------------------------
+-- Install
+-------------------------------------------------------------------------------
+-- The stock's file locals (sim_squad_bounty.script:13-26): its tables are filled by its own on_game_start, the references stay.
+local function read_cfg(m)
+	local L = C().find_local
+	local factions, squads = (L(m, "factions")), (L(m, "faction_bounty_squads"))
+	local dr, dp = (L(m, "danger_ranks")), (L(m, "danger_reputations"))
+	if type(factions) ~= "table" or type(squads) ~= "table" or type(dr) ~= "table" or type(dp) ~= "table" then return nil end
+	return {
+		factions = factions, squads = squads, ranks = dr, reps = dp,
+		delay = tonumber((L(m, "delay"))) or 60 * 60 * 24,
+		delay_spawn = tonumber((L(m, "delay_spawn"))) or 300,
+		distance = tonumber((L(m, "spawn_distance"))) or 200,
+	}
+end
+
+local function install()
+	local m = C().mod("sim_squad_bounty")
+	if not m then return end
+	cfg = read_cfg(m)
+	if not cfg then
+		C().log(TAG, "sim_squad_bounty has not the stock's locals: its bounty stays as it is")
+		return
+	end
+	local ok, orig = C().wrap(m, "spawn_timer", "bounty.spawn_timer", make_spawn)
+	wrapped.spawn = ok
+	-- the router runs the wrapper where it ran the stock's timer ("host": the world's decider), not as a coop_* script
+	local route = C().mod("coop_route")
+	if ok and route and route.inherit_source then route.inherit_source(m.spawn_timer, orig) end
+	local squads = C().mod("sim_squad_scripted")
+	local cls = squads and squads.sim_squad_scripted
+	if cls then wrapped.task = C().wrap(cls, "get_current_task", "bounty.get_current_task", make_task) end
+end
+
+function status()
+	return string_format("%s%s | characters %d, squads %d, copy %d | passes %d, spawned %d, near a player %d, no smart %d, "
+		.. "no faction %d | to a character %d | published %d, received %d, dropped %d, errors %d",
+		wrapped.spawn and "timer" or "-", wrapped.task and " + task" or "", count(book), count(owner), count(mirror),
+		stats.passes, stats.spawned, stats.near, stats.no_smart, stats.no_faction, stats.redirected, stats.published,
+		stats.received, stats.dropped, stats.errors)
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5).
+function on_game_start()
+	local steps = {
+		{ "install", install },
+		{ "callbacks", function()
+			if not cfg then return end
+			RegisterScriptCallback("save_state", save_state)
+			RegisterScriptCallback("load_state", load_state)
+			RegisterScriptCallback("on_game_load", on_game_load)
+			RegisterScriptCallback("actor_on_update", actor_on_update)
+			RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
+		end },
+		{ "events", function() if cfg then C().on(VERB, on_targets, "client") end end },
+		{ "status", function() C().status_line(TAG, status) end },
+	}
+	for _, s in ipairs(steps) do
+		local ok, err = pcall(s[2])
+		if not ok then printf("! [coop_bounty] start step %s failed: %s", s[1], tostring(err)) end
+	end
+end
+
+-- tests
+function _stats() return stats end
