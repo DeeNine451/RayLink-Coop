@@ -55,6 +55,11 @@
 	dist_to_actor_ge, dist_to_task_target_anomaly_le, actor_see_npc, actor_near_smart, actor_in_zone, actor_out_zone, actor_inside_zone,
 	has_active_tutorial; xr_effects.<actor effects>; bind_physic_object.generic_physics_binder.use_callback;
 	ph_code.codepad.use_callback.
+
+	Dev 57 G15-5: snapshot a cutscene's participants before activation. npc.logic carries the run, roster and
+	optional stop signal on switches and re-issues. Only an invited machine runs the camera and reports completion
+	(mods.npc_scene_end). Keep the actor of local scheme transitions for story|actor remarks. The owner's NPC use
+	and remote USE (mods.npc_abuse_use) both judge irritation on the map that runs the NPC and use G15-1 for the punch.
 --]]
 
 local tostring, tonumber, type, pairs, ipairs, pcall, next = tostring, tonumber, type, pairs, ipairs, pcall, next
@@ -68,6 +73,13 @@ local function report(what, err) P.report(TAG, what, err) end
 
 local EV_SECTION, EV_REQ, EV_ALL, EV_FX = "npc.logic", "npc.logic_req", "npc.logic_all", "npc.fx"
 local EV_PAD, EV_PAD_CODE, EV_VISE = "npc.pad", "npc.pad_code", "npc.vise"
+local SCENE_END, ABUSE_USE = "npc_scene_end", "npc_abuse_use" -- mods.*
+local CUT_TIMEOUT = 300000 -- allow the long multi-camera scenes to finish before releasing a missing participant
+local USE_REACH_SQR = 4
+local MAX_OBJECT_ID, MAX_SCENE_RUN = 65534, 2147483647
+local MAX_SCENE_AUDIENCE = 16
+local cut_run = 0
+local transition_user, meet_user
 local CHUNK = 150
 local PENDING_TTL = 120000
 local KILL_RELAY_MS = 500
@@ -155,12 +167,17 @@ local function each_line(ini, visit)
 	return ok
 end
 
--- shared: some effect leaves the machine; positional: some switch waits for a player to arrive;
+local function is_cutscene(section)
+	return type(section) == "string" and (section == "sr_cutscene" or section:sub(1, 12) == "sr_cutscene@")
+end
+
+-- shared: some effect leaves the machine or a scheme runs a camera; positional: a switch waits for a player;
 -- gathers: some effect takes the player out of play.
 function scan_ini(ini)
 	local shared, positional, gathers = false, false, false
 	if not ini then return true, false, false end
-	local ok = each_line(ini, function(_, key, value)
+	local ok = each_line(ini, function(section, key, value)
+		if is_cutscene(section) then shared = true end
 		if type(key) == "string" and ARRIVAL_CONDS[(key:gsub("%d+$", ""))] then positional = true end
 		if type(value) == "string" and value:find("%", 1, true) then
 			for block in value:gmatch("%%([^%%]*)%%") do
@@ -304,7 +321,7 @@ local function current(npc)
 	local top = ctx[#ctx]
 	if not (top and host_on) then return nil end
 	if npc and top.npc_id ~= (type(npc.id) == "function" and npc:id() or npc.id) then return nil end
-	return top.st
+	return top.st, top
 end
 
 -- A logic that teleports whoever uses it is a scene (the Pripyat and X-8 lifts). A valve or a switch is the presser's alone.
@@ -337,15 +354,15 @@ end
 
 -- nil = neither a replicated restrictor's condlist nor a pressed physics object on a host with clients.
 function audience_of(npc)
-	local state = current(npc)
+	local state, frame = current(npc)
 	if state == nil then return press_of(npc) end
-	return audience(npc, state) or nil
+	return frame.cut_audience or audience(npc, state)
 end
 
--- The object id of the player who used this physics object last, nil = nobody did.
+-- The object id of the player who used this object or triggered its scene, nil = nobody did.
 function user_of(npc)
 	local st = storage_of(npc)
-	return st and st.coop_user or nil
+	return st and (st.coop_user or st.coop_scene_user) or nil
 end
 
 -- True when the press belongs to other players: what it shows is not for the host's screen (coop_npc_effects).
@@ -397,8 +414,9 @@ function deliver(name, npc, p)
 		return aud[db.actor:id()] == true or ACTOR_FX[name] == "always"
 	end
 	if P.is_client() then return true end -- a scheme's own call (sr_cutscene): this player's
-	if not current(npc) then return true end -- scheme-internal on the host: vanilla
-	local aud = audience(npc, st)
+	local _, frame = current(npc)
+	if not frame then return true end -- scheme-internal on the host: vanilla
+	local aud = frame.cut_audience or audience(npc, st)
 	local mine = db.actor ~= nil and aud[db.actor:id()] == true
 	if name == "kill_actor" then
 		-- A gated kill fires every tick until it is done: relay at most twice a second.
@@ -411,7 +429,7 @@ function deliver(name, npc, p)
 		return mine and not (gate and db.actor:object(gate))
 	end
 	relay(aud, npc:id(), name, args_of(p))
-	return mine or ACTOR_FX[name] == "always"
+	return mine or (not frame.cut_audience and ACTOR_FX[name] == "always")
 end
 
 local function wrap_effect(name)
@@ -508,6 +526,74 @@ local SWITCH_TESTS = {
 	on_actor_outside = function(x) return not zone_has_player(x.npc) end,
 }
 
+local function bounded_int(n, min, max)
+	return type(n) == "number" and n >= min and n <= max and n % 1 == 0
+end
+
+local function own_actor()
+	-- The engine's actor id is local. A mod can temporarily point db.actor at a client's proxy.
+	if coop_mods_core.identity_obj() then return level.object_by_id(AC_ID or 0) end
+	return P.own_actor()
+end
+
+local function player_here(peer)
+	if peer == nil or coop_mode.where(peer) ~= "here" then return nil end
+	local actor
+	if peer == P.self_peer() then
+		actor = coop_mode.actor_is_player() and own_actor()
+	else
+		actor = P.object_of_peer(peer)
+	end
+	if actor and actor:alive() and P.standing(actor) then return actor end
+end
+
+local function player_by_id(id)
+	local actor = id and player_here(P.peer_of(id))
+	if actor and actor:id() == id then return actor end
+end
+
+local function players_matching(npc, test)
+	local matches, nearest, best = {}, nil, math.huge
+	local pos = npc:position()
+	local function visit(peer)
+		local p = player_here(peer)
+		if p and (not test or test(p)) then
+			matches[p:id()] = true
+			local d = p:position():distance_to_sqr(pos)
+			if not nearest or d < best or (d == best and p:id() < nearest:id()) then nearest, best = p, d end
+		end
+	end
+	visit(P.self_peer())
+	for _, row in ipairs(P.players()) do
+		if not row.is_self then visit(row.id) end
+	end
+	return matches, nearest
+end
+
+local function arrival_players(npc, c)
+	if c.name == "on_actor_dist_le" or c.name == "on_actor_dist_le_nvis" then
+		return players_matching(npc, function(p)
+			return p:position():distance_to_sqr(npc:position()) <= radius_sqr(c)
+				and (c.name ~= "on_actor_dist_le" or npc:see(p))
+		end)
+	end
+	local zone = c.name == "on_actor_in_zone" and db.zone_by_name[c.v1] or npc
+	return players_matching(npc, function(p) return zone and zone:inside(p:position()) end)
+end
+
+local function transition_for(npc, actor, audience, f, ...)
+	local old = transition_user
+	transition_user = { npc = npc:id(), actor = actor:id(), audience = audience }
+	local ok, result = pcall(f, ...)
+	transition_user = old
+	if not ok then error(result, 0) end
+	return result
+end
+
+local function pick_and_switch(npc, st, actor, c)
+	return xr_logic.switch_to_section(npc, st.ini, xr_logic.pick_section_from_condlist(actor, npc, c.condlist))
+end
+
 -- Vanilla's loop with the actor conditions read against every alive player.
 local function team_try_switch(npc, st, actor, l)
 	local npc_id = npc:id()
@@ -538,7 +624,15 @@ local function team_try_switch(npc, st, actor, l)
 			-- An arrival restarts the audience only once its condlist delivers an effect or switches.
 			local arrival = replicated and ARRIVAL_CONDS[name]
 			if arrival then ost.coop_arrival = c end
-			switched = xr_logic.switch_to_section(npc, st.ini, xr_logic.pick_section_from_condlist(actor, npc, c.condlist))
+			local matches, initiator
+			if coop_mode and coop_mode.leads_here() and ARRIVAL_CONDS[name] then
+				matches, initiator = arrival_players(npc, c)
+			end
+			if initiator then
+				switched = transition_for(npc, initiator, matches, pick_and_switch, npc, st, actor, c)
+			else
+				switched = pick_and_switch(npc, st, actor, c)
+			end
 			if arrival and ost.coop_arrival then
 				if switched == true and ost.active_section then restart_audience(npc, ost, c) end
 				ost.coop_arrival = nil
@@ -579,6 +673,12 @@ local function try_switch(npc, st, actor)
 			local ost = restrictor_st(npc)
 			if ost and ost.coop_local == false then return false end
 		end
+		if coop_mode and coop_mods_core and coop_mode.leads_here() and actor then
+			local player, own = player_by_id(actor:id()), own_actor()
+			if player and (not own or player:id() ~= own:id()) then
+				return transition_for(npc, player, nil, orig.try_switch, npc, st, actor)
+			end
+		end
 	end
 	return orig.try_switch(npc, st, actor)
 end
@@ -586,10 +686,109 @@ end
 -------------------------------------------------------------------------------
 -- Sections: host broadcasts, client applies
 -------------------------------------------------------------------------------
-local pending = {} -- client: local id -> { s = section, t = received }
+local pending = {} -- client: local id -> { s = section, t = received, cut = scene run or nil }
+local try_apply
+
+-- The arena already owns its fighter slots, cameras and completion handshake.
+local function managed_cutscene(npc, st, section)
+	return is_cutscene(section) and npc:name() ~= "bar_arena_triger"
+		and not (st.ini and st.ini:section_exist("sr_cutscene@fight_1"))
+end
+
+local function cutscene_audience(npc, st, actor, entry)
+	if entry and entry.audience then return entry.audience end
+	if actor then return { [actor:id()] = true } end
+	if st.coop_cutscene then return st.coop_cutscene.aud end
+	if st.coop_scene_arrival then return st.coop_scene_arrival end
+	local participants, nearest = players_matching(npc, function(p) return npc:inside(p:position()) end)
+	if not nearest then
+		_, nearest = players_matching(npc)
+		if nearest then participants[nearest:id()] = true end
+	end
+	return participants
+end
+
+local function transition_actor(npc)
+	local entry = transition_user
+	if entry and entry.npc == npc:id() then return player_by_id(entry.actor), entry end
+	local obj = P.in_identity() and db.actor or coop_mods_core.identity_obj()
+	return obj and player_by_id(obj:id())
+end
+
+local function stop_cutscene(st)
+	local action = st.sr_cutscene and st.sr_cutscene.cutscene_action
+	if not (action and action.coop_playing) then return end
+	action.coop_playing = nil
+	if action.motion then
+		level.remove_cam_effector(210408)
+		action.motion = nil
+	end
+	if action.postprocess then
+		level.remove_complex_effector(1999)
+		action.postprocess = false
+	end
+	if action.st.pp_effector and action.st.pp_effector ~= "nil.ppe" then level.remove_pp_effector(234) end
+	if action.ui_disabled then
+		local actor = own_actor()
+		if actor then P.with_identity(actor, xr_effects.enable_ui, actor, nil) end
+		action.ui_disabled = false
+	end
+end
+
+local function remember_transition(npc, st, section)
+	local actor, entry = transition_actor(npc)
+	if section == "nil" then
+		st.coop_scene_user, st.coop_scene_arrival = nil, nil
+	elseif actor then
+		st.coop_scene_user = actor:id()
+	end
+	if st.stype ~= STYPE_RESTRICTOR then return end
+	if managed_cutscene(npc, st, section) then
+		actor = actor or player_by_id(st.coop_user)
+		local now = time_global()
+		cut_run = math.max(cut_run, now % MAX_SCENE_RUN) % MAX_SCENE_RUN + 1
+		st.coop_cutscene = { s = section, q = cut_run, aud = cutscene_audience(npc, st, actor, entry), done = {}, started = now }
+		st.coop_scene_arrival = nil
+	else
+		st.coop_cutscene = nil
+		if actor then st.coop_scene_arrival = entry and entry.audience or { [actor:id()] = true } end
+	end
+end
+
+local function section_packet(id, section, cut)
+	local t = { i = id, s = section or "nil" }
+	if cut and cut.s == section then
+		local ids = {}
+		for actor in pairs(cut.aud) do
+			if not cut.done[actor] then
+				local hid = coop_mods_core.hid(actor)
+				if bounded_int(hid, 0, MAX_OBJECT_ID) then ids[#ids + 1] = hid end
+			end
+		end
+		table.sort(ids)
+		t.i, t.q, t.a = coop_mods_core.hid(id), cut.q, table_concat(ids, ",")
+		t.k = cut.stop
+	end
+	return t
+end
+
+local function read_cutscene(section, run, ids, stop)
+	if not (is_cutscene(section) and bounded_int(run, 1, MAX_SCENE_RUN) and type(ids) == "string"
+		and #ids <= MAX_SCENE_AUDIENCE * 6) then return nil end
+	local audience, count = {}, 0
+	for id in ids:gmatch("[^,]+") do
+		local n = tonumber(id)
+		count = count + 1
+		if count > MAX_SCENE_AUDIENCE or not bounded_int(n, 0, MAX_OBJECT_ID) then return nil end
+		audience[n] = true
+	end
+	return { s = section, q = run, aud = audience, stop = stop == true }
+end
 
 local function broadcast_section(id, section)
-	if P.send(EV_SECTION, { i = id, s = section or "nil" }, -1) then
+	local st = db.storage[id]
+	if is_cutscene(section) and coop_mode and not coop_mode.leads_here() then return end
+	if P.send(EV_SECTION, section_packet(id, section, st and st.coop_cutscene), -1) then
 		stats.sections_out = stats.sections_out + 1
 	end
 end
@@ -609,7 +808,7 @@ local function switch_to_section(npc, ini, section)
 	local switched = orig.switch(npc, ini, section)
 	if switched then
 		if not st.active_section then st.coop_aud, st.coop_trigger_zone = nil, nil end
-		if host_on then broadcast_section(npc:id(), st.active_section) end
+		if host_on or st.coop_cutscene then broadcast_section(npc:id(), st.active_section) end
 	end
 	return switched
 end
@@ -627,7 +826,10 @@ local function determine_section(npc, ini, section_logic, actor)
 			if st.coop_local == false then
 				local p = pending[npc:id()]
 				pending[npc:id()] = nil
-				if p and (p.s == "nil" or ini:section_exist(p.s)) then return p.s end
+				if p and (p.s == "nil" or ini:section_exist(p.s)) then
+					st.coop_cutscene = p.cut
+					return p.s
+				end
 				client_request(npc:id())
 				return "nil"
 			end
@@ -677,20 +879,11 @@ local function initialize(obj, st, loaded, actor, stype)
 	if not (installed and stype == STYPE_RESTRICTOR and st and P.active()) then return end
 	classify(st)
 	if st.coop_local ~= false then return end
-	if host_on then
+	if host_on or (st.coop_cutscene and coop_mode.leads_here()) then
 		broadcast_section(obj:id(), st.active_section)
 	elseif P.is_client() then
 		local p = pending[obj:id()]
-		if p then
-			pending[obj:id()] = nil
-			local target = p.s ~= "nil" and p.s or nil
-			if st.active_section ~= target and (p.s == "nil" or st.ini:section_exist(p.s)) then
-				applying = true
-				local ok, err = pcall(orig.switch, obj, st.ini, p.s)
-				applying = false
-				if not ok then report("apply pending " .. tostring(p.s), err) end
-			end
-		end
+		if p and try_apply(obj:id(), p.s, p.cut) then pending[obj:id()] = nil end
 	end
 end
 
@@ -729,7 +922,7 @@ local function save_obj(obj, packet)
 end
 
 -- Returns true when done (applied, refused or not ours), false to retry later.
-local function try_apply(id, section)
+try_apply = function(id, section, cut)
 	local st = db.storage[id]
 	if not (st and st.stype == STYPE_RESTRICTOR and st.ini) then return false end
 	classify(st)
@@ -739,9 +932,20 @@ local function try_apply(id, section)
 		return true
 	end
 	local target = section ~= "nil" and section or nil
-	if st.active_section == target then return true end
 	local obj = level.object_by_id(id)
 	if not obj then return false end
+	if st.active_section == target then
+		if cut and (not st.coop_cutscene or st.coop_cutscene.q ~= cut.q) then
+			stop_cutscene(st)
+			st.coop_cutscene = cut
+			local action = st.sr_cutscene and st.sr_cutscene.cutscene_action
+			if action then action:reset_scheme() end
+		elseif cut and cut.stop then
+			st.coop_cutscene.stop = true
+		end
+		return true
+	end
+	st.coop_cutscene = cut
 	applying = true
 	local ok, err = pcall(orig.switch, obj, st.ini, section)
 	applying = false
@@ -750,16 +954,21 @@ local function try_apply(id, section)
 	return true
 end
 
-local function client_on_section(host_id, section)
+local function client_on_section(host_id, section, run, participants, stop)
 	if type(host_id) ~= "number" or type(section) ~= "string" or section == "" then return end
 	local id = P.to_local(host_id)
-	if not try_apply(id, section) then pending[id] = { s = section, t = time_global() } end
+	local cut = read_cutscene(section, run, participants, stop)
+	if try_apply(id, section, cut) then
+		pending[id] = nil
+	else
+		pending[id] = { s = section, cut = cut, t = time_global() }
+	end
 end
 
 local function client_retry_pending()
 	local now = time_global()
 	for id, p in pairs(pending) do
-		if try_apply(id, p.s) or now - p.t > PENDING_TTL then pending[id] = nil end
+		if try_apply(id, p.s, p.cut) or now - p.t > PENDING_TTL then pending[id] = nil end
 	end
 end
 
@@ -777,7 +986,9 @@ local function host_send_all(peer)
 		local st = ok and db.storage[id]
 		if st and st.stype == STYPE_RESTRICTOR and st.ini then
 			classify(st)
-			if st.coop_local == false then
+			if st.coop_cutscene then
+				P.send(EV_SECTION, section_packet(id, st.active_section, st.coop_cutscene), peer)
+			elseif st.coop_local == false then
 				n = n + 1
 				t["i" .. n] = id
 				t["s" .. n] = st.active_section or "nil"
@@ -942,6 +1153,33 @@ local function pick_for_leader(obj, npc, condlist)
 	return nil
 end
 
+local function pick_scene_line(obj, npc, condlist, frame)
+	local st, cut = frame.st, frame.st.coop_cutscene
+	if not (coop_mode and coop_mode.leads_here()) then return orig.pick(obj, npc, condlist) end
+	if cut then
+		frame.cut_audience = cut.aud
+		return orig.pick(obj, npc, condlist)
+	end
+	if type(condlist) == "table" then
+		for _, line in ipairs(condlist) do
+			if type(line) == "table" and managed_cutscene(npc, st, line[1]) then
+				-- The effects of the chosen branch run before switch_to_section, including disable_ui in Zaton.
+				for _, candidate in ipairs(condlist) do
+					frame.cut_audience = nil
+					if managed_cutscene(npc, st, candidate[1]) then
+						local actor, entry = transition_actor(npc)
+						frame.cut_audience = cutscene_audience(npc, st, actor or player_by_id(st.coop_user), entry)
+					end
+					local section = orig.pick(obj, npc, { candidate })
+					if section ~= nil then return section end
+				end
+				return nil
+			end
+		end
+	end
+	return orig.pick(obj, npc, condlist)
+end
+
 local function pick_section(obj, npc, condlist)
 	local rep = rawget(_G, "coop_reputation")
 	if rep and host_on then
@@ -955,8 +1193,9 @@ local function pick_section(obj, npc, condlist)
 	if not (st and st.stype == STYPE_RESTRICTOR and st.coop_local == false) then
 		return orig.pick(obj, npc, condlist)
 	end
-	ctx[#ctx + 1] = { st = st, npc_id = id }
-	local ok, r = pcall(orig.pick, obj, npc, condlist)
+	local frame = { st = st, npc_id = id }
+	ctx[#ctx + 1] = frame
+	local ok, r = pcall(pick_scene_line, obj, npc, condlist, frame)
 	ctx[#ctx] = nil
 	if not ok then error(r, 0) end
 	return r
@@ -1068,6 +1307,255 @@ local function patch_uses()
 end
 
 -------------------------------------------------------------------------------
+-- Scene cameras, remark targets and NPC use
+-------------------------------------------------------------------------------
+local function mark_scene_end(cut, id)
+	if cut and cut.aud[id] and not cut.done[id] then cut.done[id] = true end
+end
+
+local function scene_end(t, from)
+	local valid = bounded_int(t.i, 0, MAX_OBJECT_ID) and bounded_int(t.q, 1, MAX_SCENE_RUN)
+	if not coop_trust.pass("npc_scene_end_shape", valid, "peer %s: invalid cutscene completion", tostring(from)) then return end
+	if not valid then return end
+	local id = coop_mods_core.lid(t.i)
+	local st = id and db.storage[id]
+	local cut = st and st.coop_cutscene
+	local actor = coop_mode.decider(from) == "this" and player_here(from)
+	local who = actor and actor:id()
+	local invited = cut and cut.done and cut.q == t.q and cut.s == st.active_section and cut.aud[who] == true
+	if not coop_trust.pass("npc_scene_end_member", invited, "peer %s: cutscene %d run %d has no such participant",
+		tostring(from), t.i, t.q) then return end
+	if invited then mark_scene_end(cut, who) end -- completion is a one-shot for the assigned participant
+end
+
+local function camera_finished(cut)
+	if time_global() - cut.started >= CUT_TIMEOUT then return true end
+	for id in pairs(cut.aud) do
+		if not cut.done[id] and player_by_id(id) then return false end
+	end
+	return true
+end
+
+local function patch_scene_transitions()
+	coop_mods_core.wrap(xr_logic, "activate_by_section", "npc_logic:scene_activate", function(stock)
+		return function(npc, ini, section, ...)
+			local st = P.active() and storage_of(npc)
+			if st then
+				if st.active_section ~= section then stop_cutscene(st) end
+				if coop_mode.leads_here() then remember_transition(npc, st, section) end
+			end
+			return stock(npc, ini, section, ...)
+		end
+	end)
+	coop_mods_core.wrap(xr_logic, "issue_event", "npc_logic:scene_use", function(stock)
+		return function(npc, st, event, ...)
+			if event == "use_callback" and npc and P.active() and coop_mode.leads_here() then
+				local _, who = ...
+				local actor = who and player_by_id(who:id())
+				if actor then return transition_for(npc, actor, nil, stock, npc, st, event, ...) end
+			end
+			return stock(npc, st, event, ...)
+		end
+	end)
+end
+
+local function patch_cutscenes()
+	local mod = coop_mods_core.mod("sr_cutscene")
+	local action = mod and mod.action_cutscene
+	if not action then return end
+	coop_mods_core.wrap(action, "zone_enter", "npc_logic:cutscene_enter", function(stock)
+		return function(self, ...)
+			local st = P.active() and storage_of(self.object)
+			if not (st and managed_cutscene(self.object, st, st.active_section)) then return stock(self, ...) end
+			local cut, actor = st.coop_cutscene, own_actor()
+			if not (cut and cut.s == st.active_section and actor and coop_mode.actor_is_player()
+				and actor:alive() and P.standing(actor)) then return end
+			local id = cut.done and actor:id() or coop_mods_core.hid(actor:id())
+			if not cut.aud[id] or cut.presented then return end
+			cut.presented, self.coop_playing = true, cut.q
+			return P.with_identity(actor, stock, self, ...)
+		end
+	end)
+	coop_mods_core.wrap(action, "cutscene_callback", "npc_logic:cutscene_end", function(stock)
+		return function(self, ...)
+			local st = P.active() and storage_of(self.object)
+			if not (st and managed_cutscene(self.object, st, st.active_section)) then return stock(self, ...) end
+			local cut = st.coop_cutscene
+			if not (cut and self.motion and self.coop_playing == cut.q) then return end
+			local result = stock(self, ...)
+			if self.st.signals and self.st.signals.cameff_end then
+				self.coop_playing = nil
+				self.st.signals.cameff_end = nil
+				if cut.done then
+					local actor = own_actor()
+					if actor then mark_scene_end(cut, actor:id()) end
+				else
+					local id = coop_mods_core.hid(self.object:id())
+					if id then coop_mods_core.to_host(SCENE_END, { i = id, q = cut.q }) end
+				end
+			end
+			return result
+		end
+	end)
+	coop_mods_core.wrap(action, "update", "npc_logic:cutscene_update", function(stock)
+		return function(self, ...)
+			local st = P.active() and storage_of(self.object)
+			if not (st and managed_cutscene(self.object, st, st.active_section)) then return stock(self, ...) end
+			local cut = st.coop_cutscene
+			if cut and cut.done and camera_finished(cut) then
+				self.st.signals = self.st.signals or {}
+				self.st.signals.cameff_end = true
+			end
+			if cut and cut.stop and self.coop_playing then self.st.signals.cam_effector_stop = true end
+			if coop_mode.leads_here() or self.coop_playing then return stock(self, ...) end
+		end
+	end)
+	coop_mods_core.wrap(coop_mods_core.mod("xr_effects"), "stop_sr_cutscene", "npc_logic:cutscene_stop", function(stock)
+		return function(actor, npc, ...)
+			local st = P.active() and storage_of(npc)
+			if not (st and managed_cutscene(npc, st, st.active_section)) then return stock(actor, npc, ...) end
+			local cut = st.coop_cutscene
+			if cut and cut.done and not cut.stop then
+				cut.stop = true
+				broadcast_section(npc:id(), cut.s)
+			end
+		end
+	end)
+end
+
+local function remark_actor(npc)
+	local st = storage_of(npc)
+	local actor = st and player_by_id(st.coop_scene_user)
+	if not actor then
+		local _, nearest = players_matching(npc)
+		actor = nearest
+	end
+	return actor
+end
+
+local function actor_target(target)
+	if type(target) ~= "string" then return false end
+	local name = target:match("^%s*story%s*|%s*([^,]+)")
+	return name ~= nil and name:gsub("%s+$", "") == "actor"
+end
+
+local function patch_remarks()
+	local mod = coop_mods_core.mod("xr_remark")
+	if not mod then return end
+	coop_mods_core.wrap(mod, "init_target", "npc_logic:remark_init", function(stock)
+		return function(npc, target, ...)
+			if not (P.active() and actor_target(target)) then return stock(npc, target, ...) end
+			local actor = remark_actor(npc)
+			return nil, actor and actor:id(), actor ~= nil
+		end
+	end)
+	-- Some scheme copies captured init_target before the module was wrapped.
+	coop_mods_core.wrap(mod.action_remark_activity, "get_target", "npc_logic:remark_target", function(stock)
+		return function(self, ...)
+			if not (P.active() and actor_target(self.st.target)) then return stock(self, ...) end
+			local actor = remark_actor(self.object)
+			self.st.target_position, self.st.target_id, self.st.target_init = nil, actor and actor:id(), actor ~= nil
+			return actor and { look_object = actor } or nil
+		end
+	end)
+end
+
+local function abuse_rules(npc, actor, meet)
+	local use, abuse = meet.use, meet.abuse_mode
+	if meet.a and meet.a.use then use = xr_logic.pick_section_from_condlist(actor, npc, meet.a.use) end
+	if meet.a and meet.a.abuse then abuse = xr_logic.pick_section_from_condlist(actor, npc, meet.a.abuse) end
+	if meet.npc_is_camp_director then use = "false" end
+	if load_var and load_var(actor, "force_all_talk", false) then use = "true" end
+	return use == "false" and abuse == "true" and game_relations.get_npcs_relation(npc, actor) == game_object.friend
+end
+
+local function abuse_use(t, from, add)
+	local valid = bounded_int(t.i, 1, MAX_OBJECT_ID)
+	if not coop_trust.pass("npc_abuse_shape", valid, "peer %s: invalid NPC use id", tostring(from)) then return end
+	if not valid then return end
+	local actor = coop_mode.decider(from) == "this" and player_here(from)
+	local id = coop_mods_core.lid(t.i)
+	local npc = id and level.object_by_id(id)
+	local reach = actor and npc and actor:position():distance_to_sqr(npc:position()) <= USE_REACH_SQR
+	if not coop_trust.pass("npc_abuse_reach", reach, "peer %s: NPC %d is out of use reach", tostring(from), t.i) then return end
+	local st = npc and storage_of(npc)
+	local meet = st and st.meet and st.meet.meet_manager
+	local ab = st and st.abuse
+	local manager = ab and ab.abuse_manager
+	local eligible = actor and npc and IsStalker(npc) and npc:alive() and P.peer_of(id) == nil and meet and manager
+		and P.with_identity(actor, abuse_rules, npc, actor, meet)
+	if not coop_trust.pass("npc_abuse_eligible", eligible, "peer %s: NPC %d cannot be irritated by this use",
+		tostring(from), t.i) then return end
+	if not eligible then return end
+	-- The cached enable bit is set by [meet] for the player its update was evaluating. This use has its own player.
+	local enabled, before = manager.enable, manager.abuse_value
+	manager.enable = true
+	local ok, err = pcall(add, npc, 1)
+	manager.enable = enabled
+	if not ok then error(err, 0) end
+	if manager.abuse_value > before and (not ab.coop_abuser or before < (manager.abuse_threshold or 5)) then
+		ab.coop_abuser = actor:id()
+	end
+end
+
+local function ask_abuse(key)
+	if not (P.active() and coop_mode.is_player_mirror() and coop_mode.actor_is_player()) then return end
+	if dik_to_bind(key) ~= key_bindings.kUSE or (_GUIs and next(_GUIs)) then return end
+	if not game.hud_motion_allowed() or game.only_movekeys_allowed() then return end
+	local npc = level.get_target_obj()
+	if not (npc and IsStalker(npc) and npc:alive() and P.peer_of(npc:id()) == nil) then return end
+	local distance = level.get_target_dist()
+	if type(distance) ~= "number" or distance <= 0 or distance * distance > USE_REACH_SQR then return end
+	local id = coop_mods_core.hid(npc:id())
+	if id then coop_mods_core.to_host(ABUSE_USE, { i = id }) end
+end
+
+local function patch_abuse()
+	local mod, meet = coop_mods_core.mod("xr_abuse"), coop_mods_core.mod("xr_meet")
+	local add = mod and coop_mods_core.fn(mod, "add_abuse")
+	if not (add and meet) then return end
+	coop_mods_core.wrap(meet, "notify_on_use", "npc_logic:abuse_notify", function(stock)
+		return function(npc, who, ...)
+			local actor = P.active() and coop_mode.leads_here() and coop_mode.actor_is_player() and own_actor()
+			if not (npc and who and actor and who:id() == actor:id()) then return stock(npc, who, ...) end
+			local old = meet_user
+			meet_user = npc:id()
+			local ok, result = pcall(stock, npc, who, ...)
+			meet_user = old
+			if not ok then error(result, 0) end
+			return result
+		end
+	end)
+	coop_mods_core.wrap(mod, "add_abuse", "npc_logic:abuse_add", function(stock)
+		return function(npc, value, ...)
+			if meet_user and npc:id() == meet_user and value == 1 then
+				return abuse_use({ i = coop_mods_core.hid(meet_user) }, P.self_peer(), stock)
+			end
+			return stock(npc, value, ...)
+		end
+	end)
+	coop_mods_core.wrap(mod.action_abuse_hit, "initialize", "npc_logic:abuse_hit", function(stock)
+		return function(self, ...)
+			if P.active() and coop_mode.leads_here() then
+				local st = storage_of(self.object)
+				local id = st and st.abuse and st.abuse.coop_abuser
+				if id then
+					local actor = player_by_id(id)
+					if not actor then return end
+					local punch = coop_mods_core.mod("coop_quests_punch")
+					if punch then punch.punch(id, self.object:id(), "keep") end
+					return P.with_identity(actor, stock, self, ...)
+				end
+			end
+			return stock(self, ...)
+		end
+	end)
+	coop_mods_core.set_limit(ABUSE_USE, 6, 4)
+	coop_mods_core.on(ABUSE_USE, function(t, from) abuse_use(t, from, add) end, "host")
+	RegisterScriptCallback("on_key_press", ask_abuse)
+end
+
+-------------------------------------------------------------------------------
 -- Client: restrictor schemes that must not run here
 -------------------------------------------------------------------------------
 local function patch_schemes()
@@ -1130,6 +1618,16 @@ local function install()
 	installed = true
 	for name in pairs(ACTOR_FX) do wrap_effect(name) end
 	local steps = { { "conditions", patch_conditions }, { "schemes", patch_schemes }, { "uses", patch_uses } }
+	if coop_mode and coop_mods_core then
+		steps[#steps + 1] = { "scene transitions", patch_scene_transitions }
+		steps[#steps + 1] = { "cutscenes", patch_cutscenes }
+		steps[#steps + 1] = { "remarks", patch_remarks }
+		steps[#steps + 1] = { "abuse", patch_abuse }
+		steps[#steps + 1] = { "camera completion", function()
+			coop_mods_core.set_limit(SCENE_END, 8, 2)
+			coop_mods_core.on(SCENE_END, scene_end, "host")
+		end }
+	end
 	for _, s in ipairs(steps) do
 		local ok, err = pcall(s[2])
 		if not ok then report("install " .. s[1], err) end
@@ -1156,8 +1654,20 @@ local function actor_on_update()
 	end
 end
 
+local function reply_sections(t, from)
+	if t.i == nil then
+		host_send_all(from)
+		return
+	end
+	local id = coop_mods_core and coop_mods_core.lid(t.i) or t.i
+	local st = id and db.storage[id]
+	if st and st.stype == STYPE_RESTRICTOR and st.coop_local == false then
+		P.send(EV_SECTION, section_packet(id, st.active_section, st.coop_cutscene), from)
+	end
+end
+
 local function register_events()
-	P.on(EV_SECTION, function(t) client_on_section(t.i, t.s) end, "client", TAG)
+	P.on(EV_SECTION, function(t) client_on_section(t.i, t.s, t.q, t.a, t.k) end, "client", TAG)
 	P.on(EV_ALL, function(t)
 		local n = tonumber(t.n) or 0
 		for k = 1, math.min(n, CHUNK) do client_on_section(t["i" .. k], t["s" .. k]) end
@@ -1166,16 +1676,22 @@ local function register_events()
 	P.on(EV_PAD, client_on_pad, "client", TAG)
 	P.on(EV_PAD_CODE, host_on_pad_code, "host", TAG)
 	P.on(EV_VISE, client_on_vise, "client", TAG)
-	P.on(EV_REQ, function(t, from)
-		if type(t.i) == "number" then
-			local st = db.storage[t.i]
-			if st and st.stype == STYPE_RESTRICTOR and st.coop_local == false then
-				P.send(EV_SECTION, { i = t.i, s = st.active_section or "nil" }, from)
-			end
-		else
-			host_send_all(from)
-		end
-	end, "host", TAG)
+	if coop_mode and coop_trust then
+		-- Existing npc.logic_req wire name. Use the same transport identity and map delivery as the new verbs.
+		coop_mode.on_level_request(EV_REQ, function(payload, from)
+			local t = P.decode(payload)
+			local valid = t.i == nil or bounded_int(t.i, 0, MAX_OBJECT_ID)
+			if not coop_trust.pass("npc_logic_req_shape", valid, "peer %s: invalid logic state request", tostring(from)) then return end
+			local here = coop_mode.decider(from) == "this"
+			if not coop_trust.pass("npc_logic_req_map", here, "peer %s: logic state requested on another map", tostring(from)) then return end
+			if valid and here then reply_sections(t, from) end
+		end, function(_, from)
+			local valid = type(from) == "number" and from > 0
+			return coop_trust.pass("npc_logic_req_sender", valid, "peer %s: invalid logic request sender", tostring(from)) and valid
+		end)
+	else
+		P.on(EV_REQ, reply_sections, "host", TAG)
+	end
 end
 
 function print_status()
