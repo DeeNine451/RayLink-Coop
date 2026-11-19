@@ -1,3 +1,4 @@
+-- Ядро: общие правила заданий и ответы слоя карты (docs/MODES.md)
 --[[
 	Anomaly Coop - quests group core (gamedata\scripts\coop_quests_core.script), W4 "quests".
 
@@ -41,14 +42,13 @@ function is_host() return active() and api.is_host() == true end
 function is_map_server() return active() and api.is_map_server ~= nil and api.is_map_server() == true end
 function is_client() return active() and api.is_client() == true and not is_map_server() end
 function client_live() return is_client() and api.is_live() == true end
--- This process's own actor is nobody (owner 2026-11-13): a world server whose seat plays no character (-coop_dedicated) and a map
--- server stand a ghost actor in their ALife. It is not listed, ranked, named or counted, and earns nothing. An ordinary host's actor is
--- the host player's character. Same rule as coop_npc_players.actor_is_nobody.
+local function actor_is_player()
+	return not (coop_mode and coop_mode.actor_is_player) or coop_mode.actor_is_player()
+end
+
+-- Compatibility for quest callers that still use the negative form.
 function actor_is_nobody()
-	if not active() then return false end
-	if is_map_server() then return true end
-	local ok, yes = pcall(function() return api.is_dedicated ~= nil and api.is_dedicated() == true end)
-	return ok and yes == true
+	return not actor_is_player()
 end
 
 function self_peer()
@@ -120,7 +120,7 @@ end
 -- What the server's scripts hand in (step S4, docs\MODES.md section 4). The Core never names a server script (check_layers
 -- L3): a server script gives its part from coop_mode.when_srv, so in the co-op and in single player there is none, and
 -- every caller gives the stock answer without it. Registering below is the same in every process; only a server reads it.
---   set_part(name, t) / part(name)      "far", "levels", "brain", "audience": that server script's functions, or nil
+--   set_part(name, t) / part(name)      "far", "levels", "brain", "audience", "quest_level": supplied functions, or nil
 --   share_up(name, get, set[, every])   a table a map server tells the world server: get() on a map server, set(value,
 --                                       level) on the world server; every: ms between two looks (the server's default)
 --   share_down(name, get, set[, every]) a table the world server tells the map servers: get() there, set(value) on one
@@ -299,9 +299,8 @@ end
 -- { {obj, peer, self, id}, ... }: own actor first, then the other connected players' characters.
 function characters()
 	local out = {}
-	local ghost = api and ((api.is_dedicated and api.is_dedicated()) or is_map_server()) -- the actor of a dedicated host or a map server is nobody's
 	-- in a far view the actor of this machine stands elsewhere: coordinates of two levels mean nothing to each other
-	if db and db.actor and not ghost and not far_seen() then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
+	if db and db.actor and actor_is_player() and not far_seen() then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and p.avatar_id then
@@ -420,9 +419,8 @@ function record:set_npc_position(pos) end
 function record:force_set_position(pos) end
 function record:hit(h) end
 
--- A player on another level has no game object here. On the world server (and on every machine, each keeps the same registry) his
--- record stands for him: the map server of his level reports his place every second and every item that changes hands. far_body is
--- what the task code asks of a character, asked of those records. It also is a place for the stock create_item: { pos, lvid, gvid, id }.
+-- A saved character can be offline when a quest pays or changes their goodwill. Their ALife record supplies the body and
+-- inventory in either mode. The body is also a place for the stock create_item: { pos, lvid, gvid, id }.
 local far_item_class = {}
 far_item_class.__index = far_item_class
 function far_item_class:id() return self.item_id end
@@ -479,13 +477,9 @@ function far_body_class:transfer_item(item, to)
 end
 
 function far_body(peer, avatar_id)
-	local l = api and api.levels
-	if not (l and l.split and l.split() == true and l.carried and type(avatar_id) == "number") then return nil end
-	local mine, his = l.my_level(), l.level_of_player(peer)
-	if mine == nil or his == nil or mine == his then return nil end
-	local se = alife_object(avatar_id)
-	if not se then return nil end
-	return setmetatable({ se.position, se.m_level_vertex_id, se.m_game_vertex_id, avatar_id, far = true }, far_body_class)
+	local facts = part("quest_level")
+	if facts then return facts.far_body(peer, avatar_id) end
+	return nil
 end
 
 -- A saved character still owns its rewards and goodwill when its player is disconnected.
@@ -498,15 +492,8 @@ end
 -- Every player's character wherever he stands: characters(), and a far_body for those on other levels.
 function bodies()
 	local out = characters()
-	if not active() then return out end
-	local seen = {}
-	for _, c in ipairs(out) do seen[c.id] = true end
-	for _, p in ipairs(players()) do
-		if not p.is_self and p.avatar_id and not seen[p.avatar_id] then
-			local far = far_body(p.id, p.avatar_id)
-			if far then out[#out + 1] = { obj = far, peer = p.id, id = p.avatar_id } end
-		end
-	end
+	local facts = part("quest_level")
+	if facts and active() then facts.add_far_bodies(out) end
 	return out
 end
 
@@ -533,11 +520,10 @@ local function alive(o)
 end
 
 -- The living character nearest to pos: obj, peer, squared distance (flat = ignore height).
-function nearest_character(pos, flat)
-	if not pos then return nil end
+function nearest_among(group, pos, flat, eligible)
 	local best, best_peer, best_d
-	for _, c in ipairs(characters()) do
-		if alive(c.obj) then
+	for _, c in ipairs(group) do
+		if (not eligible or eligible(c.obj)) and alive(c.obj) then
 			local p = c.obj:position()
 			local dx, dz = p.x - pos.x, p.z - pos.z
 			local d = dx * dx + dz * dz
@@ -551,30 +537,22 @@ function nearest_character(pos, flat)
 	return best, best_peer, best_d
 end
 
+function nearest_character(pos, flat)
+	if not pos then return nil end
+	return nearest_among(characters(), pos, flat)
+end
+
 function min_dist_sqr(pos, flat)
 	local _, _, d = nearest_character(pos, flat)
 	return d
 end
 
--- The player nearest to server object `se` among those on ITS level, wherever this machine stands: what nearest_character is with split
--- levels off. obj (a far_body for a player on another level), peer, squared distance; nil when nobody is on that level.
+-- The nearest living player on the target's map: object or record, peer, squared distance.
 function nearest_body(se, flat)
 	if not (se and se.position) then return nil end
-	local l = api and api.levels
-	if not (l and l.split and l.split() == true and se.m_game_vertex_id) then return nearest_character(se.position, flat) end
-	local gg = game_graph()
-	local lid = gg:vertex(se.m_game_vertex_id):level_id()
-	local best, best_peer, best_d
-	for _, c in ipairs(bodies()) do
-		local ok, v = pcall(function() return gg:vertex(c.obj:game_vertex_id()):level_id() end)
-		if ok and v == lid and alive(c.obj) then
-			local p, pos = c.obj:position(), se.position
-			local dx, dy, dz = p.x - pos.x, flat and 0 or p.y - pos.y, p.z - pos.z
-			local d = dx * dx + dy * dy + dz * dz
-			if not best_d or d < best_d then best, best_peer, best_d = c.obj, c.peer, d end
-		end
-	end
-	return best, best_peer, best_d
+	local facts = part("quest_level")
+	if facts then return facts.nearest_body(se, flat) end
+	return nearest_character(se.position, flat)
 end
 
 -- Host: the online character of a peer (0 / own peer = db.actor).
@@ -597,10 +575,9 @@ function far_seen() return far_view ~= nil end
 
 -- A player who stands on another level than this process.
 function is_far_peer(peer)
-	local l = api and api.levels
-	if not (l and l.split and l.split() == true and type(peer) == "number") then return false end
-	local mine, his = l.my_level(), l.level_of_player(peer)
-	return mine ~= nil and his ~= nil and mine ~= his
+	local facts = part("quest_level")
+	if facts then return facts.is_far_peer(peer) end
+	return false
 end
 
 local function install_level_view()
@@ -674,11 +651,11 @@ function at_home(fn, ...)
 	return far.at_home(fn, ...)
 end
 
--- A squad a map server holds: with split levels off nothing is.
+-- A squad held on a map this process does not lead.
 function held_there(se)
-	local l = api and api.levels
-	if not (se and se.online and se.m_game_vertex_id and l and l.split and l.split() == true) then return false end
-	return game_graph():vertex(se.m_game_vertex_id):level_id() ~= l.my_level()
+	local facts = part("quest_level")
+	if facts then return facts.held_there(se) end
+	return false
 end
 
 -- The smart's field, seen from where the far view stands (a rewrite of the task scripts' `smart.online`).

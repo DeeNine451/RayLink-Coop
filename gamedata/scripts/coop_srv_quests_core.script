@@ -1,0 +1,63 @@
+-- Сервер (srv): факты карты и персонажей для заданий (docs/MODES.md)
+local api = rawget(_G, "coop")
+
+local function map_facts()
+	local l = api and api.levels
+	if l and l.split and l.split() == true then return l end
+end
+
+local function on_another_map(l, peer)
+	local mine, his = l.my_level(), l.level_of_player(peer)
+	return mine ~= nil and his ~= nil and mine ~= his
+end
+
+local function is_far_peer(peer)
+	local l = map_facts()
+	return l ~= nil and type(peer) == "number" and on_another_map(l, peer)
+end
+
+local function far_body(peer, avatar_id)
+	local l = map_facts()
+	if not (l and l.carried and type(avatar_id) == "number" and on_another_map(l, peer)) then return nil end
+	return coop_quests_core.body_for_character(avatar_id)
+end
+
+local function add_far_bodies(out)
+	local seen = {}
+	for _, c in ipairs(out) do seen[c.id] = true end
+	for _, p in ipairs(coop_quests_core.players()) do
+		if not p.is_self and p.avatar_id and not seen[p.avatar_id] then
+			local far = far_body(p.id, p.avatar_id)
+			if far then out[#out + 1] = { obj = far, peer = p.id, id = p.avatar_id } end
+		end
+	end
+end
+
+local function nearest_body(se, flat)
+	local q = coop_quests_core
+	if not (map_facts() and se.m_game_vertex_id) then return q.nearest_character(se.position, flat) end
+	local gg = game_graph()
+	local lid = gg:vertex(se.m_game_vertex_id):level_id()
+	return q.nearest_among(q.bodies(), se.position, flat, function(obj)
+		local ok, v = pcall(function() return gg:vertex(obj:game_vertex_id()):level_id() end)
+		return ok and v == lid
+	end)
+end
+
+local function held_there(se)
+	local l = map_facts()
+	if not (se and se.online and se.m_game_vertex_id and l) then return false end
+	return game_graph():vertex(se.m_game_vertex_id):level_id() ~= l.my_level()
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		coop_quests_core.set_part("quest_level", {
+			far_body = far_body,
+			add_far_bodies = add_far_bodies,
+			nearest_body = nearest_body,
+			is_far_peer = is_far_peer,
+			held_there = held_there,
+		})
+	end)
+end

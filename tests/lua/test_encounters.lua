@@ -3,6 +3,7 @@
 -- Run: tools\test_lua.cmd encounters
 dofile("tests/lua/support/harness_npc.lua")
 dofile("tests/lua/support/mod_source.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 AC_ID = 0
 
 local BS = string.char(92)
@@ -433,7 +434,11 @@ do
 	local LEVELS = { "l03_agroprom", "l05_bar" }
 	local W, E, enc = make_world()
 	local Mk, F, mk_enc = make_world("client", BRIDGE)
-	local function stage(env, mine)
+	E.coop.is_dedicated = function() return true end
+	F.coop.is_map_server = function() return true end
+	F.coop.is_mirror = function() return false end
+	local function stage(M, mine)
+		local env = M.env
 		env.coop.levels = {
 			split = function() return true end,
 			my_level = function() return mine end,
@@ -450,16 +455,16 @@ do
 		env.PURGED, env.SWITCHED = nil, nil
 		env.xr_zones = { purge_arena_items = function(n) env.PURGED = n end }
 		env.xr_logic = { switch_to_section = function(_, _, s) env.SWITCHED = s end }
-		env.coop_quests_core = load_script(mine == 1 and W or Mk, "coop_quests_core")
-		env.coop_srv_levels_share = load_script(mine == 1 and W or Mk, "coop_srv_levels_share")
-		-- step S4: the share starts from coop_mode.when_srv: split levels, its server layer answers
-		env.coop_srv_levels_share.coop_mode = { when_srv = function(fn) fn() return true end }
-		env.coop_srv_levels_share.on_game_start()
+		local function load(name) return load_script(M, name) end
+		local facade = load("coop_mode")
+		facade.on_game_start()
+		modes.live(facade, load)
+		load("coop_quests_core")
+		load("coop_srv_quests_core").on_game_start()
+		load("coop_srv_levels_share").on_game_start()
 	end
-	stage(E, 1)
-	stage(F, 2)
-	F.coop.is_map_server = function() return true end
-	F.coop.is_mirror = function() return false end
+	stage(W, 1)
+	stage(Mk, 2)
 	F.db.actor._pos = vec(0, 0, 0) -- its ghost stands at the point: nobody
 	enc.on_game_start()
 	mk_enc.on_game_start()

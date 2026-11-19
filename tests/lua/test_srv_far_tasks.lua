@@ -2,8 +2,10 @@
 -- actions that go to the map server, a map server is no player. Real scripts over the quests harness: the host (world server, level 1),
 -- a client on level 2, the map server of level 2. Run: tools\test_lua.cmd srv_far_tasks
 dofile("tests/lua/support/harness_quests.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_tasks", "coop_quests_offer", "coop_quests_party",
+local SCRIPTS = { "coop_quests_core", "coop_srv_quests_core", "coop_srv_levels_share", "coop_srv_quests_far",
+	"coop_tasks", "coop_srv_tasks", "coop_quests_offer", "coop_quests_party",
 	"coop_quests_story", "coop_quests_missions", "coop_quests_pda" }
 local BRIDGE = 0x101
 local LEVEL_NAMES = { "l01_escape", "k00_marsh" }
@@ -85,6 +87,10 @@ local function world(M)
 end
 
 local function boot(M)
+	local function load(name) return load_script(M, name) end
+	local facade = load("coop_mode")
+	facade.on_game_start()
+	modes.live(facade, load)
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do
 		if M.env[n].on_game_start then M.env[n].on_game_start() end
@@ -97,6 +103,7 @@ local Cm = machine("client", 1)
 local Ms = machine("client", BRIDGE)
 Hm.my_level, Cm.my_level, Ms.my_level = 1, 2, 2
 world(Hm); world(Cm); world(Ms)
+Hm.env.coop.is_dedicated = function() return true end
 Ms.env.coop.is_map_server = function() return true end
 
 records[500] = { id = 500, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 5, position = vec(10, 0, 10), online = true,
@@ -114,7 +121,7 @@ records[710] = { id = 710, parent_id = 65535, m_game_vertex_id = 2, m_level_vert
 records[711] = { id = 711, parent_id = 65535, m_game_vertex_id = 2, position = vec(40, 0, 10), online = true,
 	section_name = function() return "dog" end, clsid = function() return 55 end, name = function() return "dog" end, alive = function() return false end }
 
-local PLAYERS_H = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, is_self = false, avatar_id = 500 } }
+local PLAYERS_H = { { id = 1, is_self = false, avatar_id = 500 } }
 Hm.players = PLAYERS_H
 Cm.players = { { id = 1, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 400 } }
 Ms.players = { { id = 1, is_self = false, avatar_id = 500 } }
@@ -322,10 +329,10 @@ T.run_as(1, function() Hm.tm:give_task("away_task", 700) end)
 check(T.taker("away_task") == 1, "he took it")
 frames(1)
 check(judged == 1, "in the world: judged")
-Hm.players = { PLAYERS_H[1], { id = 1, is_self = false } }
+Hm.players = { { id = 1, is_self = false } }
 frames(1)
 check(judged == 1, "on his loading screen: his things and his place cannot be read, nothing is judged")
-Hm.players = { PLAYERS_H[1] }
+Hm.players = {}
 frames(1)
 check(judged == 2, "he left: the task goes on as before")
 Hm.players = PLAYERS_H
@@ -602,29 +609,44 @@ do
 	ghost._rank, ghost._cname = 99999, "server"
 	Hm.env.pda.get_coc_ranking_list = function() return { 0, 500 } end
 	Hm.env.pda.get_rankings_array_size = function() return 2 end
-	local function ask()
-		Hm.sent = {}
-		Hm.handlers["quests.rank_req"](Hm.env.coop_main.encode({ q = 2, r = 0 }), 1)
-		local got = last_sent(Hm, "quests.rank")
-		return got and Hm.env.coop_quests_core.des(got.d) or {}, got and tonumber(got.w)
+	local function ask(M)
+		M.sent = {}
+		M.handlers["quests.rank_req"](M.env.coop_main.encode({ q = 2, r = 0 }), 1)
+		local got = last_sent(M, "quests.rank")
+		return got and M.env.coop_quests_core.des(got.d) or {}, got and tonumber(got.w)
 	end
 	-- an ordinary host: its seat plays, its actor is the host player's character and stays in the list
-	Hm.env.coop.is_dedicated = function() return false end
-	check(qc.actor_is_nobody() == false, "an ordinary host's actor is somebody")
-	local list, place = ask()
+	local Co = machine("host", 0)
+	Co.players = { { id = 0, is_self = true, avatar_id = 0 }, PLAYERS_H[1] }
+	Co.new_obj(500, "coop_player_avatar", vec(10, 0, 10), { _stalker = true })
+	Co.actor._rank, Co.actor._cname = ghost._rank, ghost._cname
+	Co.env.pda = {
+		calculate_rankings = function() end,
+		get_coc_ranking_list = Hm.env.pda.get_coc_ranking_list,
+		get_rankings_array_size = Hm.env.pda.get_rankings_array_size,
+	}
+	Co.env.ranks = Hm.env.ranks
+	Co.env.alife = Hm.env.alife
+	Co.env.IsStalker = Hm.env.IsStalker
+	Co.env.utils_obj = Hm.env.utils_obj
+	boot(Co)
+	check(Co.env.coop_quests_core.actor_is_nobody() == false, "an ordinary host's actor is somebody")
+	local list, place = ask(Co)
 	check(#list == 2 and list[1].n == "server", "the playing host's character keeps its line")
 	check(place == 2, "and counts above the player")
+	Co.ini.nowhere_task = {}
+	Co.tm:give_task("nowhere_task", 31337) -- in co-op a script's task without a giver belongs to the playing host
+	check(Co.env.coop_tasks.taker("nowhere_task") == 0, "with nobody to measure to: as before")
+	table.remove(MACHINES) -- the co-op host is a separate session
 	-- a world server: the ghost has no line, no place above anyone
-	Hm.env.coop.is_dedicated = function() return true end
 	check(qc.actor_is_nobody() == true, "a world server's actor is nobody")
-	list, place = ask()
+	list, place = ask(Hm)
 	local named = false
 	for _, e in ipairs(list) do if e.n == "server" then named = true end end
 	check(not named and #list == 1 and list[1].me == true, "the ghost is not among the lines a client gets")
 	check(place == 1, "the ghost's rank puts nobody lower")
 	check(Ms.env.coop_quests_core.actor_is_nobody() == true, "a map server's actor is nobody")
 	check(Cm.env.coop_quests_core.actor_is_nobody() == false, "a player's actor is somebody")
-	Hm.env.coop.is_dedicated = nil
 	ghost._rank, ghost._cname = rank0, name0
 end
 
@@ -696,10 +718,12 @@ do
 	check(ended.complete and ended.complete.peer == 1, "the rewards are still his")
 	check(Hm.env.level.name() == "l01_escape", "the far view is closed after the end")
 
-	-- a task nobody of a map server's level has to do with ends at home, as before
+	-- A script gave this task when the world had no players. A player joining elsewhere does not own its completion.
 	Hm.ini.home_task = {}
 	Hm.on_complete.home_task = function() look("home") end
+	Hm.players = {}
 	Hm.tm:give_task("home_task", 960)
+	Hm.players = PLAYERS_H
 	Hm.env.task_manager.task_callback(Hm.engine_tasks.home_task, Hm.env.task.completed)
 	check(ended.home and ended.home.level == "l01_escape", "a task of the world server's own level ends at home")
 
@@ -805,7 +829,6 @@ print("== the spy with no player on his level: \"the actor\" is the player who t
 -- tasks_agent_rescue brings an offline spy to db.actor:position(). With nobody on the spy's level the nearest player is nobody and the
 -- stock read the world server's ghost: the squad went to fake_start (the followers analysis, 2026-11-13).
 do
-	Hm.env.coop.is_dedicated = function() return true end
 	records[780] = { id = 780, parent_id = 65535, m_game_vertex_id = 1, m_level_vertex_id = 1, position = vec(50, 0, 50), online = false,
 		section_name = function() return "spy" end, clsid = function() return 44 end, name = function() return "spy" end,
 		alive = function() return true end }
@@ -819,7 +842,6 @@ do
 	check(Hm.env.coop_tasks.taker("spy_far") == 1, "the player of level 2 took it")
 	Hm.tm.task_info.spy_far:check_task(Hm.tm)
 	check(at ~= nil and at.x == 10 and at.z == 10, "the task reads the place of the player who took it")
-	Hm.env.coop.is_dedicated = nil
 	Hm.tm.task_info.spy_far = nil
 	records[780] = nil
 end
@@ -831,22 +853,17 @@ do
 	Hm.ini.script_task = {}
 	Hm.tm:give_task("script_task", 700) -- no talk, no request, no reward scope
 	check(Hm.env.coop_tasks.taker("script_task") == 1, "the player of the giver's level, not the world server's ghost")
-	Hm.ini.nowhere_task = {}
-	Hm.tm:give_task("nowhere_task", 31337) -- a giver that is no more
-	check(Hm.env.coop_tasks.taker("nowhere_task") == 0, "with nobody to measure to: as before")
 	-- a seat that plays no character: its ghost takes no task. A script that gives one with nobody named (operacia_monolith's
 	-- PDA in the group's inventory) gives it to a player of the world, or its rewards are nobody's.
-	Hm.env.coop.is_dedicated = function() return true end
 	Hm.ini.ghost_task = {}
 	Hm.tm:give_task("ghost_task")
 	check(Hm.env.coop_tasks.taker("ghost_task") == 1, "a seat with no character: a player of the world takes it, not the ghost")
-	Hm.env.coop.is_dedicated = nil
 end
 
 print("== a world hurt by a give that died: the info of the dialog is taken back, once")
 -- Worlds played on builds 45-49: the dialog phrase gave its info, the give died on the world server, the dialog is closed for good.
 do
-	local T = Hm.env.coop_tasks
+	local T = Hm.env.coop_srv_tasks
 	for _, id in ipairs({ "task_fanat_training_1", "cs_task0_ambush_renegade_story", "cs_task0_ambush_renegade_story2" }) do Hm.ini[id] = {} end
 	Hm.infos.fanat_training_start_done = true -- the Fanat's dialog is closed, the training was never the group's
 	Hm.infos.cs_story_task0_ambush_renegade_start = true -- "The Last Dawn": asked for ...

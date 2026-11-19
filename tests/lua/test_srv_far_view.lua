@@ -61,9 +61,13 @@ level.object_by_id = function(id) return REAL[id] end
 level.name = function() return "l01_escape" end
 simulation_objects = { is_on_the_actor_level = function() return "stock" end }
 
--- the facade (step S4): this is a world server, its server layer answers: when_srv runs at once
-coop_mode = { when_srv = function(fn) fn() return true end }
+coop.is_dedicated = function() return true end
+local modes = dofile("tests/lua/support/modes.lua")
+local facade = load_script_file("coop_mode")
+facade.on_game_start()
+modes.live(facade)
 load_script_file("coop_quests_core")
+load_script_file("coop_srv_quests_core").on_game_start()
 load_script_file("coop_srv_levels_share")
 load_script_file("coop_srv_quests_far")
 local qc, far = coop_quests_core, coop_srv_quests_far

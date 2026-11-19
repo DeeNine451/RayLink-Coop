@@ -4,6 +4,7 @@
 -- Run: tools\test_lua.cmd mission_gamma
 dofile("tests/lua/support/harness_npc.lua")
 dofile("tests/lua/support/mod_source.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 AC_ID = 0
 
 local BS = string.char(92)
@@ -37,10 +38,13 @@ local function host_world(dedicated)
 	local H = machine("host", 0, dedicated and { [1] = 500 } or { [0] = 0, [1] = 500 })
 	local E = H.env
 	E.coop.is_dedicated = function() return dedicated == true end
+	local function load(name) return load_script(H, name) end
+	local facade = load("coop_mode")
+	facade.on_game_start()
+	modes.live(facade, load)
 	H.TP = {}
 	E.coop_npc_players = load_script(H, "coop_npc_players")
 	E.coop_mods_core = load_script(H, "coop_mods_core")
-	E.coop_quests_core = load_script(H, "coop_quests_core")
 	E.LIFE = {}
 	E.coop.life_of = function(id) return E.LIFE[id] or (dedicated and id == 0 and "dead" or "alive") end
 	E.getFS = function() return { exist = function() return false end, update_path = function(_, _, file) return GAMMA_DIR .. BS .. file end } end
@@ -80,6 +84,8 @@ local function host_world(dedicated)
 	}
 	E.LEVEL = dedicated and "fake_start" or "l03_agroprom"
 	E.level.name = function() return E.LEVEL end
+	load("coop_quests_core")
+	load("coop_srv_quests_core").on_game_start()
 	E.CreateTimeEvent = function(a, b, t, f, ...) H.timers = H.timers or {}; H.timers[#H.timers + 1] = { name = tostring(b), f = f, p = { ... } } end
 	H.add(make_obj(500, 0, 0, 0, { _name = "client", _comm = "actor_stalker" }))
 	E.db.actor.set_actor_position = function(self, p) self._pos = vector():set(p) end
@@ -359,25 +365,6 @@ do
 	check(uo.is_from_duty(), "a running task says whose it is, wherever the group is")
 	E.TASKS.bar_dolg_leader_task_urgent_orders = nil
 	check(OFIRST >= 1, "the check of the first update runs when a player is seen")
-	-- Server: the world checks the map-server record of the Duty player.
-	local player, roster, dedicated = H.objects[500], E.coop.players, E.coop.is_dedicated
-	H.objects[500] = nil
-	E.coop.is_dedicated = function() return true end
-	E.coop.players = function() return { { id = 1, avatar_id = 500 } } end
-	E.SE[500] = { position = vec(0, 0, 0), m_game_vertex_id = 2, m_level_vertex_id = 3,
-		alive = function() return true end, community = function() return "actor_dolg" end }
-	E.coop.levels = {
-		split = function() return true end,
-		my_level = function() return 1 end,
-		level_of_player = function(p) if p == 1 then return 2 end end,
-		carried = function() return {} end,
-	}
-	E.alife = function() return { level_name = function(_, l) return l == 2 and "l05_bar" or "fake_start" end } end
-	E.LEVEL = "fake_start"
-	check(uo.is_from_duty(), "a Duty player at the Bar of a map server starts Duty's Urgent Orders")
-	E.coop.levels = nil
-	H.objects[500], E.coop.players, E.coop.is_dedicated = player, roster, dedicated
-	E.SE[500], E.LEVEL = nil, "l03_agroprom"
 	H.objects[500]._comm = "actor_isg"
 	check(E.dialogs.actor_true_isg() == true, "an ISG client")
 	E.xr_effects.lttz_set_squad_enemy_to_actor()
@@ -396,6 +383,24 @@ do
 	check(u.actor_in_smart("pri_b35", 3), "any player at the smart")
 	E.LIFE[500] = "wounded"
 	check(not u.actor_in_smart("pri_b35", 3), "not one who is down")
+end
+
+print("== Urgent Orders: the world server checks a Duty player's record on the Bar map server")
+do
+	local H, E = host_world(true)
+	E.tasks_urgent_orders = { is_from_duty = function() return false end, is_from_army = function() return false end }
+	H.objects[500] = nil
+	E.SE[500] = { position = vec(0, 0, 0), m_game_vertex_id = 2, m_level_vertex_id = 3,
+		alive = function() return true end, community = function() return "actor_dolg" end }
+	E.coop.levels = {
+		split = function() return true end,
+		my_level = function() return 1 end,
+		level_of_player = function(p) if p == 1 then return 2 end end,
+		carried = function() return {} end,
+	}
+	E.alife = function() return { level_name = function(_, l) return l == 2 and "l05_bar" or "fake_start" end } end
+	start_nta(H)
+	check(E.tasks_urgent_orders.is_from_duty(), "a Duty player at the Bar of a map server starts Duty's Urgent Orders")
 end
 
 print("== Hidden Threat: an army player joins a game the host's first update switched off")
@@ -529,12 +534,7 @@ do
 		map_servers = function() return { { bridge = 0x101, level = 2 } } end,
 	}
 	E.HIS_LEVEL = 2
-	E.level._coop_far_view = nil
-	E.coop_quests_core = load_script(H, "coop_quests_core") -- its far view stands over this level.name
-	E.coop_srv_quests_far = load_script(H, "coop_srv_quests_far")
-	-- step S4: the far view starts from coop_mode.when_srv; this world server's server layer answers (split levels)
-	E.coop_srv_quests_far.coop_mode = { when_srv = function(fn) fn() return true end }
-	E.coop_srv_quests_far.on_game_start()
+	load_script(H, "coop_srv_quests_far").on_game_start()
 	local passes = {}
 	E.task_status_functor.hold_the_ground_task_status_functor = function(tsk)
 		passes[#passes + 1] = { E.level.name(), E.db.actor:id() }

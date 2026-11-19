@@ -128,15 +128,13 @@ local function settle(list, ms)
 	pump()
 end
 
--- The facade coop_mode answers as the machine's column (docs\contracts\coop_mode_api.md 2): the S4 answer sets, a player's
--- machine being the hostplay set with the answers of a mirror.
 local modes = dofile("tests/lua/support/modes.lua")
-local PLAYER_ANSWERS = { is_player_mirror = function() return true end, leads_here = function() return false end,
-	decides_world = function() return false end }
 
-local function boot(M, list, set, overrides)
-	load_script(M, "coop_mode")
-	M.env.coop_mode.install(modes.set(set, overrides))
+local function boot(M, list)
+	local function load(name) return load_script(M, name) end
+	local facade = load("coop_mode")
+	facade.on_game_start()
+	modes.live(facade, load)
 	for _, n in ipairs(list) do load_script(M, n) end
 	for _, n in ipairs(list) do
 		if M.env[n].on_game_start then M.env[n].on_game_start() end
@@ -189,8 +187,9 @@ local function has_key(M, prefix)
 	return false
 end
 
-local HOST_SCRIPTS = { "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_mods_core", "coop_tasks", "coop_quests_fetch" }
-local PLAYER_SCRIPTS = { "coop_quests_core", "coop_mods_core", "coop_tasks", "coop_quests_fetch" }
+local HOST_SCRIPTS = { "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_srv_quests_core",
+	"coop_mods_core", "coop_tasks", "coop_quests_fetch" }
+local PLAYER_SCRIPTS = { "coop_quests_core", "coop_srv_quests_core", "coop_mods_core", "coop_tasks", "coop_quests_fetch" }
 
 -- ==================================================================================================================== Co-op
 print("== Co-op: the host plays and decides, the client's character is a game object on the host")
@@ -208,8 +207,8 @@ local HOST_PLAYERS = { { id = 0, is_self = true, avatar_id = 0, nick = "host" },
 Hm.players = HOST_PLAYERS
 Cm.players = { { id = 1, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 500 } }
 Cm.actor._pos = vec(4, 0, 0)
-boot(Hm, HOST_SCRIPTS, "hostplay")
-boot(Cm, PLAYER_SCRIPTS, "hostplay", PLAYER_ANSWERS)
+boot(Hm, HOST_SCRIPTS)
+boot(Cm, PLAYER_SCRIPTS)
 local CO = { Hm, Cm }
 
 -- An item of the client: in his character on the host and in his own actor, one id. Only his own copy is ever on a belt.
@@ -470,6 +469,9 @@ W.env.coop.levels = {
 	level_of_player = function(p) return LEVEL[p] end,
 	carried = function(id) return CARRIED[id] or {} end,
 }
+-- The server players know the session mode from their Welcome.
+P1.env.coop.levels = { split = W.env.coop.levels.split }
+P2.env.coop.levels = { split = W.env.coop.levels.split }
 W.new_obj(501, "coop_player_avatar")
 W.new_obj(502, "coop_player_avatar")
 do
@@ -493,9 +495,9 @@ W.players = { { id = 0, is_self = true, nick = "world" }, { id = 1, is_self = fa
 	{ id = 2, is_self = false, avatar_id = 502, nick = "p2" } }
 P1.players = { { id = 1, is_self = true, avatar_id = 0 }, { id = 0, is_self = false }, { id = 2, is_self = false, avatar_id = 502 } }
 P2.players = { { id = 2, is_self = true, avatar_id = 0 }, { id = 0, is_self = false }, { id = 1, is_self = false, avatar_id = 501 } }
-boot(W, HOST_SCRIPTS, "srv_world")
-boot(P1, PLAYER_SCRIPTS, "hostplay", PLAYER_ANSWERS)
-boot(P2, PLAYER_SCRIPTS, "hostplay", PLAYER_ANSWERS)
+boot(W, HOST_SCRIPTS)
+boot(P1, PLAYER_SCRIPTS)
+boot(P2, PLAYER_SCRIPTS)
 local SRV = { W, P1, P2 }
 
 -- An item of a player: in his own actor and in the world server's record of him, one id.

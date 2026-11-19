@@ -44,7 +44,12 @@ level = level or {}
 level.object_by_id = function(id) return id == 0 and ACTOR or nil end
 
 print("== far_body")
+local modes = dofile("tests/lua/support/modes.lua")
+local facade = load_script_file("coop_mode")
+facade.on_game_start()
+modes.live(facade)
 load_script_file("coop_quests_core")
+load_script_file("coop_srv_quests_core").on_game_start()
 local qc = coop_quests_core
 check(qc.far_body(0, 0) == nil, "the world server ghost has no far body")
 local far = qc.far_body(1, 500)
