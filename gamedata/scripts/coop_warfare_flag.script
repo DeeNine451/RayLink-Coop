@@ -1,0 +1,31 @@
+-- Core, G18-1 s42:2. Stock warfare.on_game_start sets WARFARE before the PDA
+-- chooses its Contacts tab. Restore the loaded world's mode on every machine.
+
+local function saved_mode()
+	local storage = coop_mods_core.mod("alife_storage_manager")
+	local get_state = coop_mods_core.fn(storage, "get_state")
+	if not get_state then return false end
+	local ok, state = pcall(get_state)
+	return ok and type(state) == "table" and state.enable_warfare_mode == true
+end
+
+local function world_mode()
+	if coop_mode.decides_world() then
+		local is_warfare = rawget(_G, "IsWarfare")
+		if type(is_warfare) == "function" then
+			local ok, enabled = pcall(is_warfare)
+			if ok then return enabled == true end
+		end
+	end
+	-- A client or map server has the world's save and its own local config.
+	return saved_mode()
+end
+
+local function set_flag()
+	if coop_mods_core.active() then _G.WARFARE = world_mode() end
+end
+
+function on_game_start()
+	RegisterScriptCallback("on_game_load", set_flag)
+	RegisterScriptCallback("actor_on_first_update", set_flag)
+end

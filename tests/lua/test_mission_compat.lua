@@ -358,8 +358,6 @@ local presence_guards = {
 		"if dist_to_cam_sqr < (max_dist_limit * max_dist_limit) then",
 		"if pos:distance_to_sqr(cache_cam_pos) < cache_cam_limit_sqr then",
 	},
-	spawn_defense = { "if (smart.dist_to_actor < smart.respawn_radius) then" },
-	spawn_mutants = { "if (smart.dist_to_actor < smart.respawn_radius) then" },
 }
 
 local function check_function_rewrite(r, src, path)

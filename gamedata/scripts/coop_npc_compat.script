@@ -208,7 +208,7 @@ local function read_script(name, archive)
 	if not (ok and type(path) == "string") then return nil end
 	local fh = io.open(path, "rb")
 	if not fh then
-		-- Stock crow/Warfare scripts live in .db archives on the stand. This
+		-- The stock crow script lives in .db archives on the stand. This
 		-- existing engine reader uses VFS (including overrides); opt in per patch,
 		-- leaving the historical loose-only rewrites' installation unchanged.
 		if archive and type(r_file_as_string) == "function" then
@@ -422,20 +422,6 @@ local FUNCTION_REWRITES = {
 		"if coop_npc_compat.camera_player_near(new_pos, max_dist_limit * max_dist_limit, dist_to_cam_sqr) then" },
 		{ "if pos:distance_to_sqr(cache_cam_pos) < cache_cam_limit_sqr then",
 		"if coop_npc_compat.camera_player_near(pos, cache_cam_limit_sqr, pos:distance_to_sqr(cache_cam_pos)) then" },
-	},
-	-- G8-3 s39:2: replace only the proximity guard, AFTER the original timer
-	-- advancement, so an excluded attempt still consumes one respawn interval.
-	{ module = "smart_terrain_warfare", name = "spawn_defense", header = "function spawn_defense(smart)", archive = true,
-		{ "if (is_factions_enemies(smart.owning_faction, warfare.actor_faction) and smart.is_on_actor_level and smart.dist_to_actor) then",
-		"if coop_npc_compat.warfare_player_near(smart, is_factions_enemies, warfare.actor_faction) then" },
-		{ "\t\tif (smart.dist_to_actor < smart.respawn_radius) then\n\t\t\tprintd(1, smart:name())\n\t\t\treturn\n\t\tend",
-		"\t\tprintd(1, smart:name())\n\t\treturn" },
-	},
-	{ module = "smart_terrain_warfare", name = "spawn_mutants", header = "function spawn_mutants(smart)", archive = true,
-		{ "if (smart.is_on_actor_level and smart.dist_to_actor ~= nil) then",
-		"if coop_npc_compat.warfare_player_near(smart) then" },
-		{ "\t\tif (smart.dist_to_actor < smart.respawn_radius) then\n\t\t\tprintd(1, smart:name())\n\t\t\treturn\n\t\tend",
-		"\t\tprintd(1, smart:name())\n\t\treturn" },
 	},
 	{ module = "grok_bo", name = "npc_on_before_hit", header = "function npc_on_before_hit(npc,shit,bone_id)", past = "momo_multihit_fix",
 		{ "if shit.draftsman:id() ~= db.actor:id() then",
@@ -720,7 +706,7 @@ end
 -- Audit B4: a smart terrain does not respawn within its respawn_radius of the HOST's player only; any player counts. The world
 -- server alone respawns (a map server's try_respawn returns, coop_main): for a player on a map server's level it has no object, only
 -- the record of his body, and "the actor is on this level" holds for him too (respawn_only_level).
-local function player_near_record(self, r, accepts)
+local function player_near_record(self, r)
 	local gg = game_graph()
 	local lid = gg:vertex(self.m_game_vertex_id):level_id()
 	local on_level = false
@@ -728,8 +714,7 @@ local function player_near_record(self, r, accepts)
 		local se = not p.is_self and type(p.avatar_id) == "number" and alife_object(p.avatar_id) or nil
 		if se and gg:vertex(se.m_game_vertex_id):level_id() == lid then
 			on_level = true
-			local d = se.position:distance_to_sqr(self.position)
-			if d <= r * r and (not accepts or accepts(se, d)) then return true, true end
+			if se.position:distance_to_sqr(self.position) <= r * r then return true, true end
 		end
 	end
 	return false, on_level
@@ -755,35 +740,10 @@ local function same_presence_level(self, gvid)
 	return gg:vertex(self.m_game_vertex_id):level_id() == gg:vertex(gvid):level_id()
 end
 
-local function hostile_to_smart(self, community, is_enemy)
-	return type(community) == "string" and is_enemy(self.owning_faction, (community:gsub("^actor_", "")))
-end
-
 local function record_is_alive(se)
 	-- A downed player is still present. Use the body's life, not standing().
 	local ok, alive = pcall(se.alive, se)
 	return not ok or alive ~= false -- same record fallback as coop_quests_core's far body
-end
-
-function warfare_player_near(self, is_enemy, actor_faction)
-	if not P.active() then
-		if is_enemy and not is_enemy(self.owning_faction, actor_faction) then return false end
-		local distance = self.dist_to_actor
-		return self.is_on_actor_level and (not is_enemy or distance) and distance ~= nil and distance < self.respawn_radius
-	end
-	local radius_sqr = self.respawn_radius * self.respawn_radius
-	for _, o in ipairs(P.everyone()) do
-		-- Warfare uses the actor's true faction even when the actor wears a disguise.
-		if same_presence_level(self, o:game_vertex_id()) and
-			o:position():distance_to_sqr(self.position) < radius_sqr and
-			(not is_enemy or hostile_to_smart(self, o:id() == 0 and actor_faction or o:character_community(), is_enemy)) then return true end
-	end
-	-- No body here: the character's record is updated by the process leading its
-	-- map. Never use another map's coordinates or a stale record over a live body.
-	return player_near_record(self, self.respawn_radius, function(se, d)
-		return not level.object_by_id(se.id) and record_is_alive(se) and d < radius_sqr and
-			(not is_enemy or hostile_to_smart(self, se:community(), is_enemy))
-	end)
 end
 
 local function escort_distance_sqr(squad)
