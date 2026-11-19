@@ -394,3 +394,69 @@ def test_remove_file_deletes_one_name_of_a_read_only_link(work):
     ms.remove_file(link)
     assert not link.exists() and original.read_text(encoding="utf-8") == "x" and not os.access(original, os.W_OK)
     assert ms.link_count(original) == 1
+
+
+# --- round 7 (review 6, B1): a junction anywhere above the target ------------------------------------------------------
+# replace_file / remove_file took a path and trusted every folder on it: with the stand's gamedata a junction into a
+# mod's gamedata (or the stand itself a junction into a mod), the new bytes went into the mod's folder and the mod's
+# own file was deleted. Every folder from the volume root down to the target's own folder is checked now.
+
+def tree_state(folder: Path) -> dict:
+    return {p.relative_to(folder).as_posix(): None if p.is_dir() else (p.read_bytes(), os.access(p, os.W_OK))
+            for p in sorted(folder.rglob("*"))}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows thing")
+def test_replace_and_remove_refuse_a_junction_anywhere_above_the_target(work):
+    import _winapi
+
+    mod = work / "mods" / "A"
+    root_mod = work / "mods" / "B"
+    for path in (write(mod / "gamedata" / "configs" / "axr_options.ltx", "the mod's options"),
+                 write(mod / "gamedata" / "scripts" / "coop_zz_base.script", "the mod's script"),
+                 write(root_mod / "fsgame.ltx", "the mod's fsgame"),
+                 write(root_mod / ms.STAND_MEMORY, "{}")):
+        os.chmod(path, stat.S_IREAD)
+    before = {"A": tree_state(mod), "B": tree_state(root_mod)}
+    stand, stand_j = work / "stand", work / "stand_j"
+    stand.mkdir()
+    _winapi.CreateJunction(str(mod / "gamedata"), str(stand / "gamedata"))  # above the target's own folder
+    _winapi.CreateJunction(str(root_mod), str(stand_j))  # the game root itself
+    try:
+        steps = [
+            lambda: ms.replace_file(stand / "gamedata" / "configs" / "axr_options.ltx", b"ours"),
+            lambda: ms.replace_file(stand / "gamedata" / "configs" / "new.ltx", b"ours"),
+            lambda: ms.replace_file(stand / "gamedata" / "scripts" / "deeper" / "x.script", b"ours"),
+            lambda: ms.remove_file(stand / "gamedata" / "scripts" / "coop_zz_base.script"),
+            lambda: ms.remove_file(stand / "gamedata" / "scripts" / "coop_zz_none.script"),
+            lambda: ms.replace_file(stand_j / "fsgame.ltx", b"ours"),
+            lambda: ms.remove_file(stand_j / "fsgame.ltx"),
+            lambda: ms.remember_on_stand(stand_j, new_files=["gamedata/scripts/x.script"]),
+        ]
+        for number, step in enumerate(steps, 1):
+            with pytest.raises(OSError, match="junction"):
+                step()
+            assert {"A": tree_state(mod), "B": tree_state(root_mod)} == before, f"step {number}"
+        assert ms.link_on_path(stand / "gamedata" / "configs" / "axr_options.ltx") == str(stand / "gamedata")
+        assert ms.link_on_path(stand_j / "appdata" / "user.ltx") == str(stand_j)
+        assert ms.link_on_path(stand / "fsgame.ltx") is None and ms.link_on_path(work / "none" / "x") is None
+    finally:
+        os.rmdir(stand / "gamedata")
+        os.rmdir(stand_j)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows thing")
+def test_materialize_refuses_an_out_folder_under_a_junction(fake):
+    import _winapi
+
+    fake.mod("A", {"gamedata/scripts/a.script": "a"})
+    elsewhere = fake.root / "elsewhere"
+    elsewhere.mkdir()
+    _winapi.CreateJunction(str(elsewhere), str(fake.root / "linked"))
+    try:
+        layers = ms.build_layers(fake.game, [], fake.mods, ["A"], fake.overwrite, [])
+        with pytest.raises(SystemExit, match="junction"):
+            ms.materialize(layers, fake.root / "linked" / "out")
+        assert not any(elsewhere.iterdir())
+    finally:
+        os.rmdir(fake.root / "linked")

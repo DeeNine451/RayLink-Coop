@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -355,6 +356,87 @@ def test_engine_gamedata_entries_are_the_engine_repositorys_blobs(tmp_path):
     assert got["compared"] == 1
 
 
+
+# --- review 6 (round 7), residual (a): the exe the gate judged is the exe that ships -------------------------------------
+# verify used to hand check_gates the exe's own path and then read that path again for the label, the hash, the package
+# comparison and verified.json: an exe swapped in between went out unjudged (temp/modes_review6 attacks6 A1, a fake
+# runner: the gate saw ae2f31a4..., verified.json recorded 59da3222...). Now the exe is copied into temp/<tag>/ first;
+# the gate, the label, the hash and the package all judge that copy, and a copy that changed during verify is refused.
+
+class SwapFake(Fake):
+    """Fake, plus the reads a whole verify makes (git ls-tree, git diff), and a gate that writes `swap` over a file:
+    "original" (the exe verify was given) or "given" (whatever path the gate was handed)."""
+
+    def __init__(self, original: Path, swap: bytes, target: str, **kw):
+        super().__init__(**kw)
+        self.original, self.swap, self.target, self.gate_exe = original, swap, target, None
+
+    def __call__(self, args, cwd):
+        args = [str(a) for a in args]
+        if args[:2] == ["git", "ls-tree"] or args[:2] == ["git", "diff"]:
+            self.calls.append(args)
+            return done(args, "")
+        if "check_gates.py" in " ".join(args):
+            self.gate_exe = Path(args[args.index("--exe") + 1])
+            seen = self.gate_exe.read_bytes()
+            (self.original if self.target == "original" else self.gate_exe).write_bytes(self.swap)
+            self.gate_saw = seen
+        return super().__call__(args, cwd)
+
+
+def whole_verify(tmp_path, exe: bytes, packaged: bytes, swap: bytes, target: str):
+    n = release.names_for("dev", "57")
+    original = tmp_path / "engine-ci" / "AnomalyDX11AVX.exe"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(exe)
+    work = tmp_path / n.work
+    work.mkdir(parents=True)
+    for name in release.NOTES:
+        (work / name).write_text("Что нового: торговля у костра.\n", encoding="utf-8")
+    archive = tmp_path / "releases" / n.asset
+    archive.parent.mkdir()
+    packaged_hash = hashlib.sha256(packaged).hexdigest()
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr(f"Anomaly Coop - Engine/bin/{release.EXE_NAME}", packaged)
+        z.writestr("anomaly-coop-release.txt", f"Anomaly Coop {n.version}\n{PROJECT[:7]} {ENGINE[:7]}\n{packaged_hash}\n"
+                                               "RayLink Engine dev\n")
+        z.writestr("fomod/info.xml", f"<fomod><Version>{n.version}</Version></fomod>")
+        z.writestr("fomod/ModuleConfig.xml", "<config/>")
+    fake = SwapFake(original, swap, target, root=tmp_path)
+    return n, original, fake, lambda: release.verify(n, tmp_path, "dev-42.1", original, fake)
+
+
+def test_verify_judges_one_copy_of_the_exe(tmp_path, capsys):
+    exe = b"MZ RayLink Engine dev: the build"
+    n, original, fake, run = whole_verify(tmp_path, exe, exe, exe, "original")
+    result = run()
+    copy = tmp_path / n.work / release.EXE_NAME
+    assert fake.gate_exe == copy and fake.gate_saw == exe  # the gate was handed the copy
+    assert result["exe_sha256"] == hashlib.sha256(exe).hexdigest() and result["exe"] == str(copy)
+    assert result["exe_source"] == str(original)
+    capsys.readouterr()
+
+
+def test_verify_never_ships_an_exe_swapped_in_after_the_gate(tmp_path, capsys):
+    # attacks6 A1: the package already holds the swapped-in exe; the gate judged the one before it
+    judged, swapped = b"MZ RayLink Engine dev: judged", b"MZ RayLink Engine dev: swapped in"
+    n, original, fake, run = whole_verify(tmp_path, judged, swapped, swapped, "original")
+    with pytest.raises(release.Refused, match="the package's exe is not the exe being released"):
+        run()
+    assert fake.gate_saw == judged
+    assert not (tmp_path / n.work / "verified.json").exists()
+    capsys.readouterr()
+
+
+def test_verify_refuses_a_copy_that_changed_during_the_gate(tmp_path, capsys):
+    exe, other = b"MZ RayLink Engine dev: judged", b"MZ RayLink Engine dev: changed"
+    n, original, fake, run = whole_verify(tmp_path, exe, other, other, "given")
+    with pytest.raises(release.Refused, match="changed while verify ran"):
+        run()
+    assert not (tmp_path / n.work / "verified.json").exists()
+    capsys.readouterr()
+
+
 # --- draft and publish -------------------------------------------------------------------------------------------------
 
 def verified(tmp_path, n, **extra):
@@ -560,13 +642,45 @@ def test_prepare_writes_the_plan(tmp_path, capsys):
 # prerelease, so that was a Dev build with no check at all. Every publishing command in tools/ must be release.py's,
 # whose draft and publish refuse without the verify of this tag (and verify runs check_gates --release --layers).
 
-PUBLISHES = re.compile(r"\bgh\s+release\s+(?:create|edit|upload|delete)\b|\bgh\s+api\b[^\n]*(?:-X|--method)\s*(?:POST|PATCH|"
-                       r"PUT|DELETE)\b|\bgit\b[^\n]*\bpush\b", re.I)
-TEXT_SUFFIXES = {".sh", ".ps1", ".py", ".cmd", ".bat", ".js", ".mjs", ".lua"}
+# Round 7 (review 6, residual e): also the list form of Python and JS (["gh", "release", "create", ...]), gh api with
+# a field (-f / -F / --field / --raw-field / --input: an implicit POST), curl / wget / Invoke-RestMethod / Invoke-WebRequest
+# that send (a method other than GET, a body, an upload), and a command split over lines (\ ` ^ at the end of a line).
+Q = r"[\"']"
+PUBLISHES = re.compile(
+    r"\bgh\s+release\s+(?:create|edit|upload|delete)\b|"
+    r"\bgh\s+api\b[^\n]*(?:(?:-X|--method)\s*=?\s*(?:POST|PATCH|PUT|DELETE)\b|\s(?:-f|-F|--field|--raw-field|--input)\b)|"
+    r"\bgit\b[^\n]*\bpush\b|"
+    rf"{Q}gh{Q}\s*,\s*{Q}release{Q}\s*,\s*{Q}(?:create|edit|upload|delete){Q}|"
+    rf"{Q}gh{Q}\s*,\s*{Q}api{Q}[^\]\n]*{Q}(?:-X|--method|-f|-F|--field|--raw-field|--input){Q}|"
+    rf"{Q}git{Q}\s*,[^\]\n]*{Q}push{Q}|"
+    r"\b(?:curl|wget)\b[^\n]*(?:\s(?:-X|--request)\s*=?\s*(?:POST|PATCH|PUT|DELETE)\b|\s(?:-d|--data\S*|-F|--form|-T|"
+    r"--upload-file|--post-data|--post-file)\b)|"
+    r"\bInvoke-(?:RestMethod|WebRequest)\b[^\n]*-Method\s+(?:Post|Patch|Put|Delete)\b|"
+    r"\bInvoke-(?:RestMethod|WebRequest)\b[^\n]*\s-(?:Body|InFile)\b", re.I)
+TEXT_SUFFIXES = {".sh", ".ps1", ".psm1", ".py", ".cmd", ".bat", ".js", ".mjs", ".cjs", ".ts", ".lua"}
+CONTINUED = re.compile(r"(?:\\|`|\^)\s*$")
+
+
+def logical_lines(text: str) -> list[str]:
+    """The lines of a tool with a command split over lines (\\ ` ^ at the end) joined into one."""
+    out, acc = [], ""
+    for line in text.splitlines():
+        if CONTINUED.search(line):
+            acc += CONTINUED.sub(" ", line)
+            continue
+        out.append(acc + line)
+        acc = ""
+    if acc:
+        out.append(acc)
+    return out
 GATED_PUBLISHER = {"tools/release.py"}
-# Not the layer guard's file (the lead's): it publishes b<N> and pushes main of both public repositories with no gate.
-# The lead removes it or turns it into a refusal like publish_dev.sh; then this entry goes (the test fails while stale).
-NOT_YET_GATED = {"tools/publish_github.sh"}
+# Tools that publish only after `release.py --channel <channel> verify` passed, and whose coop and engine release is
+# release.py's own draft and publish (round 7, review 6): the first network command of the file comes after the verify
+# line (test below), and a refused verify ends the run before any network command (test_publish_github_*).
+VERIFY_FIRST = {"tools/publish_github.sh": "stable"}
+# A tool that still publishes around release.py would be named here with its owner, and the test fails while a name is
+# stale. Empty since round 7: tools/publish_github.sh (the Stable publish) went through release.py.
+NOT_YET_GATED: set[str] = set()
 
 
 def publishing_tools() -> set[str]:
@@ -574,7 +688,7 @@ def publishing_tools() -> set[str]:
     for path in sorted((ROOT / "tools").rglob("*")):
         if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES or "__pycache__" in path.parts:
             continue
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in logical_lines(path.read_text(encoding="utf-8", errors="replace")):
             code = line.lstrip()
             if code.startswith(("#", "rem ", "REM ", "::", "--")):
                 continue
@@ -586,10 +700,57 @@ def publishing_tools() -> set[str]:
 
 def test_only_release_py_publishes():
     found = publishing_tools()
-    assert found - GATED_PUBLISHER - NOT_YET_GATED == set(), (
+    assert found - GATED_PUBLISHER - set(VERIFY_FIRST) - NOT_YET_GATED == set(), (
         "these tools publish around release.py (no gate): make them refuse and name `python -I tools/release.py "
         "--channel <dev|stable> --build <N> verify|draft|publish`")
     assert NOT_YET_GATED <= found, "NOT_YET_GATED names a file that no longer publishes: drop it from the list"
+    assert "tools/publish_github.sh" not in NOT_YET_GATED
+
+
+@pytest.mark.parametrize(("text", "sends"), [
+    ('subprocess.run(["gh", "release", "create", tag])', True),
+    ("run(['gh', 'api', path, '-X', 'POST'])", True),
+    ("['git', '-C', d, 'push', url]", True),
+    ("gh api repos/o/r/releases -f tag_name=b57", True),
+    ("curl -X POST https://api.github.com/repos/o/r/releases", True),
+    ("curl --data-binary @a.zip https://uploads.github.com/x", True),
+    ("Invoke-RestMethod -Uri $u -Method Post -Body $b", True),
+    ("Invoke-WebRequest $u -InFile $zip", True),
+    ("gh release \\\n  create b57 a.zip", True),
+    ("git -C $root `\n  push $url HEAD:refs/heads/main", True),
+    ("gh api repos/o/r/releases/latest", False),
+    ('["gh", "api", path]', False),
+    ("curl -s https://example.invalid", False),
+    ("git fetch -q $url main", False),
+    ("gh repo view o/r", False),
+])
+def test_the_publish_detector_sees_every_form(text, sends):
+    # review 6, residual (e): the list form, gh api with a field, curl / Invoke-RestMethod sends, split lines
+    assert any(PUBLISHES.search(line) for line in logical_lines(text)) == sends
+
+
+# any command that talks to GitHub or publishes: gh, git push / fetch / ls-remote, release.py draft / publish
+NETWORK = re.compile(r"(?<![\w$-])gh\s|\bgit\b[^\n]*\s(?:push|fetch|ls-remote)\b|release\.py[^\n]*\s(?:draft|publish)\b|"
+                     r"\bcurl\b|\bwget\b|Invoke-(?:RestMethod|WebRequest)")
+
+
+@pytest.mark.parametrize("rel", sorted(VERIFY_FIRST))
+def test_verify_first_tools_run_release_py_verify_before_any_network_command(rel):
+    channel = VERIFY_FIRST[rel]
+    lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+    gate = re.compile(rf'^\s*if ! python -I "\$ROOT/tools/release\.py" --channel {channel} --build "\$BUILD" verify; then$')
+    at = [number for number, line in enumerate(lines) if gate.match(line)]
+    assert len(at) == 1, f'{rel}: one `if ! python -I "$ROOT/tools/release.py" --channel {channel} ... verify; then`'
+    assert re.match(r"^\s*(?:refuse|exit)\b", lines[at[0] + 1]), f"{rel}: a refused verify must end the run"
+    early = [f"{rel}:{number + 1}: {line.strip()}" for number, line in enumerate(lines[:at[0]])
+             if not line.lstrip().startswith("#") and NETWORK.search(line)]
+    assert not early, "a network command before release.py verify:\n" + "\n".join(early)
+    later = [line.strip() for line in lines[at[0]:] if not line.lstrip().startswith("#")]
+    for command in ("draft", "publish"):
+        wanted = rf'^python -I "\$ROOT/tools/release\.py" --channel {channel} --build "\$BUILD" {command}$'
+        assert any(re.match(wanted, line) for line in later), f"{rel}: its release goes through release.py {command}"
+    assert not [line for line in later if re.search(r"(?<![\w$-])gh\s+(?:release|api)\b", line)], \
+        f"{rel}: the release itself is release.py's (no gh release / gh api of its own)"
 
 
 def git_bash():
@@ -629,3 +790,103 @@ def test_publish_dev_scripts_refuse_and_name_release_py(tmp_path, script, asset)
     assert done.returncode != 0, done.stdout + done.stderr
     assert not called.exists(), "gh was called: " + called.read_text(encoding="utf-8")
     assert "tools/release.py --channel dev --build" in done.stdout + done.stderr, done.stdout + done.stderr
+
+
+# --- review 6 (round 7): the Stable publish, tools/publish_github.sh, goes through release.py -------------------------
+# It used to create b<N> as Latest and push main of both public repositories with no gate at all. Now it runs
+# `release.py --channel stable --build <N> verify` first (exit 2 and nothing on the network when refused) and its coop
+# and engine release is release.py's own draft and publish. Run in a fake project: python, gh and git on PATH are fakes
+# that write down every call; the copy of the script finds its ROOT next to itself.
+
+FAKE_TOOL = """#!/usr/bin/env bash
+echo "{name} $*" >> '{calls}'
+if [ "{name}" = python ]; then
+  case " $* " in *" verify "*) exit "${{FAKE_VERIFY:-0}}";; esac
+fi
+if [ "{name}" = git ]; then
+  case " $* " in
+    *" ls-remote "*) [ -n "${{FAKE_MAIN:-}}" ] && printf '%s\\trefs/heads/main\\n' "$FAKE_MAIN";;
+    *" rev-parse "*) [ -n "${{FAKE_PUBLISH:-}}" ] && echo "$FAKE_PUBLISH";;
+    *" merge-base "*) exit "${{FAKE_ANCESTOR:-1}}";;
+  esac
+fi
+exit 0
+"""
+
+
+def publish_github(tmp_path, **env):
+    """Runs a copy of tools/publish_github.sh in a fake project; (exit code, output, the calls in order)."""
+    bash = git_bash()
+    if bash is None:
+        pytest.skip("no Git bash here")
+    project = tmp_path / "proj"
+    (project / "tools").mkdir(parents=True)
+    shutil.copy2(ROOT / "tools" / "publish_github.sh", project / "tools" / "publish_github.sh")
+    # what the old script read before it published: the protocol header, the package, the launcher's folder
+    (project / "engine" / "src" / "xrCoop").mkdir(parents=True)
+    (project / "engine" / "src" / "xrCoop" / "coop_protocol.h").write_text(
+        "    constexpr uint32_t kProtocolVersion = 33;\n", encoding="utf-8")
+    (project / "releases").mkdir()
+    (project / "releases" / "anomaly-coop-0.57.0.zip").write_bytes(b"PK a build")
+    (tmp_path / "raylink-launcher").mkdir(parents=True)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    calls = tmp_path / "calls.txt"
+    for name in ("python", "gh", "git", "npm", "powershell.exe"):
+        (fake_bin / name).write_text(FAKE_TOOL.format(name=name, calls=calls.as_posix()), encoding="utf-8",
+                                     newline="\n")
+    run_env = {k: v for k, v in os.environ.items() if k not in ("BUILD", "OWNER", "VISIBILITY", "SKIP_LAUNCHER")}
+    run_env.update(PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""), SKIP_LAUNCHER="1", **env)
+    done = subprocess.run([bash, str(project / "tools" / "publish_github.sh")], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=run_env, cwd=tmp_path, timeout=120)
+    lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    return done.returncode, done.stdout + done.stderr, lines
+
+
+def release_calls(lines):
+    """The release.py commands among the calls, as (channel, build, command)."""
+    out = []
+    for line in lines:
+        m = re.match(r'^python -I .*tools/release\.py --channel (\w+) --build (\S+) (\w+)$', line)
+        if m:
+            out.append(m.groups())
+        elif line.startswith("python "):
+            out.append(("?", "?", line))
+    return out
+
+
+def test_publish_github_refuses_when_release_py_verify_refuses(tmp_path):
+    code, out, calls = publish_github(tmp_path, BUILD="57", FAKE_VERIFY="1")
+    assert code == 2, out
+    assert release_calls(calls) == [("stable", "57", "verify")], calls
+    assert calls == [c for c in calls if c.startswith("python ")], f"ran something besides verify: {calls}"
+    assert "Nothing was published" in out and "release.py --channel stable --build 57 prepare" in out, out
+
+
+def test_publish_github_publishes_only_through_release_py_after_verify(tmp_path):
+    code, out, calls = publish_github(tmp_path, BUILD="57")
+    assert code == 0, out
+    assert release_calls(calls) == [("stable", "57", "verify"), ("stable", "57", "draft"), ("stable", "57", "publish")]
+    assert calls[0].startswith("python "), calls  # the gate before anything else
+    assert not [c for c in calls if re.match(r"^gh (?:release|api)\b", c) or re.match(r"^git\b.*\bpush\b", c)], calls
+
+
+def test_publish_github_refuses_a_public_engine_main_made_elsewhere(tmp_path):
+    # the snapshot of engine\ goes on top of the public main: a commit made on GitHub would be undone by it
+    code, out, calls = publish_github(tmp_path, BUILD="57", FAKE_MAIN="a" * 40, FAKE_PUBLISH="b" * 40)
+    assert code == 4, out
+    assert release_calls(calls) == [("stable", "57", "verify")], calls
+    assert "Nothing was published" in out, out
+    code, out, calls = publish_github(tmp_path / "again", BUILD="57", FAKE_MAIN="a" * 40, FAKE_PUBLISH="a" * 40)
+    assert code == 0 and [c for _, _, c in release_calls(calls)] == ["verify", "draft", "publish"], out + str(calls)
+    code, out, calls = publish_github(tmp_path / "ancestor", BUILD="57", FAKE_MAIN="a" * 40, FAKE_ANCESTOR="0")
+    assert code == 0 and [c for _, _, c in release_calls(calls)] == ["verify", "draft", "publish"], out + str(calls)
+
+
+@pytest.mark.parametrize("env", [{}, {"BUILD": "57.1"}, {"BUILD": "57; echo x"}, {"BUILD": "b57"},
+                                 {"BUILD": "57", "OWNER": "somebody"}, {"BUILD": "57", "VISIBILITY": "internal"}],
+                         ids=["no-build", "point-build", "injection", "tag", "owner", "visibility"])
+def test_publish_github_refuses_bad_input_before_anything_runs(tmp_path, env):
+    code, out, calls = publish_github(tmp_path, **env)
+    assert code == 2 and calls == [], out + str(calls)
+    assert "Nothing was published" in out, out

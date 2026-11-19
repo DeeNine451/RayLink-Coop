@@ -238,16 +238,61 @@ def delete_blocker(path) -> "str | None":
     return None
 
 
+class LinkOnPath(OSError):
+    """A folder on the way to a stand file is a junction, a symlink or another reparse point (round 7 of the layer
+    guard): a write through it lands in another folder, a mod's."""
+
+
+def _is_link_folder(folder: Path) -> "bool | None":
+    """True: folder is a junction, a symlink or another reparse point; False: a real folder (or a file); None: there is
+    nothing at that name (so nothing below it either). Any other error is raised: a folder we cannot look at is no
+    folder we write through."""
+    try:
+        st = os.lstat(folder)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    reparse = getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(stat.S_ISLNK(st.st_mode) or reparse or os.path.isjunction(folder))
+
+
+def link_on_path(path) -> "str | None":
+    """The first folder from the volume root down to path's own folder that is a junction, a symlink or another reparse
+    point, as a full path, or None. The game root, every folder above it and every folder below it down to the target
+    are all checked: a link anywhere on the way takes the write into another folder (review 6, B1: the stand's gamedata
+    as a junction into a mod's gamedata; the PowerShell helpers' Assert-NoJunction walks the same way)."""
+    folder = Path(os.path.abspath(path)).parent
+    for cur in [*reversed(folder.parents), folder]:
+        found = _is_link_folder(cur)
+        if found is None:
+            return None
+        if found:
+            return str(cur)
+    return None
+
+
+def refuse_link_on_path(path) -> None:
+    """LinkOnPath when a folder on the way to path is a link (link_on_path)."""
+    through = link_on_path(path)
+    if through:
+        raise LinkOnPath(f"refusing to write through a junction or symlink folder: {through} (on the way to {path}; "
+                         "the launcher builds real folders)")
+
+
 def remove_file(path) -> None:
-    """Delete one name of a file. Other hard links keep their data and their read-only attribute."""
+    """Delete one name of a file. Other hard links keep their data and their read-only attribute. Refused (LinkOnPath)
+    when any folder on the way is a junction or symlink: the name inside it is the mod's own file."""
+    refuse_link_on_path(path)
     _unlink(Path(path))
 
 
 def replace_file(path, data: bytes) -> int:
     """Put data at path as a NEW file: the bytes go to a fresh file next to it, the old name (a hard link into a mod's
     folder, maybe read-only) is deleted, the fresh file takes the name. No other link of the old file ever sees the new
-    bytes or loses its read-only attribute. Returns the old name's link count (0: there was no file)."""
+    bytes or loses its read-only attribute. Returns the old name's link count (0: there was no file). Refused
+    (LinkOnPath) before anything is written when any folder from the volume root down to path's folder is a junction or
+    symlink."""
     path = Path(path)
+    refuse_link_on_path(path)
     if path.is_dir() and not path.is_symlink():
         raise IsADirectoryError(f"a folder stands where a file goes: {path}")
     links = link_count(path)
@@ -362,6 +407,11 @@ def materialize(layers: list[Layer], out) -> Report:
     started = time.perf_counter()
     out = Path(out)
     report = Report()
+    # out itself and every folder above it (_Dirs checks the ones below; round 7, review 6 B1)
+    through = link_on_path(out / MANIFEST)
+    if through:
+        raise SystemExit(f"refusing to write through a junction or symlink folder: {through} (--out {out}; the stand "
+                         "builds real folders)")
     real_out = os.path.realpath(out)
     for layer in layers:
         if _overlaps(real_out, os.path.realpath(layer.root)):

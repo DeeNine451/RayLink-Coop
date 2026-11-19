@@ -14,6 +14,7 @@ Run: python -m pytest tests\\tools\\test_gates.py -q
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -1825,51 +1826,667 @@ def test_powershell_stand_helpers_never_write_through_a_junction(work):
     os.rmdir(stand / "appdata_server" / "presets")
 
 
-# Every PowerShell file of tools/ that can write into a game root: a write goes through the helpers of stand_common.ps1.
-# Found by what it takes or names (review 5, B1: tools/stand_server.ps1 was in no list, wrote fsgame_server.ltx with
-# [IO.File]::WriteAllText and ran robocopy appdata -> appdata_server, and changed 2 mod files through hard links). A
-# PowerShell file of tools/ that names no game root must be in NOT_A_GAME_ROOT_WRITER with its reason, so a new script
-# is classified before it can slip by.
-GAME_ROOT_PS = re.compile(r"\$(?:Stand|GameDir|TestRoot|GameRoot)\b|RayLinkGames|game-dev", re.I)
+# Review 6, B1 (round 7): Assert-NoJunction looked only at the target's own folder. With the stand's gamedata a junction
+# into a mod's gamedata, Write-StandText on gamedata\configs\axr_options.ltx replaced the mod's read-only file and cleared
+# its attribute, and Copy-StandFile + Remove-StandFile on gamedata\scripts\coop_zz_base.script deleted the mod's own file
+# (temp\modes_review6\hl6.txt, N3a / N3b). Every folder from the volume root down to the target is checked now: the game
+# root, the folders above it and every folder below it.
+PS_JUNCTION_ABOVE = r"""
+$ErrorActionPreference = 'Stop'
+. '{common}'
+$cp = [System.Text.Encoding]::GetEncoding(1251)
+$steps = [ordered]@{{
+    'text' = {{ Write-StandText -Path '{stand}\gamedata\configs\axr_options.ltx' -Text "ours" -Encoding $cp }}
+    'lines' = {{ Write-StandLines -Path '{stand}\gamedata\configs\deeper\new.ltx' -Lines @('ours') -Encoding $cp }}
+    'bytes' = {{ Write-StandBytes -Path '{stand}\gamedata\scripts\coop_zz_new.script' -Bytes ([byte[]](65, 66)) }}
+    'copy' = {{ Copy-StandFile -From '{src}\coop_zz_base.script' -To '{stand}\gamedata\scripts\coop_zz_base.script' }}
+    'remove' = {{ Remove-StandFile -Path '{stand}\gamedata\scripts\coop_zz_base.script' }}
+    'remove_missing' = {{ Remove-StandFile -Path '{stand}\gamedata\scripts\coop_zz_none.script' }}
+    'tree' = {{ Copy-StandTree -From '{src}\tree' -To '{stand}\gamedata\configs\sub' }}
+    'mirror' = {{ Copy-StandTree -From '{src}\tree' -To '{stand}\gamedata\scripts' -Mirror }}
+    'tree_into' = {{ Copy-StandTree -From '{src}\withgamedata' -To '{stand}' }}
+    'root_text' = {{ Write-StandText -Path '{stand_j}\fsgame_h.ltx' -Text "ours" -Encoding $cp }}
+    'root_remove' = {{ Remove-StandFile -Path '{stand_j}\fsgame.ltx' }}
+    'root_deep' = {{ Write-StandText -Path '{stand_j}\appdata\user.ltx' -Text "ours" -Encoding $cp }}
+}}
+foreach ($name in $steps.Keys) {{
+    try {{ & $steps[$name]; "wrote ${{name}}" }} catch {{ "refused ${{name}}: $($_.Exception.Message)" }}
+}}
+"""
+
+
+def folder_state(folder: Path) -> dict:
+    """Every file and folder under folder: bytes and read-only attribute (folders: None)."""
+    out = {}
+    for path in sorted(folder.rglob("*")):
+        rel = path.relative_to(folder).as_posix()
+        out[rel] = None if path.is_dir() else (path.read_bytes(), not os.access(path, os.W_OK))
+    return out
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None or sys.platform != "win32", reason="Windows PowerShell")
+def test_powershell_stand_helpers_refuse_a_junction_anywhere_above_the_target(work):
+    import _winapi
+
+    stand, src, stand_j = work / "stand", work / "src", work / "stand_j"
+    write(src, "coop_zz_base.script", "-- our probe\n")
+    write(src, "tree/a.ltx", "[ours a]\n")
+    write(src, "withgamedata/gamedata/configs/axr_options.ltx", "[ours]\n")
+    mod = work / "mo2" / "mods" / "60- A mod"
+    write(mod, "gamedata/configs/axr_options.ltx", "[the mod's options]\n")
+    write(mod, "gamedata/scripts/coop_zz_base.script", "-- the mod's script of that name\n")
+    write(mod, "gamedata/scripts/other.script", "-- the mod's other script\n")
+    root_mod = work / "mo2" / "mods" / "70- A root mod"
+    write(root_mod, "fsgame.ltx", "[the mod's fsgame]\n")
+    write(root_mod, "appdata/user.ltx", "[the mod's user]\n")
+    for path in [*mod.rglob("*"), *root_mod.rglob("*")]:
+        if path.is_file():
+            os.chmod(path, stat.S_IREAD)
+    before = {"mod": folder_state(mod), "root_mod": folder_state(root_mod)}
+    stand.mkdir()
+    _winapi.CreateJunction(str(mod / "gamedata"), str(stand / "gamedata"))  # one level above the target's folder
+    _winapi.CreateJunction(str(root_mod), str(stand_j))  # the game root itself
+    try:
+        script = PS_JUNCTION_ABOVE.format(common=ROOT / "tools" / "stand_common.ps1", stand=stand, src=src,
+                                          stand_j=stand_j)
+        done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                              capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, done.stdout + done.stderr
+        lines = [l for l in done.stdout.splitlines() if l.startswith(("wrote", "refused"))]
+        assert len(lines) == 12, done.stdout + done.stderr
+        wrote = [l for l in lines if not (l.startswith("refused") and "junction" in l)]
+        assert not wrote, "\n".join(wrote)
+        assert {"mod": folder_state(mod), "root_mod": folder_state(root_mod)} == before
+    finally:
+        os.rmdir(stand / "gamedata")
+        os.rmdir(stand_j)
+
+
+# Every PowerShell file of tools/ is a stand writer (review 5, B1: tools/stand_server.ps1 was in no list, wrote
+# fsgame_server.ltx with [IO.File]::WriteAllText and ran robocopy appdata -> appdata_server, and changed 2 mod files
+# through hard links). Round 7 (review 6): the files are found when the test runs, not when pytest collects (a scenario
+# added meanwhile, such as companions_group.ps1 or phantoms_server.ps1, is checked too), every *.ps1 / *.psm1 under
+# tools/ counts whatever it names, and only NOT_A_GAME_ROOT_WRITER may leave one out, with its reason: never a file of
+# tools/stand, never a file that takes or names a game root (GAME_ROOT_PS; stand_common.ps1 is the helpers' own file,
+# tested by what it does).
+GAME_ROOT_PS = re.compile(r"\$(?:Stand|GameDir|TestRoot|GameRoot|Game)\b|RayLinkGames|game-dev", re.I)
 NOT_A_GAME_ROOT_WRITER = {
     "tools/package.ps1": "writes only inside the repository (Assert-Inside): the package's stage and releases\\",
-    "tools/stand_common.ps1": "the helpers' own file (test_powershell_stand_helpers_never_write_through_a_link)",
+    "tools/stand_common.ps1": "the helpers' own file (test_powershell_stand_helpers_never_write_through_a_link, "
+                              "..._refuse_a_junction_anywhere_above_the_target)",
 }
-ALL_PS = sorted(p for p in (ROOT / "tools").rglob("*.ps1") if "__pycache__" not in p.parts)
-STAND_WRITERS = [p for p in ALL_PS if p.relative_to(ROOT).as_posix() not in NOT_A_GAME_ROOT_WRITER
-                 and GAME_ROOT_PS.search(p.read_text(encoding="utf-8", errors="replace"))]
+PS_SUFFIXES = (".ps1", ".psm1")
 
 
-def test_every_powershell_tool_is_classified_as_a_stand_writer_or_not():
-    rels = {p.relative_to(ROOT).as_posix() for p in ALL_PS}
-    writers = {p.relative_to(ROOT).as_posix() for p in STAND_WRITERS}
-    assert rels - writers - set(NOT_A_GAME_ROOT_WRITER) == set(), \
-        "a tools/*.ps1 that names no game root: add it to NOT_A_GAME_ROOT_WRITER with its reason, or to the writers"
-    # the ones the reviews named stay in the lint whatever their text becomes
+def powershell_files(tools: Path) -> list[Path]:
+    return sorted(p for p in tools.rglob("*") if p.suffix.lower() in PS_SUFFIXES and p.is_file()
+                  and "__pycache__" not in p.parts)
+
+
+def stand_writers(tools: Path) -> list[Path]:
+    """Every PowerShell file under tools (found now) but the ones NOT_A_GAME_ROOT_WRITER names."""
+    return [p for p in powershell_files(tools) if p.relative_to(tools.parent).as_posix() not in NOT_A_GAME_ROOT_WRITER]
+
+
+def test_every_powershell_tool_is_a_stand_writer_unless_named_with_its_reason():
+    tools = ROOT / "tools"
+    writers = {p.relative_to(ROOT).as_posix() for p in stand_writers(tools)}
+    every = {p.relative_to(ROOT).as_posix() for p in powershell_files(tools)}
+    assert every - writers == set(NOT_A_GAME_ROOT_WRITER), "NOT_A_GAME_ROOT_WRITER names a missing file"
+    assert {f"tools/stand/{p.name}" for p in (tools / "stand").glob("*.ps1")} <= writers  # every scenario, always
     assert {"tools/stand_server.ps1", "tools/ded_check.ps1", "tools/ded_probe.ps1", "tools/split_test.ps1",
-            "tools/deploy.ps1", "tools/launch.ps1", "tools/stand_hostplay.ps1", "tools/stand_srv.ps1",
-            *(f"tools/stand/{p.name}" for p in (ROOT / "tools" / "stand").glob("*.ps1"))} <= writers
+            "tools/deploy.ps1", "tools/launch.ps1", "tools/stand_hostplay.ps1", "tools/stand_srv.ps1"} <= writers
     for rel in NOT_A_GAME_ROOT_WRITER:
-        assert (ROOT / rel).is_file(), f"NOT_A_GAME_ROOT_WRITER names a missing file: {rel}"
+        assert not rel.startswith("tools/stand/"), f"{rel}: a scenario is always linted"
+        if rel != "tools/stand_common.ps1":
+            assert not GAME_ROOT_PS.search((ROOT / rel).read_text(encoding="utf-8", errors="replace")), \
+                f"{rel} takes or names a game root: it is a stand writer, not an exception"
 
 
-IN_PLACE = re.compile(r"robocopy|\[(?:System\.)?IO\.File\]::(?:WriteAll|AppendAll|Copy|Replace|Open)|Set-Content|"
-                      r"Add-Content|Out-File|Copy-Item\b|Remove-Item\b[^\n]*-Force|\.Write(?:Line)?\(|(?<![\w-])Move-Item", re.I)
-# what may stay: copies into the repository's temp\stand (the run history) and the staging folder of deploy.ps1
-TO_OUR_FOLDERS = re.compile(r"Copy-Item -LiteralPath [^\n]*-Destination \(Join-Path \$(?:OutDir|fixture|engineStage)\b|"
-                            r"Copy-Item -LiteralPath \$opt -Destination \$optKeep\b|"
-                            r"Copy-Item -LiteralPath \$BuiltExe -Destination \(Join-Path \$engineStage|"
-                            r"\$in\.Write|\[System\.IO\.File\]::WriteAllLines\(\(Join-Path \$fixture", re.I)
+# The rule for a write in a stand writer (round 7). The helpers of stand_common.ps1 (Write-Stand*, Copy-Stand*,
+# Remove-StandFile) are the way into a stand. Any other write (Copy-Item, Set-/Add-/Clear-Content, Out-File, Tee-Object,
+# Export-*, Remove-Item -Force, Move-/Rename-Item, [IO.File]::WriteAll* / AppendAll* / AppendText / Create* / Open* /
+# Copy / Move / Replace, StreamWriter / FileStream / BinaryWriter, .Write() / .CopyTo() / .MoveTo() / .Delete() and
+# the like, -OutFile, -RedirectStandardOutput / -Error, > and >>) is allowed only when what it writes, deletes or moves
+# lies in the repository:
+#   - a copy OUT of the stand into the repository is allowed: a copy's source may be a stand file (a copy only reads
+#     it), its destination must be the repository's;
+#   - "the repository's": a variable whose every assignment in the file (a parameter: its default) is a Join-Path from
+#     $PSScriptRoot, from stand_common.ps1's repository folders ($script:Root, $script:StandDir, $script:MarkDir,
+#     $script:ScenarioDir: only in a file that dot-sources stand_common.ps1 and does not assign them itself), or from
+#     another such variable, and whose path stays inside the repository; or a Join-Path of such a variable and a child
+#     that stays inside (a child's variables count as one plain name: the lint judges the code, not what a caller
+#     passes); or such a path with a suffix ($outPath + '.err');
+#   - a write into a process's standard input (a StreamWriter on .StandardInput, $in.WriteLine) is allowed;
+#   - robocopy, xcopy and cmd's copy never are (Copy-StandTree).
+# Not judged: Remove-Item without -Force (it deletes one name and fails on a read-only link; through a junction folder
+# it deletes the mod's own file: the scenarios that use it are named in the round-7 report).
+
+def ps_code(text: str) -> list[tuple[int, str]]:
+    """(first line number, code) per logical line: comments and <# #> blocks out, here-strings emptied, a line ending
+    in ` or | joined with the next. String literals stay as they are."""
+    physical: list[str] = []
+    state = None  # None | "block" | "'" / '"' (inside a here-string)
+    for line in text.splitlines():
+        code, i, n = [], 0, len(line)
+        if state in ("'", '"'):
+            if not line.startswith(state + "@"):
+                physical.append("")
+                continue
+            code.append(state * 2)
+            i, state = 2, None
+        while i < n:
+            if state == "block":
+                j = line.find("#>", i)
+                if j < 0:
+                    break
+                state, i = None, j + 2
+                continue
+            ch = line[i]
+            if line.startswith("<#", i):
+                state, i = "block", i + 2
+                continue
+            if ch == "#" and (i == 0 or line[i - 1] in " \t;({|"):
+                break
+            if ch == "@" and i + 1 < n and line[i + 1] in "'\"" and not line[i + 2:].strip():
+                state = line[i + 1]
+                code.append(state * 2)
+                break
+            if ch in "'\"":
+                j = string_end(line, i)
+                code.append(line[i:j])
+                i = j
+                continue
+            code.append(ch)
+            i += 1
+        physical.append("".join(code))
+    out: list[tuple[int, str]] = []
+    start, acc = None, ""
+    for number, code in enumerate(physical, 1):
+        start = number if start is None else start
+        acc += " " + code
+        if blank_strings(code).rstrip().endswith(("`", "|")):
+            acc = acc.rstrip().rstrip("`") + " "
+            continue
+        out.append((start, acc.strip()))
+        start, acc = None, ""
+    if start is not None:
+        out.append((start, acc.strip()))
+    return out
 
 
-@pytest.mark.parametrize("path", STAND_WRITERS, ids=lambda p: p.name)
-def test_stand_scripts_write_into_the_stand_only_through_the_helpers(path):
-    bad = []
-    for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-        code = line.split("#", 1)[0] if not line.lstrip().startswith("#") else ""
-        if IN_PLACE.search(code) and not TO_OUR_FOLDERS.search(code):
-            bad.append(f"{path.name}:{number}: {line.strip()}")
-    assert not bad, "\n".join(bad)
+def string_end(s: str, i: int) -> int:
+    """The index after the string literal that starts at s[i] ('...' with '' inside, "..." with `x and "")."""
+    q, j = s[i], i + 1
+    while j < len(s):
+        if q == '"' and s[j] == "`":
+            j += 2
+            continue
+        if s[j] == q:
+            if j + 1 < len(s) and s[j + 1] == q:
+                j += 2
+                continue
+            return j + 1
+        j += 1
+    return len(s)
+
+
+def blank_strings(s: str) -> str:
+    """s with every string literal's inside replaced by _ (same length: positions stay)."""
+    out, i = [], 0
+    while i < len(s):
+        if s[i] in "'\"":
+            j = string_end(s, i)
+            out.append(s[i] + "_" * max(0, j - i - 2) + (s[i] if j - i >= 2 else ""))
+            i = j
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
+def statements(code: str) -> list[str]:
+    """The statements of a logical line: split at ; { } outside strings and parentheses."""
+    out, depth, start, i = [], 0, 0, 0
+    while i < len(code):
+        ch = code[i]
+        if ch in "'\"":
+            i = string_end(code, i)
+            continue
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        elif ch in ";{}" and depth == 0:
+            out.append(code[start:i])
+            start = i + 1
+        i += 1
+    out.append(code[start:])
+    return [s.strip() for s in out if s.strip()]
+
+
+def var_key(name: str) -> str:
+    name = name.lower()
+    for scope in ("script:", "local:", "private:"):
+        if name.startswith(scope):
+            return name[len(scope):]
+    return name
+
+
+def take_expr(s: str, i: int) -> tuple[str, int]:
+    """The expression that starts at s[i] (spaces skipped): a $variable with its member / index tail, a (...) group, a
+    [type]::call(...), a quoted string or a bare word; and the index after it."""
+    while i < len(s) and s[i] in " \t":
+        i += 1
+    start = i
+    if i >= len(s):
+        return "", i
+    if s[i] in "'\"":
+        j = string_end(s, i)
+        return s[start:j], j
+    if s[i] in "$([":
+        depth = 0
+        while i < len(s):
+            ch = s[i]
+            if ch in "'\"":
+                i = string_end(s, i)
+                continue
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+                if depth == 0 and s[start] == "(" and ch == ")" and not s[i + 1:i + 2] in (".", "["):
+                    return s[start:i + 1], i + 1
+            elif depth == 0 and (ch in " \t,;|" or (ch == "-" and s[i - 1] in " \t")):
+                break
+            i += 1
+        return s[start:i], i
+    while i < len(s) and s[i] not in " \t,;)|":
+        i += 1
+    return s[start:i], i
+
+
+def split_args(inner: str) -> list[str]:
+    """The comma-separated arguments inside a call's parentheses (commas inside strings or groups do not count)."""
+    args, depth, start, i = [], 0, 0, 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch in "'\"":
+            i = string_end(inner, i)
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(inner[start:i].strip())
+            start = i + 1
+        i += 1
+    args.append(inner[start:].strip())
+    return [a for a in args if a]
+
+
+def unwrap(expr: str) -> str:
+    expr = expr.strip()
+    while expr.startswith("(") and expr.endswith(")"):
+        group, end = take_expr(expr, 0)
+        if end != len(expr):
+            return expr
+        expr = group[1:-1].strip()
+    return expr
+
+
+def split_plus(expr: str) -> list[str]:
+    """The terms of a top-level + concatenation (one term when there is none; [] when it is not one)."""
+    terms, i = [], 0
+    while True:
+        term, j = take_expr(expr, i)
+        if not term:
+            return []
+        terms.append(term)
+        rest = expr[j:].lstrip()
+        if not rest:
+            return terms
+        if not rest.startswith("+"):
+            return []
+        i = len(expr) - len(rest) + 1
+
+
+def name_part(term: str) -> "str | None":
+    """One term of a child name as a "/"-path: a quoted literal ($var / $(...) inside it read as one plain name), or a
+    variable ($x, $x.Name, $x.BaseName: one plain name); None otherwise."""
+    term = term.strip()
+    if len(term) >= 2 and term[0] in "'\"" and term[-1] == term[0]:
+        body = term[1:-1]
+        if term[0] == '"':
+            body = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)|\$\{[^}]*\}|\$[\w:]+(?:\.\w+)*", "x", body)
+        return body.replace("\\", "/")
+    if re.fullmatch(r"\$[\w:]+(?:\.(?:Name|BaseName))?", term):
+        return "x"
+    return None
+
+
+def literal_child(expr: str) -> "str | None":
+    """A Join-Path child: a name part or a (...) + concatenation of name parts."""
+    terms = split_plus(unwrap(expr))
+    parts = [name_part(t) for t in terms]
+    return None if not parts or any(p is None for p in parts) else "".join(parts)
+
+
+def repo_path(expr: "str | None", known: dict, root: str) -> "str | None":
+    """The "/"-path expr names when it is a repository path by the rule above, else None."""
+    if not expr:
+        return None
+    expr = unwrap(expr)
+    terms = split_plus(expr)
+    if len(terms) > 1:  # a path with a suffix ($outPath + '.err'): the suffix may not leave the file's folder
+        base, tail = repo_path(terms[0], known, root), [name_part(t) for t in terms[1:]]
+        return None if base is None or any(t is None or "/" in t for t in tail) else base + "".join(tail)
+    m = re.fullmatch(r"\(Resolve-Path\s+(?:-LiteralPath\s+|-Path\s+)?(.+)\)\.(?:Path|ProviderPath)", expr, re.S | re.I)
+    if m:
+        return repo_path(m.group(1), known, root)
+    m = re.fullmatch(r"\$([\w:]+)", expr)
+    if m:
+        return known.get(var_key(m.group(1)))
+    m = re.match(r"Join-Path\s+(?:-Path\s+)?", expr, re.I)
+    if not m:
+        return None
+    base_expr, i = take_expr(expr, m.end())
+    rest = re.sub(r"^-ChildPath\s+", "", expr[i:].strip(), flags=re.I)
+    child_expr, j = take_expr(rest, 0)
+    if rest[j:].strip():
+        return None  # more than one child, or a switch: not this rule's
+    base, child = repo_path(base_expr, known, root), literal_child(child_expr)
+    if base is None or child is None or re.match(r"^(?:[A-Za-z]:|/)", child):
+        return None
+    path = posixpath.normpath(posixpath.join(base, child))
+    return path if path == root or path.startswith(root + "/") else None
+
+
+ASSIGN = re.compile(r"\$([\w:]+)\s*([-+*/%]?)=(?!=)")
+
+
+def assignment_rhs(s: str, i: int) -> str:
+    """An assignment's right side: up to ; or an unmatched ) } ] at depth 0."""
+    depth, j = 0, i
+    while j < len(s):
+        ch = s[j]
+        if ch in "'\"":
+            j = string_end(s, j)
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch in ";," and depth == 0:
+            break
+        j += 1
+    return s[i:j].strip()
+
+
+STAND_COMMON_SOURCED = re.compile(r"^\s*\.\s+\(?\s*Join-Path\s+\$PSScriptRoot\s+'((?:\.\.\\)*stand_common\.ps1)'",
+                                  re.I | re.M)
+
+
+def repo_vars(lines: list[tuple[int, str]], script_dir: str, root: str, text: str) -> tuple[dict, set]:
+    """(repository variables: name -> "/"-path; the variables that hold a process's standard input)."""
+    assigned: dict[str, list[str]] = {}
+    for _, code in lines:
+        for m in ASSIGN.finditer(blank_strings(code)):  # never an "$x = " inside a string
+            assigned.setdefault(var_key(m.group(1)), []).append("" if m.group(2) else assignment_rhs(code, m.end()))
+    bases = {"psscriptroot": script_dir}
+    sourced = STAND_COMMON_SOURCED.search(text)  # the real stand_common.ps1, not a file of that name elsewhere
+    if sourced and posixpath.normpath(posixpath.join(script_dir, sourced.group(1).replace("\\", "/"))) == \
+            root + "/tools/stand_common.ps1":
+        bases.update(root=root, standdir=root + "/temp/stand", markdir=root + "/temp/gates",
+                     scenariodir=root + "/tools/stand")
+    known = {k: v for k, v in bases.items() if k not in assigned}
+    changed = True
+    while changed:
+        changed = False
+        for name, rhss in assigned.items():
+            if name not in known:
+                paths = [repo_path(r, known, root) for r in rhss]
+                if paths and all(p is not None for p in paths):
+                    known[name], changed = paths[0], True
+    stdin = {name for name, rhss in assigned.items() if rhss and all(re.search(r"\.StandardInput\b", r) for r in rhss)}
+    return known, stdin
+
+
+# robocopy / xcopy / cmd's copy, also when the command line is a string (cmd /c "copy ...", Start-Process robocopy.exe);
+# a statement that only prints or throws a text naming them is no copy
+COPY_TOOL = re.compile(r"\b(?:robocopy|xcopy)\b|\bcmd(?:\.exe)?\b.*[\s'\"]/[ck]\b.*\b(?:copy|move|ren|rename|del|erase|"
+                       r"type|echo|mklink)\b", re.I)
+OUTPUT_ONLY = re.compile(r"^(?:Write-(?:Host|Output|Warning|Verbose|Error|Information|Debug)|throw)\b", re.I)
+CMD = r"(?<![\w$@.:\\/-])"  # a command name starts here (not $copy, @copy, .Move, the tail of Copy-StandFile)
+WRITES = {
+    "copy-item": re.compile(CMD + r"(?:Copy-Item|copy|cp|cpi)(?![\w-])", re.I),
+    "content": re.compile(CMD + r"(?:Set-Content|sc|Add-Content|ac|Clear-Content|clc|Out-File|Tee-Object|tee|"
+                          r"Export-Csv|epcsv|Export-Clixml)(?![\w-])", re.I),
+    "move": re.compile(CMD + r"(?:(?:Remove-Item|rm|del|erase|ri|rd|rmdir)(?![\w-])[^|;]*\s-Force\b|"
+                       r"(?:Move-Item|move|mv|mi|Rename-Item|ren|rni)(?![\w-]))", re.I),
+    "file-method": re.compile(r"\[(?:System\.)?IO\.(?:File|FileInfo)\]::(WriteAll\w*|AppendAll\w*|AppendText|Create\w*|"
+                              r"Open\w*|Copy|Move|Replace|Encrypt|Decrypt|SetAttributes|Delete)\s*\(", re.I),
+    "stream": re.compile(r"\[(?:System\.)?IO\.(?:StreamWriter|FileStream|BinaryWriter)\]::new\s*\(|New-Object\s+"
+                         r"(?:-TypeName\s+)?(?:System\.)?IO\.(?:StreamWriter|FileStream|BinaryWriter)\b", re.I),
+    "member": re.compile(r"\.(Write|WriteLine|WriteAllText|CopyTo|MoveTo|Create|CreateText|AppendText|Delete|"
+                         r"Encrypt|Decrypt)\s*\(", re.I),
+    "out-param": re.compile(r"\s-(?:OutFile|RedirectStandardOutput|RedirectStandardError)\s*:?\s+", re.I),
+    "redirect": re.compile(r"(?<![-<>=])(?:\d|\*)?>>?(?![>&])"),
+}
+
+
+def param_value(stmt: str, names: str, start: int = 0) -> "str | None":
+    m = re.compile(rf"\s-(?:{names})\s*:?\s+", re.I).search(stmt, start)
+    return take_expr(stmt, m.end())[0] if m else None
+
+
+def call_args(stmt: str, at: int) -> list[str]:
+    """The arguments of the call whose ( is at stmt[at]."""
+    group, _ = take_expr(stmt, at)
+    return split_args(group[1:-1]) if group.startswith("(") and group.endswith(")") else []
+
+
+def write_problems(stmt: str, known: dict, stdin: set, root: str) -> list[str]:
+    """Why each write of a statement is not allowed ([]: it writes only into the repository or a process's stdin)."""
+    blank = blank_strings(stmt)
+    ok = lambda expr: repo_path(expr, known, root) is not None  # noqa: E731
+    out = []
+    if COPY_TOOL.search(stmt) and not OUTPUT_ONLY.match(stmt):
+        out.append("robocopy / xcopy / cmd copy write into existing files: use Copy-StandTree / Copy-StandFile")
+    for kind, rx in WRITES.items():
+        for m in rx.finditer(blank):
+            if kind == "copy-item" and not ok(param_value(stmt, "Destination", m.end())):
+                out.append("Copy-Item into a stand: Copy-StandFile (a copy OUT of the stand goes to a repository path)")
+            elif kind == "content":
+                if re.fullmatch(r"Tee-Object|tee", m.group(0), re.I) and re.search(r"\s-Variable\b", stmt[m.end():], re.I):
+                    continue  # into a variable
+                if not ok(param_value(stmt, "LiteralPath|Path|FilePath", m.end())):
+                    out.append("writes a file in place: Write-StandText / Write-StandLines")
+            elif kind == "move":
+                paths = [param_value(stmt, "LiteralPath|Path", m.end())]
+                if re.search(r"\s-Destination\b", stmt[m.end():], re.I):
+                    paths.append(param_value(stmt, "Destination", m.end()))
+                if not all(ok(p) for p in paths):
+                    out.append("deletes or moves a stand file: Remove-StandFile")
+            elif kind == "file-method":
+                args, method = call_args(stmt, m.end() - 1), m.group(1).lower()
+                targets = args[1:2] if method == "copy" else args[:2] if method in ("move", "replace") else args[:1]
+                if not targets or not all(ok(t) for t in targets):
+                    out.append(f"[IO.File]::{m.group(1)} into a stand: the helpers of stand_common.ps1")
+            elif kind == "stream":
+                if stmt[m.end() - 1] == "(":  # [IO.StreamWriter]::new(...)
+                    args = call_args(stmt, m.end() - 1)
+                else:  # New-Object IO.StreamWriter <arguments> / -ArgumentList <arguments>
+                    given = param_value(stmt, "ArgumentList|Args", m.end()) or take_expr(stmt, m.end())[0]
+                    args = split_args(unwrap(given)) if given.startswith("(") and "," in blank_strings(given) \
+                        else [given]
+                first = args[0] if args else ""
+                if not (re.search(r"\.StandardInput\b", first) or ok(first)):
+                    out.append("a stream written into a file: Write-StandBytes / Write-StandText")
+            elif kind == "member":
+                method = m.group(1).lower()
+                receiver = re.search(r"(\$[\w:]+(?:\.\w+)*)$", blank[:m.start()])
+                parts = receiver.group(1).split(".") if receiver else []
+                if method in ("write", "writeline") and parts and (
+                        var_key(parts[0][1:]) in stdin or "standardinput" in [p.lower() for p in parts[1:]]):
+                    continue
+                if method == "copyto":  # FileInfo.CopyTo(destination): a copy OUT of the stand is allowed
+                    args = call_args(stmt, m.end() - 1)
+                    if args and ok(args[0]):
+                        continue
+                out.append(f".{m.group(1)}() of something that is not a process's standard input or a repository file")
+            elif kind == "out-param" and not ok(take_expr(stmt, m.end())[0]):
+                out.append("a file written by -OutFile / -RedirectStandard*: point it into the repository")
+            elif kind == "redirect":
+                target = take_expr(stmt, m.end())[0]
+                if target.lower() != "$null" and not ok(target):
+                    out.append("a redirection into a file: Write-StandText")
+    return out
+
+
+def lint_ps(text: str, script_dir: str, root: str) -> list[tuple[int, str, str]]:
+    """(line, statement, why) for every write in a stand writer that the rule above does not allow."""
+    lines = ps_code(text)
+    known, stdin = repo_vars(lines, script_dir, root, text)
+    return [(number, stmt, why) for number, code in lines for stmt in statements(code)
+            for why in write_problems(stmt, known, stdin, root)]
+
+
+def stand_writer_problems(tools: Path) -> list[str]:
+    root = tools.parent.as_posix()
+    return [f"{p.relative_to(tools.parent).as_posix()}:{number}: {why}: {stmt[:160]}"
+            for p in stand_writers(tools)
+            for number, stmt, why in lint_ps(p.read_text(encoding="utf-8", errors="replace"), p.parent.as_posix(), root)]
+
+
+def test_stand_scripts_write_into_the_stand_only_through_the_helpers():
+    bad = stand_writer_problems(ROOT / "tools")
+    assert not bad, "a write into a stand that is not one of stand_common.ps1's helpers (docs/MODES.md section 5):\n" \
+        + "\n".join(bad)
+
+
+# The lint's own cases (round 7): each text is a scenario of tools\stand that dot-sources stand_common.ps1 (HEADER).
+HEADER = "param([string]$Stand = 'E:\\RayLinkGames\\GAMMA\\game-dev', [string]$Tag = 'b57')\n" \
+         ". (Join-Path $PSScriptRoot '..\\stand_common.ps1')\n"
+LINT_BAD = {
+    "by-name": "$fixture = Join-Path $Stand 'zz.txt'\n"
+               "Copy-Item -LiteralPath $a -Destination (Join-Path $fixture 'y') -Force\n",
+    "outdir-moved": "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n$OutDir = $Stand\n"
+                    "Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir 'x.log') -Force\n",
+    "outdir-escapes": "$OutDir = Join-Path $PSScriptRoot '..\\..\\..\\..\\elsewhere'\n"
+                      "Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir 'x.log') -Force\n",
+    "child-climbs": "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+                    "Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir '..\\..\\..\\x.log')\n",
+    "redirect": "'ours' > (Join-Path $Stand 'gamedata\\configs\\axr_options.ltx')\n",
+    "append": "$log = Join-Path $Stand 'appdata\\logs\\x.log'\n'ours' >> $log\n",
+    "tee": "Get-Content $a | Tee-Object -FilePath (Join-Path $Stand 'fsgame_h.ltx')\n",
+    "streamwriter": "$w = [System.IO.StreamWriter]::new((Join-Path $Stand 'user.ltx'))\n",
+    "new-object": "$w = New-Object System.IO.StreamWriter (Join-Path $Stand 'user.ltx')\n",
+    "create": "[System.IO.File]::Create((Join-Path $Stand 'd.txt')).Close()\n",
+    "createtext": "$w = [IO.File]::CreateText((Join-Path $Stand 'd.txt'))\n",
+    "appendtext": "$w = [IO.File]::AppendText((Join-Path $Stand 'd.txt'))\n",
+    "writeall": "[IO.File]::WriteAllText(\"$Stand\\x.ltx\", 'y')\n",
+    "cmd-copy": "cmd /c copy /y a.txt \"$Stand\\x.txt\"\n",
+    "xcopy": "xcopy $src $Stand /e /y\n",
+    "robocopy": "robocopy $src $Stand /E\n",
+    "copy-into": "Copy-Item -LiteralPath $a -Destination $Stand\n",
+    "split-line": "Copy-Item -LiteralPath $a `\n    -Destination (Join-Path $Stand 'x')\n",
+    "set-content": "Set-Content -Path (Join-Path $Stand 'x') -Value 1\n",
+    "remove-force": "Remove-Item -LiteralPath (Join-Path $Stand 'x') -Force\n",
+    "move": "Move-Item -LiteralPath $a -Destination (Join-Path $Stand 'x')\n",
+    "outfile": "Invoke-WebRequest -Uri $u -OutFile (Join-Path $Stand 'x')\n",
+    "copyto": "$f = Get-Item (Join-Path $Stand 'x')\n$f.CopyTo((Join-Path $Stand 'y'), $true)\n",
+    "after-block-comment": "<# a note #> Copy-Item -LiteralPath $a -Destination $Stand\n",
+    "redirect-stdout": "Start-Process x -RedirectStandardOutput (Join-Path $Stand 'o.txt')\n",
+}
+LINT_GOOD = {
+    "copy-out": "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+                "Copy-Item -LiteralPath (Join-Path $Stand 'appdata\\logs\\x.log') -Destination "
+                "(Join-Path $OutDir \"${Tag}_x_$($pair[1]).log\") -Force\n",
+    "copy-out-concat": "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+                       "Copy-Item -LiteralPath $l -Destination (Join-Path $OutDir (\"${Tag}_h_\" + $_.Name + '.log'))\n",
+    "copy-out-keep": "$keep = Join-Path $script:StandDir 'axr_options.before.ltx'\n"
+                     "if (-not (Test-Path -LiteralPath $keep)) { Copy-Item -LiteralPath $opt -Destination $keep }\n",
+    "stdin": "$in = [System.IO.StreamWriter]::new($p.StandardInput.BaseStream, $enc)\n"
+             "foreach ($l in @('a', 'b')) { $in.WriteLine($l); Start-Sleep 1 }\n$in.Close()\n",
+    "stdin-direct": "$server.StandardInput.WriteLine('quit')\n",
+    "null": "& git status 2>$null\n$x = foo 2>&1\nbar *>&1 | Out-Null\nbaz > $null\n",
+    "strings": "Write-Host \"a -> b > c\"\n$l = $l -replace '[0-9a-f]{32,}', '<hidden>'\n",
+    "comments": "# Copy-Item -Force into $Stand, robocopy\n<# robocopy $a $Stand\n Set-Content x #>\n",
+    "here-string": "$t = @'\nSet-Content -Path $Stand\nrobocopy a b\n'@\n",
+    "fixture": "$repo = (Resolve-Path (Join-Path $PSScriptRoot '..\\..')).Path\n"
+               "$fixture = Join-Path $repo \"tests\\fixtures\\saves\\$Save\"\n"
+               "[System.IO.File]::WriteAllLines((Join-Path $fixture 'README.md'), $lines, $enc)\n"
+               "foreach ($f in $files) { Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $fixture $f.Name) -Force }\n",
+    "param-default": "param([string]$OutDir = (Join-Path $PSScriptRoot '..\\..\\temp\\stand'), [string]$Out = 'o')\n"
+                     "$outPath = Join-Path $OutDir $Out\n$errPath = $outPath + '.err'\n"
+                     "Start-Process x -RedirectStandardOutput $outPath -RedirectStandardError $errPath\n",
+    "helpers": "Write-StandText -Path (Join-Path $Stand 'fsgame_h.ltx') -Text 'x' -Encoding $cp\n"
+               "Copy-StandFile -From $log -To (Join-Path $Stand 'y')\nRemove-StandFile -Path $probe\n"
+               "Copy-StandTree @copy\n$copy = @{ From = $a; To = $b }\n",
+    "split-line-out": "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+                      "Copy-Item -LiteralPath $log `\n    -Destination (Join-Path $OutDir 'x.log') -Force\n",
+    "two-writes": "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+                  "foreach ($p in $pairs) { Copy-Item -LiteralPath $p -Destination (Join-Path $OutDir 'a'); "
+                  "Copy-Item -LiteralPath $p -Destination (Join-Path $OutDir 'b') }\n",
+    "tee-variable": "$x = Get-Content $a | Tee-Object -Variable seen\n",
+    "string-text": "Write-Host \"$OutDir = $Stand; Copy-Item -Destination $Stand\"\n",
+}
+LINT_BAD["second-write"] = ("$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+                            "foreach ($p in $pairs) { Copy-Item -LiteralPath $p -Destination (Join-Path $OutDir 'a'); "
+                            "Copy-Item -LiteralPath $p -Destination (Join-Path $Stand 'b') }\n")
+LINT_BAD["string-assignment"] = ("$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n$OutDir = \"$Stand\"\n"
+                                 "Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir 'x')\n")
+LINT_BAD["alias"] = "copy $a (Join-Path $Stand 'x')\ndel (Join-Path $Stand 'y') -Force\nsc -Path $Stand -Value 1\n"
+LINT_BAD["cmd-quoted"] = "cmd /c \"copy /y a.txt $Stand\\x.txt\"\n"
+LINT_BAD["start-robocopy"] = "Start-Process -FilePath 'robocopy.exe' -ArgumentList \"$a $Stand /E\" -Wait\n"
+LINT_BAD["start-cmd"] = "Start-Process cmd -ArgumentList '/c copy a b' -Wait\n"
+LINT_GOOD["message"] = "Write-Host 'robocopy is not used here: Copy-StandTree'\nif ($x) { throw \"no xcopy\" }\n"
+
+
+@pytest.mark.parametrize("case", sorted(LINT_BAD))
+def test_powershell_write_lint_catches(case):
+    script_dir = (ROOT / "tools" / "stand").as_posix()
+    bad = lint_ps(HEADER + LINT_BAD[case], script_dir, ROOT.as_posix())
+    assert bad, f"the lint let this write into the stand pass:\n{LINT_BAD[case]}"
+
+
+@pytest.mark.parametrize("case", sorted(LINT_GOOD))
+def test_powershell_write_lint_allows_the_repository_and_stdin(case):
+    script_dir = (ROOT / "tools" / "stand").as_posix()
+    assert lint_ps(HEADER + LINT_GOOD[case], script_dir, ROOT.as_posix()) == []
+
+
+def test_powershell_write_lint_needs_stand_common_for_its_folders():
+    # without the dot-sourced stand_common.ps1, $script:Root / $script:StandDir name nothing known
+    text = "param([string]$Root)\nCopy-Item -LiteralPath $a -Destination (Join-Path $Root 'temp\\x')\n" \
+           "Copy-Item -LiteralPath $a -Destination (Join-Path $script:StandDir 'x')\n"
+    assert len(lint_ps(text, (ROOT / "tools").as_posix(), ROOT.as_posix())) == 2
+    # a stand_common.ps1 that is not tools\stand_common.ps1 (a file of that name next to a scenario) names nothing
+    other = ". (Join-Path $PSScriptRoot 'stand_common.ps1')\n" \
+            "Copy-Item -LiteralPath $a -Destination (Join-Path $script:StandDir 'x')\n"
+    assert len(lint_ps(other, (ROOT / "tools" / "stand").as_posix(), ROOT.as_posix())) == 1
+    assert lint_ps(other, (ROOT / "tools").as_posix(), ROOT.as_posix()) == []
+
+
+def test_a_new_stand_script_is_linted_without_being_listed(tmp_path):
+    # a scenario nobody added to any list: found and checked when the test runs (not when pytest collected)
+    tools = tmp_path / "tools"
+    (tools / "stand").mkdir(parents=True)
+    (tools / "stand" / "zz_new_scenario.ps1").write_text(HEADER + LINT_BAD["redirect"], encoding="utf-8")
+    (tools / "new_tool.ps1").write_text("param([string]$Game)\nSet-Content -Path (Join-Path $Game 'x') -Value 1\n",
+                                        encoding="utf-8")
+    (tools / "sub").mkdir()
+    (tools / "sub" / "helper.psm1").write_text("function f { robocopy a b }\n", encoding="utf-8")
+    found = {p.relative_to(tmp_path).as_posix() for p in stand_writers(tools)}
+    assert found == {"tools/stand/zz_new_scenario.ps1", "tools/new_tool.ps1", "tools/sub/helper.psm1"}
+    bad = stand_writer_problems(tools)
+    assert {line.split(":", 1)[0] for line in bad} == found, bad
 
 
 # The Python tools of tools/ that can write into a game root (they take --stand / --game / an output root, name the
@@ -1889,16 +2506,18 @@ PY_WRITES_ALLOWED = [
     ("stand_head.py", r"^\(backup / name\)\.write_text\(", "a list of the backup folder (the run history)"),
     ("stand_head.py", r"^keep\.write_bytes\(data\)$", "keep_copy: the backup folder"),
 ]
-PY_STAND_WRITERS = sorted(p for p in (ROOT / "tools").rglob("*.py") if "__pycache__" not in p.parts
-                          and (p.name == "mo2_stand.py" or GAME_ROOT_PY.search(p.read_text(encoding="utf-8",
-                                                                                            errors="replace"))))
+def py_stand_writers(tools: Path) -> list[Path]:
+    """Found when the test runs (round 7), as the PowerShell ones are."""
+    return sorted(p for p in tools.rglob("*.py") if "__pycache__" not in p.parts
+                  and (p.name == "mo2_stand.py" or GAME_ROOT_PY.search(p.read_text(encoding="utf-8", errors="replace"))))
 
 
 def test_python_stand_tools_never_write_in_place():
-    names = {p.name for p in PY_STAND_WRITERS}
+    writers = py_stand_writers(ROOT / "tools")
+    names = {p.name for p in writers}
     assert {"stand_head.py", "stand_overlay.py", "mo2_stand.py", "check_gates.py"} <= names, names
     bad, used = [], set()
-    for path in PY_STAND_WRITERS:
+    for path in writers:
         for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             code = line.strip()
             if code.startswith("#") or not IN_PLACE_PY.search(code):

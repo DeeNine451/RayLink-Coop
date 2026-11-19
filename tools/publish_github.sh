@@ -1,92 +1,81 @@
 #!/usr/bin/env bash
 # RayLink on GitHub (owner's layout 2026-10-24): three repositories and their releases. Needs `gh auth login` first.
-#   OWNER=stormie-labs bash tools/publish_github.sh        (VISIBILITY=private; BUILD=<N>; SKIP_LAUNCHER=1 for engine/coop only)
+#   BUILD=<N> bash tools/publish_github.sh        (OWNER=stormie-labs, the only owner; VISIBILITY=private for a new
+#                                                   launcher repository; SKIP_LAUNCHER=1 for engine/coop only)
+# The Stable publish (round 7 of the layer guard, review 6): it goes through tools/release.py and nothing else.
+#   1. python -I tools/release.py --channel stable --build <N> verify: the gate (check_gates.py --release --layers:
+#      both stand marks and tests.ok of both HEADs, the exe built from engine HEAD, clean trees, the package against
+#      HEAD's blobs, the notes; Stable only on a project commit that went out as dev-<N> first). Refused: exit 2 and
+#      not one command talks to the network. It talks to no network itself.
+#   2. RayLink-Engine's public main must be a commit made here (the branch `publish` of engine\, a local engine tag, or
+#      an ancestor of engine HEAD): the build's snapshot goes on top of it and would undo commits made elsewhere.
+#   3. release.py draft, then release.py publish: the tag b<N> and main of both public repositories, the drafts with
+#      the verified assets (their SHA-256 checked on GitHub), then "latest". This script creates no release itself.
+#   4. the launcher (unless SKIP_LAUNCHER=1): its source to the PRIVATE RayLink-Launcher-Source, installers by hand.
 # RayLink-Engine    main = one commit per build with the tree of engine\ (branch coop): the history of xray-monolith (74
 #                   authors) stays local and upstream, not on GitHub (owner 2026-10-26); release b<N> = the engine exe
 # RayLink-Coop      main = this project (gamedata, tools, tests, docs); release b<N> = releases\anomaly-coop-0.<N>.0.zip
 #                   (tools\package.ps1: the build the launcher installs)
 # RayLink-Launcher = public product page and installers only; application source goes to private RayLink-Launcher-Source.
+# tests/tools/test_release.py runs this file with fake python, gh and git (VERIFY_FIRST, test_publish_github_*).
 set -euo pipefail
 export GH_HOST=github.com
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LAUNCHER="$(cd "$ROOT/../raylink-launcher" && pwd)"
+ORG=stormie-labs  # tools/release.py ORG: the only owner the gated release publishes to
+BUILD="${BUILD:-}"
+OWNER="${OWNER:-$ORG}"
 VIS="${VISIBILITY:-public}"
-BUILD="${BUILD:-16}"
-ZIP="$ROOT/releases/anomaly-coop-0.${BUILD}.0.zip"
-ENGINE_EXE="$ROOT/engine-ci/_build/_game/bin_dbg/AnomalyDX11AVX.exe"
-PROTOCOL="$(sed -n 's/^[[:space:]]*constexpr uint32_t kProtocolVersion[[:space:]]*=[[:space:]]*\([0-9][0-9]*\);.*/\1/p' "$ROOT/engine/src/xrCoop/coop_protocol.h")"
-[[ "$PROTOCOL" =~ ^[0-9]+$ ]] || { echo "cannot read the engine protocol version"; exit 2; }
-[ -f "$ZIP" ] || { echo "no $ZIP (powershell -File tools/package.ps1 -Version 0.${BUILD}.0 -Force)"; exit 2; }
-gh auth status >/dev/null 2>&1 || { echo "gh is not logged in: run gh auth login"; exit 3; }
-gh auth setup-git
-OWNER="${OWNER:-$(gh api user -q .login)}"
-
-if [ "${SKIP_LAUNCHER:-0}" != "1" ]; then
-  SOURCE_REPO="$OWNER/RayLink-Launcher-Source"
-  gh repo view "$SOURCE_REPO" >/dev/null 2>&1 || gh repo create "$SOURCE_REPO" --private --description 'Private source for RayLink Launcher'
-  [ "$(gh repo view "github.com/$SOURCE_REPO" --json visibility --jq .visibility)" = PRIVATE ] || {
-    echo '! Launcher source destination must be PRIVATE. No source will be pushed.' >&2; exit 4;
-  }
-fi
-echo "owner: $OWNER, visibility: $VIS, build $BUILD"
-
-repo_exists() { gh repo view "$1" >/dev/null 2>&1; }
-ensure_repo() { repo_exists "$OWNER/$1" || gh repo create "$OWNER/$1" "--$VIS" --description "$2"; }
-
-ensure_repo RayLink-Engine "RayLink Engine - co-op engine for S.T.A.L.K.E.R. Anomaly 1.5.3 (fork of themrdemonized/xray-monolith with a network layer)"
-# This build's tree as one commit on top of what main has now (a plain push, never a force). The local branch `publish`
-# names it.
-publish_engine() {
-	local url="https://github.com/$OWNER/RayLink-Engine.git" prev tree snap uid
-	prev="$(git ls-remote "$url" refs/heads/main | cut -f1)"
-	tree="$(git -C "$ROOT/engine" rev-parse 'HEAD^{tree}')"
-	if [ -n "$prev" ]; then
-		git -C "$ROOT/engine" fetch -q "$url" main
-		# The snapshot is this machine's tree: commits made on GitHub (or in another clone) would be undone by it. Main must be
-		# the last snapshot made here (branch `publish`) or our own history (before the one-time rewrite).
-		local last
-		last="$(git -C "$ROOT/engine" rev-parse -q --verify publish || true)"
-		if [ "$prev" != "$last" ] && ! git -C "$ROOT/engine" merge-base --is-ancestor "$prev" HEAD; then
-			echo "! RayLink-Engine main ($prev) has commits made outside this script: bring them into engine\\ (branch coop)"
-			echo "  first, then publish again. Nothing was published."
-			exit 4
-		fi
-		if [ "$(git -C "$ROOT/engine" rev-parse "$prev^{tree}")" = "$tree" ]; then
-			echo "engine: main already has this tree"
-			return
-		fi
-	fi
-	uid="$(gh api user -q .id)"
-	local mail="$uid+$OWNER@users.noreply.github.com"
-	snap="$(GIT_AUTHOR_NAME="$OWNER" GIT_AUTHOR_EMAIL="$mail" GIT_COMMITTER_NAME="$OWNER" GIT_COMMITTER_EMAIL="$mail" \
-		git -C "$ROOT/engine" commit-tree "$tree" ${prev:+-p "$prev"} -m "RayLink Engine, build $BUILD")"
-	git -C "$ROOT/engine" branch -f publish "$snap"
-	git -C "$ROOT/engine" push "$url" "$snap:refs/heads/main"
+refuse() {
+	echo "! publish_github.sh: $1" >&2
+	echo "  Nothing was published." >&2
+	exit "${2:-2}"
 }
-publish_engine
-ensure_repo RayLink-Coop "RayLink - co-op layer for S.T.A.L.K.E.R. Anomaly and G.A.M.M.A (scripts, configs, UI, mod compatibility)"
-git -C "$ROOT" push "https://github.com/$OWNER/RayLink-Coop.git" HEAD:refs/heads/main
+[[ "$BUILD" =~ ^[0-9]{1,3}$ ]] || refuse "BUILD must be a whole Stable build number (BUILD=57); a Dev build goes out with release.py --channel dev"
+[ "$OWNER" = "$ORG" ] || refuse "tools/release.py publishes to $ORG only: leave OWNER unset or set it to $ORG"
+[ "$VIS" = public ] || [ "$VIS" = private ] || refuse "VISIBILITY is public or private"
 
-ENGINE_SHA="$(git ls-remote "https://github.com/$OWNER/RayLink-Engine.git" refs/heads/main | cut -c1-8)"
-PROJECT_SHA="$(git -C "$ROOT" rev-parse --short HEAD)"
-if ! gh release view "b$BUILD" --repo "$OWNER/RayLink-Coop" >/dev/null 2>&1; then
-	gh release create "b$BUILD" "$ZIP" --repo "$OWNER/RayLink-Coop" --target main --title "Сборка $BUILD" --notes \
-"Сборка $BUILD RayLink: движок $OWNER/RayLink-Engine $ENGINE_SHA + надстройка $PROJECT_SHA, протокол $PROTOCOL.
-Ставится лаунчером RayLink (кнопка «Обновить сборку») или вручную как мод MO2 (архив с FOMOD). Что проверено — docs/STATUS.md."
+# 1. the gate: nothing below runs unless release.py verify passed
+if ! python -I "$ROOT/tools/release.py" --channel stable --build "$BUILD" verify; then
+	refuse "release.py verify refused Stable b$BUILD (above). The steps before it:
+  python -I tools/release.py --channel stable --build $BUILD prepare   (temp/b$BUILD/: write notes-coop.md, notes-engine.md)
+  powershell -ExecutionPolicy Bypass -File tools/package.ps1 -Version 0.$BUILD.0 -Force
+  python -I tools/release.py --channel stable --build $BUILD verify"
 fi
-if [ -f "$ENGINE_EXE" ] && ! gh release view "b$BUILD" --repo "$OWNER/RayLink-Engine" >/dev/null 2>&1; then
-	STAGE="$ROOT/temp/engine_rel"
-	mkdir -p "$STAGE" && cp "$ENGINE_EXE" "$STAGE/AnomalyCoopDX11AVX.exe"
-	gh release create "b$BUILD" "$STAGE/AnomalyCoopDX11AVX.exe" --repo "$OWNER/RayLink-Engine" --target main \
-		--title "RayLink Engine, сборка $BUILD" --notes \
-"Движок RayLink для S.T.A.L.K.E.R. Anomaly 1.5.3 (DX11 AVX), коммит $ENGINE_SHA, протокол $PROTOCOL.
-Для игры нужна надстройка $OWNER/RayLink-Coop — её сборка уже содержит этот exe."
-fi
+gh auth status >/dev/null 2>&1 || refuse "gh is not logged in: run gh auth login" 3
+gh auth setup-git
+echo "owner: $OWNER, Stable b$BUILD (verified)"
 
 if [ "${SKIP_LAUNCHER:-0}" != "1" ]; then
-ensure_repo RayLink-Launcher "RayLink Launcher - downloads, updates and support (proprietary application)"
-(cd "$LAUNCHER" && npm run build && powershell.exe -NoProfile -File scripts/build-release.ps1)
-git -C "$LAUNCHER" push "https://github.com/$OWNER/RayLink-Launcher-Source.git" HEAD:refs/heads/main
-echo "launcher release: upload only releases/v<VERSION>/RayLinkSetup.exe to $OWNER/RayLink-Launcher"
+	SOURCE_REPO="$OWNER/RayLink-Launcher-Source"
+	gh repo view "$SOURCE_REPO" >/dev/null 2>&1 || gh repo create "$SOURCE_REPO" --private --description 'Private source for RayLink Launcher'
+	[ "$(gh repo view "github.com/$SOURCE_REPO" --json visibility --jq .visibility)" = PRIVATE ] ||
+		refuse "the launcher source destination $SOURCE_REPO must be PRIVATE: no source will be pushed" 4
 fi
-echo "done: https://github.com/$OWNER/RayLink-Coop/releases  https://github.com/$OWNER/RayLink-Engine/releases"
+
+# 2. the public engine main is a commit made here
+ENGINE_URL="https://github.com/$ORG/RayLink-Engine.git"
+PREV="$(git ls-remote "$ENGINE_URL" refs/heads/main | cut -f1)"
+if [ -n "$PREV" ]; then
+	git -C "$ROOT/engine" fetch -q "$ENGINE_URL" main
+	MADE_HERE=0
+	[ "$PREV" = "$(git -C "$ROOT/engine" rev-parse -q --verify publish || true)" ] && MADE_HERE=1
+	[ -n "$(git -C "$ROOT/engine" tag --points-at "$PREV" 2>/dev/null || true)" ] && MADE_HERE=1
+	git -C "$ROOT/engine" merge-base --is-ancestor "$PREV" HEAD && MADE_HERE=1
+	[ "$MADE_HERE" = 1 ] || refuse "RayLink-Engine main ($PREV) has commits made outside this machine's releases: bring
+  them into engine\\ (branch coop) first, then publish again" 4
+fi
+
+# 3. the release: release.py's draft and publish (they refuse unless verified.json is this tag's and nothing moved)
+python -I "$ROOT/tools/release.py" --channel stable --build "$BUILD" draft
+python -I "$ROOT/tools/release.py" --channel stable --build "$BUILD" publish
+
+# 4. the launcher
+if [ "${SKIP_LAUNCHER:-0}" != "1" ]; then
+	LAUNCHER="$(cd "$ROOT/../raylink-launcher" && pwd)"
+	gh repo view "$OWNER/RayLink-Launcher" >/dev/null 2>&1 ||
+		gh repo create "$OWNER/RayLink-Launcher" "--$VIS" --description "RayLink Launcher - downloads, updates and support (proprietary application)"
+	(cd "$LAUNCHER" && npm run build && powershell.exe -NoProfile -File scripts/build-release.ps1)
+	git -C "$LAUNCHER" push "https://github.com/$SOURCE_REPO.git" HEAD:refs/heads/main
+	echo "launcher release: upload only releases/v<VERSION>/RayLinkSetup.exe to $OWNER/RayLink-Launcher"
+fi
+echo "done: https://github.com/$ORG/RayLink-Coop/releases  https://github.com/$ORG/RayLink-Engine/releases"

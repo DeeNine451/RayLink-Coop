@@ -73,11 +73,12 @@ function Get-StandFullPath([string]$Path) {
 }
 
 function Remove-StandFile {
-    # deletes one name of a stand file; another hard link keeps its data and its read-only attribute
+    # deletes one name of a stand file; another hard link keeps its data and its read-only attribute. Refused (even
+    # for a missing file) when any folder on the way is a junction: the name inside it is the mod's own file
     param([Parameter(Mandatory = $true)][string]$Path)
     $full = Get-StandFullPath $Path
+    Assert-NoJunction -Dir ([System.IO.Path]::GetDirectoryName($full))
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return }
-    Assert-NoJunction -Dir ([System.IO.Path]::GetDirectoryName($full))  # the name inside a junction is the mod's own
     Initialize-StandFiles
     try { [RayLinkStand.Files]::Delete($full) }
     catch [System.ComponentModel.Win32Exception] {
@@ -92,16 +93,29 @@ function Remove-StandFile {
 
 function Assert-NoJunction {
     # review 5 (S14): a stand folder that is a junction or symlink into a mod's folder; a write through it would delete
-    # the mod's own file and put ours into the mod's folder
+    # the mod's own file and put ours into the mod's folder. Review 6 (B1, round 7): not only $Dir itself but every
+    # folder on the way, from the volume root down to $Dir: the game root, the folders above it and every folder below
+    # it (the stand's gamedata as a junction into a mod's gamedata took Write-StandText on gamedata\configs\
+    # axr_options.ltx into the mod). The helpers do not know the game root, so the whole path is checked
+    # (tools\mo2_stand.py link_on_path walks the same way). The walk ends at the first name that does not exist:
+    # nothing below it can be a link yet.
     param([Parameter(Mandatory = $true)][string]$Dir)
-    if ((Test-Path -LiteralPath $Dir) -and ((Get-Item -LiteralPath $Dir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-        throw "refusing to write through a junction or symlink folder: $Dir (the launcher builds real folders)"
+    $chain = [System.Collections.Generic.List[string]]::new()
+    $cur = Get-StandFullPath $Dir
+    while ($cur) { $chain.Insert(0, $cur); $cur = [System.IO.Path]::GetDirectoryName($cur) }
+    foreach ($folder in $chain) {
+        try { $attr = [System.IO.File]::GetAttributes($folder) }  # the link's own attributes, never its target's
+        catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return }
+        if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "refusing to write through a junction or symlink folder: $folder (on the way to $Dir; the launcher builds real folders)"
+        }
     }
 }
 
 function Set-StandFile {
     # $Write fills a fresh file next to $Path (its argument: that file's path); then the old name goes and the fresh
-    # file takes it. The stand's file is never opened for writing, and never through a junction folder.
+    # file takes it. The stand's file is never opened for writing, and never through a junction folder anywhere on
+    # its path (Assert-NoJunction walks from the volume root down; review 6, B1).
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Write)
     $full = Get-StandFullPath $Path
     $dir = [System.IO.Path]::GetDirectoryName($full)
@@ -152,6 +166,7 @@ function Copy-StandTree {
     # -Mirror (robocopy /MIR): files under $To that $From does not have go too (Remove-StandFile; excluded names stay).
     param([Parameter(Mandatory = $true)][string]$From, [Parameter(Mandatory = $true)][string]$To,
         [string[]]$ExcludeFiles = @(), [string[]]$ExcludeDirs = @(), [switch]$Mirror)
+    Assert-NoJunction -Dir $To  # every folder down to $To, before the mirror deletes anything (review 6, B1)
     if ($Mirror -and (Test-Path -LiteralPath $To -PathType Container)) {
         $srcRoot = (Get-StandFullPath $From).TrimEnd('\')
         $dstTop = (Get-StandFullPath $To).TrimEnd('\')

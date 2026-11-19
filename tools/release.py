@@ -25,7 +25,9 @@ verify   gates from the last release tag of the channel (the newest local b* or 
          then both working trees clean (no tracked change; no untracked product file), the exe's label, the package
          (entries, layers byte for byte with the working files AND with HEAD's blobs: only committed files ship;
          release.txt, fomod version), the public diff free of secret-like text, the notes free of the lines the owner
-         forbade. Writes temp/<tag>/verified.json with the notes' SHA-256. Talks to no network.
+         forbade. Writes temp/<tag>/verified.json with the notes' SHA-256. Talks to no network. The exe is copied into
+         temp/<tag>/ first: the gate, the label, the hash, the package comparison and draft's upload all use that one
+         copy, and verify refuses when it changed while verify ran (review 6, residual a).
 draft    (GitHub) refuses unless verified.json is of this tag and channel, both HEADs are the verified ones, the notes
          are the verified ones, the --since tag is the last published release of the channel on GitHub (an override:
          an ancestor of it) (stable: and dev-<N> is published on the same project commit); then pushes the tag (and
@@ -364,7 +366,17 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
            archive: Optional[pathlib.Path] = None, since_override: bool = False) -> dict:
     work = root / n.work
     since, last = choose_since(n, run, root, since, since_override)
-    for line in gate_checks(run, root, since, exe):
+    # review 6, residual (a): one copy of the exe in temp/<tag>/ is what the gate judges, what the label, the hash and
+    # the package are checked against, and what draft uploads; it may not change while verify runs
+    asset = work / EXE_NAME  # the engine release's one asset, under the name players install
+    judged = exe
+    if exe.is_file():
+        work.mkdir(parents=True, exist_ok=True)
+        if asset.resolve() != exe.resolve():
+            shutil.copy2(exe, asset)
+        judged = asset
+    before = sha256(judged.read_bytes()) if judged.is_file() else None
+    for line in gate_checks(run, root, since, judged):
         print("verify:", line)
     engine = root / "engine"
     for repo in (root, engine):
@@ -382,10 +394,14 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
         tags = must(run, ["git", "tag", "--list", "--points-at", project], root).split()
         if not dev_tags_of(n, tags):
             raise Refused(f"Stable {n.tag} ships only what went out to Dev first: no dev-{n.build} tag on {project[:8]}")
-    data = exe.read_bytes()
+    if not judged.is_file():
+        raise Refused(f"no exe {exe}")
+    data = judged.read_bytes()
+    exe_hash = sha256(data)
+    if exe_hash != before:
+        raise Refused(f"the exe {judged} changed while verify ran (the gate judged other bytes): run verify again")
     if not any(label.encode() + b"\0" in data or label.encode() in data for label in n.exe_labels):
         raise Refused(f"the exe carries none of the labels {n.exe_labels}")
-    exe_hash = sha256(data)
     archive = archive or root / "releases" / n.asset
     if not archive.is_file():
         raise Refused(f"no package {archive} (tools/package.ps1 makes it)")
@@ -402,9 +418,8 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
         if problems:
             raise Refused(f"{n.work}/{notes}: " + "; ".join(problems))
     work.mkdir(parents=True, exist_ok=True)
-    asset = work / EXE_NAME  # the engine release's one asset, under the name players install
-    if asset.resolve() != exe.resolve():
-        shutil.copy2(exe, asset)
+    if sha256(asset.read_bytes()) != exe_hash:
+        raise Refused(f"the exe {asset} changed while verify ran: run verify again")
     result = dict(asdict(n), project=project, engine=engine_sha, archive=str(archive), zip_sha256=sha256(archive.read_bytes()),
                   exe=str(asset), exe_source=str(exe), exe_built_from=engine_sha, exe_sha256=exe_hash, since=since,
                   since_override=since != last,

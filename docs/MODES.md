@@ -382,11 +382,30 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
   (пробы `coop_zz_*` в `gamedata\scripts`, `axr_options.ltx` и его возврат из копии, `fsgame_*.ltx`, `user.ltx`,
   `appdata_*`, `bin_b`), в `tools\deploy.ps1`, `tools\launch.ps1` и `tools\stand_server.ps1` (`fsgame_server.ltx`,
   `appdata_server`; пятое ревью, B1). Тест `test_stand_scripts_write_into_the_stand_only_through_the_helpers`
-  не пускает `Copy-Item -Force`, `[IO.File]::WriteAll*`, `Set-Content`, `Out-File`, robocopy и `Remove-Item -Force`
-  (кроме копий в `temp\stand` репозитория) в **каждый** `tools\**\*.ps1`, который принимает или называет корень игры
-  (`$Stand`, `$GameDir`, `$TestRoot`, `$GameRoot`, `RayLinkGames`, `game-dev`): сегодня 18 файлов, в том числе
-  `ded_check.ps1`, `ded_probe.ps1`, `split_test.ps1`. `.ps1` без этих имён должен стоять в списке теста
-  `NOT_A_GAME_ROOT_WRITER` с причиной (`package.ps1`, `stand_common.ps1`): новый скрипт не проскочит без классификации.
+  (седьмой круг) проверяет **каждый** `tools\**\*.ps1` и `*.psm1`, найденный в момент прогона теста, а не при сборе
+  pytest: новый сценарий (`phantoms_server.ps1`, `companions_group.ps1`) проверяется, никто его никуда не вписывает.
+  Сегодня 20 файлов. Вне проверки только `NOT_A_GAME_ROOT_WRITER` с причиной (`package.ps1`: пишет только в
+  репозиторий; `stand_common.ps1`: сами помощники, их проверяют тесты поведения); туда нельзя файл из `tools\stand` и
+  файл, который принимает или называет корень игры (`$Stand`, `$Game`, `$GameDir`, `$TestRoot`, `$GameRoot`,
+  `RayLinkGames`, `game-dev`). Правило записи: в стенд пишут только помощники. Любая другая запись — `Copy-Item`,
+  `Set-/Add-/Clear-Content`, `Out-File`, `Tee-Object`, `Export-*`, `Remove-Item -Force`, `Move-/Rename-Item` (и их
+  псевдонимы `copy`, `cp`, `sc`, `del`, `move`…), `[IO.File]::WriteAll*/AppendAll*/AppendText/Create*/Open*/Copy/Move/
+  Replace`, `StreamWriter`/`FileStream`, `.Write()`, `.CopyTo()`, `-OutFile`, `-RedirectStandardOutput/-Error`, `>` и
+  `>>`; robocopy, xcopy и `cmd /c copy` — никогда — допустима, только если то, что она пишет, удаляет или переносит,
+  лежит в репозитории. **Копия ИЗ стенда в репозиторий разрешена:** источник копии может быть файлом стенда (копия его
+  только читает), назначение — путь репозитория. «Путь репозитория» — переменная, у которой **каждое** присваивание в
+  файле (у параметра — значение по умолчанию) — `Join-Path` от `$PSScriptRoot`, от папок репозитория из
+  `stand_common.ps1` (`$script:Root`, `$script:StandDir`, `$script:MarkDir`, `$script:ScenarioDir` — только в файле,
+  который подключает настоящий `tools\stand_common.ps1` и сам их не присваивает) или от другой такой переменной и не
+  выходит за корень репозитория; либо `Join-Path` от неё (переменные в имени — одно имя: проверка судит код, а не то,
+  что передаст вызывающий); либо такой путь с суффиксом (`$outPath + '.err'`). Запись в стандартный ввод процесса
+  (`StreamWriter` на `.StandardInput`, `$in.WriteLine`) разрешена. Комментарии, `<# #>`, строки и here-строки не
+  считаются командами; строка с `` ` `` или `|` в конце склеивается со следующей; несколько команд в строке проверяются
+  все. Правило проверяют 31 случай «поймать» и 17 «пропустить» (`LINT_BAD`, `LINT_GOOD`): старая проверка шестого
+  круга пропускала 18 из 25 (имя `$fixture`, назначенное от стенда, `>`, `Tee-Object`, `StreamWriter`, `CreateText`,
+  `cmd /c copy`, xcopy…). Не судится: `Remove-Item` без `-Force` (удаляет одно имя, на ссылке «только для чтения»
+  падает; через junction выше удалил бы файл мода — такие строки есть в сценариях других исполнителей, их список — в
+  отчёте седьмого круга).
   Python-инструменты, которые пишут в корень игры (`--stand`, `--game`, `game-dev`, `import mo2_stand`: `stand_head.py`,
   `stand_overlay.py`, `mo2_stand.py`, `check_gates.py`), проверяет `test_python_stand_tools_never_write_in_place`:
   `write_bytes`/`write_text`, `open(…, "w"/"a"/"+")`, `shutil.copy*`, `os.chmod` допустимы только в строках списка
@@ -395,7 +414,15 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
 - **Связи папок (пятое ревью, S14).** Папка стенда, которая — junction или symlink в папку мода: запись через неё удалила
   бы файл мода и положила наш в папку мода. `stand_head.py deploy` до первой записи отказывает, `check` падает, `links`
   считает её в `blocked=`; `stand_overlay.py` отказывает до записи; `Set-StandFile`, `Remove-StandFile` и `Copy-StandTree`
-  бросают ошибку. Лаунчер таких папок не делает (на 2026-11-19 на стенде их 0).
+  бросают ошибку. Лаунчер таких папок не делает (на 2026-11-19 на стенде их 0). **Седьмой круг (шестое ревью, B1):**
+  помощники проверяли только папку самой цели, а `gamedata` стенда — junction в `gamedata` мода — пропускал запись
+  `axr_options.ltx` в мод и удаление его `coop_zz_base.script`. Теперь `Assert-NoJunction` (PowerShell) и
+  `mo2_stand.link_on_path` (Python: `replace_file`, `remove_file`, `remember_on_stand`, `materialize` для `--out`)
+  проверяют **каждую** папку пути от корня тома до папки цели: корень игры, папки выше него и все ниже. Корня игры
+  помощники не знают, поэтому проверяется весь путь (на 2026-11-19 `E:\`, `E:\RayLinkGames`, `GAMMA`, `game-dev`,
+  `D:\Projects\…\anomaly-coop\temp` и `%TEMP%` — настоящие папки). `Remove-StandFile` отказывает и для отсутствующего
+  файла под junction; `Copy-StandTree` проверяет `-To` до того, как `-Mirror` что-то удалит. Цена: `Copy-StandTree` 500
+  файлов — 2,6 с вместо 1,9 с (замер 2026-11-19).
 - **Проверка до записи.** `stand_head.py deploy` до первой записи проверяет, что каждое имя, которое он удалит, удалить
   можно (открытие с `DELETE`: имя держит запущенная со стенда игра — отказ, ничего не записано), и печатает
   `replaced_links=` — сколько заменённых файлов были ссылками. `stand_head.py links --stand <стенд>` — тот же план без
@@ -454,6 +481,24 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
   Не закрыто: перекрытие копии мода (`copy=true`) **неотслеживаемым** файлом оверлея, если удалили и память стенда, —
   таких байтов нет ни в одном блобе.
 
+Шестое ревью (B1 и остатки, седьмой круг, 2026-11-19):
+
+- **Junction выше папки цели (B1).** Помощники PowerShell и Python проверяют весь путь от корня тома (выше,
+  «Связи папок»); тест `test_powershell_stand_helpers_refuse_a_junction_anywhere_above_the_target` — 12 записей через
+  `gamedata`-junction и через стенд, который сам junction: все отказаны, файлы и атрибуты модов те же;
+  `test_replace_and_remove_refuse_a_junction_anywhere_above_the_target` — то же для `mo2_stand.py`.
+- **Stable без ворот.** `tools/publish_github.sh` сначала гонит `python -I tools/release.py --channel stable --build <N>
+  verify` и при отказе выходит с кодом 2, не выполнив ни одной сетевой команды; сам выпуск — `release.py draft` и
+  `publish` (своего `gh release create` и пуша `main` у скрипта больше нет). Подробно — раздел 10.
+- **Проверка записи в стенд** находит файлы сама в момент прогона и судит по правилу «только помощники, копия ИЗ
+  стенда — в репозиторий» (выше, PowerShell); слепые места шестого ревью (`>`, `>>`, `Tee-Object`, `StreamWriter`,
+  `[IO.File]::Create/CreateText/AppendText`, `cmd /c copy`, xcopy) закрыты.
+- **Остаток (a): exe читался дважды.** `release.py verify` копирует exe в `temp/<тег>/` до ворот; ворота, метка, хеш,
+  сверка с пакетом и загрузка `draft` — по одной копии; копия, изменившаяся за время `verify`, — отказ.
+- **Остаток (e): формы публикации.** `test_only_release_py_publishes` видит и список Python/JS (`["gh", "release",
+  "create", …]`), `gh api` с полем (`-f`/`-F`/`--input`: неявный POST), отправку `curl`/`wget`/`Invoke-RestMethod`/
+  `Invoke-WebRequest` и команду, разбитую на строки (`\`, `` ` ``, `^`).
+
 Метка стенда считается, только если в ней `mode=` своего стенда, `dirty=0`, в `scenarios=` все сценарии своего стенда
 (`check_gates.SCENARIOS`, тест сверяет их со списками в `stand_*.ps1`), совпали оба HEAD и SHA-256 exe, `exe=` — exe
 самого стенда, `exe_source=` равен HEAD движка, `stand_extra=0`, `stand_fingerprint` равен нынешнему отпечатку стенда, а
@@ -506,7 +551,9 @@ gates: FAIL (3)
 | Dev-сборка выложена скриптом мимо `release.py` (пятое ревью, B2) | `publish_dev*.sh` отказывают; тест не пускает команды публикации в `tools/` кроме `release.py` |
 | Неотслеживаемый файл оверлея (DLTX, DXML) остался на стенде, а метка его не видит (пятое ревью, B3) | на стенде лаунчера остаток — любой файл `gamedata`, которого нет ни в манифесте, ни в HEAD |
 | Память выкладки потеряна (`temp\stand` почищен, другое рабочее дерево) — уроненный HEAD хук и перекрытие мода остались (пятое ревью, B4) | память в самом стенде; без неё — манифест (ссылка заменена) и блобы наших репозиториев |
-| Запись через папку-junction в папку мода (пятое ревью, S14) | `stand_head`, `stand_overlay`, помощники PowerShell отказывают до записи |
+| Запись через папку-junction в папку мода (пятое ревью, S14), в том числе через junction выше папки цели (шестое ревью, B1) | `stand_head`, `stand_overlay` отказывают до записи; помощники PowerShell и `mo2_stand.replace_file` / `remove_file` проверяют каждую папку пути от корня тома |
+| Stable выложен `publish_github.sh` без ворот (шестое ревью) | скрипт сначала гонит `release.py --channel stable verify`, выпуск — `release.py draft` / `publish` |
+| Новый сценарий пишет в стенд мимо помощников (`>`, `Tee-Object`, `StreamWriter`, копия в переменную, названную как папка репозитория) | проверка находит каждый `.ps1` при прогоне; запись разрешена только в путь, который по присваиваниям ведёт в репозиторий |
 
 ---
 
@@ -637,8 +684,20 @@ gates: FAIL (3)
 
 Публикует **только** `release.py` (пятое ревью, B2): `tools\publish_dev.sh` и `publish_dev_engine.sh` отказывают (код 2)
 и печатают команды `release.py --channel dev --build <N> prepare / verify / draft / publish`; тест
-`test_only_release_py_publishes` не пускает команду публикации ни в один другой файл `tools/`. Пока не закрыто:
-`tools/publish_github.sh` (файл ведущей) выкладывает `b<N>` без ворот — для Stable им не пользоваться, только
-`release.py --channel stable`.
+`test_only_release_py_publishes` не пускает команду публикации ни в один другой файл `tools/` (с седьмого круга — и в
+форме списка Python, `gh api -f`, `curl -X POST`, `Invoke-RestMethod -Method Post`, команды, разбитой на строки).
+
+Stable (седьмой круг): `BUILD=<N> bash tools/publish_github.sh`. Скрипт проверяет ввод (`BUILD` — целый номер,
+`OWNER` — только `stormie-labs`, как `ORG` в `release.py`; иначе код 2, ничего не запущено), затем первой командой —
+`python -I tools/release.py --channel stable --build <N> verify` (сети не касается; отказ — код 2, «Nothing was
+published», ни одной команды `gh`/`git` и подсказка `prepare` / `package.ps1` / `verify`), затем `gh auth`, проверку,
+что публичный `main` RayLink-Engine сделан здесь (ветка `publish`, локальный тег движка или предок HEAD движка; иначе
+код 4 — снимок поверх него стёр бы чужие коммиты), и выпуск **через `release.py draft` и `publish`** (тег `b<N>` и `main`
+обоих публичных репозиториев, черновики с проверенными SHA-256, затем `latest`). Своих `gh release create` и пуша
+`main` у скрипта нет; лаунчер (`SKIP_LAUNCHER=1` — без него) — как раньше: исходники в приватный
+RayLink-Launcher-Source. Тесты: `test_publish_github_*` гоняют копию скрипта в поддельном проекте с поддельными
+`python`, `gh` и `git`; `test_verify_first_tools_run_release_py_verify_before_any_network_command` следит, что строка
+`verify` стоит раньше любой сетевой команды. `verify` копирует exe в `temp/<тег>/` до ворот и судит эту копию (шестое
+ревью, остаток a).
 
 Отчёт владельцу и `docs/TESTERS.md` — по каждому режиму отдельной строкой (`CLAUDE.md`, правила 4-5).
