@@ -161,7 +161,10 @@ Manager& mgr() { return manager; }
 namespace join { u16 to_host(u16 id) { return id; } u16 to_local(u16 id) { return id; } }
 lua_State* test_lua = nullptr;
 struct ScriptEngine { lua_State* lua() { return test_lua; } } script_engine;
-struct Ai { ScriptEngine& script_engine() { return ::script_engine; } } ai_state;
+// alife():register's guard (ddb51c18): an object the ALife already holds; the tests' objects are never held
+struct AlifeObjects { CSE_Abstract* object(u16, bool) { return nullptr; } };
+struct Alife { AlifeObjects held; AlifeObjects& objects() { return held; } } alife_state;
+struct Ai { ScriptEngine& script_engine() { return ::script_engine; } Alife& alife() { return alife_state; } } ai_state;
 Ai& ai() { return ai_state; }
 std::map<u16, CSE_Abstract*> entities;
 namespace events { CSE_Abstract* find_entity(u16 id) { auto it=entities.find(id); return it == entities.end() ? nullptr : it->second; } }
@@ -181,6 +184,7 @@ bool fail_spawn = false, fail_source = false;
 bool plain_target = false, shotgun_target = false;
 namespace syncapi { void on_entity_destroyed(u16) {} }
 namespace levels { void xfer_on_released(u16) {} }
+namespace script { void note_released(u16) {} } // F4 G3-1c: the release book of weapon riders
 bool host_records() { return false; }
 enum class HostEventKind { Released };
 struct HostEvent { HostEventKind kind; u16 id; bool online; };

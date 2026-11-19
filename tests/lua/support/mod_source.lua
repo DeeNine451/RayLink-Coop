@@ -8,11 +8,17 @@
 --                "local function check_scope(", "_G.alife_clone_weapon = function("); a function runs from its header
 --                to the first line that is exactly "end" (column 0), as these files are written
 --       module   module table name (created when missing); tail: Lua appended to the chunk ("return f")
---   GAMMA_DIR    the GAMMA scripts folder (env GAMMA_SCRIPTS, default E:\AnomalyCoopGamma\gamedata\scripts)
+--   GAMMA_DIR    the GAMMA scripts folder (env GAMMA_SCRIPTS; else E:\AnomalyCoopGamma\gamedata\scripts when it is there;
+--                else the review corpus temp/review\corpus\merged)
 --   ENGINE_DIR   engine\gamedata\scripts (the modded exes' script layer, in this repository)
 --   have_file(path) -> bool
 local BS = string.char(92)
-GAMMA_DIR = os.getenv("GAMMA_SCRIPTS") or ("E:" .. BS .. "AnomalyCoopGamma" .. BS .. "gamedata" .. BS .. "scripts")
+local OLD_GAMMA = "E:" .. BS .. "AnomalyCoopGamma" .. BS .. "gamedata" .. BS .. "scripts"
+-- the review corpus (temp/review\corpus\merged: the profile's scripts, merged by MO2 priority) when the old folder is gone
+local CORPUS = "temp" .. BS .. "review" .. BS .. "corpus" .. BS .. "merged"
+local function dir_has(dir, name) local fh = io.open(dir .. BS .. name, "r") if fh then fh:close() return true end return false end
+GAMMA_DIR = os.getenv("GAMMA_SCRIPTS") or (dir_has(OLD_GAMMA, "item_parts.script") and OLD_GAMMA)
+	or (dir_has(CORPUS, "item_parts.script") and CORPUS) or OLD_GAMMA
 ENGINE_DIR = "engine" .. BS .. "gamedata" .. BS .. "scripts"
 
 function have_file(path)

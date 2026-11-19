@@ -1,5 +1,6 @@
 -- Dev 57 G3-1: real item riders, clone transactions and the merged 3DSS/jamming modules.
 -- Co-op: host has the map. Server: world has no map; two map authorities report through it.
+-- G3-1c: the engine's part (riders carried by a move, ticks of arrivals and releases) is modelled below and runs always.
 dofile("tests/lua/support/harness_economy.lua")
 local modes = dofile("tests/lua/support/modes.lua")
 local CAMO, JAM = "coop_weapon_camo", "coop_weapon_jam"
@@ -34,8 +35,31 @@ local function weapon(w, id, parent, name)
 	return o
 end
 
+-- The engine part (F4 G3-1c, engine/src/xrCoop/coop_item_rider_rules.h) as coop_script.cpp runs it: one counter per
+-- process numbers the events reaching its Lua inbox (deliver_later) and the releases of entities there
+-- (coop_entities.cpp host_on_entity_released -> script::note_released); coop.event_tick() -> arrival, now;
+-- coop.released_after(local id, tick) -> riders::ReleaseBook::released_after.
+local function engine(w)
+	local e = { now = 0, delivering = nil, released = {} }
+	w.ENGINE = e
+	w.coop.event_tick = function() return e.delivering or e.now, e.now end
+	w.coop.released_after = function(id, tick)
+		if type(id) ~= "number" or type(tick) ~= "number" then return false end
+		local last = e.released[id]
+		return last ~= nil and last > tick
+	end
+end
+
+local function arrive(w) w.ENGINE.now = w.ENGINE.now + 1 return w.ENGINE.now end
+local function release(w, id, keep_instance)
+	local tick = arrive(w)
+	if not keep_instance then w.ENGINE.released[id] = tick end
+end
+local function deliver(w, tick, f) w.ENGINE.delivering = tick f() w.ENGINE.delivering = nil end
+
 local function setup(peer, set, mirror)
 	local w = make_world(peer)
+	engine(w)
 	w.coop.is_map_server = function() return BRIDGES[peer] ~= nil end
 	w.coop.is_dedicated = function() return peer == 0 and set == "srv_world" end
 	w.coop.levels = { map_servers = function()
@@ -119,45 +143,171 @@ local function settle()
 	for _ = 1, 3 do tick_all(1100) for _, w in pairs(WORLDS) do run_time_events(w) end end
 end
 
--- The native inventory move and ordinary spawn generation are outside this unit.
--- Set COOP_G3_NATIVE_GAPS=1 to run the acceptance cases against a candidate fix.
-local function native_regressions(name)
+-- coop_requests.cpp (F4 G3-1c): send_action of a client asks coop_mods_item_state.carry for a weapon leaving its
+-- character and appends the text to its ReqDrop / ReqTransfer (riders::carries, riders::text_of); host_move on the process
+-- that applies the move (the co-op host; the map server of the player's level, to which the world tunnels the request)
+-- hands it to coop_mods_item_state.carried when the requester's character holds the item (riders::judge), then
+-- apply_move moves the item. The economy's own se of the same change waits in a Lua inbox meanwhile.
+local MAX_CARRY = 4096
+local function native_move(a, b, mover)
+	local text = a.coop_mods_item_state.carry(800)
+	local holds = mover.SE[800] and mover.SE[800].parent_id == PLAYERS[1].proxy
+	local taken = nil
+	if type(text) == "string" and #text > 0 and #text <= MAX_CARRY and holds then
+		taken = mover.coop_mods_item_state.carried(800, 1, text, PLAYERS[1].proxy) -- q.proxy
+	end
+	handoff(a, b)
+	return text, taken
+end
+
+-- The process that applies a's moves: the co-op host, or the map server of a's level.
+local function mover_of(h, server) return server and WORLDS[257] or h end
+
+local function old_riders(w, a)
+	local old_camo, old_jam = a.MDATA[CAMO][800], a.MDATA[JAM][800]
+	return CM_ENCODE({ n = 2,
+		i1 = 800, k1 = CAMO, d1 = w.coop_economy_core.pack(old_camo), x1 = old_camo.instance,
+		i2 = 800, k2 = JAM, d2 = w.coop_economy_core.pack(old_jam), x2 = old_jam.instance,
+	})
+end
+
+-- The engine cases of G3-1b's report: the move runs before the Lua inbox, and an id is reused under the same name.
+local function native_cases(name)
 	local server, same_map = name ~= "hostplay", name == "srv_map"
-	local _, a, b = worlds(server, same_map)
+	local h, a, b = worlds(server, same_map)
+	local owner_trust = (h.coop_trust.status().item_state_owner or {}).failed or 0
 	a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
 	a.arti_jamming.set_jam_status(800, 3)
 	-- The native request has already moved the weapon when the Lua inbox runs.
-	handoff(a, b)
+	local text, taken = native_move(a, b, mover_of(h, server))
+	check(type(text) == "string" and #text <= MAX_CARRY and taken == true, "the client's move carries both riders and the mover takes them")
 	deliver_all()
 	fire(b, "actor_on_item_take", b.OBJ[800])
 	settle()
 	check(b.OBJ[800].texture == "green", "m01:2 transfer before Lua delivery keeps camo")
 	check(b.arti_jamming.jammed_guns[800] == 3, "m27:5 transfer before Lua delivery keeps jam")
+	local saved_camo, saved_jam = h.MDATA[CAMO] and h.MDATA[CAMO][800], h.MDATA[JAM] and h.MDATA[JAM][800]
+	local saved_se = h.MDATA.se_object[800] and h.MDATA.se_object[800][JAM]
+	check(type(saved_camo) == "table" and type(saved_camo.state) == "table" and saved_camo.state.section == "wpn_test_green"
+		and type(saved_jam) == "table" and saved_jam.state == 3 and type(saved_se) == "table" and saved_se.state == 3,
+		"the world save keeps the carried riders")
+	if not server then
+		local now = (h.coop_trust.status().item_state_owner or {}).failed or 0
+		check(now == owner_trust, "the former holder's late copy of a carried rider is no trust failure")
+	end
+	for _, w in pairs(WORLDS) do check(not w.HANDLER_ERRORS, "no handler errors after a carried move on peer " .. w.PEER) end
 
-	_, a, b = worlds(server, same_map)
+	h, a, b = worlds(server, same_map)
 	a.arti_jamming.set_jam_status(800, 3) settle()
 	a.arti_jamming.set_jam_status(800, nil)
-	handoff(a, b)
+	native_move(a, b, mover_of(h, server))
 	deliver_all()
 	fire(b, "actor_on_item_take", b.OBJ[800])
 	settle()
 	check(b.arti_jamming.jammed_guns[800] == nil, "m27:5 transfer before Lua delivery keeps the previous owner's jam clear")
+	local cleared = h.MDATA[JAM] and h.MDATA[JAM][800]
+	check(type(cleared) == "table" and cleared.state == 0, "the world save keeps the carried clear")
 
-	_, a, b = worlds(server, same_map)
+	-- Nothing to carry: an unpainted weapon that never jammed.
+	h, a, b = worlds(server, same_map)
+	check(a.coop_mods_item_state.carry(800) == nil, "a weapon without riders carries nothing")
+	-- The mover checks what a request carried like any rider of a client.
+	a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
+	local carried = a.coop_mods_item_state.carry(800)
+	local mover = mover_of(h, server)
+	local trust = mover.coop_trust.status()
+	local sent = #mover.SENT
+	check(mover.coop_mods_item_state.carried(800, 2, carried, PLAYERS[2].proxy) == false and (trust.item_state_owner or {}).failed == 1,
+		"a requester who does not hold the weapon writes no carried rider")
+	local other = mover.coop_main.encode({ n = 1, i1 = 801, k1 = CAMO, d1 = mover.coop_economy_core.pack(a.MDATA[CAMO][800]),
+		x1 = "wpn_test800" })
+	check(mover.coop_mods_item_state.carried(800, 1, other, PLAYERS[1].proxy) == false and (trust.item_state_wire or {}).failed > 0,
+		"a carried rider names the moved weapon only")
+	check(mover.coop_mods_item_state.carried(800, 1, "garbage") == false
+		and mover.coop_mods_item_state.carried(800, 1, mover.coop_main.encode({ n = 9 })) == false
+		and mover.coop_mods_item_state.carried(70000, 1, carried) == false,
+		"malformed carried text and ids are refused without an error")
+	check(mover.coop_mods_item_state.carried(800, 1, carried, 70000) == false,
+		"a holder id out of range is refused")
+	check(#mover.SENT == sent and not (mover.MDATA[CAMO] and mover.MDATA[CAMO][801]), "refused carried riders are neither kept nor sent")
+
+	-- Old relays wait in a receiver's Lua inbox while its engine releases the weapon and spawns a same-name replacement.
+	h, a, b = worlds(server, same_map)
 	a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
 	a.arti_jamming.set_jam_status(800, 3)
-	-- Deliver old packets after replacement on a receiver that missed unregister.
-	local old_camo, old_jam = a.MDATA[CAMO][800], a.MDATA[JAM][800]
+	local arrived = arrive(b)
+	release(b, 800) -- b's Lua misses the unregister
 	weapon(b, 800, 0)
 	b.MDATA.se_object[800] = nil
 	fire(b, "game_object_on_net_spawn", b.OBJ[800])
-	b.coop_main.on_event("economy.se", CM_ENCODE({ n = 2,
-		i1 = 800, k1 = CAMO, d1 = b.coop_economy_core.pack(old_camo), x1 = old_camo.instance,
-		i2 = 800, k2 = JAM, d2 = b.coop_economy_core.pack(old_jam), x2 = old_jam.instance,
-	}), 0)
+	deliver(b, arrived, function() b.coop_main.on_event("economy.se", old_riders(b, a), 0) end)
 	run_time_events(b)
 	check(b.OBJ[800].texture == "base", "m01:2 delayed rider cannot paint a same-name replacement after missed unregister")
 	check(b.arti_jamming.jammed_guns[800] == nil, "m27:5 delayed rider cannot jam a same-name replacement after missed unregister")
+	check(not (b.MDATA[CAMO] and b.MDATA[CAMO][800]) and not (b.MDATA.se_object[800] and b.MDATA.se_object[800][CAMO]),
+		"the delayed rider is never kept for the replacement")
+	-- A rider that came after the release is the replacement's own.
+	deliver(b, arrive(b), function() b.coop_main.on_event("economy.se", old_riders(b, a), 0) end)
+	run_time_events(b)
+	check(b.OBJ[800].texture == "green" and b.arti_jamming.jammed_guns[800] == 3, "a rider after the release still applies")
+
+	-- What a receiver already held for the old weapon, its unregister missed: the replacement never gets it.
+	h, a, b = worlds(server, same_map)
+	a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
+	a.arti_jamming.set_jam_status(800, 3) settle()
+	check(b.OBJ[800].texture == "green" and b.arti_jamming.jammed_guns[800] == 3, "the observer holds the old weapon's riders")
+	release(b, 800)
+	weapon(b, 800, 501)
+	fire(b, "game_object_on_net_spawn", b.OBJ[800]) settle()
+	check(b.OBJ[800].texture == "base" and b.arti_jamming.jammed_guns[800] == nil and selection(b, 800) == nil,
+		"m01:2/m27:5 held riders of a released weapon never reach its same-name replacement")
+	check(not (b.MDATA[CAMO] and b.MDATA[CAMO][800]) and not (b.MDATA.se_object[800] and b.MDATA.se_object[800][CAMO]),
+		"the released weapon's saved riders are forgotten")
+
+	-- The owner's local rebuild after a refused upgrade returns the same weapon. Lua misses the unregister.
+	h, a, b = worlds(server, same_map)
+	a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
+	a.arti_jamming.set_jam_status(800, 3) settle()
+	release(a, 800, true) -- the rebuild marks this release to be skipped by the engine's ReleaseBook
+	weapon(a, 800, 0)
+	fire(a, "game_object_on_net_spawn", a.OBJ[800]) settle()
+	check(a.OBJ[800].texture == "green", "refused upgrade rebuild keeps the same weapon's camo on its owner")
+	check(a.arti_jamming.jammed_guns[800] == 3, "refused upgrade rebuild keeps the same weapon's Lua jam on its owner")
+
+	-- The replacement's own rider arrives after the release and before net spawn. The old unregister was missed.
+	h, a, b = worlds(server, same_map)
+	a.arti_jamming.set_jam_status(800, 3) settle()
+	release(b, 800)
+	b.SE[800], b.OBJ[800] = nil, nil
+	local stamp = "wpn_test800"
+	local replacement_jam = b.coop_economy_core.pack({ instance = stamp, state = 2 })
+	deliver(b, arrive(b), function()
+		b.coop_main.on_event("economy.imd", CM_ENCODE({ n = 1, i1 = 800, k1 = JAM, d1 = replacement_jam, x1 = stamp }), 0)
+	end)
+	weapon(b, 800, 501)
+	fire(b, "game_object_on_net_spawn", b.OBJ[800]) settle()
+	check(b.arti_jamming.jammed_guns[800] == 2, "the replacement's own jam arriving before net spawn is applied")
+
+	-- The world: a client's rider waited in its inbox while the world released the weapon and made a replacement.
+	h, a, b = worlds(server, same_map)
+	a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
+	local queued = {}
+	for i = #QUEUE, 1, -1 do
+		if QUEUE[i].to == 0 and QUEUE[i].from == 1 then table.insert(queued, 1, table.remove(QUEUE, i)) end
+	end
+	check(#queued > 0, "the client's camo rider is on its way to the world")
+	local at = arrive(h)
+	release(h, 800)
+	if server then add_entity(h, 800, "wpn_test", 501) else weapon(h, 800, 501) end
+	sent = #h.SENT
+	deliver(h, at, function()
+		for _, m in ipairs(queued) do h.coop_main.on_event(m.name, m.payload, m.from) end
+	end)
+	run_time_events(h)
+	check(not (h.MDATA[CAMO] and h.MDATA[CAMO][800]) and not (h.MDATA.se_object[800] and h.MDATA.se_object[800][CAMO]),
+		"the world never keeps a rider older than its weapon's release")
+	check(#h.SENT == sent, "the world never relays a rider older than its weapon's release")
+	check(not h.HANDLER_ERRORS, "no handler errors on the world after a stale rider")
 end
 
 for _, name in ipairs(modes.names()) do
@@ -174,6 +324,8 @@ for _, name in ipairs(modes.names()) do
 		tick(w, 1100)
 		check(selection(w, 800).section == "wpn_test_green" and w.arti_jamming.jammed_guns[800] == 3, "SP live mod tables unchanged")
 		check(w.MDATA[CAMO] == nil and w.MDATA[JAM] == nil and #w.SENT == 0, "SP creates no riders or traffic")
+		check(w.coop_mods_item_state.carry(800) == nil and w.coop_mods_item_state.carried(800, 1, "x") == false,
+			"SP carries nothing with a move")
 	else
 		local h, a, b, decider = worlds(name ~= "hostplay")
 		-- m01:2: concrete-item selection, ownership transfer and real clone rider migration.
@@ -449,7 +601,7 @@ for _, name in ipairs(modes.names()) do
 				event .. " non-owner is checked through trust and cannot write or relay a weapon rider")
 		end
 
-		if os.getenv("COOP_G3_NATIVE_GAPS") == "1" then native_regressions(name) end
+		native_cases(name)
 	end
 end
 print(string.format("mods item state: %d passed, %d failed", CHECKS - FAILS, FAILS))

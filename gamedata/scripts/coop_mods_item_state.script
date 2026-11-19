@@ -4,6 +4,8 @@
 -- economy.imd carries the same riders with inventory/clone snapshots. No new wire verbs.
 -- Every value includes the economy item_instance identity. A clear is a stamped value,
 -- not a missing entry, so an old owner's Lua table cannot resurrect a cleared jam.
+-- G3-1c: a client's move of its weapon carries the riders (carry / carried, coop_requests.cpp), and engine ticks
+-- (coop.event_tick / coop.released_after) keep a rider of a released weapon off a same-name replacement.
 
 local function C() return coop_mods_core end
 local specs = {
@@ -12,13 +14,30 @@ local specs = {
 }
 local specs_by_key = {}
 for _, s in ipairs(specs) do specs_by_key[s.key] = s end
-local seen, pending, retired = {}, {}, {}
+-- since[id]: the engine tick from which this script holds state for the id's current instance (F4 G3-1c).
+local seen, pending, retired, since = {}, {}, {}, {}
 local applying, installed, storage = false, false, nil
 local receive_item, flush_se
+local MAX_CARRY, MAX_PACKED = 4096, 2048 -- riders::kMaxCarry (engine/src/xrCoop/coop_item_rider_rules.h), one rider
 
 local function data()
 	local asm = C().mod("alife_storage_manager")
 	return asm and asm.get_state and asm.get_state() or nil
+end
+
+-- F4 G3-1c (engine/src/xrCoop/coop_item_rider_rules.h): the engine numbers the events reaching its Lua inbox and the
+-- releases of entities on this process with one counter. arrival: the event being delivered now (now outside one).
+local function ticks()
+	local f = coop and coop.event_tick
+	if type(f) ~= "function" then return nil, nil end
+	local arrival, now = f()
+	return tonumber(arrival), tonumber(now)
+end
+
+-- The engine released the entity under this local id after `tick`; false when it cannot say.
+local function released_since(id, tick)
+	local f = coop and coop.released_after
+	return type(tick) == "number" and type(f) == "function" and f(id, tick) == true
 end
 
 local function live(s)
@@ -63,7 +82,42 @@ local function copy_state(s, value)
 	return out
 end
 
+-- The engine released the instance this script held state for, and unregister_item never ran here: drop it as
+-- unregister_item would, so a replacement under the same name and id starts with nothing.
+local function forget(id)
+	local m = data()
+	local se = m and m.se_object and m.se_object[id]
+	for _, s in ipairs(specs) do
+		if m and type(m[s.key]) == "table" then m[s.key][id] = nil end
+		if type(se) == "table" then se[s.key] = nil end
+		local tbl = live(s)
+		if tbl then tbl[id] = nil end
+	end
+	seen[id], pending[id], since[id] = nil, nil, nil
+end
+
+-- Called before this script reads or writes state of a weapon; true when it dropped the state of a released instance.
+-- A clone transaction keeps its state on purpose.
+local function fresh(id)
+	if type(id) ~= "number" then return false end
+	local t = since[id]
+	local stale = t ~= nil and released_since(id, t)
+	if t ~= nil and not stale then return false end -- the usual answer: one engine call
+	local _, now = ticks()
+	if stale then
+		local em = C().mod("coop_economy_mdata")
+		if em and em.clone_pending and em.clone_pending(id) then
+			since[id] = now
+			return false
+		end
+		forget(id)
+	end
+	if not since[id] then since[id] = now end
+	return stale
+end
+
 local function store(s, id, value)
+	fresh(id)
 	local m = data()
 	if not m then return end
 	if m[s.key] then
@@ -105,10 +159,19 @@ local function matches_instance(id, current, record, wire_stamp)
 	return coop_trust.pass("item_state_instance", matches, "item %s: weapon instance changed", tostring(id)) and matches
 end
 
+-- This process keeps exactly this record for the weapon already.
+local function same_record(s, id, record)
+	local m = data()
+	local current = m and type(m[s.key]) == "table" and m[s.key][id]
+	return type(current) == "table" and C().ser(current) == C().ser(record)
+end
+
 local function apply(s, id, record)
 	if not C().active() then return end
 	local state = checked_state(s, id, record)
 	if state == nil then return false end
+	-- A record of the instance the engine released here: never for the replacement.
+	if fresh(id) then return false end
 	local current = instance(id)
 	local em = C().mod("coop_economy_mdata")
 	-- The clone transaction deliberately replaces the source's stamp. Its rider has
@@ -174,7 +237,8 @@ local function dispatch_riders(orig, event, payload, from, ...)
 	if not coop_trust.pass("item_state_batch", n ~= nil, "weapon rider: invalid batch size") or not n then
 		return orig(event, payload, from, ...)
 	end
-	local changed, received = false, {}
+	local changed, received, admitted = false, {}, {}
+	local arrival = ticks()
 	for i = 1, n do
 		local key = "k" .. i
 		local s = specs_by_key[t[key]]
@@ -183,19 +247,28 @@ local function dispatch_riders(orig, event, payload, from, ...)
 			local valid = false
 			-- item_poll can report an absent entry. An actual clear carries an instance.
 			if allowed and not (event == "economy.imd" and packed == "_") then
-				local wire_ok = hid ~= nil and type(packed) == "string" and #packed <= 2048
+				local wire_ok = hid ~= nil and type(packed) == "string" and #packed <= MAX_PACKED
 				if coop_trust.pass("item_state_wire", wire_ok, "weapon rider: invalid id or payload") and wire_ok then
 					local id = C().lid(hid)
 					local record, err = ec.unpack(packed)
 					local decoded = err == nil
 					valid = coop_trust.pass("item_state_wire", decoded, "item %s: invalid rider encoding", tostring(hid))
 						and decoded and checked_state(s, id, record) ~= nil and matches_instance(id, instance(id), record, stamp)
+					-- F4 G3-1c: it waited in the inbox while the engine released its weapon here (a replacement may
+					-- have the same name and id now). An honest race, not a refusal: counted, never logged.
+					valid = valid and coop_trust.guard("item_state_released", not released_since(id, arrival))
 					if valid and world and from < 0x100 and alife_object(id) then
 						local player = ec.player(from)
 						local owner = player and player.avatar_id and ec.root_of(hid) == player.avatar_id
-						valid = coop_trust.pass("item_state_owner", owner,
-							"item %s: sender %s is not its carrier", tostring(hid), tostring(from)) and owner
+						if not owner and same_record(s, id, record) then
+							-- The former holder's own copy of what his move carried: written already (carried).
+							valid = coop_trust.guard("item_state_carried", false)
+						else
+							valid = coop_trust.pass("item_state_owner", owner,
+								"item %s: sender %s is not its carrier", tostring(hid), tostring(from)) and owner
+						end
 					end
+					if valid then admitted[#admitted + 1] = id end
 					if valid and event == "economy.se" then
 						received[#received + 1] = { spec = s, id = id, hid = hid, record = record, packed = packed }
 					end
@@ -206,6 +279,8 @@ local function dispatch_riders(orig, event, payload, from, ...)
 			end
 		end
 	end
+	-- Before the economy stores them: what this script held for a released instance goes first.
+	for _, id in ipairs(admitted) do fresh(id) end
 	orig(event, changed and cm.encode(t) or payload, from, ...)
 	-- Keep admitted SE deliveries until the weapon appears, including on maps
 	-- where the shared economy's 30-second wait would expire.
@@ -229,6 +304,7 @@ local function restore(id)
 end
 
 local function observe(id)
+	fresh(id)
 	local current = instance(id)
 	if not current then return end
 	local m = data()
@@ -281,6 +357,9 @@ end
 local function unregister_item(se)
 	if not C().active() or not se or not se.id then return end
 	local id = se.id
+	-- Seen here: what this script keeps of the id from now on (a clone's source) is kept on purpose.
+	local _, now = ticks()
+	since[id] = now
 	if coop_economy_mdata.clone_pending(id) then return end
 	local m = data()
 	if not m then return end
@@ -313,7 +392,7 @@ end
 
 local function restore_all()
 	if not C().active() then return end
-	seen, pending, retired, storage = {}, {}, {}, data()
+	seen, pending, retired, since, storage = {}, {}, {}, {}, data()
 	local ids = {}
 	for _, s in ipairs(specs) do
 		for id in pairs(storage and storage[s.key] or {}) do ids[id] = true end
@@ -325,9 +404,15 @@ local function update()
 	if not C().active() then return end
 	if storage ~= data() then restore_all() end
 	if next(retired) then retired = {} end
-	for id, records in pairs(pending) do
-		for _, s in ipairs(specs) do
-			if records[s.key] then apply(s, id, records[s.key]) end
+	if next(pending) then
+		-- apply can forget a released instance's pending entries (fresh): never re-add a key while pairs walks them.
+		local ids = {}
+		for id in pairs(pending) do ids[#ids + 1] = id end
+		for _, id in ipairs(ids) do
+			for _, s in ipairs(specs) do
+				local record = pending[id] and pending[id][s.key]
+				if record then apply(s, id, record) end
+			end
 		end
 	end
 	capture_inventory()
@@ -466,6 +551,81 @@ local function install_riders()
 			return orig(old_id, new_id, ...)
 		end
 	end)
+end
+
+-- F4 G3-1c (engine/src/xrCoop/coop_item_rider_rules.h). A client's move of its weapon is applied when the request
+-- arrives, its se copy of the same change waits in a Lua inbox and is checked there against the next holder. So the
+-- request carries the riders, and the process that applies the move writes them first, under its own holder check.
+
+-- coop_requests.cpp send_action, on a client: the weapon `id` (local) leaves this character in a ReqDrop / ReqTransfer.
+-- The text goes with the request; nil: nothing to carry.
+function carry(id)
+	if not C().active() or type(id) ~= "number" then return nil end
+	local m, ec, cm = data(), C().mod("coop_economy_core"), C().mod("coop_main")
+	local stamp = instance(id)
+	if not (m and ec and cm and stamp) then return nil end
+	local t, n = {}, 0
+	for _, s in ipairs(specs) do
+		capture(s, id) -- a direct write of the mod's table in this frame, before the next poll saw it
+		local record = type(m[s.key]) == "table" and m[s.key][id]
+		if type(record) == "table" and record.instance == stamp and copy_state(s, record.state) ~= nil then
+			local packed = ec.pack(record)
+			if type(packed) == "string" and #packed <= MAX_PACKED then
+				n = n + 1
+				t["i" .. n], t["k" .. n], t["d" .. n], t["x" .. n] = C().hid(id), s.key, packed, stamp
+			end
+		end
+	end
+	if n == 0 then return nil end
+	t.n = n
+	local text = cm.encode(t)
+	return type(text) == "string" and #text <= MAX_CARRY and text or nil
+end
+
+-- coop_requests.cpp host_move, on the process that applies a player's move of a weapon his character holds (the co-op
+-- host; the map server of his level), before apply_move. hid: the weapon (host numbering); from: the transport sender;
+-- text: what his client's carry gave; holder: his character as the engine knows it from the sender (nil: ask the
+-- roster). Checked like his se rider; written as this process's own fact through the economy's se writer: the co-op
+-- host keeps and relays it, a map server's goes up to the world server, which keeps and relays a map's facts.
+-- True when a rider was written.
+function carried(hid, from, text, holder)
+	if not C().active() then return false end
+	local ec, cm, em = C().mod("coop_economy_core"), C().mod("coop_main"), C().mod("coop_economy_mdata")
+	local args = ec ~= nil and cm ~= nil and em ~= nil and type(text) == "string" and #text <= MAX_CARRY
+		and ec.int(hid, 1, 65534) ~= nil and ec.int(from, 0, 65535) ~= nil and (holder == nil or ec.int(holder, 0, 65534) ~= nil)
+	if not coop_trust.pass("item_state_carry", args, "weapon rider carry: invalid request") or not args then return false end
+	if holder == nil then
+		local player = ec.player(from)
+		holder = player and player.avatar_id
+	end
+	local owner = holder ~= nil and ec.root_of(hid) == holder
+	if not coop_trust.pass("item_state_owner", owner, "item %s: sender %s is not its carrier", tostring(hid), tostring(from))
+		or not owner then
+		return false
+	end
+	local decoded, t = pcall(cm.decode, text)
+	t = decoded and type(t) == "table" and t or {}
+	local n = ec.int(t.n, 1, #specs)
+	if not coop_trust.pass("item_state_batch", n ~= nil, "weapon rider carry: invalid batch size") or not n then return false end
+	local id, written = C().lid(hid), false
+	if em.clone_pending(id) then return false end
+	for i = 1, n do
+		local s, packed, stamp = specs_by_key[t["k" .. i]], t["d" .. i], t["x" .. i]
+		local wire_ok = s ~= nil and ec.int(t["i" .. i], 1, 65534) == hid and type(packed) == "string" and #packed <= MAX_PACKED
+		if coop_trust.pass("item_state_wire", wire_ok, "weapon rider carry: invalid id or payload") and wire_ok then
+			local record, err = ec.unpack(packed)
+			local ok = coop_trust.pass("item_state_wire", err == nil, "item %s: invalid rider encoding", tostring(hid)) and err == nil
+			if ok and checked_state(s, id, record) ~= nil and matches_instance(id, instance(id), record, stamp) then
+				-- As capture writes the holder's change: kept, shown here, sent through the economy.
+				store(s, id, record)
+				apply(s, id, record)
+				se_save_var(id, nil, s.key, record)
+				written = true
+			end
+		end
+	end
+	if written and flush_se and ec.live() then flush_se() end
+	return written
 end
 
 local function step(name, f)
