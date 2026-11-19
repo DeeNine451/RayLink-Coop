@@ -57,3 +57,5 @@ mdata coop_weapon_camo
 mdata coop_weapon_jam
 mdata coop_idiots_templates
 mdata coop_srv_world_mines
+mdata coop_paid_contracts_v1
+event coop_env_verdict

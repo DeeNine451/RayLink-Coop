@@ -1,0 +1,431 @@
+-- Server (srv): paid escort contracts and Agroprom Underground restrictions (docs/MODES.md).
+-- The world keeps the contract ledger and the stock transition choice. Map authorities report hires,
+-- apply the world's expiry decisions, and change the objects on their own maps.
+
+local TAG = "srv_contracts"
+local PAID_KEY = "coop_paid_contracts_v1"
+local MIND_KEY = "coop_paid_contract_v1"
+local TRANSITIONS = "coop_agr_ug_choice_v1"
+local SURFACE, UNDERGROUND = "l03_agroprom", "l03u_agr_underground"
+local ENTRANCE, RESTRICTOR = "agr_level_changer_to_underground_", "agr_space_restrictor_to_agr_ug_"
+local ANOMALY = "kat2_zone_buzz_0015"
+local CLOCK_FIELDS = { "Y", "M", "D", "h", "m", "s", "ms" }
+local CLOCK_MIN = { 1, 1, 1, 0, 0, 0, 0 }
+local CLOCK_MAX = { 9999, 12, 31, 23, 59, 59, 999 }
+local PERIODS = { [86400] = true, [172800] = true }
+local MAX_MEMBERS = 254 -- the engine's squad logic stream has one byte for the squad and its members
+local MAX_LOGIC_BYTES = 8192 -- coop_levels_alife.cpp
+local paid, randomizer, companions
+local contracts, reports, seen = {}, {}, {}
+local choice, restrictions, released, next_scan, next_update
+local installed
+
+local function step(name, fn)
+	local ok, err = pcall(fn)
+	if not ok then coop_mods_core.report(TAG, name, err) end
+end
+
+local function integer(value, low, high)
+	return type(value) == "number" and value >= low and value <= high and value % 1 == 0
+end
+
+local function entity_id(value) return integer(value, 1, 65534) end
+
+local function squad_at(id)
+	local object = entity_id(id) and alife_object(id)
+	return object and object:clsid() == clsid.online_offline_group_s and object or nil
+end
+
+local function level_id(object)
+	return game_graph():vertex(object.m_game_vertex_id):level_id()
+end
+
+local function this_level(object)
+	return alife():level_name(level_id(object)) == level.name()
+end
+
+local function remote_holder(squad)
+	local holder = coop.levels.holder_of(squad.id)
+	if holder then return holder end
+	for member in squad:squad_members() do
+		holder = coop.levels.holder_of(member.id)
+		if holder then return holder end
+	end
+end
+
+-- Copy plain bounded data. Send and save the same stock-shaped time and period in host numbering.
+local function contract_row(row, to_host)
+	if type(row) ~= "table" or type(row.join_time) ~= "table" or type(row.members_id) ~= "table"
+		or not PERIODS[row.guard_period] or (row.ended ~= nil and type(row.ended) ~= "boolean")
+		or (row.settled ~= nil and type(row.settled) ~= "boolean") or (row.settled and not row.ended) then return nil end
+	local time, members, unique = {}, {}, {}
+	for index, key in ipairs(CLOCK_FIELDS) do
+		local value = row.join_time[key]
+		if not integer(value, CLOCK_MIN[index], CLOCK_MAX[index]) then return nil end
+		time[key] = value
+	end
+	local count = #row.members_id
+	if count < 1 or count > MAX_MEMBERS then return nil end
+	for index = 1, count do
+		local id = row.members_id[index]
+		if not entity_id(id) then return nil end
+		if to_host then id = coop_mods_core.hid(id) end
+		if not entity_id(id) or unique[id] then return nil end
+		members[index], unique[id] = id, true
+	end
+	return { members_id = members, join_time = time, guard_period = row.guard_period,
+		ended = row.ended == true, settled = row.settled == true }
+end
+
+local function compare_hire(a, b)
+	for _, key in ipairs(CLOCK_FIELDS) do
+		local delta = a.join_time[key] - b.join_time[key]
+		if delta ~= 0 then return delta end
+	end
+	local function stage(row) return row.settled and 2 or (row.ended and 1 or 0) end
+	return stage(a) - stage(b)
+end
+
+local function merge(id, row)
+	local old = contracts[id]
+	if not old or compare_hire(row, old) > 0 then contracts[id] = row end
+end
+
+local function has_member(squad, row)
+	local roster = {}
+	for member in squad:squad_members() do
+		local id = coop_mods_core.hid(member.id)
+		if entity_id(id) then roster[id] = true end
+	end
+	for _, id in ipairs(row.members_id) do if roster[id] then return true end end
+	return false
+end
+
+local function capture(squad)
+	local id = squad.id
+	local raw = paid and paid.paid_companions[id]
+	if not raw or seen[id] == raw then return end
+	local hid = coop_mods_core.hid(id)
+	local row = entity_id(hid) and contract_row(raw, true)
+	if not row or not has_member(squad, row) then return end
+	seen[id] = raw
+	merge(hid, row)
+	if coop_mode.leads_here() then reports[hid] = contracts[hid] end
+end
+
+local function capture_hires()
+	for id in pairs(paid.paid_companions) do
+		local squad = squad_at(id)
+		if squad and (coop_mode.decides_world() or (this_level(squad) and companions.companion_squads[id])) then
+			capture(squad)
+		end
+	end
+end
+
+local function end_contract(id, row, settled)
+	local ended = { members_id = row.members_id, join_time = row.join_time, guard_period = row.guard_period,
+		ended = true, settled = settled }
+	contracts[id] = ended
+	if settled and coop_mode.leads_here() then reports[id] = ended end
+end
+
+local function apply_end(id, squad, row)
+	local marked = companions.companion_squads[squad.id] ~= nil
+	for member in squad:squad_members() do
+		local object = alife_object(member.id)
+		if object and se_load_var(member.id, object:name(), "companion") then marked = true end
+	end
+	if not marked then return end -- adoption/binders can still be pending
+	companions.dismiss_special_squad(squad)
+	paid.paid_companions[squad.id] = nil
+	end_contract(id, row, true)
+end
+
+local function dismissed(squad)
+	if not squad or not (coop_mode.decides_world() or (coop_mode.leads_here() and this_level(squad))) then return end
+	local id = coop_mods_core.hid(squad.id)
+	local row = contracts[id]
+	if row and not row.settled and has_member(squad, row) then
+		paid.paid_companions[squad.id] = nil
+		end_contract(id, row, true)
+	end
+end
+
+local function update_contracts()
+	capture_hires()
+	local world = coop_mode.decides_world()
+	local now = world and game.get_game_time()
+	for id, row in pairs(contracts) do
+		local squad = squad_at(coop_mods_core.lid(id))
+		if squad and has_member(squad, row) then
+			if world and not row.ended then
+				local blacklisted = xr_effects.blacklisted_maps
+				local danger = blacklisted and blacklisted[alife():level_name(level_id(squad))]
+				if danger or (now and now:diffSec(utils_data.CTime_from_table(row.join_time)) > row.guard_period) then
+					end_contract(id, row, false)
+					row = contracts[id]
+				end
+			end
+			if row.ended and not row.settled and ((world and not remote_holder(squad)) or (not world and this_level(squad))) then
+				apply_end(id, squad, row)
+			end
+		elseif world then
+			contracts[id] = nil
+		end
+	end
+end
+
+local function up_get()
+	capture_hires()
+	return next(reports) and reports or nil
+end
+
+local function up_set(rows, source_level)
+	if type(rows) ~= "table" then return end
+	for id, incoming in pairs(rows) do
+		local row = entity_id(id) and contract_row(incoming)
+		local squad = row and squad_at(coop_mods_core.lid(id))
+		local holder = squad and remote_holder(squad)
+		local ok = holder ~= nil and integer(source_level, 0, 65534) and level_id(squad) == source_level and has_member(squad, row)
+		if coop_trust.pass("g16_paid_contract_report", ok, "invalid paid contract report for squad %s", tostring(id)) and ok then
+			merge(id, row)
+		end
+	end
+end
+
+local function down_get() return contracts end
+
+local function down_set(rows)
+	if type(rows) ~= "table" then return end
+	for id, incoming in pairs(rows) do
+		local row = entity_id(id) and contract_row(incoming)
+		if row then
+			merge(id, row)
+			local sent = reports[id]
+			if sent and compare_hire(row, sent) >= 0 then reports[id] = nil end
+		end
+	end
+end
+
+local function load_paid(data)
+	contracts, reports, seen = {}, {}, {}
+	if type(data[PAID_KEY]) ~= "table" then return end
+	for id, row in pairs(data[PAID_KEY]) do
+		if entity_id(id) then contracts[id] = contract_row(row) end
+	end
+end
+
+local function save_paid(data)
+	capture_hires()
+	local saved = {}
+	for id, row in pairs(contracts) do saved[id] = row end
+	data[PAID_KEY] = saved
+end
+
+-- Extend the brain's public serialized result, keeping all its own fields and the ordinary NPC path.
+local function read_mind()
+	local bytes = coop.levels.logic_bytes()
+	if #bytes == 0 then return nil end
+	local ok, mind = pcall(marshal.decode, bytes)
+	return ok and type(mind) == "table" and mind or nil
+end
+
+local function mind_out(id)
+	if not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
+	local squad = squad_at(id)
+	if not squad then return end
+	capture(squad) -- a hire can leave before the next shared-table update
+	local row = contracts[coop_mods_core.hid(id)]
+	if not row or not has_member(squad, row) then return end
+	local mind = read_mind()
+	if not mind then return end
+	mind[MIND_KEY] = row
+	local ok, bytes = pcall(marshal.encode, mind)
+	if ok and #bytes <= MAX_LOGIC_BYTES then coop.levels.logic_put(bytes) end
+end
+
+local function mind_in(id)
+	if not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
+	local squad = squad_at(id)
+	local mind = squad and read_mind()
+	local row = mind and contract_row(mind[MIND_KEY])
+	local hid = row and coop_mods_core.hid(id)
+	if entity_id(hid) and has_member(squad, row) then merge(hid, row) end
+end
+
+local function choose_transition()
+	local saved = {}
+	randomizer.save_state(saved)
+	if not (saved.agr_ug_transitions and saved.agr_ug_transitions.level_changer_list) then
+		if not (db.actor and alife_storage_manager.get_state().opened_routes) then return end
+		randomizer.randomize_transitions()
+		randomizer.save_state(saved)
+	end
+	local entrances = saved.agr_ug_transitions and saved.agr_ug_transitions.level_changer_list
+	if type(entrances) ~= "table" then return end
+	for i = 2, 5 do if entrances[ENTRANCE .. i] == false then choice = i; return end end
+end
+
+local function transition_get() return choice and { index = choice } or nil end
+local function transition_set(word)
+	if choice or type(word) ~= "table" or not integer(word.index, 2, 5) then return end
+	choice, restrictions, released, next_scan = word.index, {}, nil, 0
+	for i = 2, 6 do
+		if i ~= choice then
+			restrictions[ENTRANCE .. i] = false
+			restrictions[RESTRICTOR .. i] = false
+		end
+	end
+end
+
+local function find_entrances(sim)
+	if time_global() < next_scan then return end
+	for _, id in pairs(restrictions) do
+		if not id then
+			next_scan = time_global() + 5000
+			sim:iterate_objects(function(object)
+				local name = object:name()
+				if restrictions[name] == false and this_level(object) then restrictions[name] = object.id end
+				return false
+			end)
+			return
+		end
+	end
+end
+
+local function apply_transitions()
+	local map = level.name()
+	if map == SURFACE and next(restrictions) then
+		local sim = alife()
+		find_entrances(sim)
+		for name, id in pairs(restrictions) do
+			local object = id and alife_object(id)
+			if id and (not object or object:name() ~= name or not this_level(object)) then
+				restrictions[name] = false
+			elseif object and object.online then
+				sim:set_switch_online(id, false)
+				sim:set_switch_offline(id, true)
+				object:switch_offline()
+				if not object.online then restrictions[name] = nil end
+			end
+		end
+	elseif map == UNDERGROUND and released ~= true then
+		local manager = coop_mods_core.mod("safe_release_manager")
+		if not (manager and manager.release and manager.execute_destroy_callback) then return end
+		if not released then
+			if time_global() < next_scan then return end
+			next_scan = time_global() + 5000
+			local id
+			alife():iterate_objects(function(object)
+				if object:name() ~= ANOMALY or not this_level(object) then return false end
+				id = object.id
+				return true
+			end)
+			if not id then return end
+			manager.release(alife_object(id))
+			released = id
+		end
+		-- The stock queue's scheduled callback is routed to the world process. Drain the local queue here.
+		manager.execute_destroy_callback()
+		if not alife_object(released) then released = true end
+	end
+end
+
+local function update()
+	if not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
+	local now = time_global()
+	if now < (next_update or 0) or not alife() then return end
+	next_update = now + 1000
+	if paid and companions then step("paid contracts", update_contracts) end
+	if not randomizer then return end
+	if coop_mode.decides_world() then
+		if not choice then step("choose transition", choose_transition) end
+	elseif coop_mode.leads_here() and choice then
+		step("apply transitions", apply_transitions)
+	end
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		if installed or not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
+		installed = true
+		local function detach(callback, fn)
+			if type(fn) == "function" then UnregisterScriptCallback(callback, fn) end
+		end
+		local function retire(module, label, detach_callbacks)
+			local wrapped, original = coop_mods_core.wrap(module, "on_game_start", label, function(original)
+				return function(...)
+					if not (coop_mode.decides_world() or coop_mode.leads_here()) then return original(...) end
+					original(...)
+					detach_callbacks(original)
+				end
+			end)
+			if wrapped then detach_callbacks(original) end
+		end
+		step("paid contract hooks", function()
+			paid = coop_mods_core.mod("txr_paid_companions")
+			companions = coop_mods_core.mod("axr_companions")
+			if not (paid and companions) then return end
+			retire(paid, TAG .. ".paid_start", function(start)
+				detach("on_game_load", coop_mods_core.upvalue(start, "on_game_load") or coop_mods_core.find_local(paid, "on_game_load"))
+				detach("on_level_changing", coop_mods_core.upvalue(start, "on_level_changing") or coop_mods_core.find_local(paid, "on_level_changing"))
+				RemoveTimeEvent("cycle", "paid_companions")
+			end)
+			coop_mods_core.wrap(companions, "dismiss_special_squad", TAG .. ".dismiss", function(original)
+				return function(squad, ...)
+					if squad and (coop_mode.decides_world() or coop_mode.leads_here()) then
+						capture(squad)
+						original(squad, ...)
+						if not companions.companion_squads[squad.id] then dismissed(squad) end
+						return
+					end
+					return original(squad, ...)
+				end
+			end)
+			coop_mods_core.wrap(companions, "remove_from_actor_squad", TAG .. ".remove", function(original)
+				return function(npc, ...)
+					if not (coop_mode.decides_world() or coop_mode.leads_here()) then return original(npc, ...) end
+					local squad = get_object_squad(npc)
+					if squad then capture(squad) end
+					original(npc, ...)
+					if squad and not companions.companion_squads[squad.id] then dismissed(squad) end
+				end
+			end)
+			local brain = coop_srv_levels_brain
+			if brain then
+				coop_mods_core.wrap(brain, "logic_of", TAG .. ".logic_of", function(original)
+					return function(id)
+						original(id)
+						step("pack squad contract", function() mind_out(id) end)
+					end
+				end)
+				coop_mods_core.wrap(brain, "logic_in", TAG .. ".logic_in", function(original)
+					return function(id)
+						original(id)
+						step("unpack squad contract", function() mind_in(id) end)
+					end
+				end)
+			end
+			coop_srv_levels_share.up(PAID_KEY, up_get, up_set, 1000)
+			coop_srv_levels_share.down(PAID_KEY, down_get, down_set, 1000)
+			if coop_mode.decides_world() then
+				RegisterScriptCallback("save_state", save_paid)
+				RegisterScriptCallback("load_state", load_paid)
+				local data = alife_storage_manager.get_state()
+				if type(data) == "table" then load_paid(data) end
+			end
+		end)
+		step("transition hooks", function()
+			randomizer = coop_mods_core.mod("agroprom_underground_transition_randomizer")
+			if not randomizer then return end
+			retire(randomizer, TAG .. ".transition_start", function()
+				detach("actor_on_first_update", randomizer.disable_transitions)
+			end)
+			coop_srv_levels_share.down(TRANSITIONS, transition_get, transition_set, 1000)
+			if coop_mode.decides_world() then
+				RegisterScriptCallback("load_state", function() choice = nil end)
+			end
+		end)
+		RegisterScriptCallback("actor_on_update", update)
+	end)
+end
