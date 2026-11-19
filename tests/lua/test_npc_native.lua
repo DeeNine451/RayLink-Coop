@@ -1,8 +1,13 @@
 -- Native mod actions remain the source of animation/movement behaviour; RayLink supplies player identity.
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 reset_world()
 local H = machine("host", 0, { [0] = 0, [1] = 500 })
 local E = H.env
+if not H.env.coop_mode then
+	modes.live(load_script(H, "coop_mode"), function(name) return load_script(H, name) end)
+end
+if not H.env.coop_trust then load_script(H, "coop_trust") end
 E.coop_npc_players = load_script(H, "coop_npc_players")
 local proxy = H.add(make_obj(500, 10, 0, 0))
 local npc = H.add(make_obj(200, 11, 0, 0))
@@ -56,6 +61,10 @@ check(calls == before + 1 and seen == 0, "outside host co-op original action run
 reset_world()
 local C = machine("client", 1, { [0] = 500, [1] = 0 })
 local CE = C.env
+if not C.env.coop_mode then
+	modes.live(load_script(C, "coop_mode"), function(name) return load_script(C, name) end)
+end
+if not C.env.coop_trust then load_script(C, "coop_trust") end
 CE.coop_npc_players = load_script(C, "coop_npc_players")
 local shown, text = nil, nil
 local window = { SetAutoDelete = function() end, TextControl = function(self) return self end,
@@ -91,6 +100,10 @@ check(shown == nil, "disguise bar remains hidden while talking")
 reset_world()
 local R = machine("client", 1, { [0] = 500, [1] = 0 })
 local RE = R.env
+if not R.env.coop_mode then
+	modes.live(load_script(R, "coop_mode"), function(name) return load_script(R, name) end)
+end
+if not R.env.coop_trust then load_script(R, "coop_trust") end
 RE.coop_npc_players = load_script(R, "coop_npc_players")
 local native_calls, local_sounds, effects = {}, 0, 0
 RE.coop.instrument = function(...)

@@ -4,10 +4,11 @@
 -- did not. A build 56 request without the id goes through as before (coop_trust "mine_item_id"). Not shipped.
 -- Run: tools\test_lua.cmd npc_mine_trust
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local H, C, proxy, WH, WC
 
-local function setup(modes)
+local function setup(trust_modes)
 	reset_world()
 	H = machine("host", 0, { [0] = 0, [1] = 500 })
 	C = machine("client", 1, { [0] = 500, [1] = 0 })
@@ -15,9 +16,10 @@ local function setup(modes)
 	C.to_host, C.to_local = swap, swap
 	for _, M in ipairs({ H, C }) do
 		local E = M.env
+		modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
 		E.coop_npc_players = load_script(M, "coop_npc_players")
 		E.coop_trust = load_script(M, "coop_trust")
-		E.coop_trust.reset_for_test(modes or { default = "log" })
+		E.coop_trust.reset_for_test(trust_modes or { default = "log" })
 		E.txr_mines = { plant_bomb = function() M.stock_plant = true end, _mines = {}, trigger_mine = function() end }
 		E.actor_effects = { play_item_fx = function(f) M.item_fx = f end }
 		M.released = {}

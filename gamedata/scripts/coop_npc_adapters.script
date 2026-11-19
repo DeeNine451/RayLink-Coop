@@ -162,7 +162,7 @@ local function trader(C, P, active)
 	local timed = ti and ti.timed_update
 	if type(timed) == "function" then
 		ti.timed_update = function(npc, ...)
-			if P.is_map_server() and npc and not P.in_identity() then
+			if coop_mode.leads_here() and not coop_mode.decides_world() and npc and not P.in_identity() then
 				local near = P.nearest(npc)
 				if near then return P.with_identity(near, timed, npc, ...) end
 			end
@@ -181,7 +181,7 @@ local function trade_scheme(C, P)
 		return function(self, ...)
 			-- A remote deal has no host ActorMenu_on_trade_started to seed this
 			-- counter. Preserve existing totals and the stock reaction/UI flags.
-			if P.is_host() and self.st.all_money == nil then self.st.all_money = 0 end
+			if (coop_mode.decides_world() or coop_mode.leads_here()) and self.st.all_money == nil then self.st.all_money = 0 end
 			return old(self, ...)
 		end
 	end)

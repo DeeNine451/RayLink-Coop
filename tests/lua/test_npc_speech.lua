@@ -3,6 +3,7 @@
 -- Lua replay keeps only what the engine does not carry (the stock PDA copy of a far voice, the subtitle, the theme's state).
 -- Run: tools\test_lua.cmd npc_speech
 dofile("tests/lua/support/harness_world.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- A copy of the stock theme classes' play paths that matter here (sound_theme.script npc_sound:play/select_next_sound,
 -- object_sound:play/select_next_sound): what plays where, which variant.
@@ -113,6 +114,12 @@ end
 
 local function stage()
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	stock(H, 7)
 	stock(C, 12345)
 	load_script(H, "coop_npc_effects").on_game_start()
@@ -230,11 +237,17 @@ end
 print("== Server: looped sounds use their map server's list")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	H.env.coop.is_dedicated = function() return true end
 	H.env.coop.players = function() return { { id = 1, avatar_id = 500, level = 2 } } end
 	C.env.coop.players = function() return { { id = 1, avatar_id = 0, is_self = true, level = 2 } } end
 	C.env.coop.server_link = function() return { id = 0, plays = false } end
-	C.env.coop_mode = { group_travels = function() return false end }
+	C.env.coop.levels = { split = function() return true end }
 	stock(C, 12345)
 	online(C, 306, 20, "stalker")
 	online(C, 307, 20, "stalker")

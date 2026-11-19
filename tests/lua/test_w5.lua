@@ -24,7 +24,10 @@ print(string.format("== all groups: %d coop scripts, %d stock shapes, w5 api %s,
 	(function() local n = 0 for _ in pairs(STOCK) do n = n + 1 end return n end)(), tostring(W5_API),
 	MODS and table.concat(sorted_keys(MODS), ",") or "none"))
 
-for _, M in ipairs(ALL) do start_game(M) end
+for _, M in ipairs(ALL) do
+	load_script(M, "coop_trust")
+	start_game(M)
+end
 for _, M in ipairs(ALL) do first_update(M) end
 
 -------------------------------------------------------------------------------

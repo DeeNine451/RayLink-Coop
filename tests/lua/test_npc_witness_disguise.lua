@@ -17,8 +17,17 @@ local function boot(set, peer, occupant)
 	local E = M.env
 	E.coop.is_map_server = function() return set == "srv_map" end
 	E.coop.is_dedicated = function() return set == "srv_world" end
-	local answers = occupant and { where = function(p) return p == occupant and "here" or "away" end }
-	modes.install(load_script(M, "coop_mode"), set, answers)
+	local players = E.coop.players
+	E.coop.players = function()
+		local rows = players()
+		for _, row in ipairs(rows) do
+			row.level = row.id
+			row.elsewhere = occupant ~= nil and row.id ~= occupant
+		end
+		return rows
+	end
+	modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	load_script(M, "coop_trust")
 	load_script(M, "coop_npc_players")
 	load_script(M, "coop_mods_core")
 	E.getFS = function() return { exist = function() return false end } end

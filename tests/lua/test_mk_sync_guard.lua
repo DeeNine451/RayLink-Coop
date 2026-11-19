@@ -1,7 +1,7 @@
 -- Split levels, docs\SPLIT_LEVELS.md 7a: the form of an error that came back several times. A script passes "I lead this level" (a
 -- map server, P.is_host()), the engine says no: on a map server coop.sync.set of the session or the world is refused, and
 -- coop.sync.broadcast reaches only the players of its level. So every such call in the scripts has to say what it does on a map
--- server: its function names the role (is_map_server, is_world_server), or a comment "-- Mk:" in it says why it is right there. A
+-- server: its function names the role, branches on the map authority from the facade, or has a "-- Mk:" explanation. A
 -- new call without one fails here. Run: tools\test_lua.cmd mk_sync_guard
 local PASSES, FAILS = 0, 0
 local function check(cond, what)
@@ -71,8 +71,10 @@ local function sites_of(src)
 			local first = code:sub(at):match("^%s*([^,]+)") or ""
 			if names[receiver] and (method == "broadcast" or (method == "set" and is_world_scope(src, first))) then
 				local text = body(fn_at)
+				local prior = table.concat(lines, "\n", fn_at, i - 1)
+				local facade_guard = prior:match("\n%s*if coop_mode%.leads_here%(%) and not coop_mode%.decides_world%(%) then return ")
 				local guarded = text:find("is_map_server", 1, true) ~= nil or text:find("is_world_server", 1, true) ~= nil or
-					text:find("-- Mk:", 1, true) ~= nil
+					text:find("-- Mk:", 1, true) ~= nil or facade_guard ~= nil
 				sites[#sites + 1] = { line = i, what = method, fn = fn, guarded = guarded }
 			end
 		end
@@ -125,10 +127,15 @@ local function cast(sync)
 	return sync.broadcast("y", {})
 end
 local function mine(sync) return sync.set("player", "k", 1) end
+local function loops(sync, list)
+	if coop_mode.leads_here() and not coop_mode.decides_world() then return tell_map(list) end
+	return sync.set(SCOPE, KEY, list)
+end
 ]]
 	sites = sites_of(good)
-	check(#sites == 3, "a scope in a constant counts, a player's scope does not (" .. #sites .. ")")
+	check(#sites == 4, "a scope in a constant counts, a player's scope does not (" .. #sites .. ")")
 	check(sites[1].guarded and sites[2].guarded and sites[3].guarded, "a branch or a comment guards a call")
+	check(sites[4].guarded, "a facade branch that returns before the world write guards it")
 end
 
 print("== the scripts")

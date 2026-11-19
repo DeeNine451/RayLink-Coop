@@ -107,6 +107,7 @@ local function stand(opts)
 	B.to_host, B.to_local = swap(0, 501), swap(0, 501)
 	local W = { H = H, A = A, B = B, squads = { [300] = new_squad(300, 201), [310] = new_squad(310, 211) } }
 	for _, M in ipairs({ H, A, B }) do
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
 		stock(M, W.squads)
 		if opts and opts.env then opts.env(M) end
@@ -436,6 +437,7 @@ W.refresh()
 local fresh = load_script(A, "coop_npc_companions")
 A.handlers = {}
 A.callbacks = {}
+if not A.env.coop_trust then load_script(A, "coop_trust") end
 A.env.coop_npc_players = load_script(A, "coop_npc_players")
 fresh.on_game_start()
 W.comp_a:give_info_portion("npcx_is_companion")

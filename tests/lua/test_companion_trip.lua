@@ -5,6 +5,7 @@
 -- l02_garbage (bridge 0x101) and a client on it. Squads are luabind stand-ins (tests\lua\support\luabind_like.lua).
 -- Run: tools\test_lua.cmd companion_trip
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 dofile("tests/lua/support/luabind_like.lua")
 
 local NAMES = { [1] = "l01_escape", [2] = "l02_garbage" }
@@ -133,6 +134,10 @@ local function stand(opts)
 	B.to_host, B.to_local = swap(0, 501), swap(0, 501)
 	local W = { H = H, A = A, B = B, squads = {}, raw = {} }
 	for _, M in ipairs({ H, A, B }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
 		stock(M, W)
 		lv_env(M)
@@ -337,6 +342,10 @@ do
 	reset_world()
 	local S = machine("single", 0, { [0] = 0 })
 	local W = { squads = {} }
+	if not S.env.coop_mode then
+		modes.live(load_script(S, "coop_mode"), function(name) return load_script(S, name) end)
+	end
+	if not S.env.coop_trust then load_script(S, "coop_trust") end
 	S.env.coop_npc_players = load_script(S, "coop_npc_players")
 	stock(S, W)
 	lv_env(S)
@@ -361,6 +370,10 @@ do
 	Mk.env.coop.is_mirror = function() return false end
 	Mk.env.level.name = function() return NAMES[2] end
 	for _, M in ipairs({ H, Mk, B }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
 		stock(M, W)
 		lv_env(M)

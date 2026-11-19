@@ -6,6 +6,7 @@
 -- The module learns which of the two the running game uses from the host's own NPCs (soft rules "ignored" / "stock").
 -- Run: tools\test_lua.cmd npc_talk
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 local REF_STOCK = "../anomaly-ref/unpacked/scripts/xr_meet.script"
 local FIXTURE_GAMMA = "tests/lua/fixtures/gamma_usability.lua"
 
@@ -17,6 +18,10 @@ local function pair()
 	local function swap(id) if id == 0 then return 500 elseif id == 500 then return 0 end return id end
 	C.to_host, C.to_local = swap, swap
 	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
 	end
 	local proxy = H.add(make_obj(500, 10, 0, 0, { _name = "proxy1", _comm = "actor_csky" }))

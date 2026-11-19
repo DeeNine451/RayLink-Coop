@@ -91,7 +91,7 @@ local function tss() return game.get_game_time():diffSec(level.get_start_time())
 local function explode_as(id, by)
 	local api = rawget(_G, "coop")
 	local f = api and api.explode_as
-	if type(f) ~= "function" or type(by) ~= "number" or not P.is_host() then return false end
+	if type(f) ~= "function" or type(by) ~= "number" or not (coop_mode.decides_world() or coop_mode.leads_here()) then return false end
 	if f(id, by) ~= true then return false end
 	stats.as_planter = stats.as_planter + 1
 	return true
@@ -261,7 +261,9 @@ end
 -- Host: the engine says player `peer` opened container `id` (a box or a dead body: coop_on_container_opened).
 local function on_container_opened(peer, id)
 	peer, id = tonumber(peer), tonumber(id)
-	if peer and id and P.is_host() then mine_item.opened[peer] = { id = id, at = time_global() } end
+	if peer and id and (coop_mode.decides_world() or coop_mode.leads_here()) then
+		mine_item.opened[peer] = { id = id, at = time_global() }
+	end
 end
 
 -- coop_trust.pass; without that script (an older install) the request goes through as before.
@@ -481,7 +483,7 @@ end
 
 -- The host rolls a strike around every player (stock: around db.actor), each on its own timer.
 local function pulse_update()
-	if not (P.is_host() and P.active()) then return orig.pulse() end
+	if not (P.active() and (coop_mode.decides_world() or coop_mode.leads_here())) then return orig.pulse() end
 	if pa.light and pa.light.enabled then pa.light:update() end
 	if bLevelUnderground then return end
 	local tg = time_global()

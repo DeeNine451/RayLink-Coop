@@ -27,8 +27,6 @@ local installed = false
 
 local function sync() return rawget(_G, "coop") and coop.sync end
 
-local function map_server() return coop.is_map_server ~= nil and coop.is_map_server() == true end
-
 local function publish(npc)
 	local id = npc and npc:id()
 	local se = id and alife_object(id)
@@ -36,37 +34,46 @@ local function publish(npc)
 	if not state then return end
 	local t = {}
 	for k in pairs(HINT) do t[k] = state[k] end
-	if map_server() then
+	if not coop_mode.decides_world() then
 		t.id = id
-		coop.send_event(EV_UP, coop_main.encode(t), 0)
+		coop_mode.publish(EV_UP, t)
 	else
 		sync().set("object:" .. id, KEY, t)
 	end
 end
 
--- World server: the numbers of an NPC of a map server's level.
+local function bounded_integer(value, lo, hi)
+	return value ~= nil and value >= lo and value <= hi and value % 1 == 0
+end
+
 local function on_up(payload, from)
-	if not (coop.is_host() and type(from) == "number" and from >= 0x100) then return end
+	local sender = coop_mode.decides_world() and coop_mode.from_level(from)
+	if not coop_trust.pass("npc_stats_sender", sender, "NPC stats from unregistered authority %s", tostring(from))
+		or not sender then return end
 	local t = coop_main.decode(payload)
 	local id = tonumber(t.id)
-	local se = id and alife_object(id)
-	local state = se and alife_storage_manager.get_se_obj_state(se, true)
-	if not state then return end
 	local v = {}
+	local valid = bounded_integer(id, 1, 0xfffe)
 	for k in pairs(HINT) do
 		v[k] = tonumber(t[k])
-		state[k] = v[k]
+		valid = valid and (t[k] == nil or bounded_integer(v[k], 0, 0x7fffffff))
 	end
+	if not coop_trust.pass("npc_stats_values", valid, "invalid NPC stats for object %s from %s", tostring(id), tostring(from))
+		or not valid then return end
+	local se = alife_object(id)
+	local state = se and alife_storage_manager.get_se_obj_state(se, true)
+	if not state then return end
+	for k in pairs(HINT) do state[k] = v[k] end
 	sync().set("object:" .. id, KEY, v)
 end
 
-local function install_host()
+local function install_counter()
 	local orig = game_statistics and game_statistics.increment_npc_statistic
 	if not orig or installed then return end
 	installed = true
 	game_statistics.increment_npc_statistic = function(npc, value, ...)
 		orig(npc, value, ...)
-		if HINT[value] and coop.is_active() and (coop.is_host() or map_server()) then
+		if HINT[value] and coop.is_active() and (coop_mode.decides_world() or coop_mode.leads_here()) then
 			local ok, err = pcall(publish, npc)
 			if not ok then printf("! coop_npc_stats: %s", tostring(err)) end
 		end
@@ -74,6 +81,7 @@ local function install_host()
 end
 
 local function on_change(_, value, _, _, id)
+	if coop_mode.decides_world() then return end
 	local se = id and alife_object(id)
 	local state = se and value and alife_storage_manager.get_se_obj_state(se, true)
 	if not state then return end
@@ -82,10 +90,8 @@ end
 
 function on_game_start()
 	if not sync() then return end
-	if coop.is_client() then coop.sync.on_change("object", KEY, on_change) end
-	if not coop.is_client() or map_server() then
-		install_host() -- also before a session starts: the wrapper asks for one each time
-		local cm = rawget(_G, "coop_main") or coop_main
-		if cm then cm.add_event_handler(EV_UP, on_up) end
-	end
+	coop.sync.on_change("object", KEY, on_change)
+	if not coop_mode.is_player_mirror() then install_counter() end
+	local cm = rawget(_G, "coop_main") or coop_main
+	if cm then cm.add_event_handler(EV_UP, on_up) end
 end

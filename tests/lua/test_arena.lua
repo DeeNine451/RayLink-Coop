@@ -288,6 +288,7 @@ local function env(M, level_name)
 	-- audience_of: the players a restrictor's condlist is for (M.logic_aud: who walked into bar_arena_waiter; bar_arena_spam
 	-- names no player, so everybody)
 	E.coop_npc_logic = { add_audience_rule = function(f) M.rule = f end, audience_of = function() return M.logic_aud end }
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	E.coop_npc_players = load_script(M, "coop_npc_players")
 	local facade = load_script(M, "coop_mode")
 	modes.live(facade, function(name) return load_script(M, name) end)

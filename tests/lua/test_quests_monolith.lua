@@ -30,7 +30,8 @@ local function setup(role, peer, answer, map, map_by_peer, players)
 	m.map, m.view, m.players, m.tips, m.spawns = map, map, {}, 0, {}
 	m.active = answer ~= "none"
 	for _, id in ipairs(players) do
-		m.players[#m.players + 1] = { id = id, is_self = id == peer, avatar_id = id == 0 and 0 or 100 + id }
+		m.players[#m.players + 1] = { id = id, is_self = id == peer, avatar_id = id == 0 and 0 or 100 + id,
+			level = map_by_peer and map_by_peer[id] }
 		if id ~= 0 and id ~= peer then m.new_obj(100 + id, "coop_player_avatar") end
 	end
 	if map_by_peer and map_by_peer[1] == 2 then

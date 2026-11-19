@@ -1,6 +1,7 @@
 -- World parity W4f, sound M1, M7 (coop_npc_effects.script): particles of logic scenes, looped sounds that began before a
 -- client could hear them, sounds that carry further than the voice radius, a puppet's voice table. Run: tools\test_lua.cmd world_voices
 dofile("tests/lua/support/harness_world.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function stock(M)
 	local E = M.env
@@ -57,6 +58,12 @@ end
 
 local function stage()
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	stock(H)
 	stock(C)
 	local FH, FC = load_script(H, "coop_npc_effects"), load_script(C, "coop_npc_effects")

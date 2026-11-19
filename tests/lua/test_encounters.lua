@@ -30,6 +30,10 @@ local function make_world(role, peer)
 	if not peer then reset_world() end -- a second machine of the same world comes with its peer
 	local M = machine(role or "host", peer or (role == "client" and 1 or 0), peer and { [1] = 500 } or { [0] = 0, [1] = 500 })
 	local E = M.env
+	if not M.env.coop_mode then
+		modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	end
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	E.coop_npc_players = load_script(M, "coop_npc_players")
 	E.coop_mods_core = load_script(M, "coop_mods_core")
 	E.MODE = "checkpoint"

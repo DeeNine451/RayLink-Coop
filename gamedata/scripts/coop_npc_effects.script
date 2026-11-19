@@ -234,7 +234,7 @@ local function host_loops_tick()
 	end
 	table.sort(list)
 	local sig = table.concat(list, ",")
-	if P.is_map_server() then return tell_loops(sync, list, sig) end
+	if coop_mode.leads_here() and not coop_mode.decides_world() then return tell_loops(sync, list, sig) end
 	if sig ~= loops_sent and sync.set("session", KEY_LOOPS, list) == true then loops_sent = sig end
 end
 
@@ -255,16 +255,10 @@ local function client_loop_start(id, theme)
 	client_loops[key] = { id, theme }
 end
 
--- A co-op client takes the host's session list. Other clients get the list from their map server.
-local function follows_host()
-	local mode = rawget(_G, "coop_mode") or coop_mode
-	return mode == nil or mode.group_travels()
-end
-
 local function client_loops_tick()
 	local sync = api and api.sync
 	local list = level_loops
-	if follows_host() then list = sync and sync.get("session", KEY_LOOPS) end
+	if coop_mode.group_travels() then list = sync and sync.get("session", KEY_LOOPS) end
 	if type(list) ~= "table" then return end
 	local want = {}
 	for _, entry in ipairs(list) do
@@ -623,7 +617,7 @@ local next_tick, next_loops = 0, 0
 local function loops_tick(now)
 	if now < next_loops then return end
 	next_loops = now + LOOPS_TICK_MS
-	if P.is_host() then
+	if coop_mode.decides_world() or coop_mode.leads_here() then
 		host_loops_tick()
 	elseif P.client_live() then
 		client_loops_tick()
@@ -641,7 +635,7 @@ local function actor_on_update()
 	if not ok then report("loops", err) end
 	-- host: a save made during the hold comes back with anabiotic_in_process set and no hold in this Lua
 	-- state; the poll clears it after the emission (or 20 s), or the host would be immune for good (W5)
-	if not ana.on and P.is_world_server() and has_alife_info("anabiotic_in_process") then
+	if not ana.on and coop_mode.decides_world() and has_alife_info("anabiotic_in_process") then
 		ana.on, ana.t0, ana.seen, ana.next_check = true, now, false, 0
 	end
 	ana_poll(now)

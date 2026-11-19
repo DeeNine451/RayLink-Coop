@@ -1,6 +1,7 @@
 -- World parity sound H1, M3 (coop_world_fight.script): the fighter list of each player, the hit handlers of mods on the
 -- attacker's machine; routing R2, R6, R8 (coop_world_compat.script). Run: tools\test_lua.cmd world_fight
 dofile("tests/lua/support/harness_world.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function stock(M)
 	local E = M.env
@@ -18,6 +19,12 @@ end
 
 local function stage()
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	stock(H)
 	stock(C)
 	local fighting = {}
@@ -109,6 +116,12 @@ end
 print("== R2, R6, R8: coop_world_compat")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	stock(H)
 	stock(C)
 	C.env.pda = { calculate_rankings = function() C.ranks = (C.ranks or 0) + 1 end }

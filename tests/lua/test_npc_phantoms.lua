@@ -1,6 +1,7 @@
 -- Enemy audit F10 (2026-10-31): phantoms for every player. The fakes keep the shape of phantom_manager.script and
 -- xcv_phantoms.script: a private callback registered by value, module globals, file locals reassigned at load_state.
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function boot(role, peer)
 	reset_world()
@@ -19,6 +20,10 @@ local function boot(role, peer)
 		return false
 	end
 	E.xr_combat_ignore = { fighting_with_actor_npcs = {} }
+	if not M.env.coop_mode then
+		modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	end
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	load_script(M, "coop_npc_players")
 	load_script(M, "coop_mods_core")
 	return M, E, proxy, other
@@ -248,6 +253,8 @@ do
 	local M, E, proxy = boot()
 	local a = psy(E)
 	E.coop_economy_mdata = { player_value = function() return { actor_psy_health = 0.2 } end }
+	E.coop.players = function() return { { id = 0, is_self = true, avatar_id = 0 } } end
+	E.coop.peer_of_avatar = function() return nil end
 	install(M, false)
 	check(math.abs(E.coop_npc_players.with_identity(proxy, a.get_ppe_intensity) - 0.05) < 1e-6, "no clients: stock psy")
 end

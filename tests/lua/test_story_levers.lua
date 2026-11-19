@@ -3,6 +3,7 @@
 -- the Red Forest bridge, Heart of Bureaucracy.
 -- Run: tools\test_lua.cmd story_levers
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- A section that dies is one failed check, the others still run.
 local function section(title, f)
@@ -157,7 +158,12 @@ end
 local function start_logic(H, C, D)
 	local L = {}
 	for i, M in ipairs({ H, C, D }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
+		load_script(M, "coop_mods_core")
 		L[i] = load_script(M, "coop_npc_logic")
 		L[i].on_game_start()
 		M.fire("actor_on_update")

@@ -65,8 +65,7 @@ local function boot(mode, peer, map)
 	e.size_table = function(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 	e.game_relations = { is_factions_enemies = function(a, b) return a == "army" and b == "stalker" end }
 	e.news_manager = { send_tip = function() M.tips = (M.tips or 0) + 1 end }
-	load_script(M, "coop_mode")
-	modes.install(e.coop_mode, mode)
+	modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
 	load_script(M, "coop_mods_core")
 	load_script(M, "coop_trust")
 	e.coop_trust.reset_for_test({ default = "log" })

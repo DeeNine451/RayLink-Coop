@@ -444,7 +444,7 @@ end
 
 -- For other scripts: an actor effect on every other player's own character, when no object names an audience (a dialog).
 function relay_to_all(name, args, except_peer)
-	if not (installed and P.is_host() and ACTOR_FX[name]) then return end
+	if not (installed and (coop_mode.decides_world() or coop_mode.leads_here()) and ACTOR_FX[name]) then return end
 	local aud = {}
 	for _, o in ipairs(P.others()) do
 		if P.peer_of(o) ~= except_peer then aud[o:id()] = true end
@@ -1284,7 +1284,7 @@ local function patch_uses()
 	if type(use) == "function" and not orig.ph_use then
 		orig.ph_use = use
 		pb.use_callback = function(self, obj, who)
-			if installed and who and P.is_host() and on_use(self.object, who) then return end
+			if installed and who and (coop_mode.decides_world() or coop_mode.leads_here()) and on_use(self.object, who) then return end
 			return use(self, obj, who)
 		end
 	end
@@ -1293,7 +1293,7 @@ local function patch_uses()
 	if type(pad_use) == "function" and not orig.pad_use then
 		orig.pad_use = pad_use
 		pad.use_callback = function(self, obj, who)
-			if not (installed and who and P.is_host() and P.is_proxy(who)) then
+			if not (installed and who and (coop_mode.decides_world() or coop_mode.leads_here()) and P.is_proxy(who)) then
 				-- in a session too the second pad of a level must not answer to the first (see client_on_pad)
 				local ui = P.active() and _G["ui_numpad"]
 				if ui and ui.GUI then ui.GUI.owner = self end

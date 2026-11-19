@@ -2,6 +2,7 @@
 -- server's level (coop_quests_far view.zone). The players of that level are records on the world server: P.everyone() has none of them,
 -- the stand-in says who stands in it. Run: tools\test_lua.cmd far_zones_logic
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 reset_world()
 local H = machine("host", 0, { [0] = 0, [1] = 500 })
@@ -39,6 +40,10 @@ E.xr_conditions = {
 	actor_out_zone = function(actor, npc, p) return not E.utils_obj.npc_in_zone(E.db.actor, p[1]) end,
 }
 local L = load_script(H, "coop_npc_logic")
+if not H.env.coop_mode then
+	modes.live(load_script(H, "coop_mode"), function(name) return load_script(H, name) end)
+end
+if not H.env.coop_trust then load_script(H, "coop_trust") end
 E.coop_npc_players = load_script(H, "coop_npc_players")
 L.on_game_start()
 L._set_host_on(true)

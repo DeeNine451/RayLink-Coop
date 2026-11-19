@@ -118,6 +118,10 @@ local function stand()
 		end
 		M.teleported, M.arrival = {}, vec(30, 2, 15)
 		stock(M, squads, members)
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
 		M.comp = load_script(M, "coop_npc_companions")
 		M.comp.on_game_start()

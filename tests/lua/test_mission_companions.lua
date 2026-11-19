@@ -2,12 +2,19 @@
 -- squad joins when a client's give runs on the host (audit B section 7, add_speaker_companion).
 -- Run: tools\test_lua.cmd mission_companions
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local function pair()
 	reset_world()
 	local H = machine("host", 0, { [0] = 0, [1] = 500 })
 	local C = machine("client", 1, { [0] = 500, [1] = 0 })
-	for _, M in ipairs({ H, C }) do M.env.coop_npc_players = load_script(M, "coop_npc_players") end
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+		M.env.coop_npc_players = load_script(M, "coop_npc_players")
+	end
 	local proxy = H.add(make_obj(500, 10, 0, 0, { _name = "proxy1" }))
 	C.add(make_obj(500, 0, 0, 0, { _name = "host_avatar" }))
 	return H, C, proxy

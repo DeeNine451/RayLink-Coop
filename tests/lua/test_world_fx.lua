@@ -1,6 +1,7 @@
 -- World parity W4, sound M4, tasks X2 (coop_world_fx.script): what scripts on the host draw and play reaches the clients.
 -- Run: tools\test_lua.cmd world_fx
 dofile("tests/lua/support/harness_world.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- A script of the machine, loaded the way CScriptStorage does (module table with __index to the globals).
 local function fixture(M, name, src)
@@ -65,6 +66,12 @@ end
 
 local function stage()
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	engine_fx(H)
 	engine_fx(C)
 	local grok = [[
@@ -258,6 +265,12 @@ end
 print("== emission flares: the smoke trail")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	engine_fx(H)
 	engine_fx(C)
 	local flare = [[
@@ -337,6 +350,10 @@ local function map_server()
 			return true, 1
 		end,
 	}
+	if not K.env.coop_mode then
+		modes.live(load_script(K, "coop_mode"), function(name) return load_script(K, name) end)
+	end
+	if not K.env.coop_trust then load_script(K, "coop_trust") end
 	load_script(K, "coop_npc_players")
 	return K
 end
@@ -362,11 +379,17 @@ print("== who fights a player on a map server's level")
 do
 	local function stage()
 		local H, C = world_pair()
+		for _, M in ipairs({ H, C }) do
+			if not M.env.coop_mode then
+				modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+			end
+			if not M.env.coop_trust then load_script(M, "coop_trust") end
+		end
 		H.env.coop.is_dedicated = function() return true end
 		H.env.coop.players = function() return { { id = 1, avatar_id = 500, level = LEVEL_MK } } end
 		C.env.coop.players = function() return { { id = 1, avatar_id = 0, is_self = true, level = LEVEL_MK } } end
 		C.env.coop.server_link = function() return { id = 0, plays = false } end
-		C.env.coop_mode = { group_travels = function() return false end }
+		C.env.coop.levels = { split = function() return true end }
 		local K = map_server()
 		for _, M in ipairs({ H, C, K }) do
 			M.env.vector = vector
@@ -437,6 +460,12 @@ do
 
 	-- A co-op player still reads the session key.
 	local H2, C2 = world_pair()
+	for _, M in ipairs({ H2, C2 }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	C2.env.vector = vector
 	C2.env.xr_combat_ignore = { fighting_with_actor_npcs = {} }
 	C2.add(make_obj(700, 10, 0, 0))

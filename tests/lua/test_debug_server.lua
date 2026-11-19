@@ -4,6 +4,7 @@
 -- The engine side (coop.debug, coop.sync) is stubbed by the contract of the design (package 1).
 -- Run: tools\test_lua.cmd debug_server
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local MK = 0x101
 local LEVEL_HOST, LEVEL_MK = 1, 2
@@ -115,6 +116,15 @@ local function engine(M, o)
 		map_servers = function() return { { bridge = MK, level = LEVEL_MK } } end,
 		players_on = function() return 1 end,
 	}
+	local players = E.coop.players
+	E.coop.players = function()
+		local rows = players()
+		for _, p in ipairs(rows) do
+			p.level = E.coop.levels.level_of_player(p.id)
+			p.elsewhere = p.level ~= nil and p.level ~= E.coop.levels.my_level()
+		end
+		return rows
+	end
 end
 
 -- The world server: the host's process, the host player peer 0 (character 0), a client peer 3 (proxy 503 here).
@@ -128,6 +138,10 @@ local function world(o)
 	engine(H, o)
 	if not o.dedicated then H.add(make_obj(503, 10, 0, 0, { _stalker = true })) end
 	H.add(make_obj(700, 20, 0, 0, { _stalker = true, _name = "bandit_1" }))
+	if not H.env.coop_mode then
+		modes.live(load_script(H, "coop_mode"), function(name) return load_script(H, name) end)
+	end
+	if not H.env.coop_trust then load_script(H, "coop_trust") end
 	load_script(H, "coop_npc_players")
 	load_script(H, "coop_debug_cmds")
 	local S = load_script(H, "coop_debug_server")
@@ -139,6 +153,10 @@ local function map_authority()
 	local K = machine("client", MK, { [3] = 900 })
 	engine(K, { mk = true, split = true, my_level = LEVEL_MK, levels = { [3] = LEVEL_MK } })
 	K.add(make_obj(900, 10, 0, 5, { _stalker = true }))
+	if not K.env.coop_mode then
+		modes.live(load_script(K, "coop_mode"), function(name) return load_script(K, name) end)
+	end
+	if not K.env.coop_trust then load_script(K, "coop_trust") end
 	load_script(K, "coop_npc_players")
 	load_script(K, "coop_debug_cmds")
 	load_script(K, "coop_debug_server").on_game_start()
@@ -178,6 +196,10 @@ do
 	reset_world()
 	local C = machine("client", 1, { [0] = 500, [1] = 0 })
 	engine(C, {})
+	if not C.env.coop_mode then
+		modes.live(load_script(C, "coop_mode"), function(name) return load_script(C, name) end)
+	end
+	if not C.env.coop_trust then load_script(C, "coop_trust") end
 	load_script(C, "coop_npc_players")
 	load_script(C, "coop_debug_cmds")
 	load_script(C, "coop_debug_server").on_game_start()

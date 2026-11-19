@@ -1,12 +1,14 @@
 -- Anomaly Coop W4 "npc" temp test A: coop_npc_players, coop_npc_logic, coop_npc_effects on a fake host + client.
 -- Run: tools\test_lua.cmd npc_a
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- Host numbering: host actor 0, client proxy 500. On the client the pair (0, 500) is swapped.
 local function pair()
 	reset_world()
 	local H = machine("host", 0, { [0] = 0, [1] = 500 })
 	local C = machine("client", 1, { [0] = 500, [1] = 0 })
+	for _, M in ipairs({ H, C }) do load_script(M, "coop_mods_core") end
 	local function swap(id) if id == 0 then return 500 elseif id == 500 then return 0 end return id end
 	C.to_host, C.to_local = swap, swap
 	return H, C
@@ -103,6 +105,10 @@ do
 	reset_world()
 	local S = machine("single", 9, {})
 	S.add(make_obj(500, 1, 0, 0))
+	if not S.env.coop_mode then
+		modes.live(load_script(S, "coop_mode"), function(name) return load_script(S, name) end)
+	end
+	if not S.env.coop_trust then load_script(S, "coop_trust") end
 	local P = load_script(S, "coop_npc_players")
 	check(not P.active() and not P.is_host() and not P.is_client(), "no session: no role")
 	check(#P.others() == 0, "no session: nobody else")
@@ -119,6 +125,10 @@ print("== coop_npc_players: host with one client")
 local H, C = pair()
 local proxy = H.add(make_obj(500, 10, 0, 0, { _name = "proxy1" }))
 H.env.story_objects = { object_id_by_story_id = { actor = 0 } }
+if not H.env.coop_mode then
+	modes.live(load_script(H, "coop_mode"), function(name) return load_script(H, name) end)
+end
+if not H.env.coop_trust then load_script(H, "coop_trust") end
 local P = load_script(H, "coop_npc_players")
 check(P.is_host() and P.host_with_clients(), "host role, has a client")
 check(#P.others() == 1 and P.others()[1] == proxy, "others = the client's proxy")
@@ -278,6 +288,10 @@ print("== coop_npc_logic: client takes the host's sections and never switches it
 stock_logic(C)
 local LC = load_script(C, "coop_npc_logic")
 local RC = restrictor(C, 100, 50, SCENE_INI, "sr_idle@a")
+if not C.env.coop_mode then
+	modes.live(load_script(C, "coop_mode"), function(name) return load_script(C, name) end)
+end
+if not C.env.coop_trust then load_script(C, "coop_trust") end
 C.env.coop_npc_players = load_script(C, "coop_npc_players")
 LC.on_game_start()
 C.env.xr_logic.initialize_obj(RC, C.env.db.storage[100], true, C.env.db.actor, 4)

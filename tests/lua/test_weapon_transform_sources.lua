@@ -2,6 +2,7 @@
 -- Uses complete GAMMA kit/canted modules and real WPO disassembly bodies.
 -- GAMMA_SCRIPTS overrides the current RayLink profile; originals are only read.
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local GAMMA = os.getenv("GAMMA_SCRIPTS") or "E:/RayLink2/gamma/gamedata/scripts"
 local function read_source(name)
@@ -74,6 +75,10 @@ local function boot(fixed, role)
 	end
 	load_real(M, "z_3dss_weapon_kits")
 	load_real(M, "scripted_canted_irons")
+	if not M.env.coop_mode then
+		modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	end
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	load_script(M, "coop_npc_players")
 	local compat = load_script(M, "coop_npc_compat")
 	if fixed then compat.on_game_start() end

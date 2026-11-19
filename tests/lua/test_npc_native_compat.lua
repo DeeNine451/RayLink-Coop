@@ -18,6 +18,7 @@ local function boot(role)
 		for _, v in ipairs(M.callbacks[name] or {}) do if v == f then return true end end
 		return false
 	end
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	load_script(M, "coop_npc_players")
 	local facade = load_script(M, "coop_mode")
 	modes.live(facade, function(name) return load_script(M, name) end)

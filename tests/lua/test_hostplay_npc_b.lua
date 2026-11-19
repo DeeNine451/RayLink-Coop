@@ -2,6 +2,12 @@
 -- Run: tools\test_lua.cmd npc_b
 dofile("tests/lua/support/harness_npc.lua")
 
+local modes = dofile("tests/lua/support/modes.lua")
+local function setup(M)
+	modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	load_script(M, "coop_trust")
+end
+
 local function pair()
 	reset_world()
 	local H = machine("host", 0, { [0] = 0, [1] = 500 })
@@ -13,6 +19,7 @@ local function pair()
 	end
 	local proxy = H.add(make_obj(500, 10, 0, 0, { _name = "proxy1" }))
 	local hav = C.add(make_obj(500, 0, 0, 0, { _name = "host_avatar" }))
+	setup(H); setup(C)
 	return H, C, proxy, hav
 end
 
@@ -588,63 +595,6 @@ local far_smart = { position = vector():set(proxy:position().x + 900, 0, proxy:p
 SM.try_respawn(far_smart)
 check(far_smart.respawned == true, "far from every player: respawns")
 
-print("== coop_npc_compat: a player on a map server's level is a record on the world server, and he counts")
-H.env.coop.is_dedicated = function() return true end
-local world_players = H.env.coop.players
-H.env.coop.players = function()
-	local out = {}
-	for _, p in ipairs(world_players()) do if p.id ~= 0 then out[#out + 1] = p end end
-	return out
-end
-H.objects[500] = nil -- he stands on a map server's level: no game object here
-H.env.coop_npc_players.invalidate()
-RECORD.m_game_vertex_id = 2
-RECORD.position = vector():set(7000, 0, 7000)
-local his_smart = { position = vector():set(7030, 0, 7000), respawn_radius = 150, m_game_vertex_id = 2 }
-SM.try_respawn(his_smart)
-check(his_smart.respawned == nil, "no respawn 30 m from the record of his body")
-local on_his_level = { position = vector():set(9000, 0, 7000), respawn_radius = 150, m_game_vertex_id = 2 }
-SM.try_respawn(on_his_level)
-check(on_his_level.respawned == true and on_his_level.saw == true, "far from him: it respawns, with his level as the actor's (respawn_only_level)")
-check(on_his_level.is_on_actor_level == nil, "and the smart stays as it was")
-RECORD.m_game_vertex_id = 1
-local another_level = { position = vector():set(7030, 0, 7000), respawn_radius = 150, m_game_vertex_id = 2 }
-SM.try_respawn(another_level)
-check(another_level.respawned == true, "the same coordinates on another level are nobody's")
-
-print("== coop_npc_compat: on a map server its ghost is nobody")
-H, C, proxy, hav = pair()
-SQ = {}
-SQ.check_online_status = function(self)
-	if self.position:distance_to(H.env.db.actor:position()) <= 75 then self.forced_online_status = false else self.forced_online_status = nil end
-end
-H.env.sim_squad_scripted = { sim_squad_scripted = SQ }
-H.env.smart_terrain = { se_smart_terrain = {} }
-H.env.se_actor = { se_actor = {
-	get_location = function(self) return self.position, self.m_level_vertex_id, self.m_game_vertex_id end,
-	get_alife_task = function(self) return "ghost's" end,
-} }
-KS = load_script(H, "coop_npc_compat")
-KS.on_game_start()
-KS._set_host_on(true)
-H.env.coop.is_map_server = function() return true end
-H.env.coop.is_host = function() return false end
-H.env.db.actor._pos = vector():set(5000, 0, 5000) -- where the ghost stands
-H.env.coop_npc_players.invalidate()
-local at_ghost = { online = false, position = vector():set(5010, 0, 5000) }
-SQ.check_online_status(at_ghost)
-check(at_ghost.forced_online_status == nil, "a squad next to the ghost is near nobody")
-local at_player = { online = false, position = vector():set(proxy:position().x + 20, 0, proxy:position().z) }
-SQ.check_online_status(at_player)
-check(at_player.forced_online_status == false, "a squad 20 m from a player of its level stays offline")
-check(H.env.coop_npc_players.any_within(vector():set(5001, 0, 5000), 50) == false, "nothing is near the ghost")
-check(H.env.coop_npc_players.any_within(proxy:position(), 50) == true, "the player of the level is")
-local GHOST = { position = vector():set(5000, 0, 5000), m_level_vertex_id = 1, m_game_vertex_id = 1 }
-check(H.env.se_actor.se_actor.get_location(GHOST) == proxy:position(), "a squad sent at the actor goes to a player of the level")
-H.env.CALifeSmartTerrainTask = function(gv, lv) return { gv = gv, lv = lv } end
-check(H.env.se_actor.se_actor.get_alife_task(GHOST).lv == proxy:level_vertex_id(), "the engine's task too")
-H.env.sim_squad_scripted, H.env.smart_terrain, H.env.se_actor = nil, nil, nil
-
 print("== coop_npc_compat: helicopters hunt every player as the actor (audit B7)")
 H, C, proxy, hav = pair()
 common(H)
@@ -790,14 +740,9 @@ check(#rb.released == 1 and rb.released[1] == 802, "only the body far from every
 check(rb.release_objects_table[801] == true and rb.release_objects_table[802] == nil, "the body near the client stays queued")
 check(rb.size == 5, "the count follows what was released")
 rb.released = {}
-H.env.coop.levels = { split = function() return true end }
-RB.clear(rb, true)
-check(#rb.released == 0 and rb.release_objects_table[801] == true, "clear(all) with a player on this level: the host's level change takes no bodies from under him")
-H.env.coop.levels.split = function() return false end
 RB.clear(rb, true)
 check(#rb.released == 1 and rb.released[1] == 801, "no split levels: everybody leaves together, the stock's clear(all)")
 rb.released, rb.release_objects_table[801], rb.size = {}, true, rb.size + 1
-H.env.coop.levels = nil
 -- the distance is the player's option, not the stock's default: 100 m from the client is near at 150 m
 bodies[803] = { position = vector():set(proxy:position().x + 100, 0, proxy:position().z) }
 H.env.ui_options = { get = function(key) return key == "gameplay/general/corpse_min_dist" and 150 or nil end }

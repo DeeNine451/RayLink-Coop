@@ -3,6 +3,7 @@
 -- coop_npc_players + coop_npc_combat + coop_npc_meet, and checks what NPCs do about a client's proxy.
 -- Run: tools\test_lua.cmd npc_w11
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 local REF = "../anomaly-ref/unpacked/scripts/"
 
 -- ---------------------------------------------------------------- mini luabind class + xr_logic condlists
@@ -104,6 +105,10 @@ local function setup(role_single)
 		local E = M.env
 		install_class(E)
 		install_logic(M)
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
 		E.coop_npc_players = load_script(M, "coop_npc_players")
 		E.game_object = { friend = 0, neutral = 1, enemy = 2 }
 		E.clsid = { crow = 99 }

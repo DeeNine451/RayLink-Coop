@@ -1,6 +1,7 @@
 -- World parity W1 and W6 (coop_world_weather.script): the script weather manager of every machine follows the host, a
 -- client's wetness follows the host's. Run: tools\test_lua.cmd world_weather
 dofile("tests/lua/support/harness_world.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- level_weathers as bind_stalker sees it: the class table, one manager, the stock order of update (the hour turns:
 -- change_period, then select_weather). The rolls are the machine's own, as in stock.
@@ -59,6 +60,12 @@ end
 print("== W1: the script weather manager")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	local wh, wc = stock_weathers(H, 100), stock_weathers(C, 200)
 	local WH, WC = load_script(H, "coop_world_weather"), load_script(C, "coop_world_weather")
 	WH.on_game_start()
@@ -97,6 +104,12 @@ end
 print("== the weather of a map server")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	H.env.coop.is_dedicated = function() return true end
 	H.env.coop.players = function() return {} end
 	C.env.coop.players = function() return {} end
@@ -123,6 +136,12 @@ end
 -- a client that has no state yet keeps the stock code
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	local wh, wc = stock_weathers(H, 100), stock_weathers(C, 200)
 	local WC = load_script(C, "coop_world_weather")
 	WC.on_game_start()
@@ -133,6 +152,10 @@ end
 do
 	reset_world()
 	local S = machine("single", 0, { [0] = 0 })
+	if not S.env.coop_mode then
+		modes.live(load_script(S, "coop_mode"), function(name) return load_script(S, name) end)
+	end
+	if not S.env.coop_trust then load_script(S, "coop_trust") end
 	load_script(S, "coop_npc_players")
 	local ws = stock_weathers(S, 300)
 	local WS = load_script(S, "coop_world_weather")
@@ -145,6 +168,12 @@ end
 print("== W6: wetness")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	stock_weathers(H, 100)
 	stock_weathers(C, 200)
 	local WH, WC = load_script(H, "coop_world_weather"), load_script(C, "coop_world_weather")
@@ -196,6 +225,12 @@ end
 print("== wetness: the host's numbers are of the host's level")
 do
 	local H, C = world_pair()
+	for _, M in ipairs({ H, C }) do
+		if not M.env.coop_mode then
+			modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+		end
+		if not M.env.coop_trust then load_script(M, "coop_trust") end
+	end
 	stock_weathers(H, 100)
 	stock_weathers(C, 200)
 	local WH, WC = load_script(H, "coop_world_weather"), load_script(C, "coop_world_weather")
@@ -212,7 +247,6 @@ do
 	C.env.coop.players = function()
 		return group and client_rows() or { { id = 1, avatar_id = 0, level = 2, is_self = true } }
 	end
-	C.env.coop_mode = { group_travels = function() return group end }
 	C.env.coop.levels = {
 		split = function() return not group end,
 		my_level = function() return 2 end,

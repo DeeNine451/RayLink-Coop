@@ -713,7 +713,7 @@ local function wrap_squads()
 	if type(f) ~= "function" or orig.squad_online then return end
 	orig.squad_online = f
 	cls.check_online_status = function(self, ...)
-		local first = host_on and P.is_map_server() and P.others()[1] or nil
+		local first = host_on and coop_mode.leads_here() and not coop_mode.decides_world() and P.others()[1] or nil
 		if first then
 			P.with_identity(first, f, self, ...)
 		else
@@ -734,7 +734,7 @@ local function wrap_squads()
 	local actor = mod("se_actor")
 	local ca = actor and actor.se_actor
 	local function player_here()
-		return host_on and P.is_map_server() and P.others()[1] or nil
+		return host_on and coop_mode.leads_here() and not coop_mode.decides_world() and P.others()[1] or nil
 	end
 	local where, task = ca and ca.get_location, ca and ca.get_alife_task
 	if type(where) == "function" then
@@ -943,7 +943,7 @@ local function wrap_helis()
 	if type(aim) == "function" and not orig.heli_skyfall then
 		orig.heli_skyfall = aim
 		sky.set_player_enemy = function(...)
-			if not P.is_host() then return aim(...) end
+			if not (coop_mode.decides_world() or coop_mode.leads_here()) then return aim(...) end
 			local go = sky.get_dynamic_heli()
 			local bound = go and go:binded_object()
 			local combat = bound and bound.st and bound.st.combat
@@ -987,10 +987,8 @@ local function wrap_body_release()
 		local queue = self and self.release_objects_table
 		if not host_on or type(queue) ~= "table" then return f(self, all, dist, ...) end
 		if all then
-			local coop_api = mod("coop")
-			local lv = coop_api and coop_api.levels
-			if lv and lv.split and lv.split() == true and P.others()[1] then return end
-			return f(self, all, dist, ...) -- without split levels everybody leaves together
+			if not coop_mode.group_travels() and P.others()[1] then return end
+			return f(self, all, dist, ...)
 		end
 		local sim = alife()
 		local near = release_dist_sqr(dist)

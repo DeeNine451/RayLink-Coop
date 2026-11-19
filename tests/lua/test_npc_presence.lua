@@ -31,9 +31,9 @@ local function run(mode)
 	local local_friend = body(501, 115, level_id)
 	local remote = body(502, 1, 3)
 	db.actor = host
-	local rows = { { id = 1, avatar_id = 500 }, { id = 2, avatar_id = 501 } }
+	local rows = { { id = 1, avatar_id = 500, level = level_id }, { id = 2, avatar_id = 501, level = level_id } }
 	if mode == "hostplay" then rows[#rows + 1] = { id = 0, avatar_id = 0, is_self = true } end
-	if mode == "srv_map" or mode == "srv_world" then rows[#rows + 1] = { id = 3, avatar_id = 502 } end
+	if mode == "srv_map" or mode == "srv_world" then rows[#rows + 1] = { id = 3, avatar_id = 502, level = 3, elsewhere = true } end
 	coop.players = function() return rows end
 	coop.is_map_server = function() return mode == "srv_map" end
 	coop.is_dedicated = function() return mode == "srv_world" end

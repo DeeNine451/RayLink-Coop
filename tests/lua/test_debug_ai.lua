@@ -5,6 +5,7 @@
 -- Loads the REAL stock xr_combat_ignore / xr_conditions (anomaly-ref) on a fake host + client, then coop_npc_players + coop_npc_combat.
 -- Run: tools\test_lua.cmd debug_ai
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 local REF = "../anomaly-ref/unpacked/scripts/"
 
 -- ---------------------------------------------------------------- the stock scripts on a fake engine (as test_npc_w11)
@@ -53,6 +54,10 @@ local function setup(role)
 	local E = M.env
 	install_class(E)
 	E.xr_logic = { pick_section_from_condlist = function() return nil end }
+	if not M.env.coop_mode then
+		modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	end
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	E.coop_npc_players = load_script(M, "coop_npc_players")
 	E.game_object = { friend = 0, neutral = 1, enemy = 2 }
 	E.clsid = { crow = 99 }

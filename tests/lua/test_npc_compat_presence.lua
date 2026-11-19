@@ -31,6 +31,7 @@ local function boot(name, packed)
 	E.game_graph = function() return { vertex = function(_, id) return { level_id = function() return id end } end } end
 	E.coop_mode = load_script(M, "coop_mode")
 	modes.install(E.coop_mode, name)
+	if not M.env.coop_trust then load_script(M, "coop_trust") end
 	load_script(M, "coop_npc_players")
 	load_script(M, "coop_mods_core")
 	E.clsid = { online_offline_group_s = 90 }
