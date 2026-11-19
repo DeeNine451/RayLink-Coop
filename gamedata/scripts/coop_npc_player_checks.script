@@ -1,0 +1,388 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G13-3: actor checks in the Facer, panic and bribe schemes.
+local TAG = "npc-player-checks"
+local PANIC = "npc_player_checks_panic"
+local WARNING = "npc_player_checks_bribe_warning"
+local BRIBE_SECTION = "remark@aim_bribe"
+local installed = false
+
+local function player_id(id)
+	return coop_npc_players.is_player_id(id) and (id ~= 0 or coop_mode.actor_is_player())
+end
+
+local function player_here(peer)
+	if peer == nil or coop_mode.where(peer) ~= "here" then return nil end
+	local who = coop_npc_players.object_of_peer(peer)
+	if who and player_id(who:id()) and who:alive() then return who end
+end
+
+local function object(id)
+	local st = id and db.storage[id]
+	return st and st.object
+end
+
+local function restore_result(ok, ...)
+	if not ok then error((...), 0) end
+	return ...
+end
+
+local function install_facer()
+	local core = coop_mods_core
+	local m = core.mod("xrs_facer")
+	if not m then return end
+	local _, holder, index = core.find_local(m, "facer_sets")
+	if not holder then return end
+	local function settings(rank)
+		local _, sets = debug.getupvalue(holder, index)
+		local ranks_by_name = sets and sets.ranks
+		return ranks_by_name and (ranks_by_name[rank] or ranks_by_name.default)
+	end
+
+	core.wrap(m, "check_enemy", TAG .. ":xrs_facer.check_enemy", function(orig)
+		return function(enemy, npc, ...)
+			if core.active() then
+				local id = enemy:id()
+				if player_id(id) then
+					local vals = settings(ranks.get_obj_rank_name(npc))
+					return vals ~= nil and enemy:alive() and not IsWounded(enemy) and vals.enable_vs_actor == true
+				end
+				if id == 0 then return false end
+			end
+			return orig(enemy, npc, ...)
+		end
+	end)
+
+	core.wrap(m.action_facer, "execute", TAG .. ":xrs_facer.action_facer.execute", function(orig)
+		-- A remote player has the stalker class. Give that branch the actor multiplier for
+		-- this punch while stock still owns the hit, friend scaling, sound and animation.
+		local function finish(vals, previous, ...)
+			vals.k_stalker = previous
+			return restore_result(...)
+		end
+		return function(self, ...)
+			if core.active() and self.hit_time and self.end_time then
+				local now = time_global()
+				if self.hit_time < now and now <= self.end_time then
+					local id = load_var(self.object, "facer_target", nil)
+					local target = id and id ~= 0 and player_id(id) and object(id)
+					local vals = target and target:clsid() == clsid.script_stalker and settings(self.rank)
+					if vals then
+						local previous = vals.k_stalker
+						vals.k_stalker = vals.k_actor
+						return finish(vals, previous, pcall(orig, self, ...))
+					end
+				end
+			end
+			return orig(self, ...)
+		end
+	end)
+end
+
+local function forced_by(trigger, id)
+	if not player_id(id) then return false end
+	if trigger == true then return true end -- stock, non-dialogue trigger
+	return trigger.id == id and coop_npc_players.peer_of(id) == trigger.peer
+end
+
+-- The stock selector is a private upvalue of evaluate. Preserve its scan cursor and
+-- keep/retarget rules on forced NPCs, and use stock as-is for ordinary panic.
+local function forced_panic_target(npc, st, trigger, can_cause_panic)
+	if st.overflowdetect then
+		printf("C Stack Overflow Prevention: warning axr_panic scheme making repeated calls without return; save now and reload!")
+		return false
+	end
+	local now = time_global()
+	local current = (st.target_id ~= 0 or coop_mode.actor_is_player()) and object(st.target_id) or nil
+	if current and current:alive() and not IsWounded(current) and xr_combat_ignore.is_enemy(npc, current)
+			and st.__keep_target_until and now < st.__keep_target_until then
+		return true
+	end
+	st.index, st.memory = st.index or 1, st.memory or {}
+	if #st.memory == 0 then
+		st.overflowdetect = true
+		for visible in npc:memory_visible_objects() do
+			local who = visible:object()
+			local cls = who and who.clsid and who:clsid()
+			if cls and who:alive() and (player_id(who:id()) or IsStalker(nil, cls) or IsMonster(nil, cls)) then
+				st.memory[#st.memory + 1] = who:id()
+			end
+		end
+		st.overflowdetect = nil
+		if #st.memory == 0 then return current ~= nil end
+	end
+	if st.index > #st.memory then
+		st.index = 1
+		iempty_table(st.memory)
+		return current ~= nil
+	end
+
+	local target = object(st.memory[st.index])
+	st.index = st.index + 1
+	if not (target and target:alive() and npc:relation(target) >= game_object.enemy and not IsWounded(target)
+			and xr_combat_ignore.is_enemy(npc, target) == true) then return false end
+	local id = target:id()
+	local human = forced_by(trigger, id)
+	if not human and not can_cause_panic(npc, target:clsid()) then return false end
+
+	local enemy = npc:best_enemy()
+	if enemy and (enemy:id() ~= 0 or player_id(0)) and enemy:alive() and not IsWounded(enemy)
+			and not can_cause_panic(npc, enemy:clsid()) and npc:position():distance_to_sqr(enemy:position()) <= 30 then
+		st.target_id, st.__keep_target_until = enemy:id(), now + 8000
+		return true
+	end
+	if human then
+		if st.target_id ~= 0 then xr_sound.set_sound_play(npc:id(), "panic_human") end
+	elseif st.target_id ~= id and not st.__played_sound then
+		xr_sound.set_sound_play(npc:id(), "panic_monster")
+		st.__played_sound = true
+	end
+	st.target_id, st.__keep_target_until = id, now + 5000
+	return true
+end
+
+local function install_panic()
+	local core = coop_mods_core
+	local m = core.mod("axr_stalker_panic")
+	if not m then return false end
+	local select_target, holder, index = core.upvalue(
+		core.fn(m.evaluator_stalker_panic, "evaluate"), "find_valid_target")
+	if not holder then select_target, holder, index = core.find_local(m, "find_valid_target") end
+	local can_cause_panic = core.upvalue(select_target, "can_cause_panic")
+	if type(can_cause_panic) ~= "function" then return false end
+
+	local slot = { select_target = select_target }
+	core.wrap(slot, "select_target", TAG .. ":axr_stalker_panic.find_valid_target", function(orig)
+		return function(npc, st, ...)
+			if core.active() and coop_mode.leads_here() then
+				local state = db.storage[npc:id()]
+				local trigger = state and state.panicked_to_actor
+				if trigger == true or type(trigger) == "table" then
+					return forced_panic_target(npc, st, trigger, can_cause_panic)
+				end
+			end
+			return orig(npc, st, ...)
+		end
+	end)
+	debug.setupvalue(holder, index, slot.select_target)
+	return true
+end
+
+local function dialogue_panic(t, from)
+	local id = t.n
+	local valid = type(id) == "number" and id >= 1 and id <= 65534 and id % 1 == 0
+	if not coop_trust.pass(PANIC .. "_id", valid, "invalid NPC id from peer %s", tostring(from)) or not valid then return end
+
+	local who = player_here(from)
+	local npc = not player_id(id) and level.object_by_id(id) or nil
+	local state = npc and db.storage[id]
+	local available = state and npc:alive() and IsStalker(npc) and who ~= nil
+		and coop_mode.decider(from) == "this"
+	if not coop_trust.pass(PANIC .. "_objects", available, "peer %s or NPC %d is unavailable", tostring(from), id)
+			or not available then return end
+	local recent = coop_mods_core.engine().talk_recent
+	local talked = who:position():distance_to_sqr(npc:position()) <= 225
+		and (type(recent) ~= "function" or recent(from, id, 5000) == true)
+	if not coop_trust.pass(PANIC .. "_dialogue", talked, "peer %s did not talk to NPC %d recently", tostring(from), id) then return end
+	state.panicked_to_actor = { id = who:id(), peer = from }
+end
+
+local function install_dialogue()
+	local core = coop_mods_core
+	local dialogs = core.mod("dialogs")
+	if not (dialogs and core.fn(dialogs, "surrender_victim_answers_2")) then return end
+	core.set_limit(PANIC, 4, 2)
+	core.on(PANIC, dialogue_panic, "host")
+	core.wrap(dialogs, "surrender_victim_answers_2", TAG .. ":dialogs.surrender_victim_answers_2", function(orig)
+		local function finish(state, previous, id, ...)
+			state.panicked_to_actor = previous
+			local text = restore_result(...)
+			local from = core.self_peer()
+			if coop_mode.leads_here() then
+				dialogue_panic({ n = id }, from)
+			elseif coop_mode.is_player_mirror() then
+				core.to_host(PANIC, { n = core.hid(id) })
+			end
+			return text
+		end
+		return function(a, b, ...)
+			if not (core.active() and coop_mode.actor_is_player() and a and b) then return orig(a, b, ...) end
+			local who = coop_npc_players.own_actor()
+			local npc
+			if who and a:id() == who:id() then npc = b
+			elseif who and b:id() == who:id() then npc = a end
+			local id = npc and npc:id()
+			local state = id and not player_id(id) and db.storage[id]
+			if not state then return orig(a, b, ...) end
+			return finish(state, state.panicked_to_actor, id, pcall(orig, a, b, ...))
+		end
+	end)
+end
+
+local function show_bribe_warning(t)
+	local comm = t.c
+	if type(comm) == "string" and #comm <= 64 and comm:match("^[%w_]+$") and db.actor then
+		news_manager.send_tip(db.actor, strformat("You are getting too close to a %s!", game.translate_string(comm)))
+		return true
+	end
+end
+
+local function npc_argument(a, b)
+	if a and a:id() ~= 0 and not player_id(a:id()) then return a end
+	return b
+end
+
+local function bribe_player(st)
+	local target = st and st.coop_bribe_target
+	local who = target and player_here(target.peer)
+	if who and who:id() == target.id then return who end
+end
+
+local function approaching_player(npc, comm, radius_sqr)
+	local pos = npc:position()
+	local best, best_peer, nearest = nil, nil, radius_sqr
+	for _, who in ipairs(coop_npc_players.everyone()) do
+		local id = who:id()
+		local peer = player_id(id) and coop_npc_players.peer_of(id) or nil
+		if peer and coop_mode.where(peer) == "here" then
+			local dist = who:position():distance_to_sqr(pos)
+			local faction = character_community(who):gsub("^actor_", "")
+			if (dist < nearest or (best and dist == nearest and peer < best_peer))
+					and game_relations.is_factions_enemies(comm, faction) then
+				best, best_peer, nearest = who, peer, dist
+			end
+		end
+	end
+	return best, best_peer
+end
+
+local function install_bribe()
+	local core = coop_mods_core
+	local bribe = core.mod("xr_bribe")
+	if not bribe then return end
+	local _, holder, index = core.find_local(bribe, "M_DATA")
+	if not holder then return end
+	local function data()
+		local _, rows = debug.getupvalue(holder, index)
+		return rows
+	end
+	local function on_map()
+		return core.active() and coop_mode.leads_here()
+	end
+
+	local warning_peer, warning_times = nil, {}
+	core.on(WARNING, show_bribe_warning, "player")
+	core.wrap(bribe, "trigger_warning", TAG .. ":xr_bribe.trigger_warning", function(orig)
+		return function(comm, ...)
+			if warning_peer == nil then return orig(comm, ...) end
+			local times = warning_times[comm]
+			if not times then times = {}; warning_times[comm] = times end
+			local now = game.get_game_time()
+			local last = times[warning_peer]
+			local elapsed = last and now:diffSec(last)
+			if elapsed and elapsed >= 0 and elapsed < bribe.WARNING_TIME then return end
+			local delivered
+			if warning_peer == core.self_peer() and coop_mode.actor_is_player() then
+				delivered = show_bribe_warning({ c = comm })
+			else
+				delivered = core.to_peer(warning_peer, WARNING, { c = comm })
+			end
+			if delivered then times[warning_peer] = now end
+		end
+	end)
+
+	local _, old_update = core.wrap(bribe, "npc_on_update", TAG .. ":xr_bribe.npc_on_update", function(orig)
+		local function finish(previous, ...)
+			warning_peer = previous
+			return restore_result(...)
+		end
+		return function(npc, ...)
+			if not core.active() then return orig(npc, ...) end
+			if not coop_mode.leads_here() then return end
+			local comm = character_community(npc)
+			local row, st = data()[comm], db.storage[npc:id()]
+			if not (row and st) then return end
+			local limit = row.distance + bribe.WARNING_DISTANCE
+			local who, peer
+			if st.active_section == BRIBE_SECTION and st.coop_bribe_target then
+				who = bribe_player(st)
+				if who then peer = st.coop_bribe_target.peer end
+			else
+				who, peer = approaching_player(npc, comm, limit)
+				st.coop_bribe_target = who and { id = who:id(), peer = peer } or nil
+			end
+			if not who then return end
+			local previous = warning_peer
+			warning_peer = peer
+			return finish(previous, pcall(coop_npc_players.with_identity, who, orig, npc, ...))
+		end
+	end)
+	if old_update and coop_main.callback_registered("npc_on_update", old_update) then
+		core.swap_callback("npc_on_update", old_update, bribe.npc_on_update)
+	end
+
+	core.wrap(xr_conditions, "bribes_dist_to_actor_check", TAG .. ":xr_conditions.bribes_dist_to_actor_check", function(orig)
+		return function(a, b, ...)
+			if not on_map() then return orig(a, b, ...) end
+			local npc = npc_argument(a, b)
+			local row = npc and data()[character_community(npc)]
+			local who = npc and bribe_player(db.storage[npc:id()])
+			return not (row and who) or who:position():distance_to_sqr(npc:position()) > row.distance + bribe.WARNING_DISTANCE + 1
+		end
+	end)
+	core.wrap(core.mod("xr_remark"), "init_target", TAG .. ":xr_remark.init_target", function(orig)
+		return function(npc, spec, ...)
+			if on_map() and type(spec) == "string" and spec:match("^story%s*|%s*actor$") then
+				local st = db.storage[npc:id()]
+				if st and st.active_section == BRIBE_SECTION then
+					local who = bribe_player(st)
+					if who then return nil, who:id(), true end
+					return nil, nil, false
+				end
+			end
+			return orig(npc, spec, ...)
+		end
+	end)
+	core.wrap(xr_effects, "bribes_reset_scheme", TAG .. ":xr_effects.bribes_reset_scheme", function(orig)
+		return function(a, b, ...)
+			if not on_map() then return orig(a, b, ...) end
+			local npc = npc_argument(a, b)
+			local st = npc and db.storage[npc:id()]
+			if st then st.coop_bribe_target = nil end
+			if npc then return orig(npc, b, ...) end
+		end
+	end)
+
+	-- World-data sync fills M_DATA in place and never calls stock try_to_toggle.
+	-- This tick is also used by the receiver of that sync.
+	local next_check = 0
+	RegisterScriptCallback("actor_on_update", function()
+		if not (old_update and on_map()) then return end
+		local now = time_global()
+		if now < next_check then return end
+		next_check = now + 250
+		local update = bribe.npc_on_update
+		local registered = coop_main.callback_registered("npc_on_update", update)
+		if next(data()) then
+			if not registered then RegisterScriptCallback("npc_on_update", update) end
+		elseif registered then
+			bribe.try_to_toggle(false)
+			UnregisterScriptCallback("npc_on_update", update)
+			warning_times = {}
+		end
+	end)
+end
+
+local function start_step(name, f)
+	local ok, err = pcall(f)
+	if not ok then coop_mods_core.report(TAG, name, err) end
+end
+
+function on_game_start()
+	if installed then return end
+	installed = true
+	start_step("facer", install_facer)
+	start_step("panic", function()
+		if install_panic() then install_dialogue() end
+	end)
+	start_step("bribe", install_bribe)
+end
