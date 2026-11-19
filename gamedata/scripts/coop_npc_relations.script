@@ -1,0 +1,536 @@
+-- Ядро: без проверок режима (docs/MODES.md).
+-- Dev 57 G13-2. Relations belong to explicit real characters, never the scene actor.
+-- Co-op: the host has the bodies and world data. Server: the level leader applies
+-- object actions; world changes are published to the world-data owner. All role
+-- answers come from coop_mode. Outside a session the installed mods run unchanged.
+-- Saved: coop_npc_relations_v1 (squad audiences and per-character overrides).
+-- Wire: mods.npcrel_policy, mods.npcrel_reset, mods.npcrel_offer.
+
+local C, P
+local policies, applied = {}, {}
+local installed = false
+local alq_cid
+local reset_seq, reset_seen, reset_order = 0, {}, {}
+local last_audience, next_update = nil, 0
+local REL = { enemy = -1000, friend = 1000, neutral = 0 }
+local FACTIONS = { stalker = true, bandit = true, csky = true, dolg = true,
+	freedom = true, killer = true, army = true, ecolog = true, monolith = true,
+	renegade = true, greh = true, isg = true, zombied = true, trader = true,
+	monster = true }
+local DEFENSE = { barrier_defense_monolith = "monolith", barrier_defense_zombie = "zombie" }
+
+local function number(v, low, high)
+	v = tonumber(v)
+	return v and v == v and v >= low and v <= high and v % 1 == 0 and v or nil
+end
+local function normalize(f)
+	return type(f) == "string" and (f:gsub("^actor_", "")) or nil
+end
+local function live() return C.active() end
+local function owner() return coop_mode.leads_here() or coop_mode.decides_world() end
+local function log(what, err) printf("! [coop-npc-relations] %s: %s", what, tostring(err)) end
+local function step(what, fn)
+	local ok, err = pcall(fn)
+	if not ok then log(what, err) end
+end
+local function own_actor()
+	return P.own_actor and P.own_actor() or db.actor
+end
+local function body(cid)
+	local id = C.lid(cid)
+	if id == 0 and coop_mode.actor_is_player() then return own_actor() end
+	local obj = (coop_mode.leads_here() or coop_mode.is_player_mirror()) and level.object_by_id(id) or nil
+	if obj then return obj end
+	local q = C.mod("coop_quests_core")
+	return q and q.body_for_character and q.body_for_character(cid) or nil
+end
+
+-- Members include stored offline proxies; the transport list adds newly seated
+-- characters before the save's membership record has caught up.
+local function characters()
+	local out, seen = {}, {}
+	local function add(cid)
+		cid = number(cid, 0, 65534)
+		if cid == nil or seen[cid] or (cid == 0 and not coop_mode.seat_plays(0)) then return end
+		seen[cid] = true; out[#out + 1] = cid
+	end
+	local actor = coop_mode.actor_is_player() and own_actor()
+	if actor then add(C.hid(actor:id())) end
+	local api = C.engine()
+	if api and type(api.members) == "function" then
+		for _, m in ipairs(api.members() or {}) do add(m.id) end
+	end
+	for _, p in ipairs(P.players()) do
+		if coop_mode.seat_plays(p.id) then add(C.hid(p.avatar_id)) end
+	end
+	table.sort(out)
+	return out, seen
+end
+local function real(cid)
+	if cid == nil then return false end
+	local _, ids = characters()
+	return ids[cid] == true
+end
+local function faction(cid)
+	local fac = C.mod("coop_faction")
+	local f = fac and fac.faction_of_character and fac.faction_of_character(cid)
+	if f then return normalize(f) end
+	local obj = body(cid)
+	if obj then return normalize(coop_npc_player_community(obj)) end
+	local se = alife_object(C.lid(cid))
+	return se and normalize(se:community()) or nil
+end
+local function with_character(cid, fn, ...)
+	return coop_tasks.with_character(cid, fn, ...)
+end
+local function as_character(cid, fn, ...)
+	local obj = body(cid)
+	if not obj then return nil end
+	return with_character(cid, P.with_identity, obj, fn, ...)
+end
+
+local function write_member(member, se, cid, relation)
+	local npc = coop_mode.leads_here() and level.object_by_id(member.id) or nil
+	local target = body(cid)
+	if npc and target and not (type(target) == "table" and target.far) then
+		game_relations.set_npcs_relation(npc, target, relation)
+		return true
+	end
+	local target_id = C.lid(cid)
+	-- ForceSetGoodwill is void and needs both ALife entities. The roster can arrive before the proxy.
+	if se and se.force_set_goodwill and target_id ~= nil and alife_object(target_id) then
+		se:force_set_goodwill(REL[relation], target_id)
+		return true
+	end
+	return false
+end
+local function apply(sid, squad, force_cid, cids, real_ids)
+	local policy = policies[sid]
+	if not (policy and squad and squad.squad_members and owner()) then return end
+	if not cids then cids, real_ids = characters() end
+	local cache = applied[sid] or {}; applied[sid] = cache
+	for member in squad:squad_members() do
+		if member.id ~= 0 and not P.is_player_id(member.id) and not real_ids[C.hid(member.id)] then
+			local se = member.object or alife_object(member.id)
+			-- A map's roster does not include disconnected player proxies.
+			if not (se and se:section_name() == "coop_player_avatar") then
+				for _, cid in ipairs(cids) do
+					local rel = policy.chars[cid] or policy.all
+					local key = tostring(member.id) .. ":" .. tostring(cid)
+					if rel and (cache[key] ~= rel or cid == force_cid) and write_member(member, se, cid, rel) then cache[key] = rel end
+				end
+			end
+		end
+	end
+end
+local function publish_policy(sid, cid, rel)
+	C.publish("npcrel_policy", { s = sid, c = cid == nil and -1 or cid, r = rel })
+end
+local function remember(sid, cid, rel)
+	local policy = policies[sid] or { chars = {} }; policies[sid] = policy
+	if cid == nil then policy.all, policy.chars = rel, {} else policy.chars[cid] = rel end
+end
+
+-- Public ALQ hook, also usable by adapters that already know their exact audience.
+function set_squad_relation_for(squad, relation, cid)
+	if not (live() and owner() and squad and REL[relation] and real(cid)) then return end
+	local sid = C.hid(squad.id)
+	if not number(sid, 1, 65534) then return end
+	remember(sid, cid, relation)
+	apply(sid, squad, cid)
+	publish_policy(sid, cid, relation)
+end
+local function set_audience(squad, relation)
+	if not REL[relation] or is_squad_monster[squad.player_id] then return end
+	local sid = C.hid(squad.id)
+	if not number(sid, 1, 65534) then return end
+	remember(sid, nil, relation); applied[sid] = nil
+	apply(sid, squad)
+	publish_policy(sid, nil, relation)
+end
+local function install_squad()
+	local m = C.mod("sim_squad_scripted")
+	if not m then return end
+	C.wrap(m.sim_squad_scripted, "set_squad_relation", "npcrel.squad_audience", function(original)
+		return function(squad, relation, ...)
+			if not live() then return original(squad, relation, ...) end
+			if not owner() then return end
+			relation = relation or squad.relationship
+			if alq_cid ~= nil then return set_squad_relation_for(squad, relation, alq_cid) end
+			return set_audience(squad, relation)
+		end
+	end)
+	C.wrap(m.sim_squad_scripted, "remove_squad", "npcrel.squad_remove", function(original)
+		return function(squad, ...)
+			if not live() then return original(squad, ...) end
+			if not owner() then return end
+			local sid = C.hid(squad.id) -- the mod releases its server entity
+			local result = { original(squad, ...) }
+			policies[sid], applied[sid] = nil, nil
+			C.publish("npcrel_policy", { s = sid, x = true })
+			return unpack(result)
+		end
+	end)
+end
+local function install_alq()
+	local m = C.mod("alq_player")
+	if not m then return end
+	C.wrap(m, "warn", "npcrel.alq_cid", function(original)
+		return function(squad, paid, cid, ...)
+			if not live() then return original(squad, paid, cid, ...) end
+			if not owner() then return end
+			cid = cid or 0
+			if not real(cid) then return end
+			local before = alq_cid; alq_cid = cid
+			local result = { pcall(original, squad, paid, cid, ...) }
+			alq_cid = before
+			if not result[1] then error(result[2], 0) end
+			return unpack(result, 2)
+		end
+	end)
+end
+
+local function chosen(who)
+	if who == nil then return nil end
+	local cid = type(who) == "number" and who or C.hid(who:id())
+	return real(cid) and cid or nil
+end
+local skyfall_hook, skyfall_hit_hook
+local function install_skyfall_hit(m)
+	local event = "physic_object_on_hit_callback"
+	if m[event] == skyfall_hit_hook then return end
+	local wrapped, old = C.wrap(m, event, "npcrel.skyfall_hit_shooter", function(original)
+		return function(obj, damage, direction, who, ...)
+			if not live() then return original(obj, damage, direction, who, ...) end
+			if not (coop_mode.leads_here() and who) then return end
+			if not P.is_player_id(who:id()) then return original(obj, damage, direction, who, ...) end
+			local cid = chosen(who)
+			if cid == nil then return end
+
+			-- Keep NTA's shared hit count and blast logic. Only its queued check
+			-- and cover effect use the character named by the physics callback.
+			local env = getfenv(original)
+			local scoped = setmetatable({}, { __index = env })
+			scoped.CreateTimeEvent = function(id, name, delay, fn, ...)
+				if id == 0 and name == "counting_hits" then
+					setfenv(fn, setmetatable({
+						is_enemies_with_military = function()
+							return not real(cid) or m.is_enemies_with_military(cid)
+						end,
+						blow_cover = function() return as_character(cid, m.blow_cover) end,
+					}, { __index = env }))
+					-- The mod's raw timer is routed to the world owner. The hit
+					-- and the resulting timer belong to the same map authority.
+					local on_timer = fn
+					fn = function(...)
+						if not (live() and coop_mode.leads_here()) then return true end
+						return on_timer(...)
+					end
+				end
+				return env.CreateTimeEvent(id, name, delay, fn, ...)
+			end
+			setfenv(original, scoped)
+			local ok, err = pcall(original, obj, damage, direction, who, ...)
+			setfenv(original, env)
+			if not ok then error(err, 0) end
+		end
+	end)
+	if wrapped then
+		skyfall_hit_hook = m[event]
+		C.swap_callback(event, old, skyfall_hit_hook)
+	end
+end
+
+local function install_skyfall()
+	local m = C.mod("tasks_skyfall")
+	if not m then return end
+	install_skyfall_hit(m)
+	if m.is_enemies_with_military == skyfall_hook then return end
+	if C.wrap(m, "is_enemies_with_military", "npcrel.skyfall_character", function(original)
+		return function(who, ...)
+			if not live() then return original(who, ...) end
+			-- The task pass scopes db.actor to the participant. Its reward scope can name someone else.
+			who = who or db.actor
+			local cid = chosen(who)
+			if cid == nil then return false end
+			local obj = who
+			if type(who) == "number" then obj = body(cid) end
+			-- Skyfall uses the player's current community, which includes their cover.
+			local f = obj and obj:character_community() or faction(cid)
+			if not f then return false end
+			return relation_registry.community_relation(f, "army") + coop_reputation.goodwill_of("army", cid) <= game_relations.ENEMIES
+		end
+	end) then skyfall_hook = m.is_enemies_with_military end
+end
+
+local function reset_goodwill(a, b)
+	a, b = normalize(a), normalize(b)
+	if not (FACTIONS[a] and FACTIONS[b] and ui_options.get("alife/general/war_goodwill_reset")) then return end
+	for _, cid in ipairs(characters()) do
+		local f, other = faction(cid)
+		if f == a then other = b elseif f == b then other = a end
+		if other then with_character(cid, relation_registry.set_community_goodwill, other, cid, 0) end
+	end
+end
+local function install_reset()
+	local m = C.mod("game_relations")
+	if not m then return end
+	C.wrap(m, "reset_goodwill", "npcrel.war_characters", function(original)
+		return function(a, b, ...)
+			if not live() then return original(a, b, ...) end
+			if coop_mode.decides_world() then return reset_goodwill(a, b) end
+			if not coop_mode.leads_here() then return end
+			reset_seq = reset_seq + 1
+			C.publish("npcrel_reset", { a = a, b = b,
+				o = tostring(C.self_peer()) .. ":" .. tostring(time_global()) .. ":" .. tostring(reset_seq) })
+		end
+	end)
+end
+
+local function patch_callback(m, key, event, label, make)
+	local old = m[key]
+	if C.wrap(m, key, label, make) then C.swap_callback(event, old, m[key]) end
+end
+local function install_sin()
+	local m = C.mod("grok_sin_allied_to_mutants")
+	if not m then return end
+	patch_callback(m, "monster_on_before_hit", "monster_on_before_hit", "npcrel.sin_shooter", function(original)
+		return function(npc, hit, ...)
+			if not live() then return original(npc, hit, ...) end
+			if not coop_mode.leads_here() then return end
+			local who = hit and hit.draftsman
+			if not (npc and IsMonster(npc) and who and P.is_player_id(who:id())) then return end
+			local cid = C.hid(who:id())
+			if not real(cid) or normalize(coop_npc_player_community(who)) ~= "greh" then return end
+			m.void_pact = m.void_pact or {}; m.void_pact[npc:id()] = true
+			local squad = get_object_squad(npc)
+			if squad then for member in squad:squad_members() do m.void_pact[member.id] = true end end
+		end
+	end)
+	patch_callback(m, "on_enemy_eval", "on_enemy_eval", "npcrel.sin_behaviour", function(original)
+		return function(npc, enemy, flags, ...)
+			if not live() then return original(npc, enemy, flags, ...) end
+			if not coop_mode.leads_here() then return end
+			local mutant, player
+			if npc and enemy and IsMonster(npc) then mutant, player = npc, enemy
+			elseif npc and enemy and IsMonster(enemy) then mutant, player = enemy, npc end
+			if player and P.is_player_id(player:id()) then
+				if not real(C.hid(player:id())) or normalize(coop_npc_player_community(player)) ~= "greh" then return end
+				if m.void_pact and m.void_pact[mutant:id()] then flags.override = false
+				else flags.override, flags.result = true, false end
+				return
+			end
+			return original(npc, enemy, flags, ...)
+		end
+	end)
+end
+
+local function defense_faction(cid)
+	if coop_mode.group_travels() then
+		local fac = C.mod("coop_faction")
+		return normalize(fac and fac.group_faction and fac.group_faction()) or faction(cid)
+	end
+	return faction(cid)
+end
+local function defense_candidates(who, include_hostile)
+	local out = {}
+	for _, p in ipairs(P.players()) do
+		local cid = C.hid(p.avatar_id)
+		if coop_mode.seat_plays(p.id) and real(cid) and (who == nil or chosen(who) == cid) then
+			local f = defense_faction(cid)
+			if include_hostile or (f and not game_relations.is_factions_enemies(f, "freedom")) then
+				out[#out + 1] = { cid = cid, peer = p.id }
+			end
+		end
+	end
+	return out
+end
+local function show_offer(t)
+	local kind = DEFENSE[t.tid]
+	if not kind or not coop_mode.actor_is_player() then return end
+	local actor = own_actor()
+	if not actor then return end
+	local info = t.tid .. "_announced"
+	local expire = t.expire == true
+	if expire and not actor:has_info(info) then return end
+	local api = C.engine()
+	local hold = coop_mode.is_player_mirror() and api and api.story_hold_infos
+	if hold then hold(true) end
+	local ok, err = pcall(function()
+		if expire then actor:disable_info_portion(info) else actor:give_info_portion(info) end
+	end)
+	if hold then hold(false) end
+	if not ok then error(err, 0) end
+	dynamic_news_helper.send_tip(game.translate_string("barrier_defense_" .. kind .. (expire and "_end_announce" or "_announce")),
+		game.translate_string("mil_freedom_leader_name"), nil, nil, "ui_inGame2_lukash", nil, "npc")
+	return true
+end
+local function offer_to(p, tid, expire)
+	local t = { tid = tid, expire = expire == true }
+	if p.peer == C.self_peer() and coop_mode.actor_is_player() then return show_offer(t) end
+	return C.to_peer(p.peer, "npcrel_offer", t)
+end
+local function install_defense()
+	local m = C.mod("tasks_defense")
+	if not m then return end
+	local original_available = m.barrier_defense_available
+	if type(original_available) ~= "function" then return end
+	-- Only the original availability function sees this lookup. Its MDATA,
+	-- probability and cooldown checks stay the installed mod's, including SP.
+	local env = getfenv(original_available)
+	local scoped = setmetatable({}, { __index = env })
+	scoped.character_community = function(obj)
+		if live() then
+			local cid = chosen(obj)
+			if cid ~= nil then return defense_faction(cid) end
+		end
+		return env.character_community(obj)
+	end
+	setfenv(original_available, scoped)
+	local function available(tid, who)
+		for _, p in ipairs(defense_candidates(who)) do
+			if as_character(p.cid, original_available, tid) then return true end
+		end
+		return false
+	end
+	C.wrap(m, "barrier_defense_available", "npcrel.defense_audience", function(original)
+		return function(tid, who, ...)
+			if not live() then return original(tid, who, ...) end
+			return available(tid, who)
+		end
+	end)
+	local offer_pending = false
+	patch_callback(m, "actor_on_first_update", "actor_on_first_update", "npcrel.defense_offers", function(original)
+		return function(...)
+			if not live() then return original(...) end
+			if not coop_mode.decides_world() then return end
+			local data = C.find_local(m, "MDATA")
+			if not data then return end
+			local tid
+			if not offer_pending then
+				if available("barrier_defense_monolith") then tid = "barrier_defense_monolith"
+				elseif available("barrier_defense_zombie") then tid = "barrier_defense_zombie" end
+			end
+			if tid then
+				offer_pending = true
+				CreateTimeEvent(0, "npcrel_defense_offer", 20, function()
+					offer_pending = false
+					if not (live() and coop_mode.decides_world()) then return true end
+					local sent = false
+					for _, p in ipairs(defense_candidates()) do
+						if offer_to(p, tid) then sent = true end
+					end
+					if sent then
+						data[tid].last_msg_time = utils_data.CTime_to_table(game.get_game_time())
+						CreateTimeEvent(math.random(999), "chatter", 5, m.f_chatter, DEFENSE[tid], 0)
+					end
+					return true
+				end)
+			end
+			for key in pairs(DEFENSE) do
+				local stamp = data[key] and data[key].last_msg_time
+				if stamp and game.get_game_time():diffSec(utils_data.CTime_from_table(stamp)) > 86400 then
+					for _, p in ipairs(defense_candidates(nil, true)) do offer_to(p, key, true) end
+				end
+			end
+		end
+	end)
+end
+
+-- These verbs carry authority facts. The transport reserves 0x101..0x107 for
+-- map-process connections (coop_mapserver_rules.h); player seats can disappear from the roster.
+local function authority_sender(from)
+	return from == 0 or (coop_mode.decides_world() and number(from, 0x101, 0x107) ~= nil)
+end
+local function wire_policy(t, from)
+	local authorized = authority_sender(from)
+	if not coop_trust.pass("npcrel_policy_sender", authorized, "sender %s published squad relations", tostring(from)) or not authorized then return end
+	local sid, cid = number(t.s, 1, 65534), number(t.c, -1, 65534)
+	local shape = sid ~= nil and (t.x == true or (cid ~= nil and REL[t.r] ~= nil))
+	if not coop_trust.pass("npcrel_policy_shape", shape, "invalid squad relation fields") then return end
+	if not shape then return end -- malformed data cannot index a record even in diagnostic log mode
+	if not (live() and owner()) then return end
+	if t.x == true then
+		policies[sid], applied[sid] = nil, nil
+		if from ~= 0 and coop_mode.decides_world() then C.publish("npcrel_policy", { s = sid, x = true }) end
+		return
+	end
+	remember(sid, cid ~= -1 and cid or nil, t.r)
+	apply(sid, alife_object(C.lid(sid)))
+	if from ~= 0 and coop_mode.decides_world() then publish_policy(sid, cid ~= -1 and cid or nil, t.r) end
+end
+local function wire_reset(t, from)
+	local authorized = authority_sender(from)
+	if not coop_trust.pass("npcrel_reset_sender", authorized, "sender %s published a war reset", tostring(from)) or not authorized then return end
+	local a, b = normalize(t.a), normalize(t.b)
+	local shape = FACTIONS[a] == true and FACTIONS[b] == true and type(t.o) == "string" and #t.o > 0 and #t.o <= 96
+	if not coop_trust.pass("npcrel_reset_shape", shape, "invalid war reset fields") then return end
+	if not shape or not coop_mode.decides_world() or reset_seen[t.o] then return end
+	reset_seen[t.o] = true; reset_order[#reset_order + 1] = t.o
+	if #reset_order > 128 then reset_seen[table.remove(reset_order, 1)] = nil end
+	reset_goodwill(a, b)
+end
+
+function save_state(data)
+	if live() then data.coop_npc_relations_v1 = policies end
+end
+function load_state(data)
+	policies, applied, last_audience = {}, {}, nil
+	if not live() then return end
+	for sid, p in pairs(data.coop_npc_relations_v1 or {}) do
+		if number(sid, 1, 65534) and type(p) == "table" then
+			if REL[p.all] then remember(sid, nil, p.all) end
+			for cid, rel in pairs(p.chars or {}) do
+				if number(cid, 0, 65534) and REL[rel] then remember(sid, cid, rel) end
+			end
+		end
+	end
+end
+function update()
+	if not (live() and owner()) then return end
+	local seats = {}
+	for _, p in ipairs(P.players()) do
+		if coop_mode.seat_plays(p.id) then seats[#seats + 1] = tostring(p.id) .. ":" .. tostring(p.avatar_id) end
+	end
+	table.sort(seats)
+	local cids, real_ids = characters()
+	local signature = table.concat(cids, ",") .. ";" .. table.concat(seats, ",")
+	local changed = signature ~= last_audience; last_audience = signature
+	for sid, policy in pairs(policies) do
+		apply(sid, alife_object(C.lid(sid)), nil, cids, real_ids)
+		if changed and coop_mode.decides_world() then
+			if policy.all then publish_policy(sid, nil, policy.all) end
+			for cid, rel in pairs(policy.chars) do publish_policy(sid, cid, rel) end
+		end
+	end
+	if changed and coop_mode.decides_world() then
+		local m = C.mod("tasks_defense")
+		if m and m.actor_on_first_update then m.actor_on_first_update() end
+	end
+end
+local function actor_on_update()
+	local now = time_global()
+	if now < next_update then return end
+	next_update = now + 1000
+	step("Skyfall", install_skyfall)
+	step("update", update)
+end
+function on_game_start()
+	if installed then return end
+	C, P = coop_mods_core, coop_npc_players
+	installed = true
+	step("squad", install_squad); step("ALQ", install_alq); step("Skyfall", install_skyfall)
+	step("war reset", install_reset); step("Sin", install_sin); step("defense", install_defense)
+	step("events", function()
+		C.set_limit("npcrel_policy", 32, 16); C.on("npcrel_policy", wire_policy)
+		C.set_limit("npcrel_reset", 8, 2); C.on("npcrel_reset", wire_reset, "world")
+		C.on("npcrel_offer", show_offer, "player")
+	end)
+	step("callbacks", function()
+		RegisterScriptCallback("save_state", save_state)
+		RegisterScriptCallback("load_state", load_state)
+		-- The NTA adapter installs its legacy group search at first update.
+		RegisterScriptCallback("actor_on_first_update", function() step("Skyfall", install_skyfall) end)
+		RegisterScriptCallback("actor_on_update", actor_on_update)
+	end)
+end
