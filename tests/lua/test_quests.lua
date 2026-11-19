@@ -1,6 +1,7 @@
 -- Anomaly Coop W4 "quests" temp test: coop_tasks + coop_quests_* on a simulated host and client.
 -- Run: tools\test_lua.cmd quests   (VERBOSE = true for machine logs)
 dofile("tests/lua/support/harness_quests.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local SCRIPTS = { "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story", "coop_quests_pda" }
 
@@ -76,7 +77,26 @@ local function setup_world(M)
 end
 
 local function boot(M)
+	-- The stock entity variable helpers and mdata share alife_storage_manager's store.
+	local state = { se_object = M.se_vars }
+	M.env.alife_storage_manager = { get_state = function() return state end }
+	local alife_object = M.env.alife_object
+	M.env.alife_object = function(id)
+		local se = alife_object(id)
+		if se then se.name = function(self) return self._o:name() end end
+		return se
+	end
+
+	local facade = load_script(M, "coop_mode")
+	load_script(M, "coop_trust")
+	local mods = load_script(M, "coop_mods_core")
+	load_script(M, "coop_economy_core")
+	local mdata = load_script(M, "coop_economy_mdata")
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
+	facade.on_game_start()
+	modes.live(facade, function(name) return load_script(M, name) end)
+	mods.on_game_start()
+	mdata.on_game_start()
 	for _, n in ipairs(SCRIPTS) do M.env[n].on_game_start() end
 	fire(M, "actor_on_first_update")
 end
@@ -714,17 +734,23 @@ end }
 Cm.env.ui_pda_npc_tab = { register_pda = function() Cm.client_reg = true end }
 Hm.new_obj(960, "itm_pda_common", vec(0, 0, 0))
 Cm.new_obj(960, "itm_pda_common", vec(0, 0, 0))
+Hm.new_obj(961, "itm_pda_common", vec(0, 0, 0))
+Cm.new_obj(961, "itm_pda_common", vec(0, 0, 0))
 for _, M in ipairs({ Hm, Cm }) do
 	local s = load_script(M, "coop_quests_pda")
 	s.on_game_start()
 	fire(M, "actor_on_first_update")
 end
 local corpse = Hm.new_obj(701, "sim_default_stalker_1", vec(6, 0, 0), { _stalker = true, _dead = true })
+local pda_sent = count_sent(Hm, "quests.pda")
 Hm.env.ui_pda_npc_tab.register_pda(Hm.npc, "itm_pda_common", 961) -- alive owner: not broadcast
 pump()
-check(Cm.se_vars[961] == nil, "a living stalker's PDA is not broadcast")
+check(count_sent(Hm, "quests.pda") == pda_sent and Cm.se_vars[961] == nil, "a living stalker's PDA is not broadcast")
 Hm.env.ui_pda_npc_tab.register_pda(corpse, "itm_pda_common", 960)
+check(count_sent(Hm, "quests.pda") == pda_sent + 1 and last_sent(Hm, "quests.pda").i == 960,
+	"host broadcasts the dead stalker's PDA at registration")
 Cm.env.ui_pda_npc_tab.register_pda(Cm.npc, "itm_pda_common", 960)
+check(Cm.client_reg == nil and Cm.se_vars[960] == nil, "client waits for the broadcast without rolling its own PDA")
 pump()
 local info = Cm.se_vars[960] and Cm.se_vars[960].info
 check(info and info.contact.name == "Petro" and info.msg[1].stash == 950 and Cm.client_reg == nil,

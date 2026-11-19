@@ -8,8 +8,8 @@
 	the stock local list is shown. On the host the players are in the list already (their characters
 	are stalkers there).
 	NPC PDAs: a dead stalker's PDA gets random messages (contact, stash, route, RF source) when it is
-	registered. Only the host generates them and sends them to every client (quests.pda); a client asks
-	for a PDA it has no messages for (quests.pda_req).
+	registered. Its level authority generates them and sends them to its players (quests.pda); a client
+	with no local messages asks that authority (mods.pda_req, answered by mods.pda_info or mods.pda_big).
 	Stashes from PDA messages: the client's reveal is also done by the host (the host decides the
 	content, quests.act "stash_reveal"; "stash" is a reward's new stash, coop_quests_missions). Opening a stash box on a client asks the host to fill it
 	(treasure_manager.try_spawn_treasure, host-domain callback that does not run on a client).
@@ -249,82 +249,151 @@ end
 -------------------------------------------------------------------------------
 -- NPC PDA messages
 -------------------------------------------------------------------------------
-local pda_cache = {} -- local item id -> info (client)
-local applying_pda = false
+local pda_cache = {} -- local item id -> received info or pending placeholder
+local pda_view = {} -- the local item and window last rendered by get_ui
+local PDA_REQ_GAP = 2000
+local PDA_MAX_TRANSFER = 256 * 1024 -- coop_mods_core.send_big limit
 
-local function host_send_pda(id, target)
+local function valid_pda_id(id)
+	return type(id) == "number" and id > 0 and id < 65535 and id % 1 == 0
+end
+
+local function displayed_pda_id()
+	local actor = db.actor
+	local obj = actor and (actor:active_item() or actor:item_in_slot(14))
+	local dev = coop_mods_core.mod("item_device")
+	local sections = dev and dev.device_npc_pda
+	return obj and type(sections) == "table" and sections[obj:section()] and obj:id()
+end
+
+local function refresh_pda(id, info)
+	local tab = pda_view.tab
+	if pda_view.id ~= id or not tab then return end
+	local menu = ActorMenu.get_pda_menu()
+	if not (menu and menu:IsShown() and menu:GetActiveSection() == "eptNPC" and displayed_pda_id() == id) then return end
+	local item = tab.message_list:GetSelectedItem()
+	local index = item and item.indx
+	local previous = index and tab.msg and tab.msg[index]
+	tab:Reset(info)
+	if info.state == "default" and index and info.msg[index] then
+		local msg = info.msg[index]
+		if previous and previous.stash == msg.stash and previous.stash_read then msg.stash_read = true end
+		tab.message_list:SetSelectedIndex(index - 1) -- the list uses zero-based indexes
+		tab:OnSelectMessage()
+	end
+end
+
+local function apply_cached_pda(id, entry)
+	if not alife_object(id) or not coop_economy_mdata.apply_se(id, "info", entry.info) then return false end
+	entry.applied = true
+	refresh_pda(id, entry.info)
+	return true
+end
+
+local function host_send_pda(id, target, legacy)
 	local info = se_load_var(id, nil, "info")
 	if type(info) ~= "table" then return end
 	local blob = qc.ser(info)
-	if not blob or #blob > qc.MAX_BLOB then
-		qc.log(TAG, "! PDA info of %s too long to send", tostring(id))
-		return
+	local hid = coop_mods_core.hid(id)
+	if not (blob and valid_pda_id(hid)) then return end
+	local t = { i = hid, d = blob }
+	local payload = qc.encode(t)
+	local sent
+	if #payload >= 15000 then
+		sent = coop_mods_core.send_big("pda_big", payload, target)
+	elseif target == -1 or legacy then
+		sent = qc.send("pda", t, target)
+	else
+		sent = coop_mods_core.to_peer(target, "pda_info", t)
 	end
-	if qc.send("pda", { i = id, d = blob }, target) then stats.pda_out = stats.pda_out + 1 end
-end
-
-local function client_store_pda(id, info)
-	pda_cache[id] = info
-	if alife_object(id) then se_save_var(id, nil, "info", info) end
+	if sent then stats.pda_out = stats.pda_out + 1 end
 end
 
 local function client_on_pda(t, from)
-	if from ~= 0 or not qc.is_client() then return end
-	local id = tonumber(t.i)
-	local info = qc.des(t.d)
-	if not (id and type(info) == "table") then return end
+	if from ~= 0 or not coop_mode.is_player_mirror() or not valid_pda_id(t.i) then return end
+	local id = coop_mods_core.lid(t.i)
+	if not valid_pda_id(id) then return end
+	local entry = pda_cache[id]
+	if entry and entry.blob == t.d and entry.applied then return end
+	local info = qc.des(t.d, PDA_MAX_TRANSFER)
+	if type(info) ~= "table" then return end
+	entry = { info = info, blob = t.d }
+	pda_cache[id] = entry
 	stats.pda_in = stats.pda_in + 1
-	client_store_pda(qc.to_local_id(id), info)
+	apply_cached_pda(id, entry)
 end
 
-local function host_on_pda_req(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
-	local id = tonumber(t.i)
-	if id and alife_object(id) then host_send_pda(id, from) end
+local function host_on_pda_req(t, from, legacy)
+	local valid = valid_pda_id(t.i)
+	if not coop_trust.pass("pda_req_id", valid, "peer %s, PDA id %s", tostring(from), tostring(t.i)) then return end
+	if not valid then return end -- impossible to look up an invalid engine id even in log mode
+	local id = coop_mods_core.lid(t.i)
+	local exists = valid_pda_id(id) and alife_object(id) ~= nil
+	if not coop_trust.pass("pda_req_entity", exists, "peer %s, PDA %s is absent", tostring(from), tostring(t.i)) then return end
+	if exists then host_send_pda(id, from, legacy) end
+end
+
+local function request_pda(id, entry)
+	local now = time_global()
+	if entry.next_req and now < entry.next_req then return end
+	local hid = coop_mods_core.hid(id)
+	if valid_pda_id(hid) and coop_mods_core.to_host("pda_req", { i = hid }) then
+		entry.next_req = now + PDA_REQ_GAP
+		stats.pda_req = stats.pda_req + 1
+	end
+end
+
+local function ensure_pda_info(id, for_view)
+	local entry = pda_cache[id] or {}
+	local info = se_load_var(id, nil, "info")
+	if type(info) == "table" and info ~= entry.stub then return end
+	if entry.info and apply_cached_pda(id, entry) then return end
+	pda_cache[id] = entry
+	if for_view and type(info) ~= "table" then
+		entry.stub = { state = "default", msg = {}, contact = {
+			name = game.translate_string("st_dyn_news_unknown_contact"), comm = "stalker",
+			icon = "ui\\ui_noise", rank = "novice", repu = 0 } }
+		coop_economy_mdata.quietly(se_save_var, id, nil, "info", entry.stub)
+	end
+	request_pda(id, entry)
 end
 
 local function patch_npc_pda()
-	local tab = qc.mod("ui_pda_npc_tab")
-	if type(tab) ~= "table" then return end
-	local reg = tab.register_pda
-	if type(reg) == "function" then
-		tab.register_pda = function(npc, pda_sec, pda_id, ...)
-			if qc.client_live() then return end -- the host's messages come with quests.pda
+	local tab = coop_mods_core and coop_mods_core.mod("ui_pda_npc_tab")
+	if not tab then return end
+	coop_mods_core.wrap(tab, "register_pda", "pda.register", function(reg)
+		return function(npc, pda_sec, pda_id, ...)
+			if not qc.active() then return reg(npc, pda_sec, pda_id, ...) end
+			if coop_mode.is_player_mirror() then return end -- the authority sends the messages
 			local r = reg(npc, pda_sec, pda_id, ...)
 			-- a dead stalker's PDA is loot now: everybody gets its messages (others are asked for when taken)
 			local dead = not npc or not pcall(npc.alive, npc) or not npc:alive()
-			if dead and qc.host_party() and type(pda_id) == "number" then
+			if dead and coop_mode.leads_here() and valid_pda_id(pda_id) then
 				local ok, err = pcall(host_send_pda, pda_id, -1)
 				if not ok then qc.report(TAG, "send pda", err) end
 			end
 			return r
 		end
-	end
-	local view = tab.use_view
-	if type(view) == "function" then
-		tab.use_view = function(obj, ...)
-			if obj and qc.client_live() then
-				local id = obj:id()
-				if type(se_load_var(id, nil, "info")) ~= "table" then
-					if pda_cache[id] then
-						se_save_var(id, nil, "info", pda_cache[id])
-					else
-						qc.send("pda_req", { i = qc.to_host_id(id) }, 0)
-						stats.pda_req = stats.pda_req + 1
-						se_save_var(id, nil, "info", { state = "default", msg = {}, contact = {
-							name = game.translate_string("st_dyn_news_unknown_contact"), comm = "stalker",
-							icon = "ui\\ui_noise", rank = "novice", repu = 0 } })
-					end
-				end
-			end
+	end)
+	coop_mods_core.wrap(tab, "use_view", "pda.use_view", function(view)
+		return function(obj, ...)
+			if qc.active() and obj and coop_mode.is_player_mirror() then ensure_pda_info(obj:id(), true) end
 			return view(obj, ...)
 		end
-	end
+	end)
+	-- get_ui runs when the PDA menu actually shows the tab, including the delayed 2D open.
+	coop_mods_core.wrap(tab, "get_ui", "pda.get_ui", function(get_ui)
+		return function(...)
+			if not (qc.active() and coop_mode.is_player_mirror()) then return get_ui(...) end
+			local wnd = get_ui(...)
+			pda_view.id, pda_view.tab = displayed_pda_id(), wnd
+			return wnd
+		end
+	end)
 	-- a stash revealed by a PDA message: the host decides its content
 	local cls = tab.pda_npc_tab
-	local sel = cls and cls.OnSelectMessage
-	if type(sel) == "function" then
-		cls.OnSelectMessage = function(self, ...)
+	coop_mods_core.wrap(cls, "OnSelectMessage", "pda.select_message", function(sel)
+		return function(self, ...)
 			if not qc.client_live() then return sel(self, ...) end
 			local msg
 			pcall(function()
@@ -343,19 +412,37 @@ local function patch_npc_pda()
 			end
 			return r
 		end
-	end
+	end)
 end
 
 -- Client took an NPC PDA it has no messages for: ask the host now, before it is read.
 local function client_item_take(item)
-	if not (qc.client_live() and item) then return end
-	local dev = qc.mod("item_device")
+	if not (qc.active() and item and coop_mode and coop_mode.is_player_mirror()) then return end
+	local dev = coop_mods_core.mod("item_device")
 	local secs = type(dev) == "table" and dev.device_npc_pda
 	if not (type(secs) == "table" and secs[item:section()]) then return end
-	local id = item:id()
-	if pda_cache[id] or type(se_load_var(id, nil, "info")) == "table" then return end
-	qc.send("pda_req", { i = qc.to_host_id(id) }, 0)
-	stats.pda_req = stats.pda_req + 1
+	ensure_pda_info(item:id(), false)
+end
+
+local function install_pda_events()
+	qc.on("pda", client_on_pda, TAG)
+	if not coop_mods_core then return end
+	coop_mods_core.set_limit("pda_req", 6, 2)
+	coop_mods_core.on("pda_req", host_on_pda_req, "host")
+	coop_mods_core.on("pda_info", client_on_pda, "player")
+	coop_mods_core.on_big("pda_big", function(payload, from) client_on_pda(qc.decode(payload), from) end, "player")
+	-- Keep the original request name routable for callers of the existing quests channel.
+	coop_mode.on_level_request("quests.pda_req", function(payload, from)
+		host_on_pda_req(qc.decode(payload), from, true)
+	end, function(_, from) return type(from) == "number" and from ~= 0 end)
+	RegisterScriptCallback("server_entity_on_unregister", function(se)
+		local id = se and se.id
+		if id then pda_cache[id] = nil end
+		if id and pda_view.id == id then pda_view = {} end
+	end)
+	RegisterScriptCallback("coop_on_world_leaving", function()
+		pda_cache, pda_view = {}, {}
+	end)
 end
 
 local function host_stash(from, t)
@@ -482,9 +569,9 @@ end
 
 local function is_note(s) return s:find("encyclopedia__notes", 1, true) ~= nil end
 
-local function unlocked(s)
+local function unlocked(s, kind)
 	local enc = ui_pda_encyclopedia_tab
-	if is_note(s) then return enc.is_unlocked_note(s) == true end
+	if kind == "note" or (not kind and is_note(s)) then return enc.is_unlocked_note(s) == true end
 	return enc.is_unlocked_article(s) == true
 end
 
@@ -506,11 +593,14 @@ local function silently(fn, ...)
 	return unpack(res)
 end
 
-local function apply_ency(s)
-	if type(s) ~= "string" or s == "" or unlocked(s) then return false end
+local function apply_ency(s, kind)
+	if type(s) ~= "string" or s == "" or unlocked(s, kind) then return false end
 	ency.applying = true
 	local ok, err
-	if is_note(s) then
+	if kind then
+		-- The mass command has no per-entry UI, sound or news, on either side.
+		ok, err = silently(kind == "note" and ency.orig_note or ency.orig_article, s)
+	elseif is_note(s) then
 		ok, err = pcall(ency.orig_note, s) -- notes keep the PDA note signal
 	else
 		ok, err = silently(ency.orig_article, s)
@@ -518,7 +608,59 @@ local function apply_ency(s)
 	ency.applying = false
 	if not ok then qc.report(TAG, "unlock " .. s, err) end
 	stats.ency_in = stats.ency_in + 1
-	return ok and unlocked(s)
+	return ok and unlocked(s, kind)
+end
+
+local ENCY_BATCH = 20 -- even escaped 200-byte sections fit in one 15 KB event
+local function valid_ency_section(s)
+	return type(s) == "string" and #s > 0 and #s <= 200
+end
+
+local function apply_ency_batch(t)
+	if not (ency.orig_article and (t.k == "article" or t.k == "note")) then return end
+	local sections = qc.des(t.d, 4300)
+	if type(sections) ~= "table" then return end
+	for i = 1, ENCY_BATCH do
+		local s = sections[i]
+		if valid_ency_section(s) then apply_ency(s, t.k) end
+	end
+end
+
+local function publish_ency_batch(kind, batch)
+	if #batch == 0 then return end
+	if coop_mode.publish("quests.ency", { k = kind, d = qc.ser(batch) }) then
+		stats.ency_out = stats.ency_out + #batch
+	else
+		qc.log(TAG, "! encyclopedia: could not send %d %s unlocks", #batch, kind)
+	end
+end
+
+local function wrap_ency_mass(enc, method, kind, counter, upvalue)
+	coop_mods_core.wrap(enc, method, "pda." .. method, function(orig)
+		return function(...)
+			if not (qc.active() and coop_mode.decides_world()) then return orig(...) end
+			-- The stock count getter and mass unlock share the locked table. The original empties it.
+			local locked = coop_mods_core.upvalue(enc[counter], upvalue)
+			if type(locked) ~= "table" then return orig(...) end
+			local before = {}
+			for s in pairs(locked) do
+				if valid_ency_section(s) then before[#before + 1] = s end
+			end
+			local n = orig(...)
+			local batch = {}
+			for _, s in ipairs(before) do
+				if unlocked(s, kind) then
+					batch[#batch + 1] = s
+					if #batch == ENCY_BATCH then
+						publish_ency_batch(kind, batch)
+						batch = {}
+					end
+				end
+			end
+			publish_ency_batch(kind, batch)
+			return n
+		end
+	end)
 end
 
 -- The article's name in this machine's language (the stock news words: UpdateName for artefacts and recipes, then the table).
@@ -581,7 +723,16 @@ local function announce_ency(s)
 end
 
 local function on_ency(t, from)
-	if type(t.s) ~= "string" or #t.s > 200 then return end
+	-- Bulk packets are world publications. Player requests still carry one section.
+	if from == 0 and t.d ~= nil then
+		if qc.active() and not coop_mode.decides_world() then apply_ency_batch(t) end
+		return
+	end
+	local valid = valid_ency_section(t.s)
+	if type(from) == "number" and from ~= 0 and coop_trust then
+		if not coop_trust.pass("pda_ency_section", valid, "peer %s, invalid encyclopedia section", tostring(from)) then return end
+	end
+	if not valid then return end
 	if qc.is_host() then
 		if type(from) ~= "number" or from == 0 then return end
 		local nick = nick_from(from, t)
@@ -624,6 +775,10 @@ local function patch_encyclopedia()
 		local r = ency.orig_article(s, ...)
 		if type(s) == "string" and not before and unlocked(s) then announce_ency(s) end
 		return r
+	end
+	if coop_mods_core then
+		wrap_ency_mass(enc, "unlock_all_articles", "article", "get_articles_locked_count", "locked_articles")
+		wrap_ency_mass(enc, "unlock_all_notes", "note", "get_notes_locked_count", "locked_notes")
 	end
 end
 
@@ -869,8 +1024,8 @@ function on_game_start()
 	if not qc.engine() then return end
 	qc.on("rank_req", host_on_rank_req, TAG)
 	qc.on("rank", client_on_rank, TAG)
-	qc.on("pda", client_on_pda, TAG)
-	qc.on("pda_req", host_on_pda_req, TAG)
+	local ok, err = pcall(install_pda_events)
+	if not ok then qc.report(TAG, "install pda events", err) end
 	qc.on("ency", on_ency, TAG)
 	qc.on("achv", on_achv, TAG)
 	qc.on("achv_got", on_achv_got, TAG)
