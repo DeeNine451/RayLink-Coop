@@ -1,0 +1,820 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - the Warfare PDA in a session (gamedata\scripts\coop_warfare_ui.script), Dev 57 G18-1 (TZ R19).
+
+	Warfare is the world's: warfare / smart_terrain_warfare / sim_squad_warfare are host by coop_route_stock.ltx and run
+	where the world is decided. The shared Warfare rule (coop_reputation.script): ONE campaign for the whole group - one
+	warfare.actor_faction (the faction that leads the war), one pool of influence points, one influence table, one manual
+	control flag; all of it world data, saved by the world's warfare.save_state, never a player's own.
+
+	s42:2  warfare.on_game_start sets _G.WARFARE = true on every machine (warfare.script:828); only the world's
+	       actor_on_update and resetter clear it (:275-277, :988-990, host), so a player's stock pda.script (:42, GAMMA :47)
+	       opened the war tab instead of the contacts in a normal world. On every machine in a session the flag is set on
+	       on_game_load and actor_on_first_update (after every on_game_start, before the PDA can open) to the world's mode:
+	       the world's own IsWarfare() (_g.script:2807, the stock's rule) where the world is decided, the world's answer
+	       elsewhere, until then the world's saved enable_warfare_mode (a player loads the world's save; his own axr config,
+	       which IsWarfare also reads, is his single player's).
+
+	s37:3  the stock PDA reads warfare.actor_faction (pda_flagger.script:56,64, pda_smart_terrain_warfare.script:24-26),
+	       warfare.actor_influence_points (pda_actor.script:26), warfare.influence_levels and pda_actor.manual_control on
+	       the machine that shows it. A player's copies were the save's (warfare.load_state, view) and actor_faction was nil
+	       (only the world's actor_on_update sets it). The world (coop_mode.decides_world: the co-op host, the world server)
+	       sends its state, mods.wf_state, to everybody when it changed (checked every POLL_MS) and to a player who asks:
+	         { w = 1|0 a Warfare world, f = the faction that leads the war ("" none), p = influence points (2 decimals),
+	           m = 1|0 manual control, i = "smart:level,..." influence levels (host ids), al = "peer,..." the players
+	           whose character is of the leading faction (coop_faction.faction_of): they may order }
+	       A player's machine (coop_mode.is_player_mirror) asks (mods.wf_ask { t = 0 }) at its first update and every
+	       JOIN_RETRY_MS until answered, and applies the state to its copies (warfare.actor_faction / actor_influence_points
+	       / influence_levels, pda_actor.manual_control, _G.WARFARE): the stock menus show the world's data.
+
+	s37:1  the influence menu of a smart terrain (pda_smart_terrain_warfare) is host: a player's machine never registered it
+	       (configs\coop_compat_warfare.ltx: its on_game_load runs everywhere now). Its two file-local menu functions are
+	       replaced by wrappers (the value of the file local, before its on_game_load registers it): the menu is the stock's
+	       over the world's data, shown to a player only when the world says he may order; a click is an order:
+	         mods.wf_cmd { k = add | rem | ctl, s = smart (host id), m = 1|0 wanted control, o = order id }
+	       to the world, which carries it out exactly as the stock click does there (pda_smart_terrain_warfare.script:76-93,
+	       pda_actor.script:56-57) after its checks, then sends the new state to everybody (a refused player gets the state
+	       back). The co-op host's own player clicks the same menus: his click calls the world's function directly
+	       (one code path, from = coop_mods_core.self_peer()). Checks (coop_trust; one-shot always on):
+	         wf_order_shape    a known kind with a whole target / wanted value and an order id (refused anyway when not)
+	         wf_order_once     guard: an order id of that player runs once (the last SERVED_KEEP of each player)
+	         wf_order_war      a Warfare world (refused anyway when not)
+	         wf_order_faction  his character is of the leading faction (coop_faction.faction_of == warfare.actor_faction)
+	         wf_order_target   the target is a smart terrain (refused anyway when not)
+	         wf_order_offer    the stock menu offers the order: an enemy (or nobody's) point, a whole point to add,
+	                           a level to take back (a remove with no level is the stock's no-op: refused anyway)
+
+	s37:2  pda_actor (view) toggled manual_control on the machine of the click; smart_terrain_warfare.script:497 reads the
+	       world's. Its click of take / release control is an order { k = ctl, m = wanted } (the wanted value, so a stale
+	       second click does not flip it back); the world sets pda_actor.manual_control and everybody's menu shows the
+	       confirmed value. A player who may not order sees the points line without take / release (show / hide points and
+	       the rest of the stock menu stay as they are).
+
+	s41:3  ui_pda_warfare_tab (the Contacts tab of a Warfare world) counted squads, captured points, territories and
+	       dominance from this machine's warfare.registered_squads and the points' owners: stale on a player's machine.
+	       Its Reset there asks the world (mods.wf_ask { t = 1 }, at most once per TAB_GAP_MS) and draws the stock rows from
+	       the world's last summary; the world answers mods.wf_sum (send_big, coop_mods_core.ser of
+	         { q = { [faction] = { [level] = squads } }, s = { [level] = { [faction] = captured points } },
+	           t = { [level] = points } }, active levels only for s and t, as the stock counts)
+	       and the open tab is drawn again when it comes. "Current map" is the player's own map: players on two maps of a
+	       server each see theirs.
+
+	Outside a session nothing here acts: every wrapper calls the stock function unchanged.
+--]]
+
+local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
+local math_floor, math_min = math.floor, math.min
+local string_find, string_match, string_gmatch = string.find, string.match, string.gmatch
+local table_concat, table_sort = table.concat, table.sort
+
+local function C() return coop_mods_core end
+
+-- Event verbs, "mods.<verb>" on the wire (permanent names: tools\persisted_keys.txt)
+local V_STATE = "wf_state" -- world -> players: the campaign's state
+local V_ASK = "wf_ask" -- player -> world: { t = 1: the war tab's summary too }
+local V_ORDER = "wf_cmd" -- player -> world: an order of the stock PDA menus
+local V_SUM = "wf_sum" -- world -> one player (send_big): the war tab's summary
+
+local POLL_MS = 1000
+local JOIN_RETRY_MS = 10000
+local TAB_GAP_MS = 1000 -- a player's tab asks at most once a second
+local SUM_KEYS_MAX = 256 -- entries of a table of the summary
+local SERVED_KEEP = 64 -- order ids kept per player for the one-shot guard
+local OP_MAX = 1073741823
+local ID_MAX = 65534 -- an object id (host numbering)
+local NUM_MAX = 65535 -- an influence level, a peer, a game level id, a count
+local POINTS_MAX = 1e9
+local INFLUENCE_MAX = 512 -- entries of influence_levels on the wire
+local PEERS_MAX = 64
+local WIRE_MAX = 8192 -- chars of a list field
+local FACTION_LEN = 32
+
+local st = { flag = 0, asks = 0, states_out = 0, states_in = 0, states_bad = 0, orders = 0, applied = 0, refused = 0,
+	sums_out = 0, sums_in = 0, sums_bad = 0 }
+local world = { sig = nil, next_poll = 0, served = {} }
+-- a player's machine: w = the world's answer (Warfare world or not), allowed = may give orders, sum = the war tab's last
+-- summary, tab = the war tab once it was drawn
+local mirror = { w = nil, known = false, allowed = false, next_join = 0, next_tab = 0, op_base = nil, op_n = 0, sum = nil,
+	tab = nil }
+local installed = false
+
+local function whole(v, lo, hi)
+	v = tonumber(v)
+	if not v or v ~= v or v % 1 ~= 0 or v < lo or v > hi then return nil end
+	return v
+end
+
+-- A stock Warfare faction: a key of warfare.registered_squads (warfare.script:84-99) on this machine.
+local function faction(f)
+	if type(f) ~= "string" or #f == 0 or #f > FACTION_LEN or not string_find(f, "^[%w_]+$") then return nil end
+	local wf = C().mod("warfare")
+	local reg = wf and wf.registered_squads
+	if type(reg) ~= "table" or reg[f] == nil then return nil end
+	return f
+end
+
+-------------------------------------------------------------------------------
+-- s42:2 the world's mode and _G.WARFARE
+-------------------------------------------------------------------------------
+local function saved_mode()
+	local asm = C().mod("alife_storage_manager")
+	local get = asm and C().fn(asm, "get_state")
+	if not get then return false end
+	local ok, m = pcall(get)
+	return ok and type(m) == "table" and m.enable_warfare_mode == true
+end
+
+-- Is this a Warfare world, as this process can know it.
+local function world_mode()
+	if coop_mode.decides_world() then
+		local f = rawget(_G, "IsWarfare")
+		if type(f) == "function" then
+			local ok, v = pcall(f)
+			if ok then return v == true end
+		end
+		return saved_mode()
+	end
+	if mirror.w ~= nil then return mirror.w end
+	return saved_mode()
+end
+
+local function set_flag()
+	if not C().active() then return end
+	local v = world_mode()
+	if _G.WARFARE ~= v then st.flag = st.flag + 1 end
+	_G.WARFARE = v
+end
+
+-------------------------------------------------------------------------------
+-- s37:3 the world's state
+-------------------------------------------------------------------------------
+-- The warfare module where this is a Warfare world, else nil.
+local function warfare_world()
+	local wf = C().mod("warfare")
+	if wf and world_mode() then return wf end
+	return nil
+end
+
+-- The true faction of the character this peer plays (the world's record), or nil.
+local function faction_of(peer)
+	local cf = C().mod("coop_faction")
+	local f = cf and C().fn(cf, "faction_of")
+	if not f then return nil end
+	local ok, v = pcall(f, peer)
+	return ok and type(v) == "string" and v or nil
+end
+
+-- The player may order for the war: his character is of the faction that leads it.
+local function may_order(peer, leader)
+	return leader ~= nil and faction_of(peer) == leader
+end
+
+local function influence_wire(levels)
+	local list = {}
+	for id, lvl in pairs(type(levels) == "table" and levels or {}) do
+		local hid = whole(id, 1, ID_MAX) and C().hid(id)
+		local n = tonumber(lvl)
+		if whole(hid, 1, ID_MAX) and n and n == n and n >= 1 and n % 1 == 0 then
+			list[#list + 1] = { hid, n > NUM_MAX and NUM_MAX or n }
+		end
+	end
+	table_sort(list, function(a, b) return a[1] < b[1] end)
+	local out = {}
+	for i = 1, math_min(#list, INFLUENCE_MAX) do out[i] = list[i][1] .. ":" .. list[i][2] end
+	return table_concat(out, ",")
+end
+
+local function allowed_wire(leader)
+	local out = {}
+	for _, p in ipairs(C().players()) do
+		local peer = whole(p.id, 0, NUM_MAX)
+		if peer and #out < PEERS_MAX and may_order(peer, leader) then out[#out + 1] = peer end
+	end
+	table_sort(out)
+	return table_concat(out, ",")
+end
+
+local function state_now()
+	local wf = warfare_world()
+	if not wf then return { w = 0 } end
+	local leader = faction(wf.actor_faction)
+	local p = tonumber(wf.actor_influence_points) or 0
+	if p ~= p or p < 0 then p = 0 elseif p > POINTS_MAX then p = POINTS_MAX end
+	local pa = C().mod("pda_actor")
+	return { w = 1, f = leader or "", p = math_floor(p * 100 + 0.5) / 100, m = pa and pa.manual_control == true and 1 or 0,
+		i = influence_wire(wf.influence_levels), al = leader and allowed_wire(leader) or "" }
+end
+
+-- The state to everybody when it changed (the first state of a world without Warfare is not sent). True when sent.
+local function world_push()
+	local t = state_now()
+	local sig = coop_main.encode(t)
+	if sig == world.sig then return false end
+	local first = world.sig == nil
+	world.sig = sig
+	if first and t.w == 0 then return false end
+	if not C().to_all(V_STATE, t) then return false end
+	st.states_out = st.states_out + 1
+	return true
+end
+
+local function state_to(peer)
+	if C().to_peer(peer, V_STATE, state_now()) then st.states_out = st.states_out + 1 end
+end
+
+local function level_of(gg, gv)
+	local ok, lvl = pcall(function() return gg:vertex(gv):level_id() end)
+	return ok and whole(lvl, 0, NUM_MAX) or nil
+end
+
+-- s41:3 what ui_pda_warfare_tab.script:86-146 gathers, for every level: q[faction][level] squads (every level), s[level]
+-- [faction] captured points and t[level] points (active levels only), the owners counted only for the factions of
+-- warfare.registered_squads, as the stock does.
+local function summary_now(wf)
+	local gg = game_graph()
+	local active = {}
+	local lt = C().mod("level_targets")
+	for _, lvl in pairs(lt and type(lt.active_levels) == "table" and lt.active_levels or {}) do active[lvl] = true end
+	local factions, q, s, t = {}, {}, {}, {}
+	for f, squads in pairs(type(wf.registered_squads) == "table" and wf.registered_squads or {}) do
+		factions[f] = true
+		for sq_id in pairs(faction(f) and type(squads) == "table" and squads or {}) do
+			local squad = whole(sq_id, 1, ID_MAX) and alife_object(sq_id)
+			local lvl = squad and level_of(gg, squad.m_game_vertex_id)
+			if lvl then
+				q[f] = q[f] or {}
+				q[f][lvl] = (q[f][lvl] or 0) + 1
+			end
+		end
+	end
+	local board = rawget(_G, "SIMBOARD")
+	for _, smart in pairs(board and type(board.smarts_by_names) == "table" and board.smarts_by_names or {}) do
+		local lvl = level_of(gg, smart.m_game_vertex_id)
+		if lvl and active[lvl] then
+			t[lvl] = (t[lvl] or 0) + 1
+			s[lvl] = s[lvl] or {}
+			local o_f = smart.owning_faction
+			if o_f and factions[o_f] and faction(o_f) then s[lvl][o_f] = (s[lvl][o_f] or 0) + 1 end
+		end
+	end
+	return { q = q, s = s, t = t }
+end
+
+local function on_ask(t, from)
+	if not coop_mode.decides_world() then return end
+	st.asks = st.asks + 1
+	state_to(from)
+	local wf = t.t == 1 and warfare_world()
+	if not wf then return end
+	local blob = C().ser(summary_now(wf))
+	if blob and C().send_big(V_SUM, blob, from) then st.sums_out = st.sums_out + 1 end
+end
+
+-------------------------------------------------------------------------------
+-- s37:1 orders, carried out where the world is decided
+-------------------------------------------------------------------------------
+-- Not carried out: the player (not the co-op host's own) gets the world's state back. Returns false.
+local function refuse(from)
+	st.refused = st.refused + 1
+	if from ~= C().self_peer() then state_to(from) end
+	return false
+end
+
+-- After a change: everybody gets the state; when nothing changed the player still gets it back.
+local function done(from)
+	st.applied = st.applied + 1
+	if not world_push() and from ~= C().self_peer() then state_to(from) end
+	return true
+end
+
+local function first_time(from, op)
+	local s = world.served[from]
+	if not s then
+		s = { ids = {}, list = {} }
+		world.served[from] = s
+	end
+	if s.ids[op] then return false end
+	s.ids[op] = true
+	s.list[#s.list + 1] = op
+	if #s.list > SERVED_KEEP then s.ids[table.remove(s.list, 1)] = nil end
+	return true
+end
+
+local function is_smart(se)
+	local cls = rawget(_G, "clsid")
+	local ok, v = pcall(function() return se:clsid() end)
+	return ok and cls ~= nil and v == cls.smart_terrain
+end
+
+local function enemies(a, b)
+	local gr = rawget(_G, "game_relations")
+	local f = gr and C().fn(gr, "is_factions_enemies")
+	if not f then return false end
+	local ok, v = pcall(f, a, b)
+	return ok and v == true
+end
+
+-- add / rem of a smart terrain's influence, as pda_smart_terrain_warfare.script:76-93 does it (the add costs no point there:
+-- only its menu asks for one, :34,:40; a remove gives one back)
+local function influence(wf, kind, hid, leader, from)
+	local id = C().lid(hid)
+	local se = whole(id, 1, ID_MAX) and alife_object(id) or nil
+	local smart = se ~= nil and is_smart(se)
+	if not coop_trust.pass("wf_order_target", smart, "peer %d: a Warfare order for object %d, no smart terrain", from, hid) then
+		return refuse(from)
+	end
+	local levels = wf.influence_levels
+	if not smart or type(levels) ~= "table" then return refuse(from) end
+	local owner = se.owning_faction or "none"
+	local have = tonumber(levels[id]) or 0
+	local points = tonumber(wf.actor_influence_points) or 0
+	local offered = (owner == "none" or (leader ~= nil and enemies(owner, leader)))
+		and ((kind == "add" and points >= 1) or (kind == "rem" and have > 0))
+	if not coop_trust.pass("wf_order_offer", offered, "peer %d: the menu of smart %d does not offer this order", from, hid) then
+		return refuse(from)
+	end
+	if kind == "add" then
+		levels[id] = levels[id] and levels[id] + 1 or 1
+		return done(from)
+	end
+	if not (have > 0) then return refuse(from) end -- the stock remove does nothing then
+	levels[id] = levels[id] - 1
+	wf.actor_influence_points = wf.actor_influence_points + 1
+	if levels[id] == 0 then levels[id] = nil end
+	return done(from)
+end
+
+-- An order of the stock PDA menus; `from` is the player (the co-op host's own: self_peer). True when carried out.
+local function order(t, from)
+	st.orders = st.orders + 1
+	local k = t.k
+	local op = whole(t.o, 1, OP_MAX)
+	local s = (k == "add" or k == "rem") and whole(t.s, 1, ID_MAX) or nil
+	local m = k == "ctl" and whole(t.m, 0, 1) or nil
+	local shaped = op ~= nil and (s ~= nil or m ~= nil)
+	if not coop_trust.pass("wf_order_shape", shaped, "peer %d: a Warfare order of no known kind, target or id", from) then
+		return refuse(from)
+	end
+	if not shaped then return refuse(from) end
+	if not coop_trust.guard("wf_order_once", first_time(from, op), "peer %d: Warfare order %d again", from, op) then
+		return false
+	end
+	local wf = warfare_world()
+	if not coop_trust.pass("wf_order_war", wf ~= nil, "peer %d: a Warfare order in a world without Warfare", from) then
+		return refuse(from)
+	end
+	if not wf then return refuse(from) end
+	local leader = faction(wf.actor_faction)
+	if not coop_trust.pass("wf_order_faction", may_order(from, leader),
+		"peer %d: his character is not of the faction that leads the war (%s)", from, tostring(leader)) then
+		return refuse(from)
+	end
+	if s then return influence(wf, k, s, leader, from) end
+	-- s37:2 manual control (pda_actor.script:57 toggles; the order names the wanted value, so a second click made on a
+	-- stale menu does not flip it back)
+	local pa = C().mod("pda_actor")
+	if not pa then return refuse(from) end
+	pa.manual_control = m == 1
+	return done(from)
+end
+
+local function on_order(t, from)
+	if coop_mode.decides_world() then order(t, from) end
+end
+
+-------------------------------------------------------------------------------
+-- s37:3 a player's machine
+-------------------------------------------------------------------------------
+-- "a:b,c:d" -> { [a] = b } (ids 1..ID_MAX, values 1..NUM_MAX), nil when anything is wrong
+local function parse_levels(str)
+	if type(str) ~= "string" or #str > WIRE_MAX then return nil end
+	local out, n = {}, 0
+	for item in string_gmatch(str, "[^,]+") do
+		n = n + 1
+		local a, b = string_match(item, "^(%d+):(%d+)$")
+		local id, lvl = whole(a, 1, ID_MAX), whole(b, 1, NUM_MAX)
+		if n > INFLUENCE_MAX or not (id and lvl) then return nil end
+		out[id] = lvl
+	end
+	return out
+end
+
+local function parse_peers(str)
+	if type(str) ~= "string" or #str > WIRE_MAX then return nil end
+	local out, n = {}, 0
+	for item in string_gmatch(str, "[^,]+") do
+		n = n + 1
+		local peer = whole(string_match(item, "^(%d+)$"), 0, NUM_MAX)
+		if n > PEERS_MAX or not peer then return nil end
+		out[peer] = true
+	end
+	return out
+end
+
+local function ask(tab)
+	if tab then
+		local now = time_global()
+		if now < mirror.next_tab then return false end
+		mirror.next_tab = now + TAB_GAP_MS
+	end
+	return C().to_host(V_ASK, { t = tab and 1 or 0 })
+end
+
+local function apply_state(data)
+	local wf = C().mod("warfare")
+	if wf then
+		if data.f ~= "" then wf.actor_faction = data.f end
+		wf.actor_influence_points = data.p
+		local levels = type(wf.influence_levels) == "table" and wf.influence_levels or {}
+		for id in pairs(levels) do levels[id] = nil end
+		for hid, lvl in pairs(data.levels) do
+			local id = C().lid(hid)
+			if whole(id, 1, ID_MAX) then levels[id] = lvl end
+		end
+		wf.influence_levels = levels
+	end
+	local pa = C().mod("pda_actor")
+	if pa then pa.manual_control = data.m end
+end
+
+local function on_state(t, from)
+	if not coop_mode.is_player_mirror() then return end
+	local w = whole(t.w, 0, 1)
+	local data
+	if w == 1 then
+		local f = t.f == "" and "" or faction(t.f)
+		local p = tonumber(t.p)
+		local m = whole(t.m, 0, 1)
+		local levels, peers = parse_levels(t.i), parse_peers(t.al)
+		if f and p and p == p and p >= 0 and p <= POINTS_MAX and m and levels and peers then
+			data = { f = f, p = p, m = m == 1, levels = levels, peers = peers }
+		end
+	end
+	if w == nil or (w == 1 and not data) then
+		st.states_bad = st.states_bad + 1
+		return
+	end
+	st.states_in = st.states_in + 1
+	mirror.known, mirror.w = true, w == 1
+	_G.WARFARE = mirror.w
+	mirror.allowed = data ~= nil and data.f ~= "" and data.peers[C().self_peer()] == true
+	if data then apply_state(data) end
+end
+
+-------------------------------------------------------------------------------
+-- s37:1 the stock menus, wrapped
+-------------------------------------------------------------------------------
+local function next_op()
+	if not mirror.op_base then mirror.op_base = math_floor(tonumber(time_global()) or 0) % 1000000 * 1024 end
+	mirror.op_n = mirror.op_n + 1
+	return (mirror.op_base + mirror.op_n) % OP_MAX + 1
+end
+
+-- A click of a stock menu: the world's function on the co-op host's process, a request on a player's machine.
+local function give_order(t)
+	t.o = next_op()
+	if coop_mode.decides_world() and coop_mode.actor_is_player() then return order(t, C().self_peer()) end
+	if coop_mode.is_player_mirror() then return C().to_host(V_ORDER, t) end
+	return false
+end
+
+-- A player's machine that may not order (or has no answer yet) shows no order of the menus.
+local function orders_hidden()
+	return C().active() and coop_mode.is_player_mirror() and not mirror.allowed
+end
+
+-- The file local `name` of a stock script gets the value make(original): what its on_game_load registers later.
+local function wrap_local(m, name, label, make)
+	local orig, holder, idx = C().find_local(m, name)
+	if type(orig) ~= "function" or not holder then
+		C().log("warfare", "! %s: the stock function is not there, its menu stays the stock one", label)
+		return false
+	end
+	debug.setupvalue(holder, idx, make(orig))
+	local list = C().wrapped
+	list[#list + 1] = label
+	return true
+end
+
+-- pda_smart_terrain_warfare.script:33-43 (the stock looks the texts up the same way: refresh_strings)
+local function influence_kind(prop)
+	if type(prop) ~= "string" then return nil end
+	if string_find(prop, game.translate_string("st_wrfr_add_influ"), 1, true) then return "add" end
+	if string_find(prop, game.translate_string("st_wrfr_remove_influ"), 1, true) then return "rem" end
+	return nil
+end
+
+local function install_smart_menu()
+	local m = C().mod("pda_smart_terrain_warfare")
+	if not m then return end
+	wrap_local(m, "map_spot_menu_add_property", "pda_smart_terrain_warfare.menu", function(orig)
+		return function(ui, id, lvl, ...)
+			if orders_hidden() then return end
+			return orig(ui, id, lvl, ...)
+		end
+	end)
+	wrap_local(m, "map_spot_menu_property_clicked", "pda_smart_terrain_warfare.click", function(orig)
+		return function(property_ui, id, level_name, prop, ...)
+			if not C().active() then return orig(property_ui, id, level_name, prop, ...) end
+			local kind = influence_kind(prop)
+			local hid = kind and whole(id, 1, ID_MAX) and C().hid(id)
+			if whole(hid, 1, ID_MAX) then give_order({ k = kind, s = hid }) end
+		end
+	end)
+end
+
+-- s37:2 pda_actor.script:15-68: the actor's map spot menu. Take / release control is an order to the world; the points line
+-- and show / hide points stay the stock's.
+local function control_texts()
+	return game.translate_string("st_wrfr_take_control_faction"), game.translate_string("st_wrfr_release_control_faction")
+end
+
+-- The menu box without two items (the stock calls only AddItem on it; anything else goes to the box).
+local function without(ui, a, b)
+	return setmetatable({}, { __index = function(_, key)
+		if key == "AddItem" then
+			return function(_, text, ...)
+				if text == a or text == b then return end
+				return ui:AddItem(text, ...)
+			end
+		end
+		return function(_, ...) return ui[key](ui, ...) end
+	end })
+end
+
+local function install_actor_menu()
+	local m = C().mod("pda_actor")
+	if not m then return end
+	wrap_local(m, "map_spot_menu_add_property", "pda_actor.menu", function(orig)
+		return function(ui, id, lvl, ...)
+			if orders_hidden() then
+				local take, release = control_texts()
+				return orig(without(ui, take, release), id, lvl, ...)
+			end
+			return orig(ui, id, lvl, ...)
+		end
+	end)
+	wrap_local(m, "map_spot_menu_property_clicked", "pda_actor.click", function(orig)
+		return function(property_ui, id, level_name, prop, ...)
+			if C().active() and id == AC_ID then
+				local take, release = control_texts()
+				if prop == take or prop == release then
+					give_order({ k = "ctl", m = prop == take and 1 or 0 })
+					return
+				end
+			end
+			return orig(property_ui, id, level_name, prop, ...)
+		end
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- s41:3 the war tab of a player's machine
+-------------------------------------------------------------------------------
+local TAB_WIDGETS = { "txt_order", "txt_squads", "txt_captured_smarts", "txt_major_territory", "faction_icon", "faction_name",
+	"progress_dominance" }
+
+local function empty(t)
+	if type(t) ~= "table" then return end
+	for k in pairs(t) do t[k] = nil end
+end
+
+-- counts[key] = whole count, every key passing key_ok; nil when anything is wrong
+local function counts(src, key_ok)
+	if type(src) ~= "table" then return nil end
+	local out, n = {}, 0
+	for k, c in pairs(src) do
+		n = n + 1
+		local v = whole(c, 0, NUM_MAX)
+		if n > SUM_KEYS_MAX or not key_ok(k) or not v then return nil end
+		out[k] = v
+	end
+	return out
+end
+
+local function level_key(k) return type(k) == "number" and whole(k, 0, NUM_MAX) ~= nil end
+local function faction_key(k) return faction(k) ~= nil end
+
+-- The world's summary as it came, or nil: factions of this machine's warfare.registered_squads, whole levels and counts.
+local function clean_summary(v)
+	if type(v) ~= "table" or type(v.q) ~= "table" or type(v.s) ~= "table" then return nil end
+	local t = counts(v.t, level_key)
+	if not t then return nil end
+	local q, s, n = {}, {}, 0
+	for f, by_level in pairs(v.q) do
+		n = n + 1
+		q[f] = n <= SUM_KEYS_MAX and faction_key(f) and counts(by_level, level_key) or nil
+		if not q[f] then return nil end
+	end
+	n = 0
+	for lvl, by_faction in pairs(v.s) do
+		n = n + 1
+		s[lvl] = n <= SUM_KEYS_MAX and level_key(lvl) and counts(by_faction, faction_key) or nil
+		if not s[lvl] then return nil end
+	end
+	return { q = q, s = s, t = t }
+end
+
+-- ui_pda_warfare_tab.script:72-243 (pda_warfare_tab:Reset) over the world's summary instead of this machine's copies of
+-- warfare.registered_squads and the points' owners: the same rows, the same fields for :Update's hint and :btn_map, the
+-- player's own map for "current map". Without a summary yet: no rows (the answer draws them).
+local function render(self, sum)
+	local xml = self.xml
+	self.scroll:Clear()
+	for _, k in ipairs(TAB_WIDGETS) do empty(self[k]) end
+	local sim = alife()
+	local gg = game_graph()
+	local actor_faction = get_actor_true_community()
+	local curr_lvl = gg:vertex(sim:actor().m_game_vertex_id):level_id()
+	empty(self.faction_squads)
+	empty(self.faction_squads_lvl)
+	empty(self.faction_smarts)
+	empty(self.faction_smarts_lvl)
+	empty(self.faction_smarts_lvls)
+	self.tot_smarts, self.tot_smarts_lvl = 0, 0
+	if not sum then return end
+	for f, by_level in pairs(sum.q) do
+		for lvl, n in pairs(by_level) do
+			self.faction_squads[f] = (self.faction_squads[f] or 0) + n
+			if lvl == curr_lvl then self.faction_squads_lvl[f] = (self.faction_squads_lvl[f] or 0) + n end
+		end
+	end
+	for lvl, n in pairs(sum.t) do
+		self.faction_smarts_lvls[lvl] = {}
+		self.tot_smarts = self.tot_smarts + n
+		if lvl == curr_lvl then self.tot_smarts_lvl = self.tot_smarts_lvl + n end
+	end
+	for lvl, by_faction in pairs(sum.s) do
+		self.faction_smarts_lvls[lvl] = self.faction_smarts_lvls[lvl] or {}
+		for f, n in pairs(by_faction) do
+			self.faction_smarts[f] = (self.faction_smarts[f] or 0) + n
+			if lvl == curr_lvl then self.faction_smarts_lvl[f] = (self.faction_smarts_lvl[f] or 0) + n end
+			self.faction_smarts_lvls[lvl][f] = n
+		end
+	end
+
+	-- Sort faction by captured smart
+	local faction_by_power = {}
+	local search_tbl = self.curr_map and self.faction_smarts_lvl or self.faction_smarts
+	for fac, num in pairs(search_tbl) do faction_by_power[#faction_by_power + 1] = { fac, num } end
+	table_sort(faction_by_power, function(a, b) return a[2] > b[2] end)
+
+	-- Gather faction squads in each active level
+	local faction_territory = {}
+	for lvl, v in pairs(self.faction_smarts_lvls) do
+		for f, num in pairs(v) do
+			if (not faction_territory[f]) or (faction_territory[f][2] < num) then faction_territory[f] = { lvl, num } end
+		end
+	end
+
+	-- Show
+	local clr_gr = utils_xml.get_color("ui_gray_1")
+	local n = 0
+	for _, v in ipairs(faction_by_power) do
+		local f = v[1]
+		n = n + 1
+		local _st = xml:InitStatic("temp", nil)
+		xml:InitFrame("faction:frame", _st)
+		if f == actor_faction then -- highlight actor faction
+			xml:InitFrame("faction:frame", _st)
+			xml:InitFrame("faction:frame", _st)
+		end
+		xml:InitFrame("faction:frame_order", _st)
+		if n == 1 then -- highlight #1 faction
+			xml:InitFrame("faction:frame_order", _st)
+			xml:InitFrame("faction:frame_order", _st)
+			xml:InitFrame("faction:frame_order", _st)
+		end
+		xml:InitStatic("faction:pic_dominance", _st)
+		self.faction_icon[f] = xml:InitStatic("faction:faction_icon", _st)
+		self.faction_icon[f]:InitTexture("ui_inGame4_ico_" .. f)
+		self.faction_icon[f]:SetStretchTexture(true)
+		self.faction_name[f] = xml:InitTextWnd("faction:text_faction", _st)
+		self.faction_name[f]:SetText(game.translate_string(f))
+		self.txt_order[f] = xml:InitTextWnd("faction:text_order", _st)
+		self.txt_order[f]:SetText(n)
+		local str_squads = self.curr_map and self.faction_squads_lvl[f] or self.faction_squads[f] or 0
+		self.txt_squads[f] = xml:InitTextWnd("faction:info_squads", _st)
+		self.txt_squads[f]:SetText(game.translate_string("ui_st_pda_warfare_squads") .. ": " .. clr_gr .. str_squads)
+		local str_smarts = self.curr_map and self.faction_smarts_lvl[f] or self.faction_smarts[f] or 0
+		self.txt_captured_smarts[f] = xml:InitTextWnd("faction:info_captured_smarts", _st)
+		self.txt_captured_smarts[f]:SetText(game.translate_string("ui_st_pda_warfare_capped_smarts") .. ": " .. clr_gr
+			.. str_smarts)
+		local str_territory = faction_territory[f] and faction_territory[f][1] and sim:level_name(faction_territory[f][1])
+		if not self.curr_map then
+			self.txt_major_territory[f] = xml:InitTextWnd("faction:info_major_territory", _st)
+			self.txt_major_territory[f]:SetText(game.translate_string("ui_st_pda_warfare_major_hold") .. ": " .. clr_gr
+				.. game.translate_string(str_territory))
+		end
+		local base = self.curr_map and self.tot_smarts_lvl or self.tot_smarts
+		local rate = math.ceil((str_smarts / base) * 100)
+		local r_val = relation_registry.community_relation(f, actor_faction)
+		local str_rel = ((r_val >= game_relations.FRIENDS) and "friend") or ((r_val <= game_relations.ENEMIES) and "enemy")
+			or "neutral"
+		self.progress_dominance[f] = xml:InitProgressBar("faction:dominance_" .. str_rel, _st)
+		self.progress_dominance[f]:Show(true)
+		self.progress_dominance[f]:SetProgressPos(rate)
+		self.scroll:AddWindow(_st, true)
+		_st:SetAutoDelete(false)
+		-- the stock's info: a world call, which the engine's call router carries to the world from here (as before)
+		if (not self.curr_map) and (f == actor_faction) and (rate >= 50)
+			and (not has_alife_info("warfare_actor_faction_domination")) then
+			give_info("warfare_actor_faction_domination")
+		end
+	end
+end
+
+local function shown(tab)
+	local ok, v = pcall(function() return tab:IsShown() end)
+	return ok and v == true
+end
+
+local function on_summary(blob, from)
+	if not coop_mode.is_player_mirror() then return end
+	local sum = clean_summary(C().deser(blob))
+	if not sum then
+		st.sums_bad = st.sums_bad + 1
+		return
+	end
+	st.sums_in = st.sums_in + 1
+	mirror.sum = sum
+	local tab = mirror.tab
+	if tab and shown(tab) then
+		local ok, e = pcall(render, tab, sum)
+		if not ok then C().report("warfare", "war tab", e) end
+	end
+end
+
+local function install_tab()
+	local m = C().mod("ui_pda_warfare_tab")
+	local cls = m and m.pda_warfare_tab
+	if not cls then return end
+	C().wrap(cls, "Reset", "ui_pda_warfare_tab.Reset", function(orig)
+		return function(self, ...)
+			if not (C().active() and coop_mode.is_player_mirror()) then return orig(self, ...) end
+			mirror.tab = self
+			ask(true)
+			local ok, e = pcall(render, self, mirror.sum)
+			if ok then return end
+			C().report("warfare", "war tab", e) -- a broken row must not take the PDA down: the stock tab then
+			return orig(self, ...)
+		end
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- Frame
+-------------------------------------------------------------------------------
+local function actor_on_update()
+	if not C().active() then return end
+	local now = time_global()
+	if coop_mode.decides_world() then
+		if now >= world.next_poll then
+			world.next_poll = now + POLL_MS
+			local ok, e = pcall(world_push)
+			if not ok then C().report("warfare", "state", e) end
+		end
+	elseif coop_mode.is_player_mirror() and not mirror.known and now >= mirror.next_join then
+		mirror.next_join = now + JOIN_RETRY_MS
+		ask(false)
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Status, game start
+-------------------------------------------------------------------------------
+function counters() return st end
+
+local function status()
+	return string.format("orders %d (carried out %d, refused %d), asks %d, states out %d, in %d (bad %d), summaries out %d, "
+		.. "in %d (bad %d) | flag set %d", st.orders, st.applied, st.refused, st.asks, st.states_out, st.states_in,
+		st.states_bad, st.sums_out, st.sums_in, st.sums_bad, st.flag)
+end
+
+local function step(what, f)
+	local ok, e = pcall(f)
+	if not ok then C().report("warfare", what, e) end
+end
+
+local function install_events()
+	C().set_limit(V_ASK, 4, 1)
+	C().set_limit(V_ORDER, 10, 4)
+	C().on(V_ASK, on_ask, "world")
+	C().on(V_ORDER, on_order, "world")
+	C().on(V_STATE, on_state, "client")
+	C().on_big(V_SUM, on_summary, "client")
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop.
+function on_game_start()
+	if installed or rawget(_G, "coop") == nil then return end
+	installed = true
+	step("smart terrain menu", install_smart_menu)
+	step("actor menu", install_actor_menu)
+	step("war tab", install_tab)
+	step("events", install_events)
+	RegisterScriptCallback("on_game_load", set_flag)
+	RegisterScriptCallback("actor_on_first_update", set_flag)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	pcall(C().status_line, "warfare", status)
+end

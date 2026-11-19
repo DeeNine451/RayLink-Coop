@@ -1,0 +1,14 @@
+; Core: Dev 57 G18-1 (TZ R19), the Warfare PDA in a session, both modes (docs/MODES.md). Read after every coop_route*.ltx
+; (coop_route.ltx explains the order). A rule for a script that is not installed changes nothing; single player runs every
+; handler as before.
+;
+; s37:1 - pda_smart_terrain_warfare is host (coop_route.ltx: "PDA orders to warfare squads"), so its on_game_load, which
+; registers the influence menu of a smart terrain's map spot, never ran on a player's machine: the co-op client and every
+; player of a server had no "add / remove influence". It only registers the two menu callbacks (when the world's save says
+; Warfare), so it runs everywhere now. The functions it registers are scripts\coop_warfare_ui.script's wrappers of the stock
+; menu (coop_* = view): on a player's machine the menu shows the world's data and a click is an order to the world
+; (mods.wf_cmd), which carries it out. Should those wrappers be missing, the stock menu functions keep their host route:
+; registered there, they still never run on a player's machine (the stock click would change only his copy).
+
+[route_pairs]
+on_game_load@pda_smart_terrain_warfare = view
