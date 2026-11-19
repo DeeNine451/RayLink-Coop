@@ -1,39 +1,105 @@
+-- Ядро: без проверок режима (docs/MODES.md)
 --[[
 	Anomaly Coop - two story moments one player decides for the group (gamedata\scripts\coop_quests_scenes.script), from the
 	mission audit of 2026-10-31.
 
-	Wish Granter (sar_monolith.ltx: on_use = %=make_a_wish%). A client's use runs on the host (coop_objects.cpp host_on_use), so
-	the stock window opened on the host's screen. Here xr_effects.make_a_wish still runs on the host, but the window goes to
-	the player who pressed; his choice comes back and runs on the host (quests.act "wish"). Choice 1 is error() in stock, which
-	would end the session for everybody: in a session it spends the wish and tells every player, and the group plays on.
+	Wish Granter (sar_monolith.ltx: on_use = %=make_a_wish%). A client's use runs where his map is led (coop_objects.cpp
+	host_on_use: the co-op host; in the server mode the map server of that level), so the stock window opened on that screen.
+	Here xr_effects.make_a_wish still runs there, but the window goes to the player who pressed; his choice comes back and runs
+	on the keeper of the world (quests.act "wish": the co-op host, the world server). Choice 1 is error() in stock, which would
+	end the session for everybody: in a session it spends the wish and tells every player, and the group plays on.
+	Dev 57 G15-1 (m09:1, G.A.M.M.A. Quests Rebalance xr_effects.script:5586): the wish is the presser's. The CHARACTER who
+	pressed is kept with the window and the choice runs for him (as_character): the riches are made in his inventory and the
+	delayed backpack removal takes his backpack, the immortality's own consequences are his (no profile of the host or of a
+	server's ghost is rewritten, the level change is made by his machine: mods.qsc_go), its goodwill goes to his character.
+	The world's infos and the faction change (coop_faction: the group's in the co-op) stay the shared calls they were.
+	Where the press is led by a process that does not keep the world (a map server), the press goes to the world server
+	(mods.qsc_offer, taken only from a seat that plays nobody), which opens the window and runs the answer the same way.
 
 	Osoznanie (dialogs_warlab.osoznanie_decline). The dialog moves only the player who speaks, and the room is left for good
 	(the restrictor destroys Osoznanie and blacks the screen): every other player follows through npc.fx, and one who respawns
 	before the waves are over (sar2_monolith_end) is sent back, since this teleport is the only stock way there. The same for a
 	player who respawns while the others stand before Osoznanie: the room has no way in on foot.
 
-	The list of a wish is closures of the stock function, kept between the press and the answer; they hold no game object.
+	The keeper of the world keeps the window's names, not the closures: it runs the stock function again for the answer (as the
+	presser sees it) and takes the choice only when it is the one the window showed.
 
-	Events: quests.wish host -> one { n, s1, s2, ... }; quests.zone_gone host -> all { };
+	Events: quests.wish keeper -> one { n, s1, s2, ... }; quests.zone_gone host -> all { };
+	mods.qsc_offer map server -> world server { p = peer, c = character (host numbering), n, s1.. } (coop_mods_core.publish);
+	mods.qsc_go keeper -> the wisher's machine { x, y, z, l = level vertex, g = game vertex } (side "player");
 	host actions: wish { c = choice }, oso_decline { }.
 	Stock functions wrapped: xr_effects.make_a_wish, dialogs_warlab.osoznanie_decline.
 --]]
 
 local qc = coop_quests_core
-local tostring, tonumber, type, ipairs = tostring, tonumber, type, ipairs
+local tostring, tonumber, type, ipairs, pcall, rawget, rawset = tostring, tonumber, type, ipairs, pcall, rawget, rawset
 local unpack = unpack
 local math_min = math.min
 
 local TAG = "scenes"
 local MAX_CHOICES = 8
+local MAX_NAME = 64 -- a choice's name is a string id (st_wish_1 ...)
+local MAX_ID = 65534
 local ZONE_GONE_SECONDS = 8
 local OSO_WALK, OSO_LOOK = "warlab_jump_sar2_walk", "warlab_jump_sar2_look"
 local OSO_ARGS = OSO_WALK .. ":" .. OSO_LOOK
 local ROOM_WALK, ROOM_LOOK = "oso_actor_walk", "oso_actor_look"
+local OFFER, TRAVEL = "qsc_offer", "qsc_go" -- mods.* verbs
+local GOODWILL_FX = { "inc_faction_goodwill_to_actor", "dec_faction_goodwill_to_actor" }
+local NO_BODY = "his character is not in the world"
 
-local wish = nil -- host: { peer, list } the window that is out
+local offers = {} -- the keeper of the world: peer -> { peer, char, names } the window that is out for him
+local stock_wish = nil -- xr_effects.make_a_wish as it was
 
 local function logic() return qc.mod("coop_npc_logic") end
+-- The facade (docs\MODES.md section 4) and the mods' wire. A test harness without them answers nothing: the press is kept here.
+local function facade() return qc.mod("coop_mode") end
+local function wire() return qc.mod("coop_mods_core") end
+
+local function whole(v, lo, hi)
+	v = tonumber(v)
+	if not v or v ~= v or v % 1 ~= 0 or v < lo or v > hi then return nil end
+	return v
+end
+
+local function finite(v, bound)
+	v = tonumber(v)
+	if not v or v ~= v or v < -bound or v > bound then return nil end
+	return v
+end
+
+local function to_host_id(id)
+	local C = wire()
+	if C then return C.hid(id) end
+	return id
+end
+
+local function to_local_id(id)
+	local C = wire()
+	if C then return C.lid(id) end
+	return id
+end
+
+-- coop_trust.guard: an always-on guard (a window that was not offered, a field out of bounds is dropped in every mode)
+local function guard(name, ok, fmt, ...)
+	local tr = qc.mod("coop_trust")
+	if not (tr and tr.guard) then return ok == true end
+	return tr.guard(name, ok == true, fmt, ...)
+end
+
+local function id_of(o)
+	if o == nil then return nil end
+	local ok, id = pcall(function() return o:id() end)
+	return ok and type(id) == "number" and id or nil
+end
+
+-- A player's character as this process has it: the object when it is online here, else its record (the world server).
+local function body_of(id)
+	if type(id) ~= "number" then return nil end
+	local o = level.object_by_id(id)
+	if o then return o end
+	return qc.body_for_character(id)
+end
 
 -------------------------------------------------------------------------------
 -- Wish Granter
@@ -62,25 +128,208 @@ local function run_for_list(orig, actor, npc, p)
 	return got, window
 end
 
--- The client who pressed, nil = the host's own press (or nobody known: the host answers).
-local function presser_peer(npc)
+-- The player who pressed: his character's id here and his peer. nil = this process's own player (or nobody known: it answers).
+local function presser(npc)
 	local L = logic()
 	local id = L and L.user_of(npc)
 	if not id or (db.actor and id == db.actor:id()) then return nil end
 	local P = qc.mod("coop_npc_players")
-	return P and P.peer_of(id) or nil
+	local peer = P and P.peer_of(id) or nil
+	if not peer then return nil end
+	return id, peer
 end
 
-local function host_make_a_wish(orig, actor, npc, p)
-	local got, window = run_for_list(orig, actor, npc, p)
+-- The stock function hides immortality from a zombie or a Monolith fighter by character_community(db.actor): run it as `body`
+-- sees it. Only that method: the infos and the world stay this process's. A player's stalker reads "monolith", the actor
+-- "actor_monolith".
+local function as_seen_by(body, fn, ...)
+	if not body then return pcall(fn, ...) end
+	return qc.with_actor({ character_community = function()
+		local c = body:character_community()
+		if type(c) == "string" and c:sub(1, 6) ~= "actor_" then c = "actor_" .. c end
+		return c
+	end }, fn, ...)
+end
+
+-------------------------------------------------------------------------------
+-- The choice of another player's character (the keeper of the world)
+-------------------------------------------------------------------------------
+local wishing = nil -- { peer, char } while the stock wish runs for another player's character
+
+-- alife() for the wisher: what the stock makes for the actor (parent AC_ID) is made for him; alife():actor() is nobody, his
+-- character is no actor of this process (the host's or a ghost's specific_character stays theirs).
+local function sim_for(sim, char)
+	if sim == nil then return nil end
+	return setmetatable({}, { __index = function(_, k)
+		if k == "create" then
+			return function(_, section, pos, lvid, gvid, parent, ...)
+				if parent == AC_ID then parent = char end
+				return sim:create(section, pos, lvid, gvid, parent, ...)
+			end
+		end
+		if k == "actor" then return function() return nil end end
+		local v = sim[k]
+		if type(v) == "function" then return function(_, ...) return v(sim, ...) end end
+		return v
+	end })
+end
+
+-- The immortality wish ends in a level change of the one who made it: his own machine makes it.
+local function travel(w, pos, lvid, gvid)
+	local C = wire()
+	local ok, x, y, z = pcall(function() return pos.x, pos.y, pos.z end)
+	if not (C and ok) then return end
+	if not C.to_peer(w.peer, TRAVEL, { x = x, y = y, z = z, l = lvid, g = gvid }) then
+		qc.log(TAG, "! the level change of #%s's wish did not go out", tostring(w.peer))
+	end
+end
+
+local as_character
+
+-- A delayed step of the wish (the backpack removal 1 s later) still is his: it runs the same way when it fires. Kept while
+-- his character is away, as the stock keeps its own event.
+local function later(w, f)
+	return function(...)
+		local res = { as_character(w, f, ...) }
+		if not res[1] then
+			if res[2] ~= NO_BODY then qc.report(TAG, "a delayed step of the wish of #" .. tostring(w.peer), res[2]) end
+			return nil
+		end
+		return unpack(res, 2)
+	end
+end
+
+-- Runs fn of the stock wish as player w.peer's character w.char -> ok, results. The stock code means this process's actor; what
+-- is his goes to him: alife() (sim_for), db.actor's place and inventory (his gift's place, his backpack), the delayed events,
+-- the goodwill of the immortality wish and its level change (travel). Infos, the faction and the world's squads stay here.
+as_character = function(w, fn, ...)
+	if wishing then return pcall(fn, ...) end
+	local body = body_of(w.char)
+	if not body then return false, NO_BODY end
+	local G, saved = _G, {}
+	local function swap(tbl, key, make)
+		local old = tbl and rawget(tbl, key)
+		if type(old) ~= "function" then return end
+		saved[#saved + 1] = { tbl, key, old }
+		rawset(tbl, key, make(old))
+	end
+	swap(G, "alife", function(real) return function(...) return sim_for(real(...), w.char) end end)
+	swap(G, "CreateTimeEvent", function(real)
+		return function(ev, act, timer, f, ...) return real(ev, act, timer, type(f) == "function" and later(w, f) or f, ...) end
+	end)
+	swap(G, "ChangeLevel", function() return function(pos, lvid, gvid) return travel(w, pos, lvid, gvid) end end)
+	local xe = qc.mod("xr_effects")
+	local mine = id_of(db.actor)
+	for _, k in ipairs(GOODWILL_FX) do
+		swap(xe, k, function(real)
+			return function(actor, npc, p) return real(id_of(actor) == mine and body or actor, npc, p) end
+		end)
+	end
+	wishing = w
+	local res = { qc.with_actor({
+		position = function() return body:position() end,
+		level_vertex_id = function() return body:level_vertex_id() end,
+		game_vertex_id = function() return body:game_vertex_id() end,
+		iterate_inventory = function(_, f) return body:iterate_inventory(f, body) end,
+	}, fn, ...) }
+	wishing = nil
+	for i = #saved, 1, -1 do rawset(saved[i][1], saved[i][2], saved[i][3]) end
+	return unpack(res)
+end
+
+local function wish_made()
+	local ok, v = pcall(function()
+		if type(has_alife_info) == "function" then return has_alife_info("actor_made_wish") end
+		return db.actor ~= nil and db.actor:has_info("actor_made_wish")
+	end)
+	return ok and v == true
+end
+
+-- The keeper of the world, the answer of a window it opened: the stock function once more, as the wisher sees it, and the chosen
+-- function of it for his character.
+local function grant(w, c)
+	if wish_made() then
+		qc.log(TAG, "! the wish of #%s came after the wish was made: nothing", tostring(w.peer))
+		return
+	end
+	local body = body_of(w.char)
+	if not (body and stock_wish) then
+		qc.log(TAG, "! the wish of #%s: %s", tostring(w.peer), body and "no stock function" or NO_BODY)
+		return
+	end
+	local ok, got = as_seen_by(body, run_for_list, stock_wish, db.actor, nil, {})
+	if not (ok and got) then
+		qc.report(TAG, "the wish of #" .. tostring(w.peer), ok and "the stock function opened no window" or got)
+		return
+	end
+	if got.names[c] ~= w.names[c] then
+		qc.log(TAG, "! the wish window of #%s was out of date (choice %s): nothing", tostring(w.peer), tostring(c))
+		return
+	end
+	local f = c == 1 and zone_gone or got.list[c]
+	if type(f) ~= "function" then return end -- "say nothing"
+	offers = {} -- one wish for the world: the other windows that are out answer nothing now
+	local done, err = as_character(w, f)
+	if not done then qc.report(TAG, "the wish of #" .. tostring(w.peer), err) end
+end
+
+-- The keeper of the world: the window of a press, for player t.p. t is checked here (a map server's offer comes over the wire).
+local function keep_offer(t)
+	local peer, char, n = whole(t.p, 1, MAX_ID), whole(t.c, 1, MAX_ID), whole(t.n, 1, MAX_CHOICES)
+	local names, shape = {}, peer ~= nil and char ~= nil and n ~= nil
+	for i = 1, n or 0 do
+		local s = t["s" .. i]
+		if type(s) ~= "string" or #s == 0 or #s > MAX_NAME then shape = false break end
+		names[i] = s
+	end
+	if not guard("quest_wish_offer_shape", shape, "a wish offer for #%s with bad fields", tostring(t.p)) then return end
+	offers[peer] = { peer = peer, char = to_local_id(char), names = names }
+	local w = { n = n }
+	for i, s in ipairs(names) do w["s" .. i] = s end
+	qc.send("wish", w, peer)
+end
+
+-- mods.qsc_offer, side "world": a press a map server led. The sender is the transport's peer: a seat that plays a character
+-- cannot have led a press (the delivery boundary, always on).
+local function on_offer(t, from)
+	local leader = type(from) == "number" and from > 0 and not coop_mode.seat_plays(from)
+	if not guard("quest_wish_offer_sender", leader, "peer %s sent a wish offer, it leads no map", tostring(from)) then return end
+	keep_offer(t)
+end
+
+-- The press was led here; the window and the answer are the keeper of the world's: this process when it keeps the world (the
+-- co-op host), else the world server (a map server tells it).
+local function offer(t)
+	local m, C = facade(), wire()
+	if m and C and not m.decides_world() then
+		if not C.publish(OFFER, t) then qc.log(TAG, "! the wish of #%s did not go to the world server", tostring(t.p)) end
+		return
+	end
+	keep_offer(t)
+end
+
+local function lead_wish(orig, actor, npc, p)
+	local char, peer = presser(npc)
+	local ok, got, window = as_seen_by(char and body_of(char), run_for_list, orig, actor, npc, p)
+	if not ok then error(got, 0) end
 	if not got then return end
 	got.list[1] = zone_gone
-	local peer = presser_peer(npc)
 	if not peer then return window(got.list, unpack(got.names)) end
-	wish = { peer = peer, list = got.list }
-	local t = { n = #got.names }
+	local t = { p = peer, c = to_host_id(char), n = #got.names }
 	for i, name in ipairs(got.names) do t["s" .. i] = name end
-	qc.send("wish", t, peer)
+	offer(t)
+end
+
+-- mods.qsc_go, side "player" (from the keeper of the world, peer 0): the level change of this player's immortality wish.
+local function on_travel(t, from)
+	local x, y, z = finite(t.x, 1e6), finite(t.y, 1e6), finite(t.z, 1e6)
+	local lvid, gvid = whole(t.l, 0, 4294967295), whole(t.g, 0, MAX_ID)
+	if not (x and y and z and lvid and gvid and db.actor) then
+		qc.log(TAG, "! the level change of the wish has bad fields: not made")
+		return
+	end
+	qc.log(TAG, "the wish takes this player to game vertex %d", gvid)
+	ChangeLevel(vector():set(x, y, z), lvid, gvid, VEC_ZERO)
 end
 
 local function client_on_wish(t, from)
@@ -93,15 +342,18 @@ local function client_on_wish(t, from)
 	if #names > 0 then qc.mod("ui_dyn_msg_box").multi_choice(list, unpack(names)) end
 end
 
+-- quests.act "wish", on the keeper of the world (coop_quests_core host actions): one answer per window that was out for him.
 local function host_wish(from, t)
-	local w = wish
-	if not (w and w.peer == from) then
+	local w = type(from) == "number" and offers[from] or nil
+	local c = whole(t.c, 1, MAX_CHOICES)
+	local ok = w ~= nil and c ~= nil and c <= #w.names
+	if not guard("quest_wish_answer", ok, "player #%s answered a wish window he was not offered (choice %s)", tostring(from),
+		tostring(t.c)) then
 		qc.log(TAG, "! a wish from #%s that nobody offered", tostring(from))
 		return
 	end
-	wish = nil
-	local f = w.list[tonumber(t.c)]
-	if type(f) == "function" then f() end
+	offers[from] = nil
+	grant(w, c)
 end
 
 -------------------------------------------------------------------------------
@@ -147,11 +399,14 @@ local function install()
 	if installed then return end
 	installed = true
 	local xe = qc.mod("xr_effects")
-	local stock_wish = xe and xe.make_a_wish
-	if type(stock_wish) == "function" then
+	local wish = xe and xe.make_a_wish
+	if type(wish) == "function" then
+		stock_wish = wish
 		xe.make_a_wish = function(actor, npc, p)
-			if not qc.is_host() then return stock_wish(actor, npc, p) end
-			return host_make_a_wish(stock_wish, actor, npc, p)
+			-- outside a session, and on a player's machine (its world is a copy: a press is led where his map is), the stock
+			local m = facade()
+			if not qc.active() or (m and m.is_player_mirror()) then return stock_wish(actor, npc, p) end
+			return lead_wish(stock_wish, actor, npc, p)
 		end
 	end
 	local dw = qc.mod("dialogs_warlab")
@@ -177,6 +432,12 @@ function on_game_start()
 	qc.on("zone_gone", function(_, from)
 		if from == 0 and qc.is_client() then show_zone_gone() end
 	end, TAG)
+	local C = wire()
+	if C then
+		C.set_limit(OFFER, 8, 1)
+		C.on(OFFER, on_offer, "world")
+		C.on(TRAVEL, on_travel, "player")
+	end
 	RegisterScriptCallback("coop_respawned", on_respawned)
 	RegisterScriptCallback("actor_on_first_update", install)
 end
