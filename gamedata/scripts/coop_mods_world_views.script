@@ -1,0 +1,421 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G10-4: keep shared mod data with its authority and derive prompts from the local player's view.
+-- Co-op: the playing host creates the world's FFT zones and reads the confirmed workshop inventory.
+-- Server: the world owner creates FFT zones from the world graph. Each map that leads a box reports its
+-- inventory to the world owner, which saves and relays the result. Local views need only the player's map.
+
+local FFT_EVENT = "wv_fft"
+local FFT_REQUEST = "wv_fft_req"
+local FFT_INFO = "fft_restrictors_spawned"
+local WORKSHOP_EVENT = "wv_workshop"
+local PARTS_KEY = "zonekeeper_workshop_stashes"
+local PARTS_LIMIT = 4096
+local DOT_REFRESH_MS = 500
+local fft, workshop
+local world, next_fft, next_workshop
+local pending_boxes = {}
+
+local function C() return coop_mods_core end
+
+local function bind_world(now)
+	local data = alife_storage_manager.get_state()
+	if data ~= world then
+		world, next_fft, next_workshop, pending_boxes = data, now, now, {}
+		if fft then fft.ready, fft.sent, fft.received, fft.packed = false, false, false, nil end
+	end
+	return data
+end
+
+local function integer(n, low, high)
+	return type(n) == "number" and n >= low and n <= high and n % 1 == 0
+end
+
+local function entity(id, section, name)
+	local se = integer(id, 1, 65534) and alife_object(id)
+	if se and se:section_name() == section and se:name() == name then return se end
+end
+
+-------------------------------------------------------------------------------
+-- Fair Fast Travel. The stock first-update callback still initializes settings and the HUD.
+-- The world tick owns migration, including when there is no playing actor.
+-------------------------------------------------------------------------------
+local function fft_version()
+	local _, version = debug.getupvalue(fft.version_fn, fft.version_idx)
+	return version
+end
+
+local function set_fft_version(version)
+	debug.setupvalue(fft.version_fn, fft.version_idx, version)
+end
+
+local function fft_complete(zones)
+	if type(zones) ~= "table" then return false end
+	local expected = {}
+	for location, config in pairs(fft.mod.fast_travel_restrictors) do
+		expected[location] = #config.zones
+	end
+	for name, zone in pairs(zones) do
+		if type(zone) ~= "table" or not expected[zone.loc] or expected[zone.loc] == 0
+			or not entity(zone.id, fft.mod.travel_zone_section, name) then return false end
+		expected[zone.loc] = expected[zone.loc] - 1
+	end
+	for _, count in pairs(expected) do
+		if count ~= 0 then return false end
+	end
+	return true
+end
+
+local function migrate_fft()
+	local mod = fft.mod
+	local old_zones, old_version = mod.spawned_travel_zones, fft_version()
+	local raw_create, raw_info = rawget(mod, "alife_create"), rawget(mod, "give_info")
+	local create, created = mod.alife_create, {}
+	-- The original can fail after creating an entity but before recording it. Track those entities
+	-- as well, and hold the completion flag until the full set is ready.
+	mod.alife_create = function(...)
+		local se = create(...)
+		if se then created[#created + 1] = se.id end
+		return se
+	end
+	mod.give_info = function() end
+	mod.spawned_travel_zones = {}
+	local ok, err = pcall(fft.spawn, false)
+	mod.alife_create, mod.give_info = raw_create, raw_info
+
+	if not ok or fft_version() ~= mod.release_date or not fft_complete(mod.spawned_travel_zones) then
+		mod.spawned_travel_zones = old_zones
+		set_fft_version(old_version)
+		for _, id in ipairs(created) do alife_release_id(id) end
+		C().log("world views", "FFT migration incomplete: %s", tostring(err or "missing zones"))
+		return false
+	end
+	for name, zone in pairs(old_zones or {}) do
+		if type(zone) == "table" and entity(zone.id, mod.travel_zone_section, name) then alife_release_id(zone.id) end
+	end
+	give_info(FFT_INFO)
+	return true
+end
+
+local function fft_tick(now)
+	if not (fft and now >= next_fft) then return end
+	next_fft = now + 5000
+	if not coop_mode.decides_world() then
+		if coop_mode.is_player_mirror() and not fft.received then C().to_host(FFT_REQUEST, {}) end
+		return
+	end
+	local mod = fft.mod
+	if not fft.ready then
+		if type(mod.fast_travel_restrictors) ~= "table" or not next(mod.fast_travel_restrictors) or not alife() then return end
+		local version = fft_version()
+		local existing = type(version) == "number" and version >= mod.release_date
+			and has_alife_info(FFT_INFO) and fft_complete(mod.spawned_travel_zones)
+		fft.ready = existing or migrate_fft()
+	end
+	if fft.ready then
+		fft.packed = fft.packed or C().ser({ version = fft_version(), zones = mod.spawned_travel_zones })
+		if fft.packed and not fft.sent then fft.sent = C().send_big(FFT_EVENT, fft.packed, -1) end
+	end
+end
+
+local function receive_fft(packed, from)
+	if from ~= 0 or coop_mode.decides_world() then return end
+	local snap = C().deser(packed)
+	if type(snap) ~= "table" or not integer(snap.version, 1, 99999999) or type(snap.zones) ~= "table" then return end
+	for name, zone in pairs(snap.zones) do
+		if type(name) ~= "string" or type(zone) ~= "table" or type(zone.loc) ~= "string"
+			or not integer(zone.id, 1, 65534) then return end
+	end
+	if not bind_world(time_global()) then return end
+	fft.mod.spawned_travel_zones = snap.zones
+	set_fft_version(snap.version)
+	fft.received = true
+end
+
+local function fft_request(t, from)
+	local valid = coop_mode.seat_plays(from) and next(t) == nil
+	if not coop_trust.pass("wv_fft_request", valid, "peer %s sent an invalid FFT snapshot request", tostring(from)) then return end
+	if bind_world(time_global()) and fft.packed then C().send_big(FFT_EVENT, fft.packed, from) end
+end
+
+local function install_fft()
+	local mod = C().mod("game_fast_travel")
+	local _, fn, idx = C().upvalue(C().fn(mod, "spawn_fast_travel_zones"), "zone_spawn_version")
+	if not fn then return end
+	local ok, spawn_zones = C().wrap(mod, "spawn_fast_travel_zones", "game_fast_travel.spawn_fast_travel_zones", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+		end
+	end)
+	if not ok then return end
+	fft = { mod = mod, version_fn = fn, version_idx = idx, spawn = spawn_zones }
+	C().on_big(FFT_EVENT, receive_fft, "client")
+	C().on(FFT_REQUEST, fft_request, "world")
+	C().set_limit(FFT_REQUEST, 2, 0.2)
+end
+
+-------------------------------------------------------------------------------
+-- NPE. The board is populated when smart terrains register, including offline ones.
+-------------------------------------------------------------------------------
+local function install_npe()
+	local mod = C().mod("npe_events")
+	C().wrap(mod, "on_near_smart_terrain", "npe_events.on_near_smart_terrain", function(orig)
+		return function(name, distance, ...)
+			if not C().active() then return orig(name, distance, ...) end
+			local actor = coop_mode.actor_is_player() and db.actor
+			local smart = SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[name]
+			if not (actor and smart and smart.position) then return false end
+			local graph = game_graph()
+			local target, here = smart.m_game_vertex_id, actor:game_vertex_id()
+			if not (target and here and graph:valid_vertex_id(target) and graph:valid_vertex_id(here)) then return false end
+			if graph:vertex(target):level_id() ~= graph:vertex(here):level_id() then return false end
+			return smart.position:distance_to(actor:position()) < (distance or 50)
+		end
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- Workshop Parts Inventory. A box's online inventory is read only where the map runs.
+-- Reports carry one box, so reports from different maps can be merged independently.
+-------------------------------------------------------------------------------
+local function same_parts(a, b)
+	if type(a) ~= "table" or #a ~= #b then return false end
+	for i, part in ipairs(b) do
+		local before = a[i]
+		if type(before) ~= "table" or before.section ~= part.section or before.condition ~= part.condition then return false end
+	end
+	return true
+end
+
+local function store_parts(data, id, parts)
+	local previous = data[PARTS_KEY] or {}
+	if (parts and same_parts(previous[id], parts)) or (not parts and previous[id] == nil) then return end
+	-- The identity of the table is also the tooltip's invalidation signal, as with economy.wmd.
+	local index = {}
+	for key, rows in pairs(previous) do index[key] = rows end
+	index[id] = parts or nil
+	data[PARTS_KEY] = index
+end
+
+local function send_parts(snap, target)
+	local packed = C().ser(snap)
+	return packed and C().send_big(WORKSHOP_EVENT, packed, target)
+end
+
+local function valid_parts(snap)
+	if type(snap) ~= "table" or not integer(snap.id, 1, 65534)
+		or type(snap.name) ~= "string" or #snap.name == 0 or #snap.name > 256 then return false end
+	local parts = snap.parts
+	if parts == false then return true end
+	if type(parts) ~= "table" or #parts > PARTS_LIMIT then return false end
+	local size = #parts
+	for index, part in pairs(parts) do
+		if not integer(index, 1, size) or type(part) ~= "table" or type(part.section) ~= "string"
+			or #part.section == 0 or #part.section > 256 or type(part.condition) ~= "number"
+			or not (part.condition >= 0 and part.condition <= 1) then return false end
+	end
+	for i = 1, size do if parts[i] == nil then return false end end
+	return true
+end
+
+local function receive_parts(packed, from)
+	local owns_world = coop_mode.decides_world()
+	if owns_world then
+		-- The native transport reserves 0x101..0x107 for level authorities (coop_mapserver_rules.h).
+		-- A player or an operator seat cannot attest the result of a transfer from any level.
+		local reporter = integer(from, 0x101, 0x107) and not coop_mode.seat_plays(from)
+		local admitted = coop_trust.pass("wv_workshop_sender", reporter, "peer %s cannot report a workshop", tostring(from))
+		if not admitted or not reporter then return end
+	elseif from ~= 0 then
+		return
+	end
+
+	local snap = C().deser(packed)
+	local valid = valid_parts(snap) and (not owns_world or snap.parts ~= false)
+	if owns_world and not coop_trust.pass("wv_workshop_snapshot", valid, "peer %s sent an invalid workshop snapshot", tostring(from)) then return end
+	if not valid then return end
+	local id = C().lid(snap.id)
+	local data = id and bind_world(time_global())
+	if not data then return end
+	if owns_world then
+		-- The world keeps an offline entity, and can reject an id that has since been reused.
+		local matches = entity(id, "workshop_stash", snap.name) ~= nil
+		if not coop_trust.pass("wv_workshop_entity", matches, "peer %s reported unknown workshop %d", tostring(from), snap.id) then return end
+		if not matches then return end
+		store_parts(data, id, snap.parts)
+		pending_boxes[snap.id] = snap
+	else
+		store_parts(data, id, snap.parts)
+	end
+end
+
+local function read_parts(box)
+	local parts = {}
+	box:iterate_inventory_box(function(_, item)
+		local section = item:section()
+		if SYS_GetParam(0, section, "kind") == "i_part" then
+			parts[#parts + 1] = { section = section, condition = item:condition() }
+		end
+	end, box)
+	table.sort(parts, function(a, b)
+		if a.section == b.section then return a.condition < b.condition end
+		return a.section < b.section
+	end)
+	return parts
+end
+
+local function scan_workshops(data, owns_world)
+	local indexed = data[PARTS_KEY] or {}
+	local candidates = {}
+	for local_id in pairs(indexed) do candidates[local_id] = true end
+	for _, local_id in pairs(data.workshop_stashes or {}) do candidates[local_id] = true end
+	for local_id in pairs(candidates) do
+		local box = integer(local_id, 1, 65534) and level.object_by_id(local_id)
+		if box and box:section() == "workshop_stash" then
+			local parts = read_parts(box)
+			local id = C().hid(local_id)
+			local se = id and alife_object(local_id)
+			if se and #parts <= PARTS_LIMIT and not same_parts(indexed[local_id], parts) then
+				local snap = { id = id, name = se:name(), parts = parts }
+				if owns_world then
+					store_parts(data, local_id, parts)
+					pending_boxes[id] = snap
+				else
+					-- Keep retrying until the world echoes its committed snapshot.
+					send_parts(snap, 0)
+				end
+			end
+		end
+	end
+end
+
+local function workshop_tick(now)
+	if not (workshop and now >= next_workshop) then return end
+	next_workshop = now + 1500
+	local owns_world = coop_mode.decides_world()
+	if coop_mode.leads_here() then scan_workshops(world, owns_world) end
+	if owns_world then
+		for id, snap in pairs(pending_boxes) do
+			if send_parts(snap, -1) then pending_boxes[id] = nil end
+		end
+	end
+end
+
+local function forget_box(se)
+	if not (se and C().active() and coop_mode.decides_world() and se:section_name() == "workshop_stash") then return end
+	local data, id = bind_world(time_global()), C().hid(se.id)
+	if data and data[PARTS_KEY] and data[PARTS_KEY][se.id] and id then
+		store_parts(data, se.id, false)
+		pending_boxes[id] = { id = id, name = se:name(), parts = false }
+	end
+end
+
+local function install_workshop_tooltip()
+	local ui = C().mod("utils_ui")
+	local seen = setmetatable({}, { __mode = "k" })
+	C().wrap(ui and ui.UIInfoItem, "Pass", "utils_ui.UIInfoItem.Pass (workshop)", function(orig)
+		return function(info, obj, ...)
+			local show = orig(info, obj, ...)
+			if show and obj and C().active() then
+				local data = alife_storage_manager.get_state()
+				local index = data and data[PARTS_KEY]
+				-- Pass already accepted the same object. Clear its render cache without restarting the hover delay.
+				if seen[info] ~= index and info.id == obj:id() and SYS_GetParam(0, obj:section(), "kind") == "i_part" then
+					info.id = nil
+				end
+				seen[info] = index
+			end
+			return show
+		end
+	end)
+end
+
+local function install_workshop()
+	local mod = C().mod("zone_keeper")
+	if not C().fn(mod, "LogItems") then return end
+	local function leave_to_authority(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+		end
+	end
+	C().wrap(mod, "LogItems", "zone_keeper.LogItems", leave_to_authority)
+	C().wrap(mod, "delete_store", "zone_keeper.delete_store", leave_to_authority)
+	coop_economy_mdata.register_world_key(PARTS_KEY)
+	C().set_limit(WORKSHOP_EVENT, 128, 64)
+	C().on_big(WORKSHOP_EVENT, receive_parts)
+	RegisterScriptCallback("server_entity_on_unregister", forget_box)
+	workshop = true
+	install_workshop_tooltip()
+end
+
+-------------------------------------------------------------------------------
+-- Dot Marks. Refresh the inventory before the existing marker code sets prompt visibility.
+-------------------------------------------------------------------------------
+local function install_dotmarks()
+	local dots = C().mod("dotmarks_main")
+	local hud = C().mod("ui_hud_dotmarks")
+	local read_items = C().fn(hud, "get_inventory_table")
+	if not (dots and read_items and C().fn(hud, "marker_loop_container_updates")) then return end
+	local scanned = setmetatable({}, { __mode = "k" })
+	local reading
+	-- The mod reads unsearched empty stashes again whenever its cache is nil. Reuse the same
+	-- observation during the marker update so their stock "unknown contents" prompt stays intact.
+	C().wrap(hud, "get_inventory_table", "ui_hud_dotmarks.get_inventory_table", function(orig)
+		return function(obj, id, ...)
+			if reading and id == reading.id then return reading.items, reading.count end
+			return orig(obj, id, ...)
+		end
+	end)
+	C().wrap(hud, "marker_loop_container_updates", "ui_hud_dotmarks.marker_loop_container_updates", function(orig)
+		return function(mark, obj, ...)
+			if not (C().active() and coop_mode.actor_is_player() and mark.can_display and obj
+				and not hud.is_body_claimed(mark)) then return orig(mark, obj, ...) end
+			local box = dots.init_inventory_box(mark.id)
+			if not box then return orig(mark, obj, ...) end
+			local now, cache = time_global(), scanned[box]
+			if not cache or now - cache.at >= DOT_REFRESH_MS then
+				local items, count = read_items(obj, mark.id)
+				cache = { at = now, id = mark.id, items = items, count = count }
+				scanned[box] = cache
+				box.items = items
+				mark.num_items, mark.has_items = count, count > 0
+				mark.refresh_container_now, mark.update_weight_now = true, true
+				if count == 0 then
+					mark.weight = 0
+					if dots.is_container_unsearched_stash(mark.id) then box.items = nil end
+				end
+			end
+			reading = cache
+			local ok, err = pcall(orig, mark, obj, ...)
+			reading = nil
+			if not ok then error(err, 0) end
+		end
+	end)
+end
+
+local function start_step(what, f, ...)
+	local ok, err = pcall(f, ...)
+	if not ok then C().report("world views", what, err) end
+end
+
+local function actor_on_update()
+	if not C().active() then
+		world = nil
+		return
+	end
+	if not coop_economy_core.live() then return end
+	local now = time_global()
+	if not bind_world(now) then return end
+	start_step("FFT tick", fft_tick, now)
+	start_step("workshop tick", workshop_tick, now)
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	start_step("install FFT", install_fft)
+	start_step("install NPE", install_npe)
+	start_step("install workshop", install_workshop)
+	start_step("install Dot Marks", install_dotmarks)
+	if fft or workshop then
+		start_step("register tick", function() RegisterScriptCallback("actor_on_update", actor_on_update) end)
+	end
+end
