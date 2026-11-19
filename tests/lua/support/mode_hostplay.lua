@@ -15,5 +15,6 @@ return {
 	seat_plays = function(peer) return true end,
 	group_travels = function() return true end,
 	publish_to = function(verb) return -1 end,
+	from_level = function() return false end,
 	level_request = function(name, payload, from) return "here", payload, from, false end,
 }

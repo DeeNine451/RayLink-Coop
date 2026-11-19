@@ -427,7 +427,7 @@ end
 function on_game_start()
 	coop_mode.when_srv(function()
 		P = coop_npc_players
-		if not (P.is_world_server() or P.is_map_server()) then return end
+		if not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
 		set_stock_squad = function(id, squad) axr_companions.companion_squads[id] = squad end
 		set_stock_teleport_rule = function(ac, rule) ac.companion_squad_can_teleport = rule end
 		C = coop_npc_companions.set_transfer_hooks({

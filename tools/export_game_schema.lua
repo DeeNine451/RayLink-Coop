@@ -10,7 +10,7 @@
 	What it reads, all of it as the game has it now:
 	  coop_game_schema.script     the catalog: items(tab), kinds, values with their string ids, defaults, shown_if, needs_mcm
 	  coop_newgame_modes.script   the tabs of the new game screen and the keys the stock controls of that screen carry
-	  coop_dedicated.script       stage_new_world: what a world server keeps of a "<key>" = <raw> line of coop_new_world.ltx; a key it
+	  coop_srv_dedicated.script   stage_new_world: what a world server keeps of a "<key>" = <raw> line of coop_new_world.ltx; a key it
 	                              overrides (a world server's world is always of split levels) is no choice and is left out
 	  coop_json_card.script       utf8(): cp1251 -> UTF-8
 	  text\{rus,eng}\st_coop_game.xml, st_coop_newgame.xml and the stock st_mm_faction_select.xml (factions, presets)
@@ -287,7 +287,7 @@ function M.build()
 	local box = M.sandbox()
 	local sc = box.load("coop_game_schema")
 	box.load("coop_game_record")
-	local ded = box.load("coop_dedicated")
+	local ded = box.load("coop_srv_dedicated")
 	local card = box.load("coop_json_card")
 	sc.reset_extras()
 	local tr = M.translator(M.load_strings(card.utf8))
@@ -342,7 +342,7 @@ function M.build()
 				else
 					local fv = staged_value(box, ded, x.key, x.default)
 					forced[x.key] = fv
-					left[#left + 1] = { x.key, format("the world server overrides it: every value is stored as %s (coop_dedicated.stage_new_world)",
+					left[#left + 1] = { x.key, format("the world server overrides it: every value is stored as %s (coop_srv_dedicated.stage_new_world)",
 						tostring(fv)) }
 				end
 			end

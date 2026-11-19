@@ -27,7 +27,8 @@ SETUP_HOOK = function(M)
 	M.declared, M.changed = {}, {}
 	e.AddScriptCallback = function(name) M.declared[name] = true end
 	e.RegisterScriptCallback("coop_faction_changed", function(...) M.changed[#M.changed + 1] = { ... } end)
-	e.coop.members = function() return MEMBERS end
+	e.coop.is_host = function() return M.active and M.role == "host" end
+	e.coop.members = function() return e.coop.is_host() and MEMBERS or {} end
 	e.coop.is_dedicated = function() return M.role == "host" end
 	e.coop.is_map_server = function() return M.role == "map" end
 	for _, p in ipairs(M.players or {}) do if p.id ~= 0 then p.level = "l01_escape" end end
@@ -242,6 +243,25 @@ do
 	pump()
 	check(cf.faction_of(1) == "freedom" and comm(A) == "actor_freedom", "a second claim is ignored, the answer is the record")
 	check(#Hm.changed == 2, "and sends no callback")
+end
+
+section("an old save: wait for a delayed world session before taking the membership snapshot")
+do
+	MEMBERS = ALL
+	setup(true, false)
+	check(Hm.env.coop_mode.decides_world() and #Hm.env.coop.members() == 0,
+		"the world server answers at load but the engine's membership snapshot is unavailable")
+	tick(Hm)
+	check(Hm.storage_state.coop_faction == nil, "the first frames do not persist an empty snapshot")
+
+	Hm.active, A.active = true, true
+	tick(Hm)
+	local rec = Hm.storage_state.coop_faction
+	check(rec and rec.old[501] and rec.old[502], "the first active frame marks both characters from the old save")
+	A.actor._comm = "actor_freedom"
+	tick(A)
+	pump()
+	check(Hm.env.coop_faction.faction_of(1) == "freedom", "the old character keeps her faction after the delayed start")
 end
 
 section("D5: an older save's character in a disguise claims nothing until the disguise is off")

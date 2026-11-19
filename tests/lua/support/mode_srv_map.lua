@@ -22,6 +22,7 @@ return {
 	seat_plays = function(peer) return peer ~= 0 end,
 	group_travels = function() return false end,
 	publish_to = function(verb) return 0 end,
+	from_level = function() return false end,
 	level_request = function(name, payload, from)
 		if from ~= 0 then return "drop" end
 		local m = main()

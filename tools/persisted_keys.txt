@@ -2,7 +2,7 @@
 # <kind> <key>: record = world record key c|<cvar>, pstor = save_var/load_var name, mdata = m_data field of a
 # save_state, event = add_event_handler name. L10 fails when the key (for c|x: x) appears in no script any more.
 # c|coop_world_server is the only mark of a server world: the card's "world_server" (coop_json_card.script:27,81),
-# the launcher's "Start server" (list.rs:117) and the world server's own save check (coop_dedicated.script:162-171).
+# the launcher's "Start server" (list.rs:117) and the world server's own save check (coop_srv_dedicated.script:171-180).
 # Generated 2026-11-18 by temp/modes_s1/gen_keys.py; add new saved names by hand, never remove one.
 record c|coop_autosave_count
 record c|coop_autosave_interval

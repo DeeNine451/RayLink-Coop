@@ -14,5 +14,6 @@ return {
 	seat_plays = function(peer) return false end,
 	group_travels = function() return false end,
 	publish_to = function(verb) return nil end,
+	from_level = function() return false end,
 	level_request = function(name, payload, from) return "here", payload, from, false end,
 }

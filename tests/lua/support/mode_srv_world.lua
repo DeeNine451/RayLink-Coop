@@ -25,6 +25,7 @@ return {
 	seat_plays = function(peer) return peer ~= 0 end,
 	group_travels = function() return false end,
 	publish_to = function(verb) return -1 end,
+	from_level = function(from) return from == BRIDGE end,
 	level_request = function(name, payload, from)
 		if type(from) ~= "number" or from == 0 then return "here", payload, from, false end
 		local m = main()

@@ -1,5 +1,7 @@
---[[ Anomaly Coop: the dedicated host's half in Lua (docs/DEDICATED_HOST.md). The process has a whole game's Lua and a ghost for an actor on the
-	 service level fake_start, and no screen where somebody chooses a new game.
+-- Сервер (srv): половина сервера мира без игрока в Lua — новый мир, тестовая карта, мир из файла, проверка сейва (docs/MODES.md)
+--[[ Anomaly Coop: the dedicated host's half in Lua (gamedata\scripts\coop_srv_dedicated.script, coop_dedicated before step S4;
+	 docs/DEDICATED_HOST.md). The process has a whole game's Lua and a ghost for an actor on the service level fake_start, and no screen
+	 where somebody chooses a new game.
 
 	 A new world: the stock new game reads [character_creation] of axr_options.ltx, which the faction-select screen writes. Without a faction
 	 no storyline is set up; without new_game_story_mode the world gets story_mode_disabled. new_game_map stays out: with it the stock
@@ -8,6 +10,13 @@
 
 	 Test map: stock IsTestMode() means "the actor is on fake_start", the empty level of a test or of the moment before a new game moves on. Here
 	 it is where the actor stands for good, and the one-time setup of a new world (game_setup, itms_manager) must not take this for a test.
+
+	 Step S4 (A-S4D): both run from coop_mode.when_srv. The server layer answers in a -coop_dedicated process from its start, before its
+	 session (coop_srv_mode), so the function runs in axr_main's loop of on_game_start (when coop_srv_mode installs the layer), before the
+	 stock reads [character_creation] or IsTestMode (on_game_load, actor_on_first_update). Elsewhere the srv layer answers (a map server, a
+	 player's machine of a server world) it does nothing; in the co-op it never runs.
+	 Called by the engine by name (coop_dedicated.cpp, layer srv): stage_new_world, load_allowed. The creator's facts of a staged world read the
+	 record only and the Core asks them: coop_game_settings.creator / creator_facts / creator_made (moved there in step S4).
 ]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -170,36 +179,14 @@ function load_allowed(stem)
 	return false, "the save '" .. tostring(stem) .. "' is a world whose host plays in it: a world server cannot run it (he would lose his character)"
 end
 
--- The creator of the world in force, as the record keeps it (coop_game_record clean_creator), or nil.
-function creator()
-	local r = record()
-	return r and type(r.creator) == "table" and r.creator or nil
-end
-
--- For the engine (coop_join.cpp host_make_creator, newchar::make_creator): { creator, used, loadout = "sec,...", count, bare }.
-function creator_facts()
-	local c = creator()
-	if not c then return { creator = false, used = false, loadout = "", count = 0, bare = false } end
-	local list = {}
-	for _, sec in ipairs(type(c.loadout) == "table" and c.loadout or {}) do
-		if type(sec) == "string" then list[#list + 1] = sec end
-	end
-	return { creator = true, used = c.used == true, loadout = table.concat(list, ","), count = #list, bare = c.bare == true }
-end
-
--- His character is made: never again from the file. The record goes into the next save with the mark.
-function creator_made()
-	local c = creator()
-	if not c then return false end
-	c.used = true
-	log("the creator's character is made: the record's creator is used")
-	return true
-end
-
+-- Everything that writes the stock's globals and the machine's config runs from coop_mode.when_srv: nothing of it in the co-op.
 function on_game_start()
-	if not on() then return end
-	rawset(_G, "IsTestMode", function() return false end)
-	if api.dedicated_new_world() and not new_world_settings() then
-		printf("! [coop] dedicated: no axr_main.config, the new world starts without its settings")
-	end
+	if not api then return end
+	coop_mode.when_srv(function()
+		if not on() then return end -- a map server or a player's machine of a server world: their actor and screen are the stock's
+		rawset(_G, "IsTestMode", function() return false end)
+		if api.dedicated_new_world() and not new_world_settings() then
+			printf("! [coop] dedicated: no axr_main.config, the new world starts without its settings")
+		end
+	end)
 end

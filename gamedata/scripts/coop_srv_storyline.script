@@ -8,7 +8,7 @@
 
 	"Chains on" = split mode (coop_faction.split_mode(): a live session with split levels) AND story mode (_g IsStoryMode).
 	Everything below is a no-op otherwise: single player, a group world (no split levels) and sandbox run the stock code,
-	key for key. The wrappers are installed only at the first update of a game with chains on (nothing on an exe without
+	key for key. The wrappers are installed on the first eligible update of a game with chains on (nothing on an exe without
 	coop, nothing in a group or sandbox world).
 
 	The stock chain keeps its state in five pstor keys of the actor (KEYS), in info portions and in tasks, one of each per
@@ -1357,6 +1357,9 @@ end
 -- Start
 -------------------------------------------------------------------------------
 local function first_update()
+	local t = now()
+	if installed or (next_tick and t < next_tick) then return end
+	next_tick = t + TICK_MS
 	if split_mode() and story() then
 		install()
 		next_tick = now() + FIRST_TICK_MS
@@ -1364,9 +1367,12 @@ local function first_update()
 end
 
 local function on_update()
-	if not (installed and next_tick) then return end
 	local t = now()
-	if t < next_tick then return end
+	if next_tick and t < next_tick then return end
+	if not installed then
+		first_update()
+		return
+	end
 	next_tick = t + TICK_MS
 	if not auth_on() then return end
 	sweep()

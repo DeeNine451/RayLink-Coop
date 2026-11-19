@@ -20,6 +20,7 @@
 		is_player_mirror()   this process is a player's machine: its objects are copies
 		seat_plays(peer)     the seat of that peer plays a character (seat 0: is the host's seat a player)
 		group_travels()      the group moves between maps together
+		from_level(from)    the transport sender is a registered map-server bridge on the active Server world
 	Delivery:
 		on_level_request(name, fn[, door])  a player's request to the logic of the map he stands on, event `name`:
 		                     fn(payload, from, relayed) runs on the process that leads that map, `from` = the player;
@@ -49,7 +50,7 @@ local DECIDER = { this = true, other = true, nobody = true }
 local ACTIONS = { here = true, pass = true, drop = true }
 -- every function a layer has (applies() says whether it answers now)
 local FIELDS = { "applies", "where", "decider", "actor_is_player", "decides_world", "leads_here", "is_player_mirror",
-	"seat_plays", "group_travels", "publish_to", "level_request" }
+	"seat_plays", "group_travels", "from_level", "publish_to", "level_request" }
 
 local function log(fmt, ...)
 	local ok, line = pcall(string_format, fmt, ...)
@@ -83,6 +84,7 @@ local NONE = {
 	is_player_mirror = function() return false end,
 	seat_plays = function() return false end,
 	group_travels = function() return false end,
+	from_level = function() return false end,
 	publish_to = function() return nil end,
 	-- nothing arrives without a session; whatever does is this process's own business
 	level_request = function(name, payload, from) return "here", payload, from, false end,
@@ -203,6 +205,12 @@ function group_travels() return ask("group_travels") == true end
 function seat_plays(peer)
 	peer = peer_of(peer)
 	return peer ~= nil and ask("seat_plays", peer) == true
+end
+
+function from_level(from)
+	from = peer_of(from)
+	-- Transport PeerId is uint32_t; 0 is the world seat and 0xffffffff is reserved.
+	return from ~= nil and from > 0 and from < 0xffffffff and ask("from_level", from) == true
 end
 
 -------------------------------------------------------------------------------

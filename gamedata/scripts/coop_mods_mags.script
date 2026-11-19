@@ -110,7 +110,10 @@ local function mirror_receive(m, t, from)
 		if type(id) == "number" and id > 0 and id < 65535 and type(s) == "string" then
 			local accept
 			if host then
-				accept = C().holder_peer(id) == from or C().is_bridge(from) -- only the carrier reports an item, or the authority of its level
+				-- Only the carrier or the authority of its level can report an item.
+				local source = (type(from) == "number" and C().holder_peer(id) == from) or coop_mode.from_level(from)
+				accept = coop_trust.pass("mg_data_sender", source, "unexpected magazine report from peer %s", tostring(from))
+					and source
 			else
 				-- from the host only (a client's broadcast is relayed with that client as sender, W5); never
 				-- over what this player carries

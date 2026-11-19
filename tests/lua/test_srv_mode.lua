@@ -1,5 +1,6 @@
 -- The server layer of the facade coop_mode (scripts\coop_srv_mode.script, docs\MODES.md section 4, step S4): it answers
--- on a world server, a map server and a player's machine of a split session, from the engine's predicates; the world
+-- on a world server (from the start of a -coop_dedicated process, before its session too: A-S4D), a map server and a
+-- player's machine of a split session, from the engine's predicates; any other process before its session: none; the world
 -- server passes a player's request to the map server of his map, the map server takes it only from the world server;
 -- when_srv functions run once it answers, never in the co-op. Real scripts over the coop.* stubs. Not shipped.
 -- Run: tools\test_lua.cmd srv_mode
@@ -130,5 +131,85 @@ check(F.group_travels() == true, "before its first level map it is answered by t
 print("== no session")
 engine({ active = false })
 check(F.where(1) == "away" and F.decider(1) == "nobody" and F.actor_is_player() and not F.decides_world(), "none")
+
+-- A-S4D (lead's option (a)): a process started with -coop_dedicated loads its world first and starts its session after it
+-- (HostAutostart). Before that the engine has no phase, so no role (is_host false), no seat (self_id -1) and no rows. Its
+-- srv scripts register inside when_srv and must do it at load (coop_srv_dedicated writes [character_creation] before the
+-- stock reads it; the save's load_state comes after on_game_start), so the server layer answers on is_dedicated alone,
+-- with answers that do not depend on is_host. Every other process before its session: none, as before.
+-- A new Lua state at a world start: the facade with no layer and nothing waiting, then the two layer scripts.
+local function fresh()
+	local f = load_script("coop_mode")
+	return f, load_script("coop_srv_mode"), load_script("coop_hostplay_mode")
+end
+-- axr_main runs on_game_start by script name: coop_hostplay_mode, coop_mode, ..., coop_srv_mode
+local function start(hp, sv)
+	hp.on_game_start()
+	sv.on_game_start()
+end
+
+print("== the world server's process before its session (-coop_dedicated): the server layer answers from the start")
+for _, host in ipairs({ false, true }) do
+	local tag = "is_host " .. tostring(host) .. ": "
+	engine({ active = false, host = host, dedicated = true, self = -1 })
+	local F2, SV2, HP2 = fresh()
+	local ran = 0
+	F2.when_srv(function() ran = ran + 1 end) -- a srv script named before coop_srv_mode (coop_srv_dedicated)
+	check(ran == 0 and F2.decides_world() == false, tag .. "before the layer is installed: none, the function waits")
+	LOG = {}
+	start(HP2, SV2)
+	check(ran == 1 and log_has("[srv] mode: world server") ~= nil, tag .. "the layer's own on_game_start runs it, at load")
+	check(not F2.actor_is_player() and F2.decides_world() and not F2.leads_here(),
+		tag .. "a ghost that decides the world and leads no map, before its session")
+	check(not F2.is_player_mirror() and not F2.group_travels(), tag .. "no mirror, no group travel")
+	check(F2.where(0) == "away" and F2.where(1) == "away" and F2.decider(0) == "nobody" and F2.decider(1) == "nobody"
+		and not F2.seat_plays(0) and not F2.seat_plays(1), tag .. "no seat and no player yet: away, nobody, no seat plays")
+	SENT = {}
+	check(F2.publish("w.early", { x = 1 }) == false and #SENT == 0, tag .. "publish before the session: not sent (as none)")
+	local now = 0
+	F2.when_srv(function() now = now + 1 end)
+	check(now == 1, tag .. "a when_srv function given after that runs at once")
+	engine({ host = true, dedicated = true, split = true, self = 0, bridges = { [1] = BRIDGE },
+		rows = { { id = 1, level = 2, elsewhere = true }, { id = 2 } } })
+	check(F2.where(1) == "away" and F2.where(2) == "joining" and F2.where(0) == "away" and F2.decider(1) == "other"
+		and F2.decider(0) == "nobody" and not F2.actor_is_player() and F2.decides_world() and not F2.leads_here()
+		and not F2.is_player_mirror() and F2.seat_plays(1) and not F2.seat_plays(0),
+		tag .. "its session starts: the answers of a world server in session")
+	SENT = {}
+	check(F2.publish("w.live", { x = 1 }) and SENT[1].target == -1, tag .. "publish in the session: to everybody")
+	check(ran == 1 and now == 1, tag .. "nothing ran twice")
+end
+
+print("== the other processes before their session: none, as before")
+for _, case in ipairs({
+	{ "a co-op host", { active = false, self = -1 } },
+	{ "a co-op host (roles already set)", { active = false, host = true, self = -1 } },
+	{ "a player's machine", { active = false, client = true, self = -1 } },
+	{ "a map server", { active = false, map_server = true, self = -1 } },
+	{ "a split world's machine", { active = false, split = true, self = -1 } },
+}) do
+	local tag = case[1] .. ": "
+	engine(case[2])
+	local F2, SV2, HP2 = fresh()
+	local ran = 0
+	F2.when_srv(function() ran = ran + 1 end)
+	LOG = {}
+	start(HP2, SV2)
+	check(ran == 0 and log_has("[srv] mode") == nil, tag .. "when_srv functions wait")
+	check(F2.where(0) == "away" and F2.where(1) == "away" and F2.decider(0) == "nobody" and F2.decider(1) == "nobody"
+		and not F2.seat_plays(0) and not F2.seat_plays(1), tag .. "away, nobody, no seat plays")
+	check(F2.actor_is_player() and not F2.decides_world() and not F2.leads_here() and not F2.is_player_mirror()
+		and not F2.group_travels(), tag .. "a player's actor; decides, leads, mirrors nothing; no group travel")
+	SENT = {}
+	check(F2.publish("x.early", { x = 1 }) == false and #SENT == 0, tag .. "publish: not sent")
+end
+engine({ active = false, self = -1 })
+local F3, SV3, HP3 = fresh()
+local waited = 0
+F3.when_srv(function() waited = waited + 1 end)
+start(HP3, SV3)
+engine({ host = true, self = 0, rows = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, avatar_id = 700 } } })
+check(F3.group_travels() and F3.decides_world() and F3.leads_here() and F3.actor_is_player() and F3.where(1) == "here"
+	and F3.decider(1) == "this" and waited == 0, "a co-op host's session starts: the co-op answers, when_srv never runs")
 
 done("SRV_MODE")

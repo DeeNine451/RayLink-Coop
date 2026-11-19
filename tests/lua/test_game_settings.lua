@@ -1337,5 +1337,32 @@ do
 	})
 end
 
+-------------------------------------------------------------------------------
+section("the creator of a staged world (plan 2026-11-12 stage 5; from coop_dedicated, step S4 A-S4D)")
+-- The record's creator, for the engine (coop_join.cpp host_make_creator / host_mark_creator_made) and coop_menu_char's exact
+-- plan. Only a world a world server stages from coop_new_world.ltx has one; every other record (a co-op host's) has none.
+do
+	check(type(gs.creator) == "function" and type(gs.creator_facts) == "function" and type(gs.creator_made) == "function",
+		"creator, creator_facts and creator_made are the Core's")
+	reset_disk()
+	local rec = make_record()
+	rec.creator = { name = "Strelok", loadout = { "wpn_pm", "wpn_pm" }, money = 10, map = "", bare = false, used = false }
+	check(gs.stage_new(rec) == true, "a record with a creator is staged")
+	gs.before_world_start("new", "")
+	local c = gs.active() and gs.active().creator
+	local f = gs.creator_facts()
+	check(c ~= nil and f.creator == true and f.used == false and f.loadout == "wpn_pm,wpn_pm" and f.count == 2 and f.bare == false,
+		"the creator's facts for the engine")
+	check(gs.creator() == c, "his record for the plan")
+	check(gs.creator_made() == true and c.used == true and gs.creator_facts().used == true, "made once: marked")
+	check(gs.stage_new(make_record()) == true, "a record without a creator (a co-op host's) is staged")
+	gs.before_world_start("new", "")
+	check(gs.active() ~= nil and gs.creator_facts().creator == false and gs.creator() == nil and gs.creator_made() == false,
+		"no creator in the record")
+	gs.before_world_start("new", "")
+	check(gs.active() == nil and gs.creator_facts().creator == false and gs.creator() == nil and gs.creator_made() == false
+		and gs.creator_facts().loadout == "" and gs.creator_facts().count == 0, "no record at all")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

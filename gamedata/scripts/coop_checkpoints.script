@@ -664,8 +664,7 @@ end
 
 -- The world server: a map server's logic ran the effect.
 local function on_story_event(payload, from)
-	local source = coop_mode.decides_world()
-		and type(coop_mode.from_level) == "function" and coop_mode.from_level(from)
+	local source = coop_mode.from_level(from)
 	if not coop_trust.pass("cp_story_sender", source, "story checkpoint from unexpected peer %s", tostring(from))
 		or not source then return end
 	local reason = cmain().decode(payload).r

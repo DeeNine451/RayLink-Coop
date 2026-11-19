@@ -4,6 +4,15 @@ Frozen 2026-11-18 18:48. After the W0 gate this file and the API it describes ch
 Source: `gamedata/scripts/coop_mode.script` (Core), `coop_hostplay_mode.script` (hostplay), `coop_srv_mode.script` (srv);
 rules: `docs/MODES.md` sections 3-4. Works on today's engine (no new engine API).
 
+Changed 2026-11-19 (A-S4D, the lead's option (a)): **the srv layer answers in a process started with `-coop_dedicated`
+from the process's start**, before its session, not only in an active session. Before, a world server was answered by
+"none" until its session started (after its world was up, `HostAutostart`), so `when_srv` ran there only after the world
+and its save had loaded. What changed: the "Which layer answers" rule and the world server's role below; the world server
+column now holds before its session too (row "before its session"); `publish` there sends nothing before the session;
+section 4: on a world server `when_srv` functions run at load. Every other process is answered as before (a co-op host,
+a co-op client, a map server and a server player before their session: "none"). The facade (`coop_mode.script`), the
+hostplay layer and the answer sets of the tests did not change.
+
 ## 1. Rules for callers
 
 - Call as a global module, `coop_mode.x(...)`. **No new `local`** for it (L7: `coop_tasks` 197/200, `coop_npc_companions` 181).
@@ -28,9 +37,11 @@ the "none" answer without asking a layer.
 | `seat_plays(peer)` | bool | that seat plays a character (`seat_plays(0)`: is the host's seat a player) |
 | `group_travels()` | bool | the group moves between maps together |
 
-Answers per process (live layers; the test sets model the first, third, fourth and last column):
+Answers per process (live layers; the test sets model the first, third, fourth and last column). The world server column
+holds from the process's start (A-S4D): before its session the engine gives it no role (`is_host()` false), no seat
+(`self_id()` -1) and no rows of `coop.players()`, and its answers do not depend on them:
 
-| | co-op host | co-op client | world server (`-coop_dedicated`) | map server | server player | none |
+| | co-op host | co-op client | world server (`-coop_dedicated`, from its start) | map server | server player | none |
 |---|---|---|---|---|---|---|
 | `where(self)` | here | here | away (ghost) | away (ghost) | here | away |
 | `where(p)` | here; joining before his character is in the world | same | away; joining before he is placed | here on its map, away elsewhere, joining unplaced | here on my map, away elsewhere | away |
@@ -42,14 +53,27 @@ Answers per process (live layers; the test sets model the first, third, fourth a
 | `is_player_mirror()` | false | true | false | false | true | false |
 | `seat_plays(p)` | p has a row in `coop.players()` | same | same; own seat false | same; own seat false | same | false |
 | `group_travels()` | true | true | false | false | false | false |
-| `publish` goes to | -1 (all) | -1 | -1 (engine adds bridges) | 0 (world server) | -1 | not sent |
+| `publish` goes to | -1 (all) | -1 | -1 (engine adds bridges); before its session not sent | 0 (world server) | -1 | not sent |
 | level request | handled here | handled here (the door refuses on a client) | passed to `bridge_of_player(from)` with `_peer`, else here | only from 0 with `_peer`: handled as that peer | handled here | handled here |
+| `from_level(from)` (A-FL) | false | false | true when `from` is a currently registered map-server bridge during the active session; false otherwise | false | false | false |
+| before its session | none | none | the column above: `where` away and `decider` nobody for every peer, `seat_plays` false (no rows yet), the rest as in the session | none | none | — |
+
+`from_level(from) -> bool` (A-FL, 2026-11-19): whether the event transport's sender is a map server's bridge. `from` is the
+sender peer the transport gives; anything but a whole peer id in range, peer 0, a player, an unknown or no longer listed
+bridge, an inactive world session, every co-op role, a map server, a server player and offline answer false. A world
+server accepts a map's report (story checkpoint, HF / items / mags reports) only when it is true; every refusal still goes
+through `coop_trust.pass`. The srv layer reads `coop.levels.map_servers()` on each call: a bridge whose process is closing
+can stay listed for a moment after its connection closed (an exact transport-disconnect answer needs a Lua binding of the
+engine's own question; not done).
 
 Which layer answers (today's predicates, read only by the layer scripts):
-- srv: active session and (`coop.is_map_server()` or `coop.is_dedicated()` or `coop.levels.split()`). World server role =
-  `coop.is_host()`. Until S2 a playing host of a split session (the hybrid) is answered by srv from the same predicates.
+- srv: `coop.is_dedicated()` (a process started with `-coop_dedicated`: the world server) from the process's start, before,
+  during and after its session (A-S4D); or an active session and (`coop.is_map_server()` or `coop.levels.split()`). World
+  server role = `coop.is_dedicated()` or (`coop.is_host()` and not a map server). Until S2 a playing host of a split session
+  (the hybrid) is answered by srv from the same predicates.
 - hostplay: active session and none of the above.
-- none: no active session, or no layer installed. The co-op layer is asked first.
+- none: no active session and not `-coop_dedicated`, or no layer installed. The co-op layer is asked first. A co-op host
+  before its session is answered by none, as before.
 - A server player's machine knows `split()` from its Welcome (protocol 33 carries the session's mode; S4C: `coop_levels.cpp`
   `split()` on a client is `world_session().session_mode() == SessionMode::Server`), not from its first LevelMap any more:
   from the Welcome on it is answered by srv.
@@ -57,16 +81,21 @@ Which layer answers (today's predicates, read only by the layer scripts):
   server answers `where(stranger)` = Joining (here: away) and `decider_of(unplaced player)` = This (here: other); a map
   server answers `decider_of(joining player)` = This (here: other). The C++ choice makes `on_host_level(p)` exactly
   `where(p) != Away` (review A-S4C F3). Nobody calls these C++ answers yet; S6 converts code against **this** Lua table and
-  settles the C++ one to it first (S6 unit A-S6-T).
+  settles the C++ one to it first (S6 unit A-S6-T). A fourth difference since A-S4D: before its session a world server's
+  C++ `mode()` is still none (it is set at `start_host`), while the Lua srv layer answers from the process's start.
 
 ### Server parts in `coop_quests_core` (S4, A-S4ML; accepted by the lead 2026-11-19)
 
-`coop_quests_core.set_part(name, t)` / `part(name)` (`far`, `levels`, `brain`, `audience`), `share_up` / `share_down` /
+`coop_quests_core.set_part(name, t)` / `part(name)` (`far`, `levels`, `brain`, `audience`, and `talk` = `{ partner(peer) }`
+given by `coop_srv_tasks` on every world server: the id of the NPC the player talks to, false for nobody, nil when the engine
+does not report it - A-S5T), `share_up` / `share_down` /
 `share()` / `shared()` and `add_death_listener` / `death_listeners`: a server script puts itself there from inside
 `when_srv`; without a part the Core caller gives the co-op answer. This is the one sanctioned way the Core reaches the
 renamed server scripts. Rules: `set_part` is called only inside `when_srv` (L9 catches it at load); the Core never uses a
-part's presence as a mode test (`part("far") ~= nil` for "am I a server") - ask `coop_mode` instead. The guard does not yet
-catch that misuse (review A-S4ML B4, hostile h5/h6): guard round 8 adds it.
+part's presence as a mode test (`part("far") ~= nil` for "am I a server") - ask `coop_mode` instead; call the part's own
+function and use its answer. Guard round 8 catches the misuse as L1 when the part is asked through `coop_quests_core.part`
+in an `if` / `and` / `or` / a comparison with nil; it does not yet see it through a local or a getter field (round 9, review
+of guard-8 item 2).
 
 ## 3. Delivery
 
@@ -91,6 +120,18 @@ logged (`[coop-mode] ! when_srv`) and does not stop the others; a `when_srv` ins
 In the co-op and in single player the functions never run. Registrations they make stay for the Lua state.
 `layer`: the srv layer itself; only `coop_srv_mode.script` passes it (L9 lets a srv script call nothing at load but
 `coop_mode.when_srv`). A layer whose name is not `"srv"` is refused there.
+
+When they run, per process (A-S4D):
+- world server (`-coop_dedicated`): at load, in axr_main's loop of `on_game_start` — the functions of the srv scripts named
+  before `coop_srv_mode` when it installs the layer, the others in their own `on_game_start`. That is before the save's
+  `load_state` and before the session: a `load_state` handler registered there gets the save, so it must not drop it on a
+  session check (`is_active()` / `is_host()` are false until the session starts). `coop_srv_scorcher` checks
+  `is_dedicated()` too; it and `coop_srv_task_audience` also read `alife_storage_manager.get_state()` inside `when_srv`
+  for a save loaded before the layer answered. A function that sets something up at the actor's first update runs at the
+  real first update there; the world's session normally starts before it, but not when the session start is refused and
+  retried (a busy port): such a function must not rely on the session either.
+- map server and server player: as soon as their session (and on a player's machine its first LevelMap or Welcome) makes
+  the layer answer — at load for a map server.
 
 `install(layer) -> bool`, `uninstall(name) -> bool` — `name` is `"hostplay"` or `"srv"`. A layer is a table:
 

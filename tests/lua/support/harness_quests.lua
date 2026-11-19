@@ -273,18 +273,23 @@ function machine(role, self_peer)
 		end,
 	}
 	-- The facade coop_mode as far as a server script needs it (docs\MODES.md section 4, step S4): when_srv(fn) waits until the
-	-- server layer answers for this machine's coop.* stubs (an active session of a map server, a dedicated world server or split
-	-- levels, as coop_srv_mode.applies) and then runs, once and in order: at once, at the next when_srv or at the next
-	-- actor_on_update (fire / tick). In the co-op it never runs. decides_world / group_travels answer as the live layers.
+	-- server layer answers for this machine's coop.* stubs (a dedicated world server from its start, before its session too
+	-- (A-S4D); an active session of a map server or split levels; as coop_srv_mode.applies) and then runs, once and in order: at
+	-- once, at the next when_srv or at the next actor_on_update (fire / tick). In the co-op it never runs. decides_world /
+	-- group_travels answer as the live layers.
 	-- Only the server scripts (coop_srv_*) and coop_conditions_stock see it (load_script puts it into their module): the Core
 	-- scripts under test keep finding no facade, as before step S4. A test that loads the real facade first (load_script(M,
 	-- "coop_mode")) gives that one to everybody instead.
 	M.srv_waiting = {}
+	local function dedicated()
+		local c = env.coop
+		return type(c.is_dedicated) == "function" and c.is_dedicated() == true
+	end
 	local function srv_applies()
 		local c = env.coop
+		if dedicated() then return true end
 		if not (type(c.is_active) == "function" and c.is_active() == true) then return false end
-		if (type(c.is_map_server) == "function" and c.is_map_server() == true)
-			or (type(c.is_dedicated) == "function" and c.is_dedicated() == true) then return true end
+		if type(c.is_map_server) == "function" and c.is_map_server() == true then return true end
 		local l = c.levels
 		return type(l) == "table" and type(l.split) == "function" and l.split() == true
 	end
@@ -303,7 +308,7 @@ function machine(role, self_peer)
 		decides_world = function()
 			local c = env.coop
 			local ms = type(c.is_map_server) == "function" and c.is_map_server() == true
-			return c.is_active() == true and c.is_host() == true and not ms
+			return dedicated() or (c.is_active() == true and c.is_host() == true and not ms)
 		end,
 		group_travels = function() return env.coop.is_active() == true and not srv_applies() end,
 	}

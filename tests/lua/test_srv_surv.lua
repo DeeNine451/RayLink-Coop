@@ -1,12 +1,13 @@
 -- Server survival callbacks and story relay. Run: tools\test_lua.cmd srv_surv
 dofile("tests/lua/support/stubs_mods.lua")
+local log_has = log_has -- menu_stubs replaces it with a pattern matcher
 dofile("tests/lua/support/item_tent_stock.lua")
 dofile("tests/lua/support/menu_stubs.lua")
 local modes = dofile("tests/lua/support/modes.lua")
 
 local bridge = 0x101
 local event = "coop_cp_story"
-local handlers, stories, spotted, blocks, checks = {}, {}, {}, {}, {}
+local handlers, stories, spotted, blocks = {}, {}, {}, {}
 local surge = { time_forwarded = false }
 
 coop_main = {
@@ -14,12 +15,7 @@ coop_main = {
 	encode = function(t) return t.r or "" end,
 	decode = function(s) return { r = s ~= "" and s or nil } end,
 }
-coop_trust = {
-	pass = function(name, valid, fmt, ...)
-		checks[#checks + 1] = { name = name, valid = valid, text = string.format(fmt, ...) }
-		return true -- Dev 57 log mode; an unauthorized transport source still cannot change the world.
-	end,
-}
+coop_trust.reset_for_test({ default = "log" })
 coop.checkpoint = {
 	story = function(reason) stories[#stories + 1] = reason or false end,
 	claim_tent = function() error("a server ghost must not make a claim") end,
@@ -36,19 +32,13 @@ xr_effects = { scenario_autosave = function() error("stock save in a session") e
 make_actor(vec3(0, 0, 0))
 load_mini()
 load_script("coop_mode")
-local function install(set)
-	modes.install(coop_mode, set)
-	-- F-FROMLEVEL is a facade answer supplied by the lead. Stand in for bridge membership.
-	coop_mode.from_level = function(peer) return set == "srv_world" and peer == bridge end
-end
-
 for _, name in ipairs({ "coop_checkpoints", "coop_death", "coop_rest", "coop_tent_guard" }) do
 	load_script(name).on_game_start()
 end
 
 -- The legacy host/client bits deliberately disagree with the answer sets.
 MODE = "host"
-install("srv_map")
+modes.install(coop_mode, "srv_map")
 xr_effects.scenario_autosave(nil, nil, { "st_save_map" })
 check(#stories == 0, "the map server does not set the world's story checkpoint")
 check(#SENT == 1 and SENT[1].name == event and SENT[1].target == 0 and SENT[1].payload == "st_save_map",
@@ -69,25 +59,33 @@ local _, map_tent = spawn("ph_tent", vec3(1, 0, 0))
 SendScriptCallback("coop_tent_placed", map_tent:id(), 7)
 check(not item_tent.get_spawned_tents()[map_tent:id()], "the map server does not register a world tent")
 
-MODE = "client"
-install("srv_world")
+MODE = "host"
+coop.is_dedicated = function() return true end
+coop.levels = { map_servers = function() return { { bridge = bridge, level = 2 } } end }
+modes.live(coop_mode)
 surge.time_forwarded, blocks = false, {}
 xr_effects.scenario_autosave(nil, nil, { "st_save_world" })
 check(#stories == 1 and stories[1] == "st_save_world", "the world process sets its own story checkpoint")
 check(#SENT == 2, "the world does not relay its own story")
 handlers[event]("st_save_from_level", bridge)
 check(#stories == 2 and stories[2] == "st_save_from_level", "the world accepts a report from its map server")
-check(checks[1] and checks[1].valid == true, "the accepted transport sender was checked")
-handlers[event]("forged", 7)
-check(#stories == 2 and checks[#checks] and checks[#checks].valid == false,
+local sender = coop_trust.status().cp_story_sender
+check(sender and sender.checked == 1 and sender.failed == 0, "the accepted transport sender was checked")
+LOG = {}
+handlers[event]("forged", 1)
+check(#stories == 2 and log_has("[coop-trust] ! cp_story_sender: story checkpoint from unexpected peer 1"),
 	"a player-sent report goes through trust and cannot change the checkpoint")
 handlers[event](string.rep("x", 129), bridge)
-check(#stories == 2 and checks[#checks] and checks[#checks].valid == false,
+check(#stories == 2 and log_has("[coop-trust] ! cp_story_reason:"),
 	"an oversized reason goes through trust and cannot change the checkpoint")
-coop_mode.from_level = nil
-handlers[event]("no_facade_answer", bridge)
-check(#stories == 2 and checks[#checks] and checks[#checks].valid == false,
-	"the world safely rejects a report when bridge membership is unavailable")
+LOG = {}
+coop.levels.map_servers = function() return {} end
+handlers[event]("stale_report", bridge)
+check(#stories == 2 and log_has("[coop-trust] ! cp_story_sender:"),
+	"the world safely rejects a report from a bridge removed from the registry")
+coop.levels.map_servers = nil
+handlers[event]("no_registry", bridge)
+check(#stories == 2 and sender.failed == 3, "the world safely rejects a report when bridge membership is unavailable")
 SendScriptCallback("coop_rest_skipped", 6)
 NOW = NOW + 1000
 SendScriptCallback("actor_on_update")
@@ -100,8 +98,6 @@ check(item_tent.get_spawned_tents()[world_tent:id()] == true, "the world records
 
 -- The live dedicated layer answers before HostAutostart opens the session.
 MODE = "sp"
-coop.is_dedicated = function() return true end
-modes.live(coop_mode)
 blocks, surge.time_forwarded = {}, false
 NOW = NOW + 1000
 SendScriptCallback("actor_on_update")
@@ -126,5 +122,14 @@ check(not item_tent.get_spawned_tents()[tent_se.id], "before the session first u
 spawn("coop_death_stash", vec3(6, 0, 0), nil, { id = 559 })
 SendScriptCallback("coop_death_marker", 7, 559, "drop")
 check(not spotted[559], "before the session the world ignores death markers")
+
+MODE = "host"
+coop.is_dedicated = function() return false end
+coop.levels.map_servers = function() return { { bridge = bridge, level = 2 } } end
+LOG = {}
+handlers[event]("coop_forgery", bridge)
+xr_effects.scenario_autosave(nil, nil, { "st_save_coop" })
+check(#stories == 3 and stories[3] == "st_save_coop" and #SENT == 2 and log_has("[coop-trust] ! cp_story_sender:"),
+	"the Co-op host rejects a network report through trust and still sets its local checkpoint")
 
 done("SRV_SURV")

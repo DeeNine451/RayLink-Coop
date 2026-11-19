@@ -1,8 +1,11 @@
--- Anomaly Coop test: the dedicated host's half in Lua (gamedata\scripts\coop_dedicated.script, docs\DEDICATED_HOST.md). A new world gets what the
--- faction-select screen would write, except the start map (the actor stays on fake_start) and what is for a character; a world that is
--- loaded gets nothing; stock IsTestMode no longer takes the service level for a test map. A window host is left alone.
+-- Anomaly Coop test: the dedicated host's half in Lua (gamedata\scripts\coop_srv_dedicated.script, coop_dedicated before step S4,
+-- docs\DEDICATED_HOST.md). A new world gets what the faction-select screen would write, except the start map (the actor stays on
+-- fake_start) and what is for a character; a world that is loaded gets nothing; stock IsTestMode no longer takes the service level for
+-- a test map. A window host is left alone. Step S4 (A-S4D): that work runs from coop_mode.when_srv; the real facade coop_mode and the
+-- real server layer coop_srv_mode run here as axr_main runs them (by name), and on a -coop_dedicated process the layer answers from
+-- the start, before the session: the work is done inside the loop of on_game_start, before the stock reads [character_creation].
 -- The audit's fixes in other scripts: the rule "the host decides", the reward group, the choice of a start, the window's new game.
--- Not shipped. Run: tools\test_lua.cmd dedicated
+-- Not shipped. Run: tools\test_lua.cmd srv_dedicated
 PASSES, FAILS = 0, 0
 function check(cond, what)
 	if cond then
@@ -20,10 +23,26 @@ local function read(path)
 	return text
 end
 
-local function fresh(dedicated, new_world)
+-- One script as the engine loads a module: its own table over _G, named in _G.
+local function module(name)
+	local chunk = assert(loadstring(read("gamedata/scripts/" .. name .. ".script"), name))
+	local env = setmetatable({}, { __index = _G })
+	setfenv(chunk, env)
+	chunk()
+	_G[name] = env
+	return env
+end
+
+-- A fresh Lua state at a world start: the facade, the server layer and this script, their on_game_start in axr_main's order (by
+-- name: coop_mode, coop_srv_dedicated, coop_srv_mode). The engine before the session (-coop_dedicated: the session starts after the
+-- world is up): no phase, so no role and no seat. `p` (optional): { active, map_server, host, split } of the engine. Returns what was
+-- written to [character_creation] and what was written by the time coop_srv_dedicated's own on_game_start was over.
+local function fresh(dedicated, new_world, p)
+	p = p or {}
 	local written = {}
 	IsTestMode = function() return true end
 	printf = function() end
+	RegisterScriptCallback = function() end
 	axr_main = {
 		config = {
 			w_value = function(_, section, key, value)
@@ -32,18 +51,31 @@ local function fresh(dedicated, new_world)
 			end,
 		},
 	}
-	coop = dedicated == nil and nil or { is_dedicated = function() return dedicated end, dedicated_new_world = function() return new_world end }
-	local chunk = assert(loadstring(read("gamedata/scripts/coop_dedicated.script"), "coop_dedicated"))
-	local env = setmetatable({}, { __index = _G })
-	setfenv(chunk, env)
-	chunk()
-	env.on_game_start()
-	return written
+	coop = dedicated == nil and nil or {
+		is_dedicated = function() return dedicated end,
+		dedicated_new_world = function() return new_world end,
+		is_active = function() return p.active == true end,
+		is_host = function() return p.host == true end,
+		is_map_server = function() return p.map_server == true end,
+		self_id = function() return p.active and 0 or -1 end,
+		players = function() return {} end,
+		levels = { split = function() return p.split == true end },
+	}
+	local facade, script, layer = module("coop_mode"), module("coop_srv_dedicated"), module("coop_srv_mode")
+	facade.on_game_start()
+	script.on_game_start()
+	local before = {}
+	for k, v in pairs(written) do before[k] = v end
+	local test_before = IsTestMode()
+	layer.on_game_start()
+	return written, before, test_before
 end
 
 -- ------------------------------------------------------------------------------------------------ a new world
 do
-	local w = fresh(true, true)
+	local w, before, test_before = fresh(true, true)
+	check(next(before) == nil and test_before == true,
+		"S4: its own on_game_start only waits in coop_mode.when_srv (axr_main runs coop_srv_mode after it)")
 	check(w.new_game_faction == "stalker", "a new world has a faction: the storyline hangs on it")
 	check(w.new_game_story_mode == true, "story mode is on")
 	check(w.new_game_difficulty == 1 and w.new_game_economy == 1, "the screen's defaults")
@@ -68,6 +100,13 @@ do
 	w = fresh(nil)
 	check(next(w) == nil, "no coop table: nothing happens")
 	check(IsTestMode() == true, "no coop table: stock IsTestMode")
+	-- S4: the other processes the server layer answers in run the when_srv function, and it does nothing there
+	w = fresh(false, true, { active = true, map_server = true })
+	check(next(w) == nil and IsTestMode() == true, "a map server (not -coop_dedicated): nothing written, stock IsTestMode")
+	w = fresh(false, true, { active = true, split = true })
+	check(next(w) == nil and IsTestMode() == true, "a player's machine of a server world: nothing written, stock IsTestMode")
+	w = fresh(false, true, { active = true, host = true })
+	check(next(w) == nil and IsTestMode() == true, "a co-op host in its session: nothing written, stock IsTestMode")
 end
 
 -- ------------------------------------------------------------------------------------------------ the audit's fixes, by their text
@@ -119,7 +158,7 @@ local LOGS = {}
 local function staging()
 	printf = function(fmt, ...) LOGS[#LOGS + 1] = string.format(fmt, ...) end
 	coop = { is_dedicated = function() return true end, dedicated_new_world = function() return true end }
-	return load_mod("coop_dedicated")
+	return load_mod("coop_srv_dedicated")
 end
 local function logged(pat)
 	for _, l in ipairs(LOGS) do if l:find(pat, 1, true) then return true end end
@@ -195,18 +234,12 @@ do
 		"no staged world: exactly as before")
 end
 
+-- S4 (A-S4D): the creator's facts read the record only, the same in both modes, and the Core asks them (coop_join.cpp
+-- host_make_creator, coop_menu_char's exact plan): they live in the Core's coop_game_settings (tests\lua\test_game_settings.lua),
+-- so no Core file names this server script.
 do
 	local d = staging()
-	ACTIVE = { faction = "bandit", creator = { loadout = { "wpn_pm", "wpn_pm" }, money = 10, used = false, bare = false } }
-	local f = d.creator_facts()
-	check(f.creator == true and f.used == false and f.loadout == "wpn_pm,wpn_pm" and f.count == 2 and f.bare == false,
-		"the creator's facts for the engine")
-	check(d.creator() == ACTIVE.creator, "his record for the plan")
-	check(d.creator_made() == true and ACTIVE.creator.used == true and d.creator_facts().used == true, "made once: marked")
-	ACTIVE = { faction = "bandit" }
-	check(d.creator_facts().creator == false and d.creator() == nil and d.creator_made() == false, "no creator in the record")
-	ACTIVE = nil
-	check(d.creator_facts().creator == false, "no record at all")
+	check(d.creator == nil and d.creator_facts == nil and d.creator_made == nil, "the creator's functions are not here any more")
 end
 
 -- A world server never loads a world of a host who plays in it: that save's actor is the host's own character, and a world server
@@ -225,7 +258,7 @@ do
 		if s then return s[1], s[2] end
 		return nil
 	end
-	check(type(d.load_allowed) == "function", "coop_dedicated.load_allowed exists")
+	check(type(d.load_allowed) == "function", "coop_srv_dedicated.load_allowed exists")
 	if type(d.load_allowed) == "function" then
 		check(d.load_allowed("ws_world") == true, "a world made for a world server loads")
 		local ok, why = d.load_allowed("old_split")

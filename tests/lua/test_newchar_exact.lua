@@ -24,9 +24,10 @@ function ini_sys:r_string_ex(s, k) local w = WEAPONS[s]; local v = w and w[k]; r
 function ini_sys:r_float_ex(s, k) local w = WEAPONS[s]; return w and tonumber(w[k]) end
 
 WORLD = "bandit"
-coop_game_settings = { world_faction = function() return WORLD end, value = function() return nil end }
 CREATOR = nil
-coop_dedicated = { creator = function() return CREATOR end }
+-- the record's creator: coop_game_settings.creator (coop_dedicated.creator before step S4, A-S4D)
+coop_game_settings = { world_faction = function() return WORLD end, value = function() return nil end,
+	creator = function() return CREATOR end }
 
 PLAYERS = { { id = 0, nick = "server", is_self = true }, { id = 1, nick = "Strelok", avatar_id = 900 } }
 coop = {

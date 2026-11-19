@@ -57,8 +57,8 @@ local function start(M, W, role, map)
 		setup_companion_logic = function(npc) npc:give_info_portion("npcx_is_companion") end,
 	}
 	E.coop_quests_core = { share = function() return {
-		up = function(_, get, set) M.share_up, M.hear = get, set end,
-		down = function(_, get, set) M.share_down, M.give = get, set end,
+		up = function(key, get, set) M.share_up_key, M.share_up, M.hear = key, get, set end,
+		down = function(key, get, set) M.share_down_key, M.share_down, M.give = key, get, set end,
 	} end }
 	load_script(M, "coop_npc_players")
 	load_script(M, "coop_trust").reset_for_test({ default = "log" })
@@ -68,6 +68,11 @@ local function start(M, W, role, map)
 	local init_srv = load_script(M, "coop_srv_mode").on_game_start
 	local core = load_script(M, "coop_npc_companions")
 	core.on_game_start()
+	local set_transfer_hooks = core.set_transfer_hooks
+	core.set_transfer_hooks = function(hooks)
+		M.transfer_installs = (M.transfer_installs or 0) + 1
+		return set_transfer_hooks(hooks)
+	end
 	load_script(M, "coop_srv_companions").on_game_start()
 	init_srv()
 	return core
@@ -123,6 +128,32 @@ local function test_coop_does_not_subscribe_to_transfers()
 	tick(H)
 	check(saved(H)[SQUAD] == LEADER and H.env.axr_companions.companion_squad_can_teleport(W.squad),
 		"Co-op keeps the leader in its save and the stock teleport rule")
+end
+
+local function test_world_installs_transfers_before_session()
+	local W = stand()
+	W.split = false
+	local H = machine("host", 0, { [PEER] = LEADER })
+	local session = false
+	local api = H.env.coop
+	local players = api.players
+	api.is_active = function() return session end
+	api.is_host = api.is_active
+	api.self_id = function() return session and 0 or -1 end
+	api.players = function() return session and players() or {} end
+	start(H, W, "world")
+	check(H.env.coop_mode.decides_world() and not H.env.coop_npc_players.is_world_server(),
+		"the facade recognizes the dedicated world before the engine gives it a session")
+	check(H.transfer_installs == 1, "the world installs its transfer hooks at load")
+	for _, verb in ipairs({ FOLLOW, ADOPT, DROP, RECALL }) do
+		check(#(H.handlers[verb] or {}) == 1, "the world registers " .. verb .. " at load")
+	end
+	check(H.share_up_key == "comp_leaders" and H.share_down_key == "comp_leaders",
+		"the world registers comp_leaders for share up and down at load")
+
+	session, W.split = true, true
+	H.env.coop_mode.decides_world()
+	check(H.transfer_installs == 1, "starting the session does not reinstall the transfer hooks")
 end
 
 local function test_follow_recall_drop_and_deferred_adoption()
@@ -193,6 +224,7 @@ local function test_transport_sender_and_number_bounds()
 end
 
 test_coop_does_not_subscribe_to_transfers()
+test_world_installs_transfers_before_session()
 test_follow_recall_drop_and_deferred_adoption()
 test_transport_sender_and_number_bounds()
 print(string.format("\n%d passed, %d failed", PASSES, FAILS))

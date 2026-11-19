@@ -459,9 +459,12 @@ local function decode(s) local n = tonumber(tostring(s):match("^w(%d+)$")); loca
 	local c = {} for k, v in pairs(t) do c[k] = v end return c end
 
 local SENT = {}
-local function machine(role, mode, faction)
+-- opts (A-S4D): session = false: the engine's session is not up yet (no phase: no role, is_host false); dedicated = true: the
+-- process was started with -coop_dedicated; saved = the table alife_storage_manager.get_state() gives (the save loaded before)
+local function machine(role, mode, faction, opts)
+	opts = opts or {}
 	local m = { role = role, infos = {}, cbs = {}, cblist = {}, ups = {}, downs = {}, events = {}, storage = {}, objects = {}, switched = {},
-		tasks = {}, msgs = {}, given = {}, srv_ran = 0 }
+		tasks = {}, msgs = {}, given = {}, srv_ran = 0, session = opts.session ~= false, dedicated = opts.dedicated, saved = opts.saved }
 	local actor = {
 		has_info = function(_, n) return m.infos[n] == true end,
 		give_info_portion = function(_, n) m.infos[n] = true end,
@@ -472,9 +475,9 @@ local function machine(role, mode, faction)
 	local api = nil
 	if mode ~= "none" then
 		api = {
-			is_active = function() return true end,
-			is_host = function() return role == "world" or role == "map" end,
-			is_map_server = function() return role == "map" end,
+			is_active = function() return m.session end,
+			is_host = function() return m.session and (role == "world" or role == "map") end,
+			is_map_server = function() return m.session and role == "map" end,
 			is_client = function() return role == "client" end,
 			is_dedicated = function() return m.dedicated == true end,
 			levels = { split = function() return mode == "split" end },
@@ -493,6 +496,8 @@ local function machine(role, mode, faction)
 			m.storage[obj.id].active_section = sect; return true end },
 		task_manager = { get_task_manager = function() return { give_task = function(_, id, giver) m.given[#m.given + 1] = { id = id, giver = giver } end } end },
 		xr_conditions = {}, xr_effects = {},
+		-- the stock module's m_data: a fresh state's (no coop_scorcher) unless the save was loaded before (opts.saved)
+		alife_storage_manager = { get_state = function() return m.saved or {} end },
 		get_actor_true_community = function() return faction end,
 		actor_menu = { set_msg = function(_, text) m.msgs[#m.msgs + 1] = text end },
 		-- axr_main: every function registered for a name runs (m.cbs[name] runs them all); one taken out keeps its place as a no-op
@@ -591,6 +596,30 @@ check(W3.env.state().flips == 0, "a broken record in the save is not taken")
 local C0 = machine("client", "split", "monolith")
 C0.cbs.load_state(m_data)
 check(C0.env.state().flips == 0, "a player's machine does not take the world's record from a save")
+-- A-S4D: a world server (-coop_dedicated) loads its save before its session starts (the session comes after its world is up).
+-- Its server layer answers from the start (coop_srv_mode), so the handler is in before the load, with no session yet.
+check(s1.flips == 4 and s1.locked == true and s1.last ~= nil, "(the saved state has flips, the lock and the last flip)")
+local function same(a, b) return a.on == b.on and a.flips == b.flips and a.last == b.last and a.locked == b.locked end
+local Wpre = machine("world", "split", nil, { session = false, dedicated = true })
+Wpre.cbs.load_state(m_data)
+Wpre.session = true
+check(same(Wpre.env.state(), s1), "the world server loads its save before its session: its flips, lock and last flip are kept")
+local Wlate = machine("world", "split", nil, { saved = m_data })
+check(same(Wlate.env.state(), s1), "a save loaded before when_srv ran: read from alife_storage_manager.get_state() then")
+local Wfresh = machine("world", "split", nil, { session = false, dedicated = true, saved = {} })
+check(Wfresh.env.state().flips == 0 and Wfresh.env.state().last == nil and not Wfresh.env.state().locked,
+	"a fresh state's m_data at when_srv: nothing to take")
+local Wbad = machine("world", "split", nil, { session = false, dedicated = true })
+Wbad.cbs.load_state(m_bad)
+check(Wbad.env.state().flips == 0, "before the session too, a broken record is not taken")
+local Cpre = machine("client", "split", "monolith", { session = false, saved = m_data })
+Cpre.cbs.load_state(m_data)
+Cpre.session = true
+check(Cpre.env.state().flips == 0, "a player's machine before its session takes nothing from a save, at when_srv or at the load")
+local Mpre = machine("map", "split", nil, { session = false, saved = m_data })
+Mpre.cbs.load_state(m_data)
+Mpre.session = true
+check(Mpre.env.state().flips == 0, "a map server takes nothing from a save either: the world sends its state down")
 
 -------------------------------------------------------------------------------
 section("map server, reports, forged words")

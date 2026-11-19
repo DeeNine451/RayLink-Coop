@@ -38,6 +38,10 @@ check(F.is_player_mirror() == false and F.group_travels() == false, "no mirror, 
 SENT = {}
 check(F.publish("p.none", { a = 1 }) == false and #SENT == 0, "publish sends nothing")
 check(none.where(1) == F.where(1) and none.decider(1) == F.decider(1) and none.publish_to("x") == nil, "the set none says the same")
+local function from_level(from)
+	return F.from_level and F.from_level(from)
+end
+check(from_level(0x101) == false, "before any layer: no map-server sender")
 
 print("== install refuses what is not a layer")
 check(F.install(nil) == false and F.install({}) == false, "nil and an empty table")
@@ -99,6 +103,10 @@ for _, name in ipairs(modes.names()) do
 	check(F.actor_is_player() == set.actor_is_player() and F.decides_world() == set.decides_world() and
 		F.leads_here() == set.leads_here() and F.is_player_mirror() == set.is_player_mirror() and
 		F.group_travels() == set.group_travels(), tag .. "actor, world, map, mirror, group as the set says")
+	check(from_level(0x101) == (name == "srv_world") and from_level(0x101) == set.from_level(0x101),
+		tag .. "only the world set recognizes its registered bridge")
+	check(from_level(0) == false and from_level(1) == false and from_level(0x102) == false,
+		tag .. "peer 0, a player and an unknown bridge cannot report for a map")
 
 	SENT = {}
 	local sent = F.publish("p." .. name, { a = 1 })
@@ -180,6 +188,21 @@ sv.where = function() return "nowhere" end
 sv.decider = function() error("bad decider") end
 check(F.where(1) == "away" and log_has("where answer"), "a word that is no answer: none's, told")
 check(F.decider(1) == "nobody" and log_has("srv.decider"), "an answer that raises: none's, told")
+sv.from_level = function() error("bridge registry failed") end
+check(from_level(0x101) == false and log_has("srv.from_level"), "an error reading the answer falls back to false")
+sv.from_level = function() return 1 end
+check(from_level(0x101) == false, "a truthy non-boolean answer falls back to false")
+local asked = 0
+sv.from_level = function()
+	asked = asked + 1
+	return true
+end
+local bad_senders = { "257", -1, 1.5, 0 / 0, math.huge, -math.huge, 0xffffffff, 0x100000000, false, {}, 0 }
+local invalid_rejected = from_level(nil) == false
+for _, from in ipairs(bad_senders) do
+	invalid_rejected = (from_level(from) == false) and invalid_rejected
+end
+check(invalid_rejected and asked == 0, "the facade refuses malformed transport peers and peer 0 without asking")
 sv.level_request = function() return "fly" end
 local h = fire({ a = 1 }, 1)
 check(#h == 1 and h[1].from == 1 and log_has("level_request answer"), "a request answer that is no action: handled here, told")
@@ -221,5 +244,33 @@ print("== status")
 LOG = {}
 F.print_status()
 check(log_has("layers srv, answers srv, when_srv waiting 0") ~= nil, "coop_status names the layers and who answers")
+
+print("== live layers: only the active Server world knows which senders are map servers")
+local dedicated, split, map_server, listed = true, true, false, true
+coop.is_dedicated = function() return dedicated end
+coop.is_map_server = function() return map_server end
+coop.levels = {
+	split = function() return split end,
+	map_servers = function() return listed and { { bridge = 0x101, level = 2 } } or {} end,
+}
+modes.live(F)
+MODE = "host"
+check(from_level(0x101) == true and from_level(1) == false and from_level(0x102) == false,
+	"live world recognizes the bridge in the engine registry")
+listed = false
+check(from_level(0x101) == false, "live world stops accepting a bridge as soon as its registry entry disappears")
+listed = true
+MODE = "sp"
+check(from_level(0x101) == false, "dedicated with an inactive session rejects even a listed bridge")
+dedicated, map_server, MODE = false, true, "client"
+check(from_level(0x101) == false, "a map server cannot accept a map report")
+map_server = false
+check(from_level(0x101) == false, "a Server player cannot accept a map report")
+split, MODE = false, "host"
+check(from_level(0x101) == false, "a Co-op host cannot accept a map report")
+MODE = "client"
+check(from_level(0x101) == false, "a Co-op client cannot accept a map report")
+MODE = "sp"
+check(from_level(0x101) == false, "offline cannot accept a map report")
 
 done("MODE_FACADE")

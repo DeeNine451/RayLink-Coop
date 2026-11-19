@@ -88,6 +88,7 @@ LAYER = {
 	is_player_mirror = function() return not host() end,
 	seat_plays = seat_plays,
 	group_travels = function() return true end,
+	from_level = function() return false end,
 	publish_to = function() return -1 end, -- the session's broadcast, as coop_mods_core.to_all
 	level_request = level_request,
 }

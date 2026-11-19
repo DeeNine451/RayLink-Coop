@@ -924,6 +924,35 @@ function origin() return S.origin end
 
 function running_id() return S.rec and S.rec.id or nil end
 
+-- Plan 2026-11-12 stage 5: the creator of a world staged from coop_new_world.ltx, as the record keeps it (coop_game_record
+-- clean_creator), or nil; every other record has none. Read by the engine (coop_join.cpp host_make_creator,
+-- host_mark_creator_made) and coop_menu_char (the exact plan). The record's own data, the same in both modes: here since step
+-- S4 (A-S4D), before it coop_dedicated.creator / creator_facts / creator_made.
+function creator()
+	local r = S.rec
+	return type(r) == "table" and type(r.creator) == "table" and r.creator or nil
+end
+
+-- For the engine (coop_join.cpp host_make_creator, newchar::make_creator): { creator, used, loadout = "sec,...", count, bare }.
+function creator_facts()
+	local c = creator()
+	if not c then return { creator = false, used = false, loadout = "", count = 0, bare = false } end
+	local list = {}
+	for _, sec in ipairs(type(c.loadout) == "table" and c.loadout or {}) do
+		if type(sec) == "string" then list[#list + 1] = sec end
+	end
+	return { creator = true, used = c.used == true, loadout = table.concat(list, ","), count = #list, bare = c.bare == true }
+end
+
+-- His character is made: never again from the file. The record goes into the next save with the mark.
+function creator_made()
+	local c = creator()
+	if not c then return false end
+	c.used = true
+	log("the creator's character is made: the record's creator is used")
+	return true
+end
+
 function world_faction()
 	local f = S.rec and S.rec.faction
 	if type(f) == "string" and f ~= "" then return f end

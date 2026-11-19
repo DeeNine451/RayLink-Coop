@@ -3,7 +3,7 @@
 --   (a) the generator's pure parts: JSON escaping, cp1251 -> UTF-8 of a label, a check item is two options off / on, shown_if is
 --       carried, a kind the export does not know is refused, a missing string is refused;
 --   (b) the committed JSON file is what the generator makes of the catalog now;
---   (c) every exported key and each of its options' raw values goes through coop_dedicated.stage_new_world unchanged into the record
+--   (c) every exported key and each of its options' raw values goes through coop_srv_dedicated.stage_new_world unchanged into the record
 --       (the launcher writes "<key>" = <raw> into [values] of coop_new_world.ltx).
 -- Not shipped. Run: tools\test_lua.cmd game_schema_export
 local PASSES, FAILS = 0, 0
@@ -129,7 +129,7 @@ check(#items > 0, "the file has items (" .. #items .. ")")
 check(not file:find('"key":"c|coop_split_levels"', 1, true) and not file:find('"key":"c|coop_story_together"', 1, true)
 	and not file:find('"key":"c|coop_world_server"', 1, true), "retired world flags are absent from the launcher form")
 
--- coop_dedicated in an environment of its own, with the real catalog and record, as tests\lua\test_dedicated.lua loads it
+-- coop_srv_dedicated in an environment of its own, with the real catalog and record, as tests\lua\test_srv_dedicated.lua loads it
 local SAFE = {}
 for _, n in ipairs({ "assert", "error", "getmetatable", "ipairs", "next", "pairs", "pcall", "rawequal", "rawget", "rawset",
 	"select", "setmetatable", "tonumber", "tostring", "type", "unpack", "xpcall", "string", "table", "math" }) do
@@ -151,7 +151,7 @@ local function load_mod(name)
 end
 load_mod("coop_game_schema")
 load_mod("coop_game_record")
-local ded = load_mod("coop_dedicated")
+local ded = load_mod("coop_srv_dedicated")
 local bad_keys = {}
 local n_pairs = 0
 for _, it in ipairs(items) do

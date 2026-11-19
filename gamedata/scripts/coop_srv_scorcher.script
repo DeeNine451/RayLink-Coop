@@ -10,7 +10,8 @@
 
 	State (the world's): on (the Scorcher works), flips (how many times a switch was turned in this world), last (game seconds of
 	the last flip), locked (after MAX_FLIPS the switch stays as it is for good; both tasks fail by their own condlists).
-	  - The world server (coop.is_host() and not a map server) keeps it in its save (m_data.coop_scorcher) and is the only place it
+	  - The world server (coop.is_host() and not a map server; at the load of its save, before its session, the -coop_dedicated
+	    process: A-S4D) keeps it in its save (m_data.coop_scorcher) and is the only place it
 	    changes. It changes when the world server's own switch logic flips it, or when the map server that leads the X10 level
 	    (SWITCH_LEVEL) reports a flip it made (coop_levels_share "scorcher" up). The world checks the report: the reporting map
 	    server's level must be SWITCH_LEVEL (the level comes from the bridge, not from the payload), it must be made on top of the
@@ -96,6 +97,9 @@ local function is_host() return active() and call(api.is_host) == true end
 local function is_map_server() return active() and call(api.is_map_server) == true end
 local function is_dedicated() return active() and call(api.is_dedicated) == true end
 local function authority() return is_host() and not is_map_server() end
+-- The process whose save keeps the world's state: the authority, and a world server (-coop_dedicated) before its session too. It
+-- loads its save before the session starts (its world comes first), and its server layer answers from the start (coop_srv_mode).
+local function keeper() return authority() or (api ~= nil and call(api.is_dedicated) == true) end
 
 local function split()
 	local f = rawget(_G, "coop_faction")
@@ -365,7 +369,7 @@ end
 
 local function load_state(m_data)
 	S.on, S.flips, S.last, S.locked = nil, 0, nil, false
-	if not authority() then return end
+	if not keeper() then return end
 	local t = clean(m_data.coop_scorcher)
 	if t then S.on, S.flips, S.last, S.locked = t.on, t.flips, t.last, t.locked end
 end
@@ -440,6 +444,11 @@ function on_game_start()
 		step("save", function()
 			RegisterScriptCallback("save_state", save_state)
 			RegisterScriptCallback("load_state", load_state)
+			-- what a save loaded before this ran brought (as coop_srv_task_audience): the world server's flips, lock and last flip
+			-- were lost at every restart of it (A-S4ML review)
+			local asm = rawget(_G, "alife_storage_manager")
+			local m = asm and type(asm.get_state) == "function" and asm.get_state() or nil
+			if type(m) == "table" then load_state(m) end
 		end)
 		step("share", function()
 			local share = coop_srv_levels_share

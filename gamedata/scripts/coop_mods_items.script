@@ -597,8 +597,11 @@ local function install_corpse_loot()
 	end, "host")
 	C().set_limit("corpse_loot", 6, 2)
 	C().on("corpse_dropped", function(t, from)
+		local source = coop_mode.from_level(from)
+		if not coop_trust.pass("corpse_dropped_sender", source, "unexpected corpse report from peer %s", tostring(from))
+			or not source then return end
 		local id = tonumber(t.n)
-		if id and type(t.s) == "string" and C().is_bridge(from) then se_save_var(id, t.s, "death_dropped", true) end
+		if id and type(t.s) == "string" then se_save_var(id, t.s, "death_dropped", true) end
 	end, "world")
 end
 
@@ -837,8 +840,11 @@ local function install_stash()
 	C().on("stash_free", host_stash_free, "host")
 	C().on("stash_made", client_stash_made, "client")
 	C().on("stash_book", function(t, from)
+		local source = coop_mode.from_level(from)
+		if not coop_trust.pass("stash_book_sender", source, "unexpected stash report from peer %s", tostring(from))
+			or not source then return end
 		local id = tonumber(t.b)
-		if not (id and C().is_bridge(from)) then return end
+		if not id then return end
 		if t.x == true then return stash_unbook(id) end
 		if type(t.s) == "string" then stash_book(id, t.s, STASH_SPOTS[t.p] and t.p or "treasure_player", tostring(t.t or "")) end
 		-- round 4 (S5): its owner, in the world's save

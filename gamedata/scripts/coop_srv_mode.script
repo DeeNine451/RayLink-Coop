@@ -6,10 +6,15 @@
 	The server: a world server process without a player's map (-coop_dedicated, its actor a ghost on fake_start) and a
 	map server per map with players (-coop_mapserver, its actor a ghost too); the players stand on different maps. The
 	world server decides the world, the map server of a player's map decides for him there. Processes this layer
-	answers in, in an active session:
-	  world server   coop.is_host(): the dedicated one, and until step S2 a host whose session is split into maps
-	                 (the hybrid: it plays and leads its own map, which today's predicates give without code of its own)
-	  map server     coop.is_map_server()
+	answers in:
+	  world server   coop.is_dedicated(): a process started with -coop_dedicated, from its start (step S4, A-S4D): it
+	                 loads its world first and starts its session after it (HostAutostart), and its srv scripts register
+	                 from when_srv at load, before the stock reads [character_creation] and before the save's load_state.
+	                 Before the session the engine gives it no role (is_host false), no seat and no rows: its answers
+	                 do not depend on them. Also coop.is_host() in an active session: until step S2 a host whose
+	                 session is split into maps (the hybrid: it plays and leads its own map, which today's predicates
+	                 give without code of its own)
+	  map server     coop.is_map_server(), in an active session
 	  player         a player's machine in a split session: it knows from its first level map (step S3 moves that into
 	                 Welcome); until then the co-op layer answers for it
 	A player's request to the logic of his map: the world server passes it to the map server of his map with his peer
@@ -41,18 +46,20 @@ local function levels()
 end
 
 local function map_server() return engine("is_map_server") end
+-- -coop_dedicated: the world server without a player, for the whole life of the process (before its session too)
 local function dedicated() return engine("is_dedicated") end
-local function world_server() return engine("is_host") and not map_server() end
+local function world_server() return dedicated() or (engine("is_host") and not map_server()) end
 
 local function applies()
+	if dedicated() then return true end -- from the process's start: its session comes after its world is up
 	if not engine("is_active") then return false end
-	if map_server() or dedicated() then return true end
+	if map_server() then return true end
 	local l = levels()
 	return l ~= nil and call(l.split) == true
 end
 
 -- this process's own actor is no player: a map server's and a world server's without a player are ghosts
-local function ghost() return map_server() or (world_server() and dedicated()) end
+local function ghost() return map_server() or dedicated() end
 
 local function self_peer()
 	local v = api and tonumber(call(api.self_id))
@@ -82,7 +89,7 @@ local function where(peer)
 	local p = row(peer)
 	if not p then return "away" end
 	if p.level == nil then return "joining" end -- in the world, not placed on a map yet
-	if world_server() and dedicated() then return "away" end -- the world server has no player's map
+	if dedicated() then return "away" end -- the world server has no player's map
 	return p.elsewhere == true and "away" or "here"
 end
 
@@ -101,7 +108,19 @@ local function seat_plays(peer)
 	return row(peer) ~= nil
 end
 
+local function from_level(from)
+	if not (engine("is_active") and dedicated() and not map_server()) then return false end
+	local l = levels()
+	local bridges = l and call(l.map_servers)
+	if type(bridges) ~= "table" then return false end
+	for _, entry in ipairs(bridges) do
+		if entry.bridge == from then return true end
+	end
+	return false
+end
+
 local function publish_to()
+	if not engine("is_active") then return nil end -- the world server before its session: nobody to send to (as none)
 	return map_server() and 0 or -1
 end
 
@@ -145,6 +164,7 @@ LAYER = {
 	is_player_mirror = function() return not (map_server() or world_server()) end,
 	seat_plays = seat_plays,
 	group_travels = function() return false end, -- each player walks his own way
+	from_level = from_level,
 	publish_to = publish_to,
 	level_request = level_request,
 }

@@ -240,7 +240,10 @@ function on_game_start()
 		common = coop_faction.register_faction_change_flow(FLOW)
 		local initialized = false
 		local function init_record()
-			if not initialized and coop_mode.decides_world() then initialized = store(true) ~= nil end
+			-- coop.members() needs the engine's host session to enumerate the saved characters.
+			if not initialized and coop_mode.decides_world() and common.call(api and api.is_host) == true then
+				initialized = store(true) ~= nil
+			end
 		end
 		RegisterScriptCallback("actor_on_first_update", function()
 			common.reset_sync()

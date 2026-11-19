@@ -441,7 +441,11 @@ local function install_data_mirror()
 	C().on("hf_data", function(t, from)
 		if not coop_mode.decides_world() then
 			if from == 0 then client_data(t) end
-		elseif C().is_bridge(from) then -- a map server changed it: the world's save keeps it, every machine hears it
+		else
+			local source = coop_mode.from_level(from)
+			if not coop_trust.pass("hf_data_sender", source, "unexpected furniture report from peer %s", tostring(from))
+				or not source then return end
+			-- A map server changed it: the world's save keeps it, every machine hears it.
 			client_data(t)
 			C().to_all("hf_data", t)
 		end
@@ -1556,10 +1560,15 @@ local function install_gadgets()
 	end, "host")
 	C().on("hf_show_map", function(t, from)
 		local case_id = C().lid(tonumber(t.c))
-		if not (case_id and type(t.m) == "string") then return end
+		local valid = case_id and type(t.m) == "string"
 		if not coop_mode.decides_world() then
-			if from == 0 then apply_case(ws, case_id, t.m) end
-		elseif C().is_bridge(from) then
+			if from == 0 and valid then apply_case(ws, case_id, t.m) end
+		else
+			local source = coop_mode.from_level(from)
+			if not coop_trust.pass("hf_show_map_sender", source, "unexpected showcase report from peer %s", tostring(from))
+				or not source then return end
+			if not coop_trust.pass("hf_show_map_payload", valid, "invalid showcase report from peer %s", tostring(from))
+				or not valid then return end
 			apply_case(ws, case_id, t.m)
 			C().to_all("hf_show_map", t)
 		end

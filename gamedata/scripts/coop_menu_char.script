@@ -604,11 +604,11 @@ function join_terms()
 	return eco, budget(eco), story_mode()
 end
 
--- Plan 2026-11-12 stage 5: the creator of a world staged from coop_new_world.ltx (coop_dedicated.creator, the record's `creator`), nil.
+-- Plan 2026-11-12 stage 5: the creator of a world staged from coop_new_world.ltx (coop_game_settings.creator, the record's `creator`), nil.
 local function creator_record()
-	local d = module_of("coop_dedicated")
-	if not (d and type(d.creator) == "function") then return nil end
-	local ok, c = pcall(d.creator)
+	local gs = module_of("coop_game_settings")
+	if not (gs and type(gs.creator) == "function") then return nil end
+	local ok, c = pcall(gs.creator)
 	return ok and type(c) == "table" and c or nil
 end
 

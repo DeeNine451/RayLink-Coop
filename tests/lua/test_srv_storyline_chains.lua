@@ -11,9 +11,14 @@ local KEYS = { "drx_sl_total_task_number", "drx_sl_current_task_number", "drx_sl
 local FACTIONS_OF = { [501] = "dolg", [502] = "bandit" }
 local OLD_KEYS = nil -- bare keys of an older save in the host's pstor at load
 local OLD_TASKS = nil -- open tasks of an older save in the host's task manager at load
+local DELAY_SESSION = false
 
 STORYLINE_HOOK = function(M)
 	if M.role ~= "host" then return end
+	if DELAY_SESSION then
+		M.active = false
+		M.env.coop.is_host = M.env.coop.is_active
+	end
 	local chars = {}
 	for id, f in pairs(FACTIONS_OF) do chars[id] = { f = f } end
 	M.storage_state.coop_faction = { chars = chars, old = {} }
@@ -36,9 +41,10 @@ local function world(split, opts)
 	REL = {}
 	OLD_KEYS = opts.old
 	OLD_TASKS = opts.tasks
+	DELAY_SESSION = opts.delay_session
 	math.randomseed(1)
 	setup_storyline(split, opts.active, opts.load)
-	if opts.active ~= false then
+	if opts.active ~= false and not DELAY_SESSION then
 		ticks(Hm)
 		ticks(A, 2)
 		ticks(B, 2)
@@ -139,6 +145,36 @@ do
 	local sl = world(true)
 	check(sl.has_chain("stalker") and chain(Hm, "stalker", "drx_sl_current_honcho") == SID, "stalker chain at Sidorovich")
 	check(Hm.infos["drx_sl_start_game_" .. SID] == true, "his start info is given")
+end
+
+section("dedicated world retries chain installation after a refused session start")
+do
+	local sl = world(true, { delay_session = true })
+	local e = Hm.env
+	local first_frame = NOW
+	check(e.coop_mode.decides_world() and not e.coop.is_active(), "the world server layer answered before the session")
+	check(e.load_var == Hm.stock_fn.load_var, "the actor's first update left the stock wrappers in place")
+
+	local function frame(ms)
+		NOW = first_frame + ms
+		fire(Hm, "actor_on_update")
+	end
+	frame(0)
+	frame(2000)
+	frame(4000)
+	Hm.active = true -- HostAutostart succeeds five seconds after the first frame.
+	frame(5000)
+	check(e.load_var == Hm.stock_fn.load_var, "the install retry waits for the next two-second tick")
+	frame(6000)
+	check(e.load_var ~= Hm.stock_fn.load_var, "the next retry installs the chain wrappers")
+	local wrapped = e.load_var
+	frame(8999)
+	check(not sl.has_chain("stalker"), "chain setup preserves the delay for stock questline initialization")
+	frame(9000)
+	check(sl.has_chain("stalker") and sl.has_chain("dolg") and sl.has_chain("bandit"),
+		"the running session has a chain for the world and both player factions")
+	frame(11000)
+	check(e.load_var == wrapped, "later ticks keep the installed wrapper")
 end
 
 section("the shared start leaders: renegade after bandit, isg after killer")
