@@ -42,7 +42,7 @@ local function starts(tid) -- a dialog that creates squads and calls give_task(t
 	return {
 		task = tid,
 		stock = function(M, a, b) M.tm:give_task(tid, b and b:id()) end,
-		reset = function(M) M.tm.task_info[tid] = nil end,
+		reset = function(M) M.tm.task_info[tid], M.engine_tasks[tid] = nil, nil end,
 	}
 end
 
@@ -82,6 +82,12 @@ local CASES = {
 local START_TASKS = {
 	["operacia_monolith.give_task_esc_military_docs_poisk"] = "esc_military_docs_task", -- alife():create(military_escape_docs)
 	["operacia_monolith.cs_story_task0"] = "cs_story_task0", -- alife():create(cs_anom_pribor)
+	["operacia_monolith.barmen_task1"] = "barmen_task1", -- operacia_monolith.script:124, bar_case
+	["operacia_monolith.ohotnik_task1"] = "ohotnik_task1", -- operacia_monolith.script:252, wpn_bm16_ohotnik
+	["operacia_monolith.dolg_story_task_1_dop"] = "dolg_story_task_1_dop", -- operacia_monolith.script:295, Freon's body
+	["operacia_monolith.dolg_story_task_3"] = "dolg_story_task_3", -- operacia_monolith.script:339, Shmatko's group
+	["operacia_monolith.dolg_story_task_4"] = "dolg_story_task_4", -- operacia_monolith.script:346, Pinya's group
+	["operacia_monolith.dolg_story_task_5"] = "dolg_story_task_5", -- operacia_monolith.script:353, three bodies in the Red Forest
 	["dialogs_agr_u.give_agr_u_bandit_boss_task_1"] = "agr_u_bandit_boss_task_1", -- alife_create_item(af_blood_af_iam, npc)
 	["ah_dialogs.pirogov_give_quest1"] = "ah_pirogov_quest1", ["ah_dialogs.pirogov_give_quest3"] = "ah_pirogov_quest3",
 	["ah_dialogs.chernov_give_quest1"] = "ah_chernov_quest1", ["ah_dialogs.chernov_give_quest4"] = "ah_chernov_quest4",

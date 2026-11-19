@@ -16,7 +16,7 @@
 	  tasks_defense.barrier_defense_*_start / _complete         the squads and the task / the surge lock and the reward
 	  dialogs_lostzone.set_impending_doom_timer                the start of the Impending Doom deadline
 	  tasks_guide.activate / complete                          the guide job: taken, paid
-	  operacia_monolith (2), ah_dialogs (10), dialogs_agr_u    a task whose target the action makes in the world: documents,
+	  operacia_monolith (8), ah_dialogs (10), dialogs_agr_u    a task whose target the action makes in the world: documents,
 	                                                           a device, artefacts, PDAs (a client's world spawn is refused)
 	  dialogs.save_* / leave_zone_save (15)                    the story checkpoint of a step (only the world server sets one)
 	  xr_bribe.bribe_N_days_<faction> (16), jurov_4            a bought ceasefire (xr_bribe keeps it on the host)
@@ -121,6 +121,7 @@ end
 
 -- Actions whose task makes a part of the world (documents, a device, artefacts, PDAs) with alife():create, which a client
 -- cannot do: the host runs them, once per task.
+local MONOLITH_PREFIX = "operacia_monolith."
 local START_TASKS = {
 	["operacia_monolith.give_task_esc_military_docs_poisk"] = "esc_military_docs_task",
 	["operacia_monolith.cs_story_task0"] = "cs_story_task0",
@@ -179,6 +180,19 @@ local RELAY = {
 	["dialogs_hidden_threat.postcond_dialog_jurov_4"] = function() return bribe_left("stalker") <= 0 end,
 }
 for full, tid in pairs(START_TASKS) do RELAY[full] = not_given(tid) end
+-- Each of these starts creates unique story targets. The engine keeps the task in the saved journal after task_info is cleared.
+for _, tid in ipairs({
+	"barmen_task1",
+	"ohotnik_task1",
+	"dolg_story_task_1_dop",
+	"dolg_story_task_3",
+	"dolg_story_task_4",
+	"dolg_story_task_5",
+}) do
+	local full = MONOLITH_PREFIX .. tid
+	START_TASKS[full] = tid
+	RELAY[full] = function() return task_of(tid) == nil and db.actor:get_task(tid, false) == nil end
+end
 for _, fn in ipairs(CHECKPOINTS) do
 	local full = "dialogs." .. fn
 	RELAY[full] = not_run_for(full, CHECKPOINT_GAP_MS)
@@ -192,6 +206,8 @@ for _, faction in ipairs(BRIBE_FACTIONS) do
 end
 
 -- After the stock function ran on the host for player `from`.
+local function ct() return rawget(_G, "coop_tasks") or coop_tasks end
+
 local AFTER_RELAY = {
 	["tasks_guide.activate"] = function(from)
 		local job = guide_table("curr_guid")
@@ -208,7 +224,44 @@ local orig = {}
 local last_run = {} -- "peer:module.function" -> time
 local last_kill = {} -- peer -> time
 
-local function ct() return rawget(_G, "coop_tasks") or coop_tasks end
+local function monolith_start(full)
+	return START_TASKS[full] ~= nil and full:sub(1, #MONOLITH_PREFIX) == MONOLITH_PREFIX
+end
+
+local function object_id(id)
+	return type(id) == "number" and id > 0 and id < 65535 and id % 1 == 0
+end
+
+local function relay_due(from, full, npc)
+	if RELAY[full](npc) then return true end
+	stats.refused = stats.refused + 1
+	qc.log(TAG, "! relay '%s' from #%s refused: not due now", full, tostring(from))
+	return false
+end
+
+local function run_monolith(from, full, npc)
+	local f = orig[full]
+	if not f or not relay_due(from, full, npc) then return end
+	stats.run = stats.run + 1
+	return ct().with_recipient(from, f, db.actor, npc)
+end
+
+local function wrap_monolith(m, fn, full)
+	coop_mods_core.wrap(m, fn, full, function(stock)
+		orig[full] = stock
+		return function(a, b, ...)
+			if not qc.active() then return stock(a, b, ...) end
+			local npc = (a and a:id() == db.actor:id()) and b or a
+			if coop_mode.leads_here() and coop_mode.actor_is_player() and coop_mode.decides_world() then
+				local ok, err = pcall(run_monolith, coop_mods_core.self_peer(), full, npc)
+				if not ok then qc.report(TAG, full, err) end
+			elseif coop_mode.is_player_mirror() and npc then
+				local id = coop_mods_core.hid(npc:id())
+				if id and qc.request_host_action("rly", { f = full, n = id }) then stats.sent = stats.sent + 1 end
+			end
+		end
+	end)
+end
 
 local function resolve(full)
 	local mod, fn = full:match("^([%w_]+)%.([%w_]+)$")
@@ -222,7 +275,9 @@ local function patch_client_relay()
 	for full in pairs(RELAY) do
 		local m, fn = resolve(full)
 		local f = m and m[fn]
-		if type(f) == "function" and not orig[full] then
+		if coop_mode and m and monolith_start(full) and not orig[full] then
+			wrap_monolith(m, fn, full)
+		elseif type(f) == "function" and not orig[full] then
 			orig[full] = f
 			m[fn] = function(a, b, ...)
 				if not qc.is_client() then return f(a, b, ...) end
@@ -246,15 +301,19 @@ local function talked_recently(from, npc)
 	return recent(from, npc:id(), TALK_MS) == true
 end
 
--- Host: the NPC player `from` talks to (host id `nid`): alive, within reach of him, and (with an engine that tells) one he held a
--- talk with in the last seconds. nil when it is not there; `what` names the request in the log.
-local function talk_partner(from, nid, what)
+-- The NPC player `from` talks to, alive and within reach, including in the player's level view.
+local function live_talk_partner(from, nid)
 	local npc = nid and not qc.is_character_id(nid) and level.object_by_id(nid) -- a player is nobody's dialog partner here
 	local who = qc.avatar_obj(from)
 	if npc and who and npc:alive() and npc:position():distance_to_sqr(who:position()) <= MAX_DIST_SQR
 		and talked_recently(from, npc) then
 		return npc
 	end
+end
+
+local function talk_partner(from, nid, what)
+	local npc = live_talk_partner(from, nid)
+	if npc then return npc end
 	stats.refused = stats.refused + 1
 	qc.log(TAG, "! %s from #%s refused: the NPC is not there, or not talked to", what, tostring(from))
 	return nil
@@ -279,17 +338,23 @@ local function host_relay(from, t)
 		qc.log(TAG, "! relay '%s' from #%s refused: not on the list", tostring(full), tostring(from))
 		return
 	end
+	if coop_mode and monolith_start(full) then
+		if not coop_mode.decides_world() then return end
+		local valid = object_id(t.n)
+		if not coop_trust.pass("g14_start_npc", valid, "%s from #%s: invalid NPC id", full, tostring(from)) or not valid then return end
+		if paced(from, full) then return end
+		local npc = live_talk_partner(from, t.n)
+		if not coop_trust.pass("g14_start_dialog", npc ~= nil, "%s from #%s: no recent talk with NPC %d",
+			full, tostring(from), t.n) then return end
+		return run_monolith(from, full, npc)
+	end
 	if paced(from, full) then return end
 	local m, fn = resolve(full)
 	local f = m and m[fn]
 	if type(f) ~= "function" then return end
 	local npc = talk_partner(from, tonumber(t.n), "relay '" .. full .. "'")
 	if not npc then return end
-	if not RELAY[full](npc) then
-		stats.refused = stats.refused + 1
-		qc.log(TAG, "! relay '%s' from #%s refused: not due now", full, tostring(from))
-		return
-	end
+	if not relay_due(from, full, npc) then return end
 	stats.run = stats.run + 1
 	ran_at[full] = time_global()
 	ct().with_recipient(from, f, db.actor, npc)
@@ -613,7 +678,129 @@ end
 -------------------------------------------------------------------------------
 -- The guide job
 -------------------------------------------------------------------------------
-local guide = { sent = nil, next = 0, players = 0, offer = nil }
+local guide = { sent = nil, next = 0, players = 0, offer = nil, maps = {}, cursor = 0, search = nil, next_report = 0 }
+local GUIDE_MAP_VERB = "g14_guide_map"
+local GUIDE_FACT_MS = GUIDE_TICK_MS * 3
+
+local function own_guide_pda()
+	local dev = qc.mod("item_device")
+	return not (dev and type(dev.is_pda_charged) == "function") or dev.is_pda_charged(true)
+end
+
+-- On a loaded player map the stock selector can check relations and squads for that player.
+local function local_guide_candidate(m, peer)
+	if coop_mode.where(peer) ~= "here" then return end
+	local player = coop_npc_players.player(peer)
+	local who = player and player.object()
+	if not (who and who:alive()) then return end
+	-- The stock guide predicates identify the dialog actor by AC_ID as well as db.actor.
+	local actor_id = _G.AC_ID
+	_G.AC_ID = who:id()
+	local ok, npc = pcall(coop_npc_players.with_identity, who, m.ins_mass_onl)
+	_G.AC_ID = actor_id
+	if not ok then
+		qc.report(TAG, "select guide", npc)
+		return
+	end
+	return npc, player.level
+end
+
+local function report_guide_map()
+	local now = time_global()
+	if now < guide.next_report then return end
+	guide.next_report = now + GUIDE_TICK_MS
+	local m = coop_mods_core.mod("tasks_guide")
+	if not (m and type(m.ins_mass_onl) == "function") then return end
+	for _, p in ipairs(qc.players()) do
+		local npc, lid = local_guide_candidate(m, p.id)
+		local id = npc and coop_mods_core.hid(npc:id())
+		if id and lid then
+			coop_mods_core.publish(GUIDE_MAP_VERB, { p = p.id, l = lid, n = id })
+			return
+		end
+	end
+end
+
+local function receive_guide_map(t, from)
+	-- Client packets cannot stand in for a map's authoritative observation, even in trust log mode.
+	-- These are the transport's reserved map connections (coop_mapserver_rules.h).
+	local from_map = type(from) == "number" and from > 0x100 and from <= 0x107 and from % 1 == 0
+	local peer = t.p
+	local valid = type(peer) == "number" and peer > 0 and peer < 0x100 and peer % 1 == 0
+		and type(t.l) == "number" and t.l >= 0 and t.l < 65535 and t.l % 1 == 0 and object_id(t.n)
+	local player = valid and coop_npc_players.player(peer)
+	local ok = from_map and player and player.level == t.l and coop_mode.where(peer) == "away"
+	if not coop_trust.pass("g14_guide_map", ok, "no matching map guide fact from #%s", tostring(from)) or not ok then return end
+	guide.maps[player.level] = { npc = t.n, until_ms = time_global() + GUIDE_FACT_MS }
+end
+
+local function guide_on_map(fact)
+	local npc = level.object_by_id(fact.npc)
+	if npc and npc:alive() then return npc end
+end
+
+local function select_guide(m)
+	local players = qc.players()
+	for i = 1, #players do
+		local index = (guide.cursor + i - 1) % #players + 1
+		local peer = players[index].id
+		local where = coop_mode.where(peer)
+		local npc
+		if where == "here" then
+			npc = local_guide_candidate(m, peer)
+		elseif where == "away" then
+			local player = coop_npc_players.player(peer)
+			local fact = player and guide.maps[player.level]
+			if fact and fact.until_ms >= time_global() then npc = qc.with_level_of(peer, guide_on_map, fact) end
+		end
+		if npc then
+			guide.cursor = index
+			return npc, peer
+		end
+	end
+end
+
+local function patch_guide_search()
+	if not coop_mode then return end
+	local m = coop_mods_core.mod("tasks_guide")
+	if not (m and type(m.prepare_follower) == "function" and type(m.ins_mass_onl) == "function") then return end
+	local dev = coop_mods_core.mod("item_device")
+	local news = coop_mods_core.mod("news_manager")
+	if not (dev and type(dev.is_pda_charged) == "function" and news and type(news.send_tip) == "function") then return end
+	coop_mods_core.wrap(dev, "is_pda_charged", "tasks_guide.search_pda", function(stock)
+		return function(...)
+			if guide.search then return true end
+			return stock(...)
+		end
+	end)
+	coop_mods_core.wrap(m, "ins_mass_onl", "tasks_guide.search_candidate", function(stock)
+		return function(...)
+			if guide.search then return guide.search.npc end
+			return stock(...)
+		end
+	end)
+	coop_mods_core.wrap(m, "prepare_follower", "tasks_guide.prepare_follower", function(stock)
+		return function(...)
+			if not qc.active() then return stock(...) end
+			if not coop_mode.decides_world() then return end
+			local npc, peer = select_guide(m)
+			local show_tip = coop_mode.actor_is_player() and own_guide_pda()
+			local send_tip = news.send_tip
+			-- Keep the current news wrapper chain. Its caller is this coop script, so it leaves
+			-- the tip local. The guide state relay checks the PDA on each player's machine.
+			news.send_tip = function(...)
+				if not show_tip then return false end
+				local result = send_tip(...)
+				return result
+			end
+			guide.search = { npc = npc }
+			local ok, err = pcall(qc.with_level_of, peer, stock, ...)
+			guide.search = nil
+			news.send_tip = send_tip
+			if not ok then qc.report(TAG, "prepare guide", err) end
+		end
+	end)
+end
 
 -- Where the guide waits and his name, for the news of the offer on a client.
 local function guide_offer_text(offer)
@@ -658,7 +845,7 @@ local function client_on_guide(t, from)
 	if c.id_smart and c.id_smart ~= was then
 		level.map_add_object_spot_ser(c.id_smart, GUIDE_SPOT, game.translate_string("st_jg_29") .. tostring(c.description))
 	end
-	if g.squad_id and g.squad_id ~= guide.offer and t.a and t.w then
+	if g.squad_id and g.squad_id ~= guide.offer and t.a and t.w and own_guide_pda() then
 		local str = string.format(game.translate_string("st_jg_14"), game.translate_string(tostring(g.target_level)), t.a, t.w)
 		news_manager.send_tip(db.actor, str, nil, nil, 15000)
 	end
@@ -737,6 +924,10 @@ local function actor_on_update()
 		local ok, err = pcall(host_guide_tick)
 		if not ok then qc.report(TAG, "guide", err) end
 	end
+	if coop_mode and qc.active() and coop_mode.leads_here() and not coop_mode.decides_world() then
+		local ok, err = pcall(report_guide_map)
+		if not ok then qc.report(TAG, "guide map", err) end
+	end
 end
 
 -- A tutorial is the machine's own.
@@ -760,12 +951,18 @@ local function install()
 	if installed then return end
 	installed = true
 	for _, s in ipairs({ { "relay", patch_client_relay }, { "status kill", patch_status_kill },
-		{ "guide timers", patch_guide_timers }, { "guide offer", patch_guide_offer }, { "npe", patch_npe },
+		{ "guide timers", patch_guide_timers }, { "guide offer", patch_guide_offer }, { "guide search", patch_guide_search },
+		{ "npe", patch_npe },
 		{ "stash", patch_client_stash },
 		{ "trade", patch_client_trade }, { "no-ops", patch_client_noops }, { "hidden threat", patch_slht_rewards } }) do
 		local ok, err = pcall(s[2])
 		if not ok then qc.report(TAG, "install " .. s[1], err) end
 	end
+end
+
+local function register_guide_map()
+	coop_mods_core.set_limit(GUIDE_MAP_VERB, 2, 1)
+	coop_mods_core.on(GUIDE_MAP_VERB, receive_guide_map, "world")
 end
 
 function on_game_start()
@@ -780,6 +977,8 @@ function on_game_start()
 	qc.on("trade", client_on_trade, TAG)
 	local ok, err = pcall(register_data_keys) -- before the world is loaded: a joining client's own values replace the host's
 	if not ok then qc.report(TAG, "data keys", err) end
+	ok, err = pcall(register_guide_map)
+	if not ok then qc.report(TAG, "guide map", err) end
 	ok, err = pcall(share_ceasefires)
 	if not ok then qc.report(TAG, "ceasefires", err) end
 	local far = rawget(_G, "coop_quests_far") or coop_quests_far
