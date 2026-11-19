@@ -17,8 +17,10 @@
 	  mods.hf_refuel   client -> host  { o, i fuel }           refill a lamp; hf_data carries the confirmed condition
 	  mods.hf_box      client -> host  { k kind, o owner }     the hidden box of a workbench / stove / harvester
 	  mods.hf_box_r    host -> client  { k, o, b box | -1 }    answer; the client opens the box when it is online
-	                                                           (the host watches a harvester's box: a client's artefact starts it)
-	  mods.hf_data     host -> all     { o, d data | x }       furniture data changed (hf_obj_manager)
+	  mods.hf_harv_insert  player -> map decider { o device, i item }  insert an artifact
+	  mods.hf_harv_demount player -> map decider { o device }          return contents and pack the device up
+	  mods.hf_harv_r       map decider -> requesting player { r reason }  a refused harvester action
+	  mods.hf_data     host -> all     { o, d data | x, b? }   furniture data and optional harvester stash link
 	  mods.hf_show     client -> host  { c case, i item, m 1|0, s section }   mount / unmount a showcase item
 	  mods.hf_show_map host -> all     { c, m map }            what a showcase displays now
 	  mods.hf_radio    host -> all     { o, on, p, q, k, c, v, n }   what a placed radio plays
@@ -248,6 +250,23 @@ end
 local resolvers = {} -- host: kind -> function(owner_obj) -> box id
 local link_tables = { workshop = "workshop_stashes", stove = "stove_stashes" } -- client mirrors the link here
 local waiting = {} -- client: "kind:id" -> { at, on_ready }
+local harv = {}
+
+function harv.is_device(obj)
+	if not obj then return false end
+	local sec = obj:section()
+	return sec == "placeable_artifact_harvester" or ini_sys:r_string_ex(sec, "script_binding") == "bind_artifact_harvester.init"
+end
+
+local function request_id(value)
+	return object_id(C().lid(object_id(value)))
+end
+
+-- Trust records failed checks in log mode too. A checked action still needs real
+-- objects, a reachable device and the actual owner's inventory to execute.
+local function checked(name, ok, from, id)
+	return trust(name, ok and true or false, "player #%s, object %s", tostring(from), tostring(id)) and ok
+end
 
 local function known_link(kind, owner_id)
 	local key = link_tables[kind]
@@ -274,11 +293,15 @@ local function ask_box(kind, owner_id, on_ready)
 end
 
 local function host_box(t, from)
-	local kind, owner = t.k, C().lid(tonumber(t.o))
+	local kind, owner = t.k, request_id(t.o)
 	local resolve = type(kind) == "string" and resolvers[kind]
 	local obj = resolve and type(owner) == "number" and level.object_by_id(owner)
 	local who = C().avatar(from)
 	local box = -1
+	if kind == "harvester" and not checked("hf_harv_box",
+		harv.is_device(obj) and who and coop_mode.where(from) == "here" and near(obj, who), from, owner) then
+		return C().to_peer(from, "hf_box_r", { k = kind, o = owner and C().hid(owner), b = box })
+	end
 	if not (obj and who and near(obj, who)) then
 		refuse("hf_box " .. tostring(kind), from, "unknown or far furniture")
 	else
@@ -304,6 +327,7 @@ local function client_box_answer(t)
 		return
 	end
 	box = C().lid(box)
+	if kind == "harvester" and harv.set_mapping and box then harv.set_mapping(owner, box) end
 	local tname = link_tables[kind]
 	if tname then
 		local m = m_data()
@@ -337,10 +361,14 @@ local function host_publish_data(id)
 	local s = ok and type(d) == "table" and C().ser(d) or nil
 	local wire_id = C().hid(id)
 	if not wire_id then return end
+	local box
+	if harv.stash_id and harv.is_device(level.object_by_id(id)) then
+		box = C().hid(harv.stash_id(id)) or -1
+	end
 	if s and #s < 4500 then -- encode may triple it
-		C().publish("hf_data", { o = wire_id, d = s })
+		C().publish("hf_data", { o = wire_id, d = s, b = box })
 	elseif not (ok and d) then
-		C().publish("hf_data", { o = wire_id, x = true })
+		C().publish("hf_data", { o = wire_id, x = true, b = box })
 	end
 	st.data_out = st.data_out + 1
 end
@@ -367,6 +395,7 @@ local function client_data(t)
 	-- A map authority can hear the world's relay of its own update. Keep the live state on that map.
 	if coop_mode.leads_here() and level.object_by_id(id) then return end
 	st.data_in = st.data_in + 1
+	if t.b ~= nil and harv.set_mapping then harv.set_mapping(id, request_id(t.b)) end
 	if t.x == true then
 		pcall(data_orig.delete, id)
 		return
@@ -403,7 +432,9 @@ local function install_data_mirror()
 		data_orig.delete = orig
 		return function(id, ...)
 			local r = orig(id, ...)
-			if C().is_host() then C().publish("hf_data", { o = id, x = true }) end
+			if coop_mode.leads_here() or coop_mode.decides_world() then
+				C().publish("hf_data", { o = C().hid(id), x = true })
+			end
 			return r
 		end
 	end)
@@ -704,8 +735,9 @@ local function client_pickup(obj_id)
 end
 
 local function host_pickup(t, from)
-	local id = C().lid(tonumber(t.o))
-	local obj = type(id) == "number" and id ~= 0 and level.object_by_id(id)
+	local id = request_id(t.o)
+	local obj = id and level.object_by_id(id)
+	if harv.ready and harv.is_device(obj) then return harv.demount(t, from) end
 	local who = C().avatar(from)
 	if not (obj and who and near(obj, who)) then return refuse("hf_pickup", from, "unknown or far furniture") end
 	local hm = C().mod("hf_obj_manager")
@@ -791,6 +823,9 @@ local function install_furniture()
 		local function wrap_wrapper_pickup(cls, label)
 			C().wrap(cls, "pickup", label, function(orig)
 				return function(self, ...)
+					if C().active() and harv.ready and harv.is_device(self.object) then
+						return harv.request_demount(self.object)
+					end
 					if not C().is_client() then return orig(self, ...) end
 					local ok, pickable = pcall(function() return self.is_pickupable == nil or self:is_pickupable() end)
 					if ok and not pickable then return end
@@ -809,6 +844,7 @@ local function install_furniture()
 	if pf then
 		C().wrap(pf, "pickup_obj", "placeable_furniture.pickup_obj", function(orig)
 			return function(obj, ...)
+				if C().active() and harv.ready and harv.is_device(obj) then return harv.request_demount(obj) end
 				if not (C().is_client() and obj) then return orig(obj, ...) end
 				local w = wrapper_of(obj:id())
 				local ok, pickable = pcall(function() return not w or w.is_pickupable == nil or w:is_pickupable() end)
@@ -1049,13 +1085,67 @@ local function install_stove()
 			return orig(obj_id, ...)
 		end
 	end)
+	local cook_wait = setmetatable({}, { __mode = "k" })
+	local function same_stove(self, pending)
+		return C().active() and not pending.cancelled and self.obj_id == pending.id and self:IsShown()
+			and level.object_by_id(pending.id) and db.actor and db.actor:id() == pending.actor
+	end
+	C().wrap(us.UICookStove, "Close", "ui_stove_furniture.UICookStove.Close", function(orig)
+		return function(self, ...)
+			local pending = cook_wait[self]
+			if pending and pending.moved then pending.cancelled = true else cook_wait[self] = nil end
+			return orig(self, ...)
+		end
+	end)
+	C().wrap(us.UICookStove, "OpenCookUI", "ui_stove_furniture.UICookStove.OpenCookUI", function(orig)
+		return function(self, ...)
+			local pending = cook_wait[self]
+			if not pending or not pending.moved then return orig(self, ...) end
+			cook_wait[self] = nil
+			if same_stove(self, pending) and level.object_by_id(pending.box) then return orig(self, ...) end
+			if db.actor and db.actor:id() == pending.actor then us.GUI_on_hide("UICook") end
+			return true
+		end
+	end)
 	C().wrap(us.UICookStove, "UseCook", "ui_stove_furniture.UICookStove.UseCook", function(orig)
 		return function(self, ...)
-			if C().is_client() and not known_link("stove", self.obj_id) then
-				C().hud("st_coop_mods_hf_syncing", "The stove's storage is still syncing, try again.")
-				return
+			if not (C().active() and coop_mode.actor_is_player()) then return orig(self, ...) end
+			local id = self.obj_id
+			local obj = id and level.object_by_id(id)
+			if not (obj and db.actor) then return end
+			local section = ini_sys:r_string_ex(obj:section(), "integrated_storage")
+			local box_id = known_link("stove", id)
+			local mirror = coop_mode.is_player_mirror()
+			if not section or section == "" then
+				if not box_id and mirror then return C().hud("st_coop_mods_hf_syncing", "The stove's storage is still syncing, try again.") end
+				return orig(self, ...)
 			end
-			return orig(self, ...)
+			local pending = cook_wait[self]
+			if pending and (pending.moved or (pending.id == id and time_global() < pending.until_ms)) then return end
+			pending = { id = id, actor = db.actor:id(), until_ms = time_global() + 20000 }
+			cook_wait[self] = pending
+			local function wait_for_box(box_id)
+				if cook_wait[self] ~= pending or not same_stove(self, pending) then return end
+				C().when_online(box_id, section, function()
+					if cook_wait[self] ~= pending then return end
+					local box = level.object_by_id(box_id)
+					if not (same_stove(self, pending) and known_link("stove", id) == box_id and box and box:section() == section) then
+						cook_wait[self] = nil
+						return
+					end
+					self:GiveStashToActor(box_id)
+					pending.moved, pending.box = true, box_id
+				end, 10000)
+			end
+			if box_id then
+				pending.until_ms = time_global() + 10000
+				wait_for_box(box_id)
+			elseif coop_mode.leads_here() then
+				wait_for_box(resolvers.stove(obj))
+			elseif mirror then
+				C().hud("st_coop_mods_hf_syncing", "The stove's storage is still syncing, try again.")
+				ask_box("stove", id, wait_for_box)
+			end
 		end
 	end)
 end
@@ -1119,81 +1209,294 @@ local function publish_case(ws, case_id)
 	if C().is_host() then C().publish("hf_show_map", { c = case_id, m = encode_case(ws, case_id) }) end
 end
 
--- The harvester's start and stop are ActorMenu callbacks of the machine whose window it is, and its data is the host's: a client's
--- artefact never reached them. The host looks into the boxes and runs the mod's own two halves for what changed.
-local WATCH_MS = 1000
-local harv = { seen = {}, next_look = 0, before = nil, after = nil }
+-- The map decider has the device, its hidden box and the player's inventory.
+-- In the server mode the world passes the request there and keeps the published device data.
+local harv_ops = {} -- device id -> initiating peer, character and progress of an unfinished demount
 
-local function harvester_refuses(box_id, item, bag)
-	local flags = { ret_value = true }
-	local menu = actor_menu
-	local line = menu.set_msg
-	menu.set_msg = function() end -- the mod's answer is for the window of the one who moved the item
-	local ok, err = pcall(harv.before, flags, box_id, item, "loot", bag)
-	menu.set_msg = line
-	if not ok then error(err, 0) end
-	return flags.ret_value == false
+local function harvester_feedback(reason)
+	if reason == "section" then
+		actor_menu.set_msg(1, "Only configured artifacts can be inserted.", 3)
+	elseif reason == "condition" then
+		actor_menu.set_msg(1, "Artifact condition is too low for one production cycle.", 3)
+	elseif reason == "occupied" then
+		actor_menu.set_msg(1, "This harvester accepts exactly one input artifact.", 3)
+	else
+		C().hud("st_coop_guard_failed")
+	end
 end
 
-local function harvester_look(harvester_id, box_id)
-	local box = level.object_by_id(box_id)
-	if not box then return end
-	local was, inside, fresh = harv.seen[box_id], {}, {}
-	box:iterate_inventory_box(function(_, item)
-		inside[item:id()] = true
-		if was and not was[item:id()] then fresh[#fresh + 1] = item end
-	end, box)
-	harv.seen[box_id] = inside
-	local data = hf_obj_manager.get_data(harvester_id) or {}
-	local active = tonumber(data.artifact_item_id)
-	if active and active > 0 then
-		local item = not inside[active] and level.object_by_id(active)
-		if item then harv.after(box_id, item, "loot", nil) end
-		return
+local function harvester_refusal(from, reason)
+	refuse("harvester", from, reason)
+	if from == C().self_peer() and coop_mode.actor_is_player() then return harvester_feedback(reason) end
+	return C().to_peer(from, "hf_harv_r", { r = reason })
+end
+
+local function harvester_target(t, from, check)
+	local id = request_id(t.o)
+	if not checked(check .. "_id", id ~= nil, from, id) then return nil, nil, "device" end
+	local obj, player = level.object_by_id(id), C().avatar(from)
+	if not checked(check .. "_device", harv.is_device(obj) and alife_object(id) ~= nil, from, id) then
+		return nil, nil, "device"
 	end
-	local bag = EDDListType.iActorBag
-	for _, item in ipairs(fresh) do
-		if not harvester_refuses(box_id, item, bag) then
-			harv.after(box_id, item, "loot", bag)
-			return
+	if not checked(check .. "_near", player and coop_mode.where(from) == "here" and near(obj, player), from, id) then
+		return nil, nil, "reach"
+	end
+	return obj, player
+end
+
+local function harvester_box(obj)
+	local id = harv.stash_id(obj:id())
+	local box = id and level.object_by_id(id)
+	local content = id and alife_object(id)
+	local section = ini_sys:r_string_ex(obj:section(), "integrated_storage")
+	if box and content and section == box:section() and IsInvbox(box) then return box end
+end
+
+-- Pure validation for the preview and the action. The condition predicate from
+-- Gadgets reads the object's current condition without changing it.
+local function harvester_insert_reason(id, item)
+	local sec = item:section()
+	if not harv.valid_section(sec) or ini_sys:r_bool_ex(sec, "quest_item", false) then return "section" end
+	if not harv.reaches_first(sec, item:id()) then return "condition" end
+	local d = hf_obj_manager.get_data(id) or {}
+	local active = object_id(d.artifact_item_id)
+	if active and active ~= item:id() and alife_object(active) then
+		local cond = harv.item_condition(active)
+		if cond == nil or cond > 0 then return "occupied" end
+	end
+end
+
+local function host_harvester_insert(t, from)
+	local obj, player, reason = harvester_target(t, from, "hf_harv_insert")
+	if not obj then return harvester_refusal(from, reason) end
+	local id, item_id = obj:id(), request_id(t.i)
+	if not checked("hf_harv_insert_item_id", item_id ~= nil, from, id) then return harvester_refusal(from, "item") end
+	local item, se = level.object_by_id(item_id), alife_object(item_id)
+	if not checked("hf_harv_insert_owner", item and se and se.parent_id == player:id(), from, item_id) then
+		return harvester_refusal(from, "item")
+	end
+	local box = harvester_box(obj)
+	if not checked("hf_harv_insert_box", box ~= nil, from, id) then return harvester_refusal(from, "device") end
+	if harv_ops[id] then return harvester_refusal(from, "busy") end
+	reason = harvester_insert_reason(id, item)
+	if not checked("hf_harv_insert_valid", reason == nil, from, item_id) then return harvester_refusal(from, reason) end
+	player:transfer_item(item, box)
+	if se.parent_id ~= box:id() then return harvester_refusal(from, "transfer") end
+	harv.clear_active(id) -- also discards a stale or spent input lock
+	local ok, err = C().as_player(player, harv.after, box:id(), item, "loot", EDDListType.iActorBag)
+	if not ok then C().report("hf", "harvester start", err) end
+end
+
+local function finish_harvester_demount(obj, box, player, section, op)
+	local id = obj:id()
+	if box then
+		local contents = {}
+		box:iterate_inventory_box(function(_, item) contents[#contents + 1] = item:id() end, box)
+		for _, item_id in ipairs(contents) do
+			local item, se = level.object_by_id(item_id), alife_object(item_id)
+			if item and se and se.parent_id == box:id() then box:transfer_item(item, player) end
+			if not (se and se.parent_id == player:id()) then return false end
+			op.moved = true
 		end
+		if not box:is_inv_box_empty() then return false end
 	end
+	if not op.packed then
+		local packed = alife_create_item(section, player)
+		if not packed then return false end
+		op.packed = true
+	end
+	if box then
+		local box_id = box:id()
+		alife_release_id(box_id)
+		if alife_object(box_id) then return false end
+	end
+	harv.set_mapping(id, nil)
+	harv.remove_display(id)
+	alife_release_id(id)
+	if alife_object(id) then return false end
+	if data_orig.delete then data_orig.delete(id) end
+	C().publish("hf_data", { o = C().hid(id), x = true, b = -1 })
+	st.pickup = st.pickup + 1
+	return true
+end
+
+function harv.demount(t, from)
+	local obj, player, reason = harvester_target(t, from, "hf_harv_demount")
+	if not obj then return harvester_refusal(from, reason) end
+	local id = obj:id()
+	local data = hf_obj_manager.get_data(id) or {}
+	local section = ini_sys:r_string_ex(obj:section(), "item_section")
+	local pickable = not data.is_world_obj and section and ini_sys:section_exist(section)
+	if not checked("hf_harv_demount_pickable", pickable, from, id) then return harvester_refusal(from, "device") end
+	local box, box_id = harvester_box(obj), harv.stash_id(id)
+	if box_id and alife_object(box_id) and not box then return harvester_refusal(from, "busy") end
+	local op = harv_ops[id]
+	if op and (op.busy or op.from ~= from or op.actor ~= player:id()) then return harvester_refusal(from, "busy") end
+	op = op or { from = from, actor = player:id() }
+	harv_ops[id], op.busy = op, true
+	local ok, packed = pcall(finish_harvester_demount, obj, box, player, section, op)
+	op.busy = false
+	if (ok and packed) or not (op.moved or op.packed) or not alife_object(id) then harv_ops[id] = nil end
+	if ok and packed then return true end
+	if not ok then C().report("hf", "harvester demount", packed) end
+	return harvester_refusal(from, "transfer")
+end
+
+function harv.request_demount(obj)
+	return run_level_action("hf_harv_demount", harv.demount, { o = C().hid(obj:id()) })
 end
 
 local function harvester_watch()
-	local now = time_global()
-	if now < harv.next_look or not C().is_host() then return end
-	harv.next_look = now + WATCH_MS
-	local m = {}
-	bind_artifact_harvester.harvester_save_state(m)
-	for harvester_id, box_id in pairs(m.harvester_stashes or {}) do
-		local ok, err = pcall(harvester_look, harvester_id, box_id)
-		if not ok then log("! harvester %s: %s", tostring(harvester_id), tostring(err)) end
+	if not (C().active() and coop_mode.leads_here()) or time_global() < harv.next_look then return end
+	harv.next_look = time_global() + 1000
+	for id, box_id in pairs(harv.links()) do
+		if level.object_by_id(id) and level.object_by_id(box_id) then
+			local d = hf_obj_manager.get_data(id) or {}
+			local active = object_id(d.artifact_item_id)
+			local item, se = active and level.object_by_id(active), active and alife_object(active)
+			if item and se and se.parent_id ~= box_id then harv.after(box_id, item, "loot", nil) end
+		end
 	end
 end
 
-local function install_gadgets()
-	local bh = C().mod("bind_artifact_harvester")
-	if bh and C().fn(bh, "open_harvester_stash") and C().fn(bh, "harvester_save_state") then
-		installed[#installed + 1] = "hf_gadgets.harvester"
-		local _, orig_open = C().wrap(bh, "open_harvester_stash", "bind_artifact_harvester.open_harvester_stash", function(orig)
-			return function(id, ...)
-				if not C().is_client() then return orig(id, ...) end
-				ask_box("harvester", id, open_box)
-			end
+local function install_harvester_binder(cls, base)
+	-- Keep the mod's constructor (including super and the local wrapper registry),
+	-- but gate its two world steps where the constructor calls them.
+	local function guard_init(name, read)
+		local fn, holder, index = C().upvalue(cls.__init, name)
+		if not (holder and type(fn) == "function") then return end
+		debug.setupvalue(holder, index, function(id, ...)
+			if not C().active() or coop_mode.leads_here() then return fn(id, ...) end
+			if read then return hf_obj_manager.get_data(id) or {} end
 		end)
-		resolvers.harvester = function(obj)
-			local id = obj:id()
-			orig_open(id)
-			RemoveTimeEvent("hf_artifact_harvester_stash", "open_" .. tostring(id))
-			local m = m_data()
-			bh.harvester_save_state(m) -- the mod publishes its box table only here
-			return type(m.harvester_stashes) == "table" and m.harvester_stashes[id] or nil
-		end
-		harv.before, harv.after = C().find_local(bh, "on_item_before_move"), C().find_local(bh, "on_item_after_move")
-		if harv.before and harv.after then RegisterScriptCallback("actor_on_update", harvester_watch) end
 	end
+	guard_init("ensure_defaults", true)
+	guard_init("sync_display_for_active", false)
+	local running, holder, index = C().upvalue(cls.refresh_sound_state, "is_production_running")
+	if holder then
+		local minimum = C().upvalue(running, "MIN_ACTIVE_CONDITION")
+		debug.setupvalue(holder, index, function(d)
+			if not (C().active() and coop_mode.is_player_mirror()) then return running(d) end
+			local sec = d.artifact_section
+			return object_id(d.artifact_item_id) and harv.valid_section(sec) and (tonumber(d.artifact_condition) or 0) > minimum
+		end)
+	end
+	C().wrap(cls, "update", "bind_artifact_harvester.artifact_harvester_wrapper.update", function(orig)
+		return function(self, delta, ...)
+			if not C().active() or coop_mode.leads_here() then return orig(self, delta, ...) end
+			base.update(self, delta)
+			if coop_mode.is_player_mirror() then
+				self:refresh_sound_state()
+				self:refresh_progress_display()
+			end
+		end
+	end)
+	local registry = C().upvalue(cls.net_destroy, "harvester_wrappers")
+	C().wrap(cls, "net_destroy", "bind_artifact_harvester.artifact_harvester_wrapper.net_destroy", function(orig)
+		return function(self, ...)
+			if not C().active() then return orig(self, ...) end
+			local id = self.object:id()
+			if self.snd_hum and self.snd_hum:playing() then self.snd_hum:stop() end
+			RemoveTimeEvent("hf_artifact_harvester_stash", "open_" .. tostring(id))
+			self:apply_display_number(0, false)
+			if registry and rawequal(registry[id], self) then registry[id] = nil end
+			return base.net_destroy(self, ...)
+		end
+	end)
+end
 
+local function install_harvester_inventory(before)
+	local bags = C().upvalue(before, "valid_actor_bags")
+	local function in_window(case_id)
+		local obj = case_id and level.object_by_id(case_id)
+		if harv.is_device(obj) then return case_id end
+		-- Search the links read-only. The mod's lookup would cache a reverse link.
+		for id, box_id in pairs(harv.links()) do if box_id == case_id then return id end end
+	end
+	C().swap_callback("ActorMenu_on_item_before_move", before, function(flags, case_id, item, mode, bag)
+		if not C().active() then return before(flags, case_id, item, mode, bag) end
+		if not (flags and flags.ret_value and item and mode == "loot" and bags[bag]) then return end
+		local id = in_window(case_id)
+		local reason = id and harvester_insert_reason(id, item)
+		if reason then
+			flags.ret_value = false
+			harvester_feedback(reason)
+		end
+	end)
+	C().swap_callback("ActorMenu_on_item_after_move", harv.after, function(case_id, item, mode, bag)
+		if not C().active() or (coop_mode.leads_here() and not bags[bag]) then
+			return harv.after(case_id, item, mode, bag)
+		end
+	end)
+	local ui = C().mod("ui_inventory")
+	C().wrap(ui and ui.UIInventory, "Action_Move", "ui_inventory.UIInventory.Action_Move (harvester)", function(orig)
+		return function(self, item, bag, ...)
+			local id = C().active() and self.mode == "loot" and (bag == "actor_bag" or bag == "actor_equ")
+				and in_window(self.npc_id)
+			if not id then return orig(self, item, bag, ...) end
+			item = self:CheckItem(item, "Action_Move")
+			if not item then return end
+			local reason = harvester_insert_reason(id, item)
+			if reason then return harvester_feedback(reason) end
+			return run_level_action("hf_harv_insert", host_harvester_insert, { o = C().hid(id), i = C().hid(item:id()) })
+		end
+	end)
+end
+
+local function install_harvester()
+	local bh, b = C().mod("bind_artifact_harvester"), C().mod("bind_hf_base")
+	local cls, base = bh and bh.artifact_harvester_wrapper, b and b.hf_binder_wrapper
+	local open, save = C().fn(bh, "open_harvester_stash"), C().fn(bh, "harvester_save_state")
+	if not (cls and base and open and save and C().mod("hf_obj_manager")) then return end
+	local before = C().find_local(bh, "on_item_before_move")
+	harv.after = C().find_local(bh, "on_item_after_move")
+	local get_or_create = C().upvalue(open, "get_or_create_harvester_stash")
+	harv.set_mapping = C().upvalue(get_or_create, "set_stash_mapping")
+	harv.reaches_first = C().upvalue(before, "can_reach_first_spawn")
+	harv.valid_section = C().upvalue(before, "is_valid_artifact_section")
+	harv.item_condition = C().upvalue(before, "get_item_condition_and_setter")
+	harv.clear_active = C().upvalue(harv.after, "clear_active")
+	harv.remove_display = C().upvalue(harv.after, "remove_display")
+	if not (harv.set_mapping and harv.reaches_first and harv.valid_section and harv.item_condition
+		and harv.clear_active and harv.remove_display) then error("unsupported artifact harvester bindings", 0) end
+	function harv.links()
+		local m = {}
+		save(m)
+		return m.harvester_stashes
+	end
+	function harv.stash_id(id) return harv.links()[id] end
+	resolvers.harvester = function(obj)
+		local box_id = get_or_create(obj, true)
+		if box_id then host_publish_data(obj:id()) end
+		return box_id
+	end
+	C().wrap(bh, "open_harvester_stash", "bind_artifact_harvester.open_harvester_stash", function(orig)
+		return function(id, ...)
+			if not C().active() then return orig(id, ...) end
+			if coop_mode.is_player_mirror() then return ask_box("harvester", id, open_box) end
+			if coop_mode.leads_here() and coop_mode.actor_is_player() then
+				local result = orig(id, ...)
+				host_publish_data(id)
+				return result
+			end
+		end
+	end)
+	-- Registration is idempotent in Gadgets, including when its own start runs later.
+	bh.on_game_start()
+	install_harvester_binder(cls, base)
+	install_harvester_inventory(before)
+	C().on("hf_harv_insert", host_harvester_insert, "host")
+	C().on("hf_harv_demount", harv.demount, "host")
+	C().on("hf_harv_r", function(t) harvester_feedback(t.r) end, "player")
+	C().set_limit("hf_harv_insert", 6, 2, function(_, from) harvester_refusal(from, "busy") end)
+	C().set_limit("hf_harv_demount", 4, 1, function(_, from) harvester_refusal(from, "busy") end)
+	harv.next_look = 0
+	RegisterScriptCallback("actor_on_update", harvester_watch)
+	harv.ready = true
+	installed[#installed + 1] = "hf_gadgets.harvester"
+end
+
+local function install_gadgets()
 	local ws = C().mod("weapon_showcase")
 	if not (ws and C().fn(ws, "spawn_displayed_item") and C().fn(ws, "remove_displayed_item")) then return end
 	installed[#installed + 1] = "hf_gadgets.showcase"
@@ -1372,8 +1675,18 @@ end
 local function client_radio_apply(w)
 	local id = w.object:id()
 	local s = R.state[id]
-	if not s or R.seen[w] == s then return end
-	R.seen[w] = s
+	local seen = R.seen[w]
+	local previous = seen and seen.state
+	if not s or previous == s then return end
+	local volume = math.max(0, math.min(1, (tonumber(s.v) or 0.5) - (tonumber(radio_local("psi_vol")) or 0)))
+	if previous and previous.on == s.on and previous.p == s.p and previous.q == s.q
+		and previous.k == s.k and previous.c == s.c then
+		if seen.sound and previous.v ~= s.v then seen.sound.volume = volume end
+		seen.state = s
+		return
+	end
+	seen = { state = s }
+	R.seen[w] = seen
 	stop_music(w)
 	local ch = channel_of(s.p, s.q)
 	w.radio_state = s.on == true
@@ -1394,7 +1707,8 @@ local function client_radio_apply(w)
 	if snd then
 		pcall(function()
 			snd:play_at_pos(w.object, w.object:position(), 0, sound_object.s3d)
-			snd.volume = math.max(0, math.min(1, (tonumber(s.v) or 0.5) - (tonumber(radio_local("psi_vol")) or 0)))
+			snd.volume = volume
+			seen.sound = snd
 		end)
 	end
 end
@@ -1417,12 +1731,13 @@ local function install_radio()
 		R.orig.update = orig
 		return function(w, delta, ...)
 			if not (C().active() and radio_ok(w)) then return orig(w, delta, ...) end
-			if C().is_host() then
+			if coop_mode.leads_here() then
 				local r = orig(w, delta, ...)
 				local ok, e = pcall(host_radio_publish, w, false)
 				if not ok then C().report("hf", "radio publish", e) end
 				return r
 			end
+			if not coop_mode.is_player_mirror() then return end
 			local ok, e = pcall(client_radio_apply, w)
 			if not ok then C().report("hf", "radio apply", e) end
 			-- The mod's own picker stays shut on a client (safety lock); noise and emission effects still run.
@@ -1438,7 +1753,7 @@ local function install_radio()
 		C().wrap(R.W, name, "placeable_radio.placeable_radio_wrapper." .. name, function(orig)
 			R.orig[name] = orig
 			return function(w, value, ...)
-				if not (C().is_client() and radio_ok(w)) then return orig(w, value, ...) end
+				if not (coop_mode.is_player_mirror() and radio_ok(w)) then return orig(w, value, ...) end
 				local t = { o = C().hid(w.object:id()), a = name }
 				if name == "action_radio_ch" then
 					local c = radio_catalog() and radio_catalog()[value]
@@ -1451,17 +1766,24 @@ local function install_radio()
 		end)
 	end
 	C().on("hf_radio_ctl", function(t, from)
-		local id = C().lid(tonumber(t.o))
-		local w = type(id) == "number" and wrapper_of(id)
+		local id = request_id(t.o)
+		if not checked("hf_radio_id", id ~= nil, from, id) then return refuse("hf_radio_ctl", from, "invalid id") end
+		local w = wrapper_of(id)
 		local who = C().avatar(from)
 		local action = t.a
-		if not (w and radio_ok(w) and who and near(w.object, who) and RADIO_ACTIONS[action] and R.orig[action]) then
+		local valid = radio_ok(w) and type(action) == "string" and RADIO_ACTIONS[action] and R.orig[action]
+		if not checked("hf_radio_action", valid, from, id) then
 			return refuse("hf_radio_ctl", from, "unknown radio or action")
+		end
+		if not checked("hf_radio_near", who and coop_mode.where(from) == "here" and near(w.object, who), from, id) then
+			return refuse("hf_radio_ctl", from, "radio out of reach")
 		end
 		local arg = nil
 		if action == "action_radio_ch" then
-			arg = channel_of(tostring(t.p or ""), tostring(t.q or ""))
-			if not arg then return refuse("hf_radio_ctl", from, "station not installed on the host") end
+			arg = type(t.p) == "string" and type(t.q) == "string" and channel_of(t.p, t.q)
+			if not checked("hf_radio_station", arg ~= nil and arg ~= false, from, id) then
+				return refuse("hf_radio_ctl", from, "station not installed on the host")
+			end
 		end
 		pcall(R.orig[action], w, arg)
 		host_radio_publish(w, true)
@@ -1469,7 +1791,8 @@ local function install_radio()
 	C().on("hf_radio", function(t)
 		local id = C().lid(tonumber(t.o))
 		if not id then return end
-		R.state[id] = { on = t.on == true, p = tostring(t.p or ""), q = tostring(t.q or ""), k = t.k, c = tostring(t.c or ""), v = t.v, n = t.n }
+		R.state[id] = { on = t.on == true, p = lower(tostring(t.p or "")), q = lower(tostring(t.q or "")),
+			k = tonumber(t.k), c = lower(tostring(t.c or "")), v = tonumber(t.v) }
 		st.radio_in = st.radio_in + 1
 	end, "client")
 	C().set_limit("hf_radio_ctl", 8, 3)
@@ -1477,7 +1800,7 @@ end
 
 -- Host: radios that are on are announced again now and then (late joiners, lost state).
 local function host_radio_refresh()
-	if not (R.W and C().is_host()) then return end
+	if not (R.W and coop_mode.leads_here()) then return end
 	local tg = time_global()
 	if tg < R.next_refresh then return end
 	R.next_refresh = tg + 20000
@@ -1502,6 +1825,7 @@ function on_game_start()
 	if not api then return end
 	start_step("install_furniture", install_furniture)
 	start_step("install_stove", install_stove)
+	start_step("install_harvester", install_harvester)
 	start_step("install_gadgets", install_gadgets)
 	start_step("install_data_mirror", install_data_mirror)
 	start_step("install_takeall", install_takeall)
