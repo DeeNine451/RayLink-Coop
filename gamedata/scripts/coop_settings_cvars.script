@@ -1,0 +1,166 @@
+-- Progressive stamina uses a process-local CVar. The existing settings snapshot carries its
+-- value as the Modded Exes option, and each player's machine applies it to its own console.
+local CVAR = "g_progressive_stamina_cost"
+local OPTION = "modded_exes/gameplay/gameplay_general/" .. CVAR
+local SAVE_KEY = "coop_progressive_stamina_cost"
+local COMMAND = {
+	[0] = "g_progressive_stamina_cost 0",
+	[1] = "g_progressive_stamina_cost 1",
+}
+
+local settings
+local world_state
+local personal, enforced
+local next_poll = 0
+
+local function binary(value)
+	if value == 0 or value == "0" then return 0 end
+	if value == 1 or value == "1" then return 1 end
+end
+
+local function read_console()
+	return get_console():get_integer(CVAR)
+end
+
+local function read_value()
+	local ok, value = pcall(read_console)
+	return ok and binary(value) or nil
+end
+
+local function execute(command)
+	get_console():execute(command)
+end
+
+local function write_value(value)
+	local ok, err = pcall(execute, COMMAND[value])
+	if not ok then coop_mods_core.report("settings_cvars", "write stamina CVar", err) end
+	return ok
+end
+
+-- On load the save takes precedence over the machine's defaults. Thereafter a local
+-- change on the world console edits the rule. Older saves start with the console value.
+local function sync_stored_rule(state)
+	if type(state) ~= "table" then return nil end
+	local saved = binary(state[SAVE_KEY])
+	local current = read_value()
+	if current == nil then return saved end
+	if state ~= world_state and saved ~= nil and saved ~= current then
+		if not write_value(saved) then return saved end
+		current = saved
+	end
+	world_state = state
+	state[SAVE_KEY] = current
+	return current
+end
+
+local function stored_rule()
+	local storage = coop_mods_core.mod("alife_storage_manager")
+	if storage and storage.get_state then return sync_stored_rule(storage.get_state()) end
+end
+
+local function has_stored_rule()
+	return coop_mode.decides_world() and not coop_mode.actor_is_player()
+end
+
+local function on_load(state)
+	if has_stored_rule() then
+		world_state = nil
+		sync_stored_rule(state)
+	end
+end
+
+local function on_save(state)
+	if has_stored_rule() then state[SAVE_KEY] = stored_rule() end
+end
+
+local function snapshot_value()
+	if coop_mode.actor_is_player() then return read_value() end
+	return stored_rule()
+end
+
+local function install_snapshot()
+	-- collect_section returns a fresh table. Add the effective value to the existing full
+	-- and delta snapshots without persisting a shadow value in the local AXR file.
+	coop_mods_core.wrap(rawget(_G, "ini_file_ex"), "collect_section", "settings_cvars: snapshot", function(original)
+		return function(self, section, ...)
+			local entries = original(self, section, ...)
+			if section == "options" and coop_mode.decides_world() then
+				local axr = coop_mods_core.mod("axr_main")
+				if axr and rawequal(self, axr.config) and type(entries) == "table" then
+					local value = snapshot_value()
+					entries[OPTION] = value ~= nil and tostring(value) or nil
+				end
+			end
+			return entries
+		end
+	end)
+end
+
+local function restore_player()
+	enforced = nil
+	if personal ~= nil and (read_value() == personal or write_value(personal)) then personal = nil end
+end
+
+local function sync_player()
+	if not coop_mode.is_player_mirror() then
+		restore_player()
+		return
+	end
+	if not (settings and db and db.actor) then return end
+	local value = binary(settings.host_value("options", OPTION))
+	if value ~= nil then enforced = value end
+	if enforced == nil then return end
+	local current = read_value()
+	if current == nil then return end
+	if personal == nil then personal = current end
+	if current ~= enforced then write_value(enforced) end
+end
+
+local function on_update()
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+	sync_player()
+end
+
+local function finish_config_save(ok, ...)
+	sync_player()
+	if not ok then error((...), 0) end
+	return ...
+end
+
+local function install_config_save()
+	-- Modded Exes writes user.ltx through this helper when accepting a menu change.
+	-- Write the player's value to disk, then put the world rule back in the console.
+	coop_mods_core.wrap(_G, "exec_console_cmd", "settings_cvars: cfg_save", function(original)
+		return function(command, ...)
+			if personal ~= nil and type(command) == "string" and command:match("^%s*(%S+)") == "cfg_save"
+				and coop_mode.is_player_mirror() then
+				if read_value() ~= personal then write_value(personal) end
+				return finish_config_save(pcall(original, command, ...))
+			end
+			return original(command, ...)
+		end
+	end)
+end
+
+local function register_callbacks()
+	settings = coop_mods_core.mod("coop_settings")
+	RegisterScriptCallback("load_state", on_load)
+	RegisterScriptCallback("save_state", on_save)
+	RegisterScriptCallback("on_option_change", sync_player)
+	RegisterScriptCallback("actor_on_update", on_update)
+	RegisterScriptCallback("actor_on_net_destroy", restore_player)
+end
+
+local function start_step(name, fn)
+	local ok, err = pcall(fn)
+	if not ok then printf("[coop-settings-cvars] %s: %s", name, tostring(err)) end
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	start_step("snapshot", install_snapshot)
+	start_step("config save", install_config_save)
+	start_step("callbacks", register_callbacks)
+end
