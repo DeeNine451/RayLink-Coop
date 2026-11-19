@@ -112,7 +112,7 @@
 Ключи записи мира (`c|…`), ключи pstor/marshal, имена событий на проводе не переименовываются и не удаляются. Список —
 `tools/persisted_keys.txt`. Пример: `c|coop_world_server` — единственный признак серверного мира: из него карточка
 получает `"world_server"` (`coop_json_card.script:27,81`), по нему лаунчер разрешает «Запустить сервер» (`list.rs:117`),
-по нему сервер мира принимает свой сейв (`coop_dedicated.script:162-171`).
+по нему сервер мира принимает свой сейв (`coop_srv_dedicated.script`, `load_allowed`).
 
 ### Где начинается новая фича
 
@@ -189,7 +189,7 @@
 | `coop_mode.seat_plays(peer)`, `coop_mode.group_travels()` | «у места 0 есть персонаж», «группа ходит вместе» |
 | `coop_mode.when_srv(function() … end)` | единственное место, где серверный скрипт регистрирует колбэки, функции условий, события и сохранения |
 
-- Звать как глобальный модуль `coop_mode.x(...)`, **без** новой `local`: в `coop_tasks.script` уже 197 из 200 локалей
+- Звать как глобальный модуль `coop_mode.x(...)`, **без** новой `local`: в `coop_tasks.script` 188 из 200 локалей (после S5, A-S5T; было 197)
   файла, в `coop_npc_companions.script` 181.
 - Предикаты режима переезжают из таблицы `coop.*` движка в отдельную таблицу `srv.*`. Одну dev-сборку они ещё читаются
   через `coop.*`, потом убираются: Ядро физически не сможет их позвать (critique §4.7).
@@ -239,6 +239,8 @@ site-packages, ключ `-I` его прячет).
 | L9 регистрация в `srv`-скрипте | `srv`-скрипты | вне **анонимных функций**, переданных в `coop_mode.when_srv(...)` (остальное в скобках выполняется сразу: `when_srv(hide_far_spots())` зовёт функцию при загрузке — это само по себе L9, C2): `RegisterScriptCallback` (и через псевдоним `local reg = RegisterScriptCallback`), поле `xr_conditions` / `xr_effects` / `xr_logic` через `.X =`, `["X"] =`, `rawset(…)` или псевдоним таблицы, `add_event_handler`; **запись в любую не свою таблицу** — скрипта Ядра, `hostplay`, стока, в том числе не из репозитория (`sim_board`, `smart_terrain`), `db.флаг = true`, глобал через `_G`, `setmetatable(db.storage, …)` (C3); своими считаются локали, параметры, переменные `for`, `self`, свои классы (`class "x"`), глобалы уровня файла и сам скрипт, **кроме копии чужой таблицы**: локали (`local db = db`, `local t = sim_board.x or {}`: C1; `local cfg = rawget(_G, "coop_far_cfg")`, `local xc = rawget(_G, "xr_conditions") or xr_conditions`: четвёртое ревью, X3) и глобала уровня файла (`far_cfg = coop_far_cfg`, `far_db = db`, `x = rawget(…)`; `x = x or {}` и копия своей таблицы остаются своими: X4); **параметр функции, которая работает при загрузке, когда вызов при загрузке передаёт в него не свою таблицу** (`wrap(sim_board.simulation_board, "assign_squad_to_smart", f)`, а в `wrap` — `tbl[key] = …`: X2); **любой вызов при загрузке** — на уровне файла, в `on_game_start`, в функции, присвоенной ему (`on_game_start = start`), во всех функциях файла, которые они зовут по имени, по цепочке (C4), и **в теле литерала функции, который выполняется сразу**: вызванного на месте `(function() … end)()` (X5) или переданного в вызов, который сам его зовёт, — `string.gsub`, `s:gsub`, `table.sort`, `pcall`, `xpcall`, `table.foreach` (X6; литерал в `CreateTimeEvent` / `RegisterScriptCallback` / таблице выполнится позже, считается сам этот вызов): `CreateTimeEvent`, `AddUniqueCall`, `level.add_call`, `exec_console_cmd`, `get_console():execute`, сеттер Ядра; чистые чтения не считаются (`rawget`, `type`, `pairs`, `tostring`, `tonumber`, `string.*`, `math.*`, `printf`, `class`, `pcall` чистой функции, в том числе локали `local pf = rawget(_G, "printf")`, и `pcall(function() … end)`, тело которого проверяется само; `table.insert` и `setmetatable` в свою или новую таблицу) |
 | L9C статическая инициализация | C++ `srv`/`hostplay` и `tests/test_srv_*.cpp` | переменная уровня пространства имён, чей инициализатор зовёт функцию (`static const bool registered = (coop::hooks::set_skip(&far_skip), true);`), или объект нашего класса с объявленным конструктором (`static Registrar s_registrar;`, `static Registrar s_r(1);`: C7; объект шаблона класса `static coop::hooks::AutoReg<FarSkip> s_reg;` — класс `AutoReg`, а не аргумент шаблона: четвёртое ревью, X8b): она выполняется в каждом процессе, и у кооп-хоста. Регистрироваться — из init режима через `mode()`. `constexpr` — не вызов. В `tests/test_srv_*.cpp` (их можно править вместе с правкой только `srv`) такой инициализатор выполняется до каждого кооп-теста того же нативного exe (`_putenv("COOP_FUZZ_RUNS=1")`: X11) |
 | L10 сохранённый ключ | скрипты | ключ из `persisted_keys.txt` пропал из скриптов |
+| L11 серверная часть `Session` (круг 8) | Ядро C++ | файл Ядра зовёт серверные члены `Session` напрямую (`issue_bridge`, `revoke_bridge`, `virtual_*`, `bridge_*`, `on_bridge_*`, `host_virtual`, сторона оператора) вместо `srv::SessionSrv`; сегодняшние вызовы — в замороженном списке `check_layers.py`, он только сокращается |
+| L1, слова интерфейса режима (круг 8) | Ядро C++ и Lua | C++: `session_mode(`, `SessionMode::Coop/Server`, `ProcessRole::` (кроме `has_role(...)`), `.roles()`, `m_roles`, `roles_of(`, `mode_for(` / `install_mode(` / `boot_layers(` вне стартов `coop_manager.cpp`, сравнения `mode().name()`; исключения по функциям — `IFACE_ALLOWED`, список только сокращается. Lua: наличие серверной части `coop_quests_core.part(...)` как условие |
 
 Пометки-исключения вида `layer-ok: причина` **нет**: это был бы простой обход проверки.
 
@@ -393,7 +395,7 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
   (`FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE`: атрибут других ссылок не трогается), новый файл получает имя;
   `remove_file` — то же удаление одного имени. `keep_copy` пишет только в резервную папку.
 - **PowerShell** (`tools\stand_common.ps1`: `Write-StandBytes`, `Write-StandText`, `Write-StandLines`, `Copy-StandFile`,
-  `Copy-StandTree` вместо robocopy, `Remove-StandFile` вместо `Remove-Item -Force`) — во всех сценариях `tools\stand\*.ps1`
+  `Copy-StandTree` вместо robocopy, `Remove-StandFile` вместо любого `Remove-Item`) — во всех сценариях `tools\stand\*.ps1`
   (пробы `coop_zz_*` в `gamedata\scripts`, `axr_options.ltx` и его возврат из копии, `fsgame_*.ltx`, `user.ltx`,
   `appdata_*`, `bin_b`), в `tools\deploy.ps1`, `tools\launch.ps1` и `tools\stand_server.ps1` (`fsgame_server.ltx`,
   `appdata_server`; пятое ревью, B1). Тест `test_stand_scripts_write_into_the_stand_only_through_the_helpers`
@@ -660,8 +662,8 @@ gates: FAIL (3)
 | L | `tools\test_lua.cmd` | Lua-тесты; файл Ядра гоняется под каждым набором (`COOP_LUA_MODE`), файл режима — под своим |
 | T | `tools\run_all_tests.cmd` | N и L целиком; оба прошли на чистом дереве, HEAD не сдвинулись и `temp\lua\runlua.exe` собран из исходников сейчас (четвёртое ревью, B5) — пишет `temp\gates\tests.ok` (оба HEAD, `dirty=0`) |
 | LN | `python -I tools\stand\stand_head.py links --stand E:\RayLinkGames\GAMMA\game-dev` | перед выкладкой на стенд: что она заменит, сколько из этого жёсткие ссылки на файлы модов, и нет ли имени, которое сейчас нельзя удалить (Р21); ничего не пишет |
-| SC | `powershell -ExecutionPolicy Bypass -File tools\stand_hostplay.ps1 -Tag b<N>` | стенд Коопа: выкладывает gamedata HEAD, затем `carry_group`, `base_group`, `sil_group`, `squads_group` (отряды рядом с клиентом, R1), `sp_smoke` (одиночная игра без ключей `-coop_`: новая игра, сохранение, загрузка, минута) из `tools\stand`. Пишет `temp\gates\hostplay.ok` |
-| SS | `powershell -ExecutionPolicy Bypass -File tools\stand_srv.ps1 -Tag b<N>` | стенд Сервера: выкладывает gamedata HEAD, затем `ded_check -World new`, `base_server`, `carry_server`, `taskboard_ws` из `tools\stand`. Пишет `temp\gates\srv.ok` |
+| SC | `powershell -ExecutionPolicy Bypass -File tools\stand_hostplay.ps1 -Tag b<N>` | стенд Коопа: выкладывает gamedata HEAD, затем `carry_group`, `base_group`, `sil_group`, `squads_group` (отряды рядом с клиентом, R1), `sp_smoke` (одиночная игра без ключей `-coop_`: новая игра, сохранение, загрузка, минута), `companions_group` (круг 8) из `tools\stand`. Пишет `temp\gates\hostplay.ok` |
+| SS | `powershell -ExecutionPolicy Bypass -File tools\stand_srv.ps1 -Tag b<N>` | стенд Сервера: выкладывает gamedata HEAD, затем `ded_check -World new`, `base_server`, `carry_server`, `taskboard_ws`, `phantoms_server` (круг 8) из `tools\stand`. Пишет `temp\gates\srv.ok` |
 | R | `python -I tools\release.py --channel dev --build <N> verify` | `check_gates.py <тег>..HEAD --release --layers` (G на той же модели + правило выпуска + exe из HEAD движка) + проверки пакета |
 
 Стенд — только `E:\RayLinkGames\GAMMA\game-dev`. Живая игра владельца не трогается. Файлы стенда — жёсткие ссылки на
