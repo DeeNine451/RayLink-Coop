@@ -1,0 +1,610 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - bleeding, heal and weakening of Perk-Based Artefacts on the decider (gamedata\scripts\coop_mods_perk_dots.script).
+	F4 unit G7-3, Dev 57: review m08:5 (PBA :1619 Thistle's bleeding, :2833 Chain's heal of a companion, :4123 Ball's weakening)
+	and m24:2 (G.A.M.M.A. Actor Damage Balancer, momopate_pba_tweaks.script:474: Momopate's Thistle replaces PBA's at load).
+	The mods' files are not changed.
+
+	PBA's owner callbacks run on the player's machine: his belt decides, his dice roll. Three of its perks then change a
+	creature that is not his: change_health and set_health_ex are class Owner (coop_calls.h:308,738) and the engine refuses
+	them on a client for another's creature (script_game_object.cpp:153, script_game_object4.cpp:457). Before this file a
+	client's Thistle halved his hit but its bleeding hurt nothing, his Chain healed no companion and his Ball kicked a
+	creature that had not been weakened first.
+	Remote Thistle on stalkers in G.A.M.M.A. is pending: grok_bo replaces PBA's callback and runs PBA_obh on the map authority.
+	That path still needs the shooter's belt. The co-op host's own stalker hits can use the wrapped PBA table.
+
+	Who decides, per mode (nothing here asks which mode it is; the requests are G7-2's commands, mods.pba_cmd):
+	  Co-op:  the host's process leads the map (bodies, AI, inventories, companions) and applies every player's request.
+	          The host's own player's bleeding and heal call the same decider function directly (coop_mods_perk_abilities.cmd
+	          does that, from = his own peer). His Ball is the mod's own call: the creature is the host's object already.
+	  Server: the map server of the player's level applies them (his machine -> the world server -> that map server,
+	          coop_mods_core.on(..., "host")). The world server has no map and applies nothing. Players on two maps reach
+	          each their own map server; a bleeding lives on the map server that ticks it.
+
+	Commands (kinds of mods.pba_cmd, coop_mods_perk_abilities; its checks run first: shape, once, his character, his
+	artefact, the target, range, floor, rate). Kind keys:
+	  bleed  t = the creature, b = the loss per tick (> 0, the mod's own number), d = seconds, s = procs merged (1..16)
+	         The owner: the mod's Thistle (PBA's or Momopate's, whichever artefact_props.af_repei is) runs on his hit as
+	         before (the halved hit, the proc's dice, sound and particles stay his); the timed effect it would add is taken
+	         instead (its target and bleeding_hit are the effect's own upvalues) and asked for. Procs within 0.5 s of the
+	         last request are merged. A batch reaching 16 procs goes as soon as 250 ms have passed since the last request
+	         (the shared verb's budget: 4 a second). Further procs start a separate batch.
+	         The decider (checks: pba_bleed_shape guard, pba_bleed_duration and pba_bleed_amount trust, pba_bleed_dots guard):
+	         d up to the active Thistle's effect_time (Momopate 3.5 s, PBA 7 s), cut to it in every mode; b up to the mod's
+	         formula for his verified count and a hit of 50 (grok_bo's own bound for a bullet) times s, cut to it in every mode;
+	         at most 24 bleedings of one player at once. A tick every 100 ms, floor(d * 10 + 0.5) + 1 of them, as the mod's
+	         100 ms loop runs an effect up to the cycle after its end; a dead or missing target ends it. The tick that would
+	         kill is npc:kill(his character) while that character is his and here (the kill is his: perks, tasks,
+	         statistics), else the mod's own change_health (the engine credits the last hitter); an invulnerable creature
+	         only gets the change.
+	  chain  m = Chain ticks (100 ms each) since the last request
+	         The owner: the mod's Chain runs every 100 ms as before (his own heal and power stay his) with the stock companion
+	         table empty for that call; a tick of the Chain's community is counted, and the count goes every 2 s.
+	         The decider (pba_chain_shape guard, pba_chain_community and pba_chain_ticks trust): his character's community
+	         matches the Chain's, including the NPC form of his faction; m up to the time since his last heal (2.5 s at most),
+	         cut to it in every mode. The weakest living companion below full health gets 0.0015 a tick if owned by his
+	         character and of the Chain's companion community. Candidates come from the stock list and ordinary squad members.
+	  ball   t = the creature
+	         The owner: the mod's Ball runs as before (target choice, cooldown, the fly of the body on his copy); its target is
+	         the one the mod names in add_cooldown(IsStalker(target) ...) after it made its hit (PBA :4108, :4166). His own
+	         kick of that creature is held back at the frame's end (his before-hit chain: flags.ret_value = false), so only
+	         the decider kicks. The decider (pba_ball_kind trust: a monster of his Ball's tiers for his verified count, as the
+	         mod's own list) weakens a living, vulnerable monster to 0.01, then hits from his character (power = the section's
+	         Health * 0.01, wound, impulse 10000, bone bip01_spine, the throw along his line to it, weapon = his character as
+	         the engine names a weaponless hit).
+	Network text never becomes a format string or a log line; ids and numbers are checked before they are used.
+
+	No saved state. No new event (the kinds above travel in mods.pba_cmd).
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, pairs, ipairs, pcall, tostring, tonumber, next, setmetatable, rawget, rawset =
+	type, pairs, ipairs, pcall, tostring, tonumber, next, setmetatable, rawget, rawset
+local math_floor, math_min, math_sqrt, math_huge, math_random = math.floor, math.min, math.sqrt, math.huge, math.random
+
+local function C() return coop_mods_core end
+local function log(fmt, ...) C().log("perk_dots", fmt, ...) end
+local function PBA() return C().mod("perk_based_artefacts") end
+
+local TICK_MS = 100 -- PBA's actor_on_update runs its effects every 100 ms (perk_based_artefacts.script:120,4522-4531)
+local PBA_THISTLE_S = 7 -- PBA's own af_repei.effect_time, when the active Thistle has none
+local HIT_CAP = 50 -- grok_bo: a hit of 50 or more is no bullet (monster_on_before_hit `if shit.power >= 50 then return end`)
+local MAX_STACK = 16 -- procs one request may merge
+local MAX_DOTS = 24 -- bleedings of one player at once
+local BLEED_GAP_MS = 500 -- normal interval for a partial batch
+local BLEED_MIN_MS = 250 -- minimum interval for a full batch and the decider's rate check
+local BLEED_RANGE = 1500 -- the engine's own range for a player's bullet (coop_requests.cpp kFireRange)
+local CHAIN_MS = 2000 -- the owner tells his Chain ticks this often
+local CHAIN_HEAL = 0.0015 -- PBA af_chelust: heal_companion:change_health(0.0015) a tick (perk_based_artefacts.script:2833)
+local MAX_CHAIN_TICKS = 25
+local BALL_RANGE = 8 -- metres: the mod kicks within 2.7 m (af_ball.scan_radius); slack for movement and latency
+local BALL_WEAK = 0.01 -- PBA af_ball: target:set_health_ex(0.01) before its hit (perk_based_artefacts.script:4123)
+local BALL_IMPULSE = 10000 -- PBA af_ball: h.impulse = 10000
+local BALL_MARK_MS = 1000
+local SWEEP_MS = 1000
+local TIMERS = { "add_simple_timed_effect", "s_event" } -- PBA's function and Momopate's alias of it (momopate_pba_tweaks.script:4)
+
+local st = { bleeds_out = 0, bleeds = 0, ticks = 0, kills = 0, heals_out = 0, heals = 0, heals_none = 0, kicks_out = 0,
+	kicks_held = 0, kicks = 0, refused = 0 }
+local abil = nil -- coop_mods_perk_abilities (G7-2): cmd / serve
+
+local function whole(v, lo, hi)
+	return type(v) == "number" and v == v and v >= lo and v <= hi and v == math_floor(v)
+end
+
+local function positive(v)
+	return type(v) == "number" and v == v and v > 0 and v < math_huge
+end
+
+local function props_of(name)
+	local pba = PBA()
+	local all = pba and pba.artefact_props
+	local p = type(all) == "table" and all[name] or nil
+	return type(p) == "table" and p or nil
+end
+
+local function refused()
+	st.refused = st.refused + 1
+end
+
+-------------------------------------------------------------------------------
+-- The decider: bleeding (m08:5 :1619, m24:2 :474)
+-------------------------------------------------------------------------------
+local dots = {} -- { peer, owner = his character id, target = creature id, b = loss a tick, left = ticks, next_at }
+
+-- The loss a tick of one proc at a hit power of 1, by the active Thistle's own numbers on this process.
+local function tick_coeff(props, n)
+	if not props then return 0 end
+	n = math_min(n or 1, 5)
+	if type(props.g_bleed) == "table" then
+		-- Momopate: s_hit.power * hit_coeff (:458), then * -g_bleed[count] * 0.75 (:456, :472)
+		return (tonumber(props.hit_coeff) or 1) * (tonumber(props.g_bleed[n]) or 0) * 0.75
+	end
+	-- PBA: s_hit.power * -bleed_coeff * artefact_count (perk_based_artefacts.script:1614)
+	return (tonumber(props.bleed_coeff) or 0) * n
+end
+
+local function bleed_apply(r)
+	local t = r.t
+	if not coop_trust.guard("pba_bleed_shape", positive(t.b) and (t.s == nil or whole(t.s, 1, 255)),
+		"player #%d: a malformed bleeding", r.from) then
+		return refused()
+	end
+	local props = props_of("af_repei")
+	local bound = props and tonumber(props.effect_time)
+	if not positive(bound) then bound = PBA_THISTLE_S end
+	if not coop_trust.pass("pba_bleed_duration", t.d == nil or t.d <= bound, "player #%d: a bleeding longer than the mod's",
+		r.from) then
+		return refused()
+	end
+	local d = math_min(t.d or bound, bound)
+	local cap = math_min(t.s or 1, MAX_STACK) * HIT_CAP * tick_coeff(props, r.count)
+	if cap <= 0 then return refused() end -- no Thistle known here
+	if not coop_trust.pass("pba_bleed_amount", t.b <= cap, "player #%d: a bleeding over the mod's own for his artefacts",
+		r.from) then
+		return refused()
+	end
+	local n = 0
+	for _, dot in ipairs(dots) do
+		if dot.peer == r.from then n = n + 1 end
+	end
+	if not coop_trust.guard("pba_bleed_dots", n < MAX_DOTS, "player #%d: too many bleedings at once", r.from) then
+		return refused()
+	end
+	dots[#dots + 1] = { peer = r.from, owner = r.owner:id(), target = r.target:id(), b = math_min(t.b, cap),
+		left = math_floor(d * 10 + 0.5) + 1, next_at = time_global() + TICK_MS }
+	st.bleeds = st.bleeds + 1
+end
+
+local function invulnerable(obj)
+	local ok, v = pcall(function() return obj:invulnerable() end)
+	return ok and v == true
+end
+
+-- One run of the mod's effect: if not npc:alive() then return end npc:change_health(bleeding_hit). False: it is over.
+local function bleed_tick(dot)
+	local npc = level.object_by_id(dot.target)
+	if not (npc and npc:alive()) then return false end
+	local health = npc.health
+	if type(health) == "number" and health - dot.b <= 0 and not invulnerable(npc) then
+		local who = level.object_by_id(dot.owner)
+		if who and C().peer_of(dot.owner) == dot.peer then
+			npc:kill(who)
+			st.kills = st.kills + 1
+			return false
+		end
+	end
+	npc:change_health(-dot.b)
+	st.ticks = st.ticks + 1
+	return true
+end
+
+local function tick_dots(now)
+	local i = 1
+	while i <= #dots do
+		local dot = dots[i]
+		local live = true
+		while live and dot.left > 0 and now >= dot.next_at do
+			local ok, more = pcall(bleed_tick, dot)
+			if not ok then C().report("perk_dots", "bleeding tick", more) end
+			live = ok and more == true
+			dot.left = dot.left - 1
+			dot.next_at = dot.next_at + TICK_MS
+		end
+		if live and dot.left > 0 then
+			i = i + 1
+		else
+			table.remove(dots, i)
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- The decider: the Chain's heal of a companion (m08:5 :2833)
+-------------------------------------------------------------------------------
+local chain_at = {} -- peer -> time_global() of his last accepted heal
+
+-- Same marks as the G12-1 hire count for ordinary members outside the stock list.
+local function ordinary_companion(id)
+	local se = alife_object(id)
+	if not se then return false end
+	local name = se:name()
+	return se_load_var(id, name, "companion") == true and not se_load_var(id, name, "companion_cannot_dismiss")
+end
+
+-- The mod's choice (perk_based_artefacts.script:2806-2826) among HIS companions on this map.
+local function his_weakest(owner, props)
+	local ax = axr_companions
+	local cc = C().mod("coop_npc_companions")
+	local whose = cc and C().fn(cc, "owner_character")
+	local valid = props.valid_companion_communities
+	if type(ax) ~= "table" or not whose or type(valid) ~= "table" then return nil end
+	local list, squads = ax.non_task_companions, ax.companion_squads
+	if type(list) ~= "table" then list = {} end
+	local oid = owner:id()
+	local best, low = nil, 1
+	local function consider(id)
+		local obj = type(id) == "number" and level.object_by_id(id) or nil
+		if obj and obj:alive() then
+			local ok, comm, health, leader = pcall(function() return obj:character_community(), obj.health, whose(obj) end)
+			if ok and valid[comm] and leader == oid and type(health) == "number" and health < low then
+				best, low = obj, health
+			end
+		end
+	end
+	for id in pairs(list) do consider(id) end
+	if type(squads) == "table" then
+		for _, squad in pairs(squads) do
+			local ok, e = pcall(function()
+				for member in squad:squad_members() do
+					local id = member.id
+					if list[id] == nil and ordinary_companion(id) then consider(id) end
+				end
+			end)
+			if not ok then C().report("perk_dots", "Chain squad members", e) end
+		end
+	end
+	return best
+end
+
+local function chain_apply(r)
+	local t = r.t
+	if not coop_trust.guard("pba_chain_shape", whole(t.m, 1, 65535), "player #%d: a malformed heal", r.from) then
+		return refused()
+	end
+	local props = props_of("af_chelust")
+	if not props then return refused() end
+	local okc, comm = pcall(function() return r.owner:character_community() end)
+	local valid = props.valid_communities
+	local member = okc and type(valid) == "table" and type(comm) == "string"
+		and (valid[comm] == true or (comm:sub(1, 6) ~= "actor_" and valid["actor_" .. comm] == true))
+	if not coop_trust.pass("pba_chain_community", member, "player #%d: his character is not of the Chain's community", r.from) then
+		return refused()
+	end
+	local now = time_global()
+	local was = chain_at[r.from]
+	local bound = was and math_min(MAX_CHAIN_TICKS, math_floor((now - was) / TICK_MS) + 2) or MAX_CHAIN_TICKS
+	if not coop_trust.pass("pba_chain_ticks", t.m <= bound, "player #%d: more Chain ticks than time passed", r.from) then
+		return refused()
+	end
+	chain_at[r.from] = now
+	local mate = his_weakest(r.owner, props)
+	if not mate then
+		st.heals_none = st.heals_none + 1
+		return
+	end
+	mate:change_health(CHAIN_HEAL * math_min(t.m, bound))
+	st.heals = st.heals + 1
+end
+
+-------------------------------------------------------------------------------
+-- The decider: the Ball's weakening and kick (m08:5 :4123)
+-------------------------------------------------------------------------------
+-- The mod's own list (artefact_on_equip_functions.af_ball, tiers 1..count; the kick's checks at :3998-4008).
+local function ball_allows(props, obj, n)
+	if not IsMonster(obj) then return false end
+	local tiers = props.monster_tiers
+	if type(tiers) ~= "table" then return false end
+	local allowed = {}
+	for i = 1, math_min(n, 5) do
+		if type(tiers[i]) == "table" then
+			for _, m in ipairs(tiers[i]) do allowed[m] = true end
+		end
+	end
+	local sec = obj:section()
+	local cls = (sec == "gigant_jumper" and clsid.pseudo_gigant) or obj:clsid()
+	return allowed[cls] == true or allowed[SYS_GetParam(2, sec, "kind", "definitely_not_found_kind")] == true
+		or allowed[SYS_GetParam(0, sec, "kind", 0)] == true
+end
+
+local function ball_apply(r)
+	local props = props_of("af_ball")
+	if not props then return refused() end
+	local target, owner = r.target, r.owner
+	local ok, fits = pcall(ball_allows, props, target, r.count)
+	if not coop_trust.pass("pba_ball_kind", ok and fits == true, "player #%d: his Ball does not kick this creature", r.from) then
+		return refused()
+	end
+	if not IsMonster(target) or not target:alive() or invulnerable(target) then return refused() end
+	-- PBA artefact_on_key_press_functions.af_ball (perk_based_artefacts.script:4103-4126), here on the creature itself
+	local health = ini_sys:r_float_ex(target:section(), "Health") or 100
+	local tp, op = target:position(), owner:position()
+	local dx, dz = tp.x - op.x, tp.z - op.z
+	local len = math_sqrt(dx * dx + dz * dz)
+	if len < 0.01 then dx, dz, len = 0, 1, 1 end
+	local magnitude = r.count * 60
+	local h = hit()
+	h.power = health * 0.01
+	h.direction = vector():set(dx / len * 1000 * magnitude, (0.1 + math_random() * 0.1) * 5000 * magnitude,
+		dz / len * 1000 * magnitude)
+	h.bone = "bip01_spine"
+	h.draftsman = owner
+	h.impulse = BALL_IMPULSE
+	h.type = hit.wound
+	h.weapon_id = owner:id() -- a weaponless hit of a player names his character (coop_requests.cpp host_hit)
+	target:set_health_ex(BALL_WEAK)
+	target:hit(h)
+	st.kicks = st.kicks + 1
+end
+
+-------------------------------------------------------------------------------
+-- The owner
+-------------------------------------------------------------------------------
+local pending = {} -- local creature id -> partial batch { id, b, s, d, ids, n, at }
+local full_bleeds = {} -- batches sealed at MAX_STACK, in order of completion
+local bleed_sent_at = 0
+local chain_st = { ticks = 0, ids = nil, n = 1, sent_at = 0 }
+local ball_mark = {} -- local creature id -> time_global() until his own kick of it is held back here
+
+-- The mod's bleeding effect (PBA :1617-1621, Momopate :474-486): its amount a tick and its creature.
+local function bleeding_of(f)
+	if type(f) ~= "function" then return nil end
+	local b = C().upvalue(f, "bleeding_hit")
+	local npc, holder = C().upvalue(f, "npc")
+	if type(b) ~= "number" or b ~= b or not holder or npc == nil then return nil end
+	return b, npc
+end
+
+-- Runs f with PBA's timed-effect function (and Momopate's alias) taking the bleeding effects into `caught`.
+local function with_capture(caught, f, ...)
+	local swapped = {}
+	for _, name in ipairs({ "perk_based_artefacts", "momopate_pba_tweaks" }) do
+		local m = C().mod(name)
+		for _, key in ipairs(TIMERS) do
+			local real = type(m) == "table" and rawget(m, key) or nil
+			if type(real) == "function" then
+				swapped[#swapped + 1] = { m, key, real }
+				m[key] = function(timer, effect, on_end, k, ...)
+					if on_end == nil and k == nil then
+						local b, npc = bleeding_of(effect)
+						if b then
+							caught[#caught + 1] = { b = b, npc = npc, d = timer }
+							return
+						end
+					end
+					return real(timer, effect, on_end, k, ...)
+				end
+			end
+		end
+	end
+	local ok, e = pcall(f, ...)
+	for i = #swapped, 1, -1 do
+		local s = swapped[i]
+		s[1][s[2]] = s[3]
+	end
+	return ok, e
+end
+
+local function bleed_flush(now)
+	local elapsed = now - bleed_sent_at
+	local p = full_bleeds[1]
+	if p then
+		if elapsed < BLEED_MIN_MS then return end
+		table.remove(full_bleeds, 1)
+	else
+		if elapsed < BLEED_GAP_MS then return end
+		for _, batch in pairs(pending) do
+			if not p or batch.at < p.at then p = batch end
+		end
+		if not p then return end
+		pending[p.id] = nil
+	end
+	local obj = level.object_by_id(p.id)
+	if not (obj and obj:alive()) then return end -- it died meanwhile: nothing left to bleed
+	if abil.cmd("bleed", p.id, { ids = p.ids, n = p.n, d = p.d > 0 and p.d or nil, b = p.b, s = p.s }) then
+		bleed_sent_at = now
+		st.bleeds_out = st.bleeds_out + 1
+	end
+end
+
+local function thistle(orig)
+	return function(actor, count, ids, names, victim, s_hit, ...)
+		if not (C().active() and coop_mode.actor_is_player()) then return orig(actor, count, ids, names, victim, s_hit, ...) end
+		local caught = {}
+		local ok, e = with_capture(caught, orig, actor, count, ids, names, victim, s_hit, ...)
+		if not ok then C().report("perk_dots", "Thistle", e) end
+		local now = time_global()
+		for _, c in ipairs(caught) do
+			local okid, id = pcall(function() return c.npc:id() end)
+			if okid and type(id) == "number" and c.b < 0 then
+				local p = pending[id]
+				if not p then
+					p = { id = id, b = 0, s = 0, d = 0, at = now }
+					pending[id] = p
+				end
+				p.b, p.s = p.b - c.b, p.s + 1
+				if type(c.d) == "number" and c.d > p.d then p.d = c.d end
+				p.ids, p.n = ids, count
+				if p.s == MAX_STACK then
+					pending[id] = nil
+					full_bleeds[#full_bleeds + 1] = p
+				end
+			end
+		end
+		bleed_flush(now)
+	end
+end
+
+local function chain_flush(now)
+	if chain_st.ticks <= 0 or now - chain_st.sent_at < CHAIN_MS then return end
+	local m = chain_st.ticks
+	chain_st.ticks, chain_st.sent_at = 0, now
+	if abil.cmd("chain", 0, { ids = chain_st.ids, n = chain_st.n, m = m }) then st.heals_out = st.heals_out + 1 end
+end
+
+local function chain(orig)
+	return function(actor, count, ids, names, ...)
+		if not (C().active() and coop_mode.actor_is_player()) then return orig(actor, count, ids, names, ...) end
+		-- the mod heals the weakest companion of the stock table where it runs (:2806-2833): empty for this call
+		local ax = axr_companions
+		local list = nil
+		if type(ax) == "table" then
+			list = ax.non_task_companions -- a client's may be false: it comes back as it was
+			ax.non_task_companions = {}
+		end
+		local ok, e = pcall(orig, actor, count, ids, names, ...)
+		if type(ax) == "table" then ax.non_task_companions = list end
+		if not ok then C().report("perk_dots", "Chain", e) end
+		local props = props_of("af_chelust")
+		local okc, comm = pcall(function() return actor:character_community() end)
+		if okc and props and type(props.valid_communities) == "table" and props.valid_communities[comm] then
+			chain_st.ticks = math_min(chain_st.ticks + 1, MAX_CHAIN_TICKS)
+			chain_st.ids, chain_st.n = ids, count
+			chain_flush(time_global())
+		end
+	end
+end
+
+local function ball(orig)
+	return function(actor, count, ids, names, key, ...)
+		-- the process that leads the map owns the creature: the mod's own weakening and kick act on it there
+		if not (C().active() and coop_mode.actor_is_player()) or coop_mode.leads_here() then
+			return orig(actor, count, ids, names, key, ...)
+		end
+		local pba = PBA()
+		local made, target = false, nil
+		local real_hit, real_is = hit, IsStalker
+		local had_hit, had_is = rawget(pba, "hit"), rawget(pba, "IsStalker")
+		rawset(pba, "hit", setmetatable({}, {
+			__index = function(_, k) return real_hit[k] end,
+			__call = function(_, ...)
+				made = true
+				return real_hit(...)
+			end,
+		}))
+		rawset(pba, "IsStalker", function(o, ...)
+			if made then target = o end
+			return real_is(o, ...)
+		end)
+		local ok, e = pcall(orig, actor, count, ids, names, key, ...)
+		rawset(pba, "hit", had_hit)
+		rawset(pba, "IsStalker", had_is)
+		if not ok then C().report("perk_dots", "Ball", e) end
+		if target == nil then return end
+		local okid, id = pcall(function() return target:id() end)
+		if not (okid and type(id) == "number") then return end
+		if abil.cmd("ball", id, { ids = ids, n = count }) then
+			ball_mark[id] = time_global() + BALL_MARK_MS
+			st.kicks_out = st.kicks_out + 1
+		end
+	end
+end
+
+-- His before-hit chain at the frame's end (coop_requests.cpp client_hit_perks): his own kick of a creature the decider kicks
+-- does not go.
+local function own_kick(victim, s_hit, bone_id, flags)
+	if next(ball_mark) == nil or victim == nil or s_hit == nil or type(flags) ~= "table" then return end
+	local ok, id, mine = pcall(function()
+		return victim:id(), s_hit.draftsman:id() == db.actor:id() and s_hit.type == hit.wound
+			and (tonumber(s_hit.impulse) or 0) >= BALL_IMPULSE / 2
+	end)
+	local till = ok and ball_mark[id]
+	if not till then return end
+	if time_global() > till then
+		ball_mark[id] = nil
+		return
+	end
+	if mine and coop_mode.actor_is_player() then
+		ball_mark[id] = nil
+		flags.ret_value = false
+		st.kicks_held = st.kicks_held + 1
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Start
+-------------------------------------------------------------------------------
+local function sweep(now)
+	if not C().active() then
+		dots, chain_at, pending, full_bleeds, ball_mark = {}, {}, {}, {}, {}
+		chain_st.ticks = 0
+		return
+	end
+	local present = { [C().self_peer()] = true }
+	for _, p in ipairs(C().players()) do
+		if type(p.id) == "number" then present[p.id] = true end
+	end
+	for peer in pairs(chain_at) do
+		if not present[peer] then chain_at[peer] = nil end
+	end
+	for id, till in pairs(ball_mark) do
+		if now > till then ball_mark[id] = nil end
+	end
+end
+
+local next_sweep = 0
+local function update()
+	local now = time_global()
+	if C().active() then
+		if full_bleeds[1] or next(pending) ~= nil then
+			local ok, e = pcall(bleed_flush, now)
+			if not ok then C().report("perk_dots", "bleeding request", e) end
+		end
+		if chain_st.ticks > 0 then
+			local ok, e = pcall(chain_flush, now)
+			if not ok then C().report("perk_dots", "Chain request", e) end
+		end
+		if dots[1] then tick_dots(now) end
+	end
+	if now >= next_sweep then
+		next_sweep = now + SWEEP_MS
+		local ok, e = pcall(sweep, now)
+		if not ok then C().report("perk_dots", "sweep", e) end
+	end
+end
+
+local function status()
+	return string.format("bleeding: asked %d, here %d (ticks %d, kills %d, running %d) | Chain: asked %d, healed %d "
+		.. "(no companion here %d) | Ball: asked %d, own kicks held %d, kicked here %d | refused %d", st.bleeds_out, st.bleeds,
+		st.ticks, st.kills, #dots, st.heals_out, st.heals, st.heals_none, st.kicks_out, st.kicks_held, st.kicks, st.refused)
+end
+
+-- Tests and coop_status: what runs now.
+function _state()
+	local n = #full_bleeds
+	for _ in pairs(pending) do n = n + 1 end
+	return { dots = #dots, pending = n }
+end
+
+-- on_game_start never throws (axr_main runs every script's on_game_start in one unprotected loop).
+local function step(what, f)
+	local ok, e = pcall(f)
+	if not ok then printf("! [coop_mods_perk_dots] %s failed: %s", what, tostring(e)) end
+end
+
+local started = false
+function on_game_start()
+	if started or not api then return end
+	started = true
+	local pba = C().mod("perk_based_artefacts")
+	if not pba then return end
+	local ab = C().mod("coop_mods_perk_abilities")
+	if not (ab and C().fn(ab, "cmd") and C().fn(ab, "serve")) then
+		log("! no ability commands (coop_mods_perk_abilities): bleeding, heal and kick stay the mod's own")
+		return
+	end
+	abil = ab
+	step("bleed", function()
+		for _, name in ipairs({ "artefact_on_monster_before_hit_functions", "artefact_on_npc_before_hit_functions" }) do
+			C().wrap(pba[name], "af_repei", "perk_based_artefacts." .. name .. ".af_repei:coop_bleed", thistle)
+		end
+		ab.serve("bleed", { items = { af_repei = true }, target = true, range = BLEED_RANGE, every = BLEED_MIN_MS,
+			apply = bleed_apply })
+	end)
+	step("chain", function()
+		C().wrap(pba.artefact_on_update_functions, "af_chelust", "perk_based_artefacts.af_chelust:coop_heal", chain)
+		ab.serve("chain", { items = { af_chelust = true }, floor = 500, every = CHAIN_MS - 500, apply = chain_apply })
+	end)
+	step("ball", function()
+		C().wrap(pba.artefact_on_key_press_functions, "af_ball", "perk_based_artefacts.af_ball:coop_kick", ball)
+		ab.serve("ball", { items = { af_ball = true }, target = true, range = BALL_RANGE, floor = 1500, every = 1500,
+			apply = ball_apply })
+	end)
+	step("callbacks", function()
+		RegisterScriptCallback("actor_on_update", update)
+		RegisterScriptCallback("monster_on_before_hit", own_kick)
+		RegisterScriptCallback("npc_on_before_hit", own_kick)
+	end)
+	step("status", function() C().status_line("perk_dots", status) end)
+end
