@@ -10,10 +10,11 @@
 -- psi_storm_manager = host). So on a client the flags stayed as the last mirror update left them: true.
 -- Their readers run on a client: dynamic_emission_cover_mcm.actor_on_update L129-131 / L144 / L250 (the cover bar: shown
 -- while either "state" is on), item_device L774 / L909 (NVG and PDA glitch), item_radio, ui_dosimeter, level_environment.
--- Real coop_main.script; the stock managers are stand-ins that keep the stock's flag writes (line refs above).
+-- Real coop_main and mode layers; the stock managers are stand-ins that keep the stock's flag writes (line refs above).
 -- Not shipped. Run: tools\test_lua.cmd client_env_end
 MODE = "client"
 dofile("tests/lua/support/stubs.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -------------------------------------------------------------------------------
 -- stock stand-ins
@@ -125,11 +126,16 @@ end
 
 -------------------------------------------------------------------------------
 load_coop_main()
+load_script_file("coop_mode")
+load_script_file("coop_srv_world")
 local observer = from_script("actor_effects", [[return function(typ, obj, name)
 	if typ == "anomalies" then EVENTS[name] = (EVENTS[name] or 0) + 1 end
 end]])
 RegisterScriptCallback("actor_on_interaction", observer)
 coop_main.on_game_start()
+modes.live(coop_mode)
+coop_mode.on_game_start()
+coop_srv_world.on_game_start()
 
 local sm = surge_manager.get_surge_manager()
 local pm = psi_storm_manager.get_psi_storm_manager()

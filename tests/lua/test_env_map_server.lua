@@ -1,9 +1,10 @@
 -- Anomaly Coop (split levels, docs\SPLIT_LEVELS.md 7b): the emission on a map server. It follows the world server's phase like a client,
 -- but it is the authority of its level: the stock kills stay on and the verdict on the players of its level is its own. Its ghost is
 -- always in a shelter and no hide task is given to it.
--- Real coop_main.script. Not shipped. Run: tools\test_lua.cmd env_map_server
+-- Real coop_main and mode layers. Not shipped. Run: tools\test_lua.cmd env_map_server
 MODE = "client" -- is_client() is true on a map server: for the world it is a client
 dofile("tests/lua/support/stubs.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 OPTS = { ["alife/event/emission_fate"] = "kill_at_wave", ["alife/event/psi_storm_fate"] = "kill_at_vortex" }
 ui_options = { get = function(name) return OPTS[name] end }
@@ -56,7 +57,13 @@ end
 
 print("== env_map_server")
 load_coop_main()
+load_script_file("coop_mode")
+load_script_file("coop_trust")
+load_script_file("coop_srv_world")
 coop_main.on_game_start()
+modes.live(coop_mode)
+coop_mode.on_game_start()
+coop_srv_world.on_game_start()
 local sm = surge_manager.get_surge_manager()
 local function phase(t)
 	coop_main.on_event("coop_env", coop_main.encode(t), 0)

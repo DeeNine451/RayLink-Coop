@@ -1,0 +1,108 @@
+-- Server (srv): the world keeps the emission schedule and the map servers apply its effects.
+-- One phase for the world (docs/SPLIT_LEVELS.md 7b). Each map server judges its own players.
+local api = rawget(_G, "coop")
+
+-- The stock excludes its source and the hospital on top of valid_levels.
+local NO_EMISSION = { l13_generators = true, l11_hospital = true }
+local function level_open(name)
+	local lw = rawget(_G, "level_weathers") or level_weathers
+	return name ~= nil and lw ~= nil and lw.valid_levels ~= nil and lw.valid_levels[name] == true and not NO_EMISSION[name]
+end
+
+local function reaches_here()
+	return level_open(level.name())
+end
+
+local function players()
+	local ok, list = pcall(api.players)
+	return ok and list or {}
+end
+
+local function open_level_of_a_player()
+	local l = api.levels
+	if not (l and l.level_of_player and l.level_name) then return end
+	for _, p in ipairs(players()) do
+		local id = not p.is_self and l.level_of_player(p.id)
+		local name = id and l.level_name(id)
+		if name and level_open(name) then return name end
+	end
+end
+
+local function publish_phase(phase)
+	-- Players use their own cover for the mirror. Map servers get shelter for their ghost.
+	phase.own = true
+	local player_phase = coop_main.encode(phase)
+	for _, p in ipairs(players()) do
+		if not p.is_self then api.send_event("coop_env", player_phase, p.id) end
+	end
+	phase.own = nil
+	local l = api.levels
+	if l and l.map_servers then
+		local map_phase = coop_main.encode(phase)
+		for _, ms in ipairs(l.map_servers()) do
+			api.send_event("coop_env", map_phase, ms.bridge)
+		end
+	end
+end
+
+local function relay_report(name, report, peer)
+	local l = api.levels
+	local bridge = l and l.bridge_of_player and l.bridge_of_player(peer)
+	local valid = type(bridge) == "number" and bridge > 0
+	if not coop_trust.pass("env_report_map", valid, "peer %d has no map server", peer) then return end
+	if not valid then return end
+	report.peer = peer -- transport sender, as received by the world server
+	api.send_event(name, coop_main.encode(report), bridge)
+end
+
+local function report_peer(from, report)
+	local peer = tonumber(report.peer)
+	local trusted = from == 0 and peer ~= nil
+	if not coop_trust.pass("env_map_relay", trusted, "invalid relay from peer %s", tostring(from)) then return end
+	if trusted then return peer end
+end
+
+function on_game_start()
+	if not api then return end
+	coop_mode.when_srv(function()
+		local policy = { reaches_here = reaches_here }
+		if coop_mode.decides_world() then
+			policy.publish = publish_phase
+			policy.relay_report = relay_report
+
+			-- The stock start consults the current map. On the service level, borrow an occupied
+			-- open map for that call, then advance the schedule without running its map effects.
+			local function schedule_around(cls, duration, finish)
+				local start, update = cls.start, cls.update
+				if start then
+					cls.start = function(self, ...)
+						local name = open_level_of_a_player()
+						if not name then return start(self, ...) end
+						printf("[srv-world] emission schedule: %s is open", name)
+						local original_name = level.name
+						level.name = function() return name end
+						local result = { pcall(start, self, ...) }
+						level.name = original_name
+						if not result[1] then printf("[srv-world] emission schedule failed: %s", tostring(result[2])) end
+						return unpack(result, 2)
+					end
+				end
+				if update then
+					cls.update = function(self, ...)
+						if self.started ~= true or reaches_here() then return update(self, ...) end
+						local ok, sec = pcall(function() return game.get_game_time():diffSec(self.inited_time) / level.get_time_factor() end)
+						if ok and sec >= (self[duration] or 0) then self[finish](self) end
+					end
+				end
+			end
+
+			local sm = rawget(_G, "surge_manager") or surge_manager
+			local pm = rawget(_G, "psi_storm_manager") or psi_storm_manager
+			if sm and sm.CSurgeManager then schedule_around(sm.CSurgeManager, "surge_time", "end_surge") end
+			if pm and pm.CPsiStormManager then schedule_around(pm.CPsiStormManager, "psi_storm_duration", "finish") end
+		elseif coop_mode.leads_here() then
+			policy.report_peer = report_peer
+		end
+		coop_main.set_env_policy(policy)
+	end)
+end
