@@ -1,0 +1,368 @@
+-- Core: world conditions use same-map player facts; the map leader runs local object actions.
+-- In a co-op the host has the map and the bodies. In a server the map leader has the bodies,
+-- and the world and other maps use player map assignments and the corresponding ALife records.
+
+local TAG = "npc_presence"
+local ARRIVED = "npc_presence_arrived"
+local MAX_OP = 2147483647
+local MAX_MAP = 255
+
+local function map_of(vertex)
+	if vertex == nil then return nil end
+	local graph = game_graph()
+	if graph:valid_vertex_id(vertex) then return graph:vertex(vertex):level_id() end
+end
+
+local function local_player(peer)
+	if coop_mode.where(peer) ~= "here" then return nil end
+	if peer == coop_mods_core.self_peer() and not coop_mode.actor_is_player() then return nil end
+	local obj = coop_npc_players.object_of_peer(peer)
+	if obj and obj:alive() and coop_npc_players.standing(obj) then return obj end
+end
+
+-- `everyone` excludes the ghost and caches the online bodies. The facade also excludes
+-- avatars that are visible while their player is assigned to another map.
+local function participants()
+	local out = {}
+	for _, obj in ipairs(coop_npc_players.everyone()) do
+		local peer = coop_npc_players.peer_of(obj)
+		if peer ~= nil and coop_mode.where(peer) == "here" and coop_npc_players.standing(obj) then
+			out[#out + 1] = obj
+		end
+	end
+	return out
+end
+
+local function nearest_story_distance(se)
+	local map = map_of(se.m_game_vertex_id)
+	local nearest = math.huge
+	if map == nil then return nil end
+	if coop_mode.leads_here() then
+		for _, obj in ipairs(participants()) do
+			if map_of(obj:game_vertex_id()) == map then
+				nearest = math.min(nearest, se.position:distance_to_sqr(obj:position()))
+			end
+		end
+	end
+	for _, row in ipairs(coop_npc_players.players()) do
+		if coop_mode.where(row.id) == "away" then
+			local p = coop_npc_players.player(row.id)
+			local body = p and p.standing and p.level == map and p.character and alife_object(p.character)
+			if body and body:alive() and map_of(body.m_game_vertex_id) == map then
+				nearest = math.min(nearest, se.position:distance_to_sqr(body.position))
+			end
+		end
+	end
+	return nearest
+end
+
+local conditions = {
+	distance_to_obj_ge = function(d, r) return d >= r * r end,
+	distance_to_obj_le = function(d, r) return d < r * r end,
+	dist_to_story_obj_ge = function(d, r) return math.sqrt(d) > r end,
+	dist_to_story_obj_le = function(d, r) return math.sqrt(d) < r end,
+}
+
+local function wrap_conditions()
+	local mod = coop_mods_core.mod("xr_conditions")
+	for name, compare in pairs(conditions) do
+		coop_mods_core.wrap(mod, name, TAG .. "." .. name, function(original)
+			return function(actor, npc, args)
+				if not coop_mods_core.active() then return original(actor, npc, args) end
+				if not (coop_mode.leads_here() or coop_mode.decides_world()) then return false end
+				local radius = args and tonumber(args[2])
+				local id = radius and args[1] and get_story_object_id(args[1])
+				local se = id and alife_object(id)
+				local distance = se and se.position and nearest_story_distance(se)
+				return distance ~= nil and distance ~= false and compare(distance, radius) or false
+			end
+		end)
+	end
+end
+
+local function wrap_monster()
+	local mod = coop_mods_core.mod("sr_monster")
+	coop_mods_core.wrap(mod and mod.fake_monster, "update", TAG .. ".sr_monster", function(original)
+		return function(self, ...)
+			if not coop_mods_core.active() then return original(self, ...) end
+			if not coop_mode.leads_here() then return end
+			local players = participants()
+			for _, obj in ipairs(players) do
+				if self.object:inside(obj:position()) then
+					return coop_npc_players.with_identity(obj, original, self, ...)
+				end
+			end
+			if players[1] then return coop_npc_players.with_identity(players[1], original, self, ...) end
+			-- An empty map has nobody inside. A sequence already running still has to finish and release its monster.
+			if self.is_actor_inside or self.final_action then return original(self, ...) end
+			if self.is_actor_inside == nil and self.st.monster then self.is_actor_inside = false end
+		end
+	end)
+end
+
+local function path_point(name)
+	if not name or name == "" or name == "nil" then return nil end
+	if level.patrol_path_exists and not level.patrol_path_exists(name) then return nil end
+	local path = patrol(name)
+	return path and path:point(0)
+end
+
+local function squad_point(smart, squad)
+	-- sim_squad_scripted:create_npc tries squad and smart overrides before the smart's default.
+	local function read(key)
+		return ini_sys:r_string_ex(squad, key) or (smart.ini and smart.ini:r_string_ex(squad, key))
+	end
+	local vertices = read("spawn_vid")
+	if vertices then
+		local lvid = vertices:match("^(%d+):%d+$")
+		if lvid then return level.vertex_position(tonumber(lvid)) end
+	end
+	return path_point(read("spawn_point")) or path_point(smart.spawn_point) or smart.position
+end
+
+local function wave_points(smart, squad, wave)
+	local points = { squad_point(smart, squad) }
+	-- The exclusive jobs in pri_a28_heli_mono.ltx place the wave's six fighters at their wait paths.
+	if level.patrol_path_exists then
+		for i = 1, 6 do
+			local point = path_point("pri_a28_heli_mono_add_" .. wave .. "_" .. i .. "_wait")
+			if point then points[#points + 1] = point end
+		end
+	end
+	return points
+end
+
+local function wave_distance(zone, online, points, players)
+	local distance, occupied = math.huge, false
+	for _, actor in ipairs(players) do
+		local pos = actor:position()
+		occupied = occupied or (online and online:inside(pos)) or false
+		distance = math.min(distance, pos:distance_to_sqr(zone.position))
+		for _, point in ipairs(points) do distance = math.min(distance, pos:distance_to_sqr(point)) end
+	end
+	return distance, occupied
+end
+
+local function wrap_waves()
+	local effects = coop_mods_core.mod("xr_effects")
+	coop_mods_core.wrap(effects, "pri_a28_check_zones", TAG .. ".pri_a28_check_zones", function(original)
+		return function(...)
+			if not coop_mods_core.active() then return original(...) end
+			if not coop_mode.leads_here() then return end
+			local players = participants()
+			local smart = SIMBOARD.smarts_by_names.pri_a28_heli
+			if not (players[1] and smart) then return end
+			local choice, score, occupied
+			for i = 1, 3 do
+				local flag = "pri_a28_wave_" .. i .. "_spawned"
+				local squad = "pri_a28_heli_mono_add_" .. i
+				local id = not has_alife_info(flag) and get_story_object_id("pri_a28_sr_mono_add_" .. i)
+				local zone = id and alife_object(id)
+				if zone and zone.position and ini_sys:section_exist(squad) then
+					local d, used = wave_distance(zone, level.object_by_id(id), wave_points(smart, squad, i), players)
+					if not choice or (occupied and not used) or (occupied == used and d > score) then
+						choice, score, occupied = { flag = flag, squad = squad }, d, used
+					end
+				end
+			end
+			if choice then
+				db.actor:give_info_portion(choice.flag)
+				return effects.create_squad(db.actor, nil, { choice.squad, "pri_a28_heli" })
+			end
+		end
+	end)
+end
+
+local silos, seen = {}, {}
+local arrival_due, operation = nil, 0
+local recovery
+
+local function restore(id, data)
+	local se = alife_object(id)
+	if not (se and se:name() == data.name and se:alive()) then return end
+	local pos = vector():set(data.x, data.y, data.z)
+	local npc = level.object_by_id(id)
+	if npc and npc:alive() then
+		npc:set_npc_position(pos)
+		se.position = pos
+	elseif se.m_level_vertex_id == data.lvid and se.m_game_vertex_id == data.gvid then
+		se.position = pos
+	else
+		-- The graph and level vertex fields are read-only. Move an offline record via A-Life.
+		alife():teleport_object(id, data.gvid, data.lvid, pos)
+	end
+	se:move_offline(data.moves)
+	se:can_switch_online(true)
+end
+
+local function save_silos(m_data)
+	local records = {}
+	for id, data in pairs(silos) do records[id] = data.saved end
+	m_data.coop_npc_presence_silos = next(records) and records or nil
+end
+
+local function restore_due(now)
+	for id, data in pairs(silos) do
+		if data.until_ms <= now then
+			restore(id, data.saved)
+			silos[id] = nil
+		end
+	end
+end
+
+local function silo(id, npc, se, deadline, players)
+	local position = vector():set(se.position)
+	local data = {
+		pos = position, until_ms = deadline, enemies = {},
+		saved = { name = se:name(), x = position.x, y = position.y, z = position.z,
+			lvid = se.m_level_vertex_id, gvid = se.m_game_vertex_id, moves = se:move_offline() },
+	}
+	-- The online relation includes personal goodwill, rank and reputation. Keep these answers
+	-- while the NPC is offline, so a second player's protection can extend the same silo.
+	for _, actor in ipairs(players) do
+		data.enemies[actor:id()] = npc:relation(actor) == game_object.enemy
+	end
+	silos[id] = data
+	npc:set_enemy(nil)
+	local limbo = vector():set(data.pos)
+	limbo.y = limbo.y - 200
+	npc:set_npc_position(limbo)
+	se:move_offline(false)
+	se:can_switch_online(false)
+end
+
+local function config_number(mod, key, default, limit)
+	local value = tonumber(mod.get_config(key)) or default
+	if value ~= value then return default end
+	return math.max(0, math.min(value, limit))
+end
+
+local function protect(mod, actor, now)
+	local radius = config_number(mod, "radius", 5, 100)
+	local duration = config_number(mod, "duration", 30, 300)
+	if mod.get_config("random_duration") then
+		local a = math.floor(config_number(mod, "duration_min", 10, 300))
+		local b = math.floor(config_number(mod, "duration_max", 60, 300))
+		duration = math.random(math.min(a, b), math.max(a, b))
+	end
+	local deadline = now + duration * 1000
+	local pos = actor:position()
+	local map = map_of(actor:game_vertex_id())
+	local r2 = radius * radius
+	local players = participants()
+	for id, data in pairs(silos) do
+		if data.pos:distance_to_sqr(pos) <= r2 then
+			local npc = level.object_by_id(id)
+			if npc and npc:alive() then data.enemies[actor:id()] = npc:relation(actor) == game_object.enemy end
+			if data.enemies[actor:id()] then data.until_ms = math.max(data.until_ms, deadline) end
+		end
+	end
+	for id, st in pairs(db.storage) do
+		if not silos[id] and type(id) == "number" then
+			local npc = st.object
+			local se = npc and alife_object(id)
+			if se and not coop_npc_players.is_player_id(id) and IsStalker(se) and se:alive() and npc:alive() and
+				map_of(se.m_game_vertex_id) == map and se.position:distance_to_sqr(pos) <= r2 and
+				npc:relation(actor) == game_object.enemy then
+				silo(id, npc, se, deadline, players)
+			end
+		end
+	end
+end
+
+local function bounded_integer(value, minimum, maximum)
+	local n = tonumber(value)
+	if n and n >= minimum and n <= maximum and n % 1 == 0 then return n end
+end
+
+local function receive_arrival(mod, payload, peer)
+	local id = payload and bounded_integer(payload.id, 1, MAX_OP)
+	local map = payload and bounded_integer(payload.map, 0, MAX_MAP)
+	local actor = local_player(peer)
+	local ready = id and map and actor and map_of(actor:game_vertex_id()) == map
+	if not coop_trust.pass("npc_presence_arrival", ready, "peer %s has no usable arrival on this map", tostring(peer)) then return end
+	if not ready then return end -- no authoritative body on which this operation can run
+	local now = time_global()
+	local ops = seen[peer] or {}
+	if ops[id] then return end
+	seen[peer] = ops
+	ops[id] = now + 120000
+	restore_due(now)
+	protect(mod, actor, now)
+end
+
+local function mark_arrived()
+	-- Wait for the actor and its A-Life neighbours to finish loading, as the stock timer does.
+	arrival_due = time_global() + 1000
+end
+
+local function update_safespawn(mod)
+	local active = coop_mods_core.active()
+	if recovery then
+		if not active or coop_mode.leads_here() then
+			for id, data in pairs(recovery) do restore(id, data) end
+		end
+		recovery = nil
+	end
+	if not active then restore_due(math.huge); return end
+	local now = time_global()
+	if coop_mode.leads_here() then restore_due(now) end
+	for peer, ops in pairs(seen) do
+		for id, expiry in pairs(ops) do if expiry <= now then ops[id] = nil end end
+		if not next(ops) then seen[peer] = nil end
+	end
+	if not arrival_due or now < arrival_due then return end
+	if not coop_mode.actor_is_player() or now > arrival_due + 10000 then arrival_due = nil; return end
+	local peer = coop_mods_core.self_peer()
+	local actor = local_player(peer)
+	local map = actor and map_of(actor:game_vertex_id())
+	if map == nil then return end
+	operation = (math.max(operation, now) % MAX_OP) + 1
+	local payload = { id = operation, map = map }
+	if coop_mode.leads_here() then
+		arrival_due = nil
+		receive_arrival(mod, payload, peer)
+	elseif coop_mode.is_player_mirror() and coop_mods_core.to_host(ARRIVED, payload) then
+		arrival_due = nil
+	end
+end
+
+local function install_safespawn()
+	local mod = coop_mods_core.mod("safespawn")
+	if not (mod and coop_mods_core.fn(mod, "get_config")) then return end
+	if not coop_mods_core.wrap(mod, "perform_silo", TAG .. ".safespawn", function(original)
+		return function(...)
+			if not coop_mods_core.active() then return original(...) end
+			return true -- the stock timer may run on the level leader, using its own actor
+		end
+	end) then return end
+	coop_mods_core.set_limit(ARRIVED, 3, 0.5)
+	coop_mods_core.on(ARRIVED, function(t, peer) receive_arrival(mod, t, peer) end, "host")
+	coop_mods_core.listen("actor_respawned", mark_arrived)
+	RegisterScriptCallback("actor_on_first_update", mark_arrived)
+	RegisterScriptCallback("actor_on_update", function() update_safespawn(mod) end)
+	RegisterScriptCallback("save_state", save_silos)
+	RegisterScriptCallback("load_state", function(m_data)
+		silos, seen = {}, {}
+		recovery = type(m_data.coop_npc_presence_silos) == "table" and m_data.coop_npc_presence_silos or nil
+	end)
+	RegisterScriptCallback("on_level_changing", function()
+		arrival_due = nil
+		if coop_mode.leads_here() then restore_due(math.huge) end
+	end)
+end
+
+local function step(name, f)
+	local ok, err = pcall(f)
+	if not ok then coop_mods_core.report(TAG, name, err) end
+end
+
+local started = false
+function on_game_start()
+	if started or not rawget(_G, "coop") then return end
+	started = true
+	step("Vices", wrap_conditions)
+	step("sr_monster", wrap_monster)
+	step("pri_a28", wrap_waves)
+	step("SafeSpawn", install_safespawn)
+end
