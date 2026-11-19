@@ -12,8 +12,6 @@ local CARD_OPTIONS = {
 	card_game_21_save_rate = "coop/coop_player/mtop_save_rate",
 	card_game_21_increasing = "coop/coop_player/mtop_increasing",
 }
-local NAME_PATH = "gameplay/general/player_name"
-
 local function start_step(name, f)
 	local ok, err = pcall(f)
 	if not ok then printf("! [coop_settings_mods] %s failed: %s", name, tostring(err)) end
@@ -78,10 +76,18 @@ local function card_value(info)
 	return axr_main.config:r_value("options", CARD_OPTIONS[info], 1, false) == true
 end
 
-local function save_card(self, field, info)
-	if not coop_mods_core.active() then return end
-	axr_main.config:w_value("options", CARD_OPTIONS[info], self[field]:GetCheck() == true)
-	axr_main.config:save()
+local function register_card_toggle(self, control, id, info)
+	local previous = control:GetCheck() == true
+	self:Register(control, id)
+	self:AddCallback(id, ui_events.BUTTON_CLICKED, function()
+		if not coop_mods_core.active() then return end
+		local checked = control:GetCheck() == true
+		-- Check buttons also send BUTTON_CLICKED for mouse buttons that do not toggle them.
+		if checked == previous then return end
+		axr_main.config:w_value("options", CARD_OPTIONS[info], checked)
+		axr_main.config:save()
+		previous = checked
+	end, self)
 end
 
 local function install_mtop()
@@ -110,49 +116,27 @@ local function install_mtop()
 		return function(self, ...)
 			if not coop_mods_core.active() then return orig(self, ...) end
 			orig(self, ...)
-			self:Register(self.check_save_rate, "coop_settings_save_rate")
-			self:Register(self.check_increasing, "coop_settings_increasing")
-			self:AddCallback("coop_settings_save_rate", ui_events.BUTTON_CLICKED, function(w)
-				save_card(w, "check_save_rate", "card_game_21_save_rate")
-			end, self)
-			self:AddCallback("coop_settings_increasing", ui_events.BUTTON_CLICKED, function(w)
-				save_card(w, "check_increasing", "card_game_21_increasing")
-			end, self)
+			register_card_toggle(self, self.check_save_rate, "coop_settings_save_rate", "card_game_21_save_rate")
+			register_card_toggle(self, self.check_increasing, "coop_settings_increasing", "card_game_21_increasing")
 		end
 	end)
 	installed.mtop = true
-end
-
--- A temporary row makes the ordinary name field use the same CVar/Apply/cfg_save path as RayLink's nick field.
--- Do not mutate the shared definition or its captured stock functors: single player must retain them.
-local function nick_row(row)
-	local copy = {}
-	for k, v in pairs(row) do copy[k] = v end
-	copy.cmd, copy.curr, copy.functor = "coop_nick", nil, nil
-	return copy
 end
 
 local function install_nick()
 	if installed.nick then return end
 	local m = coop_mods_core.mod("ui_options")
 	if not (m and m.UIOptions) then return end
-	coop_mods_core.wrap(m.UIOptions, "Reset_opt", "settings.nick.draw", function(orig)
-		return function(self, tree, path, ...)
-			if not coop_mods_core.active() or path ~= "gameplay/general" or type(tree) ~= "table" or type(tree.gr) ~= "table" then
-				return orig(self, tree, path, ...)
+	coop_mods_core.wrap(m.UIOptions, "Register_Input", "settings.nick.input", function(orig)
+		return function(self, xml, handler, path, id, row, ...)
+			if path == "gameplay/general" and id == "player_name" and coop_mods_core.active() then
+				-- The real RayLink row supplies the label, pending value, Apply and unique callback IDs for both pages.
+				local nick = self:GetOption("coop/coop_player/nick")
+				if type(nick) == "table" and nick.cmd == "coop_nick" then
+					return orig(self, xml, handler, "coop/coop_player", "nick", nick, ...)
+				end
 			end
-			local copy = {}
-			for k, v in pairs(tree) do copy[k] = v end
-			copy.gr = {}
-			for i, row in ipairs(tree.gr) do copy.gr[i] = row.id == "player_name" and nick_row(row) or row end
-			return orig(self, copy, path, ...)
-		end
-	end)
-	coop_mods_core.wrap(m.UIOptions, "GetOption", "settings.nick.apply", function(orig)
-		return function(self, id, ...)
-			local row = orig(self, id, ...)
-			if coop_mods_core.active() and id == NAME_PATH and type(row) == "table" then return nick_row(row) end
-			return row
+			return orig(self, xml, handler, path, id, row, ...)
 		end
 	end)
 	installed.nick = true
