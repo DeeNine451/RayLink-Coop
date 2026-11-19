@@ -4,10 +4,13 @@
 -- A file fails when: the process exit code is not 0, the output has SYNTAX/RUNTIME ERROR, any "  FAIL " line,
 -- a non-zero failed count, or no summary line at all (a test that dies silently must not look green).
 -- Environment: COOP_LUA_RUNLUA (runner exe, default temp\lua\runlua.exe), COOP_LUA_FILTER (space-separated substrings
--- of the file name without "test_" / ".lua"; empty = everything).
+-- of the file name without "test_" / ".lua"; empty = everything), COOP_LUA_OUT (per-file output folder, default
+-- temp\lua\out; parallel runs of several executors each give their own, e.g. temp\lua\out_<unit>, so no run overwrites or
+-- locks another's rows).
 local BS = string.char(92)
 local RUNLUA = os.getenv("COOP_LUA_RUNLUA") or ("temp" .. BS .. "lua" .. BS .. "runlua.exe")
-local OUT_DIR = "temp" .. BS .. "lua" .. BS .. "out"
+local OUT_DIR = os.getenv("COOP_LUA_OUT") or ("temp" .. BS .. "lua" .. BS .. "out")
+if not OUT_DIR:match("^[%w_%.\\/:%-]+$") then error("COOP_LUA_OUT: letters, digits and _ . - \\ / : only") end
 local TEST_DIR = "tests" .. BS .. "lua"
 local FILTER = os.getenv("COOP_LUA_FILTER") or ""
 
