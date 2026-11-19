@@ -28,6 +28,7 @@
 
 	API (G18-4 builds on it):
 	  coop_bounty.target_of(squad_id) -> character id (this process's numbering), his peer | nil
+	  coop_bounty.targets_pending() -> true where this map needs its first target list from the decider
 	  coop_bounty.squads_of(character_id) -> { [squad id] = section } (a copy)
 	  coop_bounty.records() -> { [character id] = { last = CTime | nil, squads = { [squad id] = section } } } (a copy; only
 	                           the world's decider keeps them current, another process has what its load gave it)
@@ -36,28 +37,44 @@
 	Saved (the world's decider, save_state): m_data.coop_bounty = { v = 1, c = { [character id] = { t = CTime table,
 	  s = { [squad id] = section } } } }. The stock's m_data.bounty_squad stays the stock's.
 	Event: mods.bounty_t  world's decider -> every machine with a copy of the world (coop_mode.publish), on change and every
-	  30 s while there are targets: { n, s<i> = squad id, c<i> = character id } in host numbering; listened to from peer 0 only.
+	  30 s while there are targets or a bridge has requested a snapshot: { g = generation, i = chunk index, k = chunk count,
+	  n = entry count, s<i> = squad id, c<i> = character id } in host numbering; listened to from peer 0 only.
+	Event: mods.bounty_req (empty payload) from a map server's bridge once per live connection while it lacks a list.
+	  The decider answers with mods.bounty_t, including an empty list, and repeats it to recover from missed replies.
 --]]
 
 local type, pairs, ipairs, pcall, tostring, tonumber, next = type, pairs, ipairs, pcall, tostring, tonumber, next
 local string_format, math_floor = string.format, math.floor
 
 local TAG = "bounty"
-local VERB = "bounty_t"
+local SNAPSHOT = "mods.bounty_t"
+local REQUEST = "mods.bounty_req"
 local SAVE_KEY = "coop_bounty"
-local MAX_TARGETS = 64 -- squads in one list (the stock makes a few per player)
+local TARGETS_PER_CHUNK = 64
 local MAX_ID = 65534
+local MAX_CHUNKS = math.ceil((MAX_ID + 1) / TARGETS_PER_CHUNK)
+local MAX_GENERATION = 0x7fffffff
+local MAX_CHUNK_BYTES = 2048
+local CHUNKS_PER_UPDATE = 32 -- leave room for other events in the engine's 512-entry outbox
 local PUBLISH_MS = 30000
 local LOOK_MS = 1000
+local REQUEST_MS = 5000
+local REQUEST_SLOTS = 16 -- the engine currently has seven map bridge slots
 local TIMER_EV, TIMER_ACT = "cycle", "bounty_squad_spawn" -- the stock's time event (sim_squad_bounty.script:121, :299)
 
 local cfg = nil -- the stock's tables and numbers (file locals of sim_squad_bounty), nil: not installed
 local book = {} -- the world's decider: character id -> { last = CTime | nil, squads = { [squad id] = section } }
 local owner = {} -- the world's decider: squad id -> character id (built from records)
 local mirror = {} -- another process: squad id -> character id (local numbering), as the world's decider published it
+local previous_mirror -- solely to cancel old orders omitted from the first complete snapshot after reconnect
 local dirty = false -- the targets changed since the last publication
 local next_publish = 0
 local next_look = 0 -- actor_on_update looks at the publication once a second
+local target_link_live, request_sent, have_snapshot = false, false, false
+local snapshot_requested, repeat_snapshot = false, false
+local request_after = {}
+local outgoing, incoming
+local send_generation, received_generation = 0, 0
 local wrapped = { spawn = false, task = false }
 local stats = { passes = 0, spawned = 0, near = 0, no_smart = 0, no_faction = 0, redirected = 0, published = 0, received = 0,
 	dropped = 0, errors = 0 }
@@ -218,52 +235,168 @@ local function sync_stock()
 	end
 end
 
--------------------------------------------------------------------------------
--- Publication of the targets (the world's decider) and its copy elsewhere
--------------------------------------------------------------------------------
-local function publish(force)
-	if not (C().active() and coop_mode.decides_world()) then return end
-	local now = time_global()
-	if not (dirty or (force and next(owner) ~= nil) or (next(owner) ~= nil and now >= next_publish)) then return end
-	local t, n = {}, 0
-	for sid, cid in pairs(owner) do
-		local hs, hc = C().hid(sid), C().hid(cid)
-		if n < MAX_TARGETS and valid_id(hs) and valid_id(hc) then
-			n = n + 1
-			t["s" .. n], t["c" .. n] = hs, hc
-		end
-	end
-	t.n = n
-	if C().publish(VERB, t) then
-		stats.published = stats.published + 1
-		dirty = false
-		next_publish = now + PUBLISH_MS
+local function revoke_order(sid, section)
+	local orders = C().mod("coop_bounty_orders")
+	local revoke = C().fn(orders, "revoke")
+	if revoke then
+		local ok, err = pcall(revoke, sid, section)
+		if not ok then report("revoke order", err) end
 	end
 end
 
--- Another process (side "client": from peer 0 only, on a machine with a copy of the world): the whole list replaces the copy.
-local function on_targets(t, from)
-	local n = tonumber(t.n)
-	local ok = n ~= nil and n >= 0 and n <= MAX_TARGETS and n == math_floor(n)
-	local list = {}
-	if ok then
-		for i = 1, n do
-			local sid, cid = C().lid(tonumber(t["s" .. i])), C().lid(tonumber(t["c" .. i]))
-			if not (valid_id(sid) and valid_id(cid)) then
-				ok = false
-				break
+-------------------------------------------------------------------------------
+-- Publication of the targets (the world's decider) and its copy elsewhere
+-------------------------------------------------------------------------------
+local function needs_remote_targets()
+	return C().active() and coop_mode.leads_here() and not coop_mode.decides_world()
+end
+
+local function update_target_link(needed)
+	local live = needed and C().engine().is_live()
+	if target_link_live and not live then
+		if have_snapshot then previous_mirror = mirror end
+		request_sent, have_snapshot = false, false
+		incoming, received_generation = nil, 0
+		mirror = {}
+	end
+	target_link_live = live
+	return live
+end
+
+function targets_pending()
+	return needs_remote_targets() and (not update_target_link(true) or not have_snapshot)
+end
+
+local function event_ok(name, ok, fmt, ...)
+	local trust = C().mod("coop_trust")
+	if trust and trust.pass and not trust.pass(name, ok, fmt, ...) then return false end
+	return ok -- sender, wire and rate checks are mandatory in every trust setting
+end
+
+-- A bridge asks the world itself, so this is a world event rather than a player's level request.
+local function on_target_request(payload, from)
+	local is_sender = type(from) == "number" and C().active() and coop_mode.decides_world() and coop_mode.from_level(from)
+	if not event_ok("bounty_request_sender", is_sender, "bounty request from non-bridge peer %s", tostring(from)) then return end
+	if not event_ok("bounty_request_payload", payload == "", "nonempty bounty request from map peer %s", tostring(from)) then return end
+	local now = time_global()
+	for bridge, after in pairs(request_after) do
+		if now >= after then request_after[bridge] = nil end
+	end
+	local allowed = request_after[from] == nil and count(request_after) < REQUEST_SLOTS
+	if not event_ok("bounty_request_rate", allowed, "bounty request cooldown from map peer %s", tostring(from)) then return end
+	request_after[from] = now + REQUEST_MS
+	snapshot_requested, repeat_snapshot = true, true
+end
+
+local function snapshot_chunks()
+	local t = { n = 0 }
+	local chunks = { t }
+	for sid, cid in pairs(owner) do
+		local hs, hc = C().hid(sid), C().hid(cid)
+		if valid_id(hs) and hs ~= 0 and valid_id(hc) then
+			if t.n == TARGETS_PER_CHUNK then
+				t = { n = 0 }
+				chunks[#chunks + 1] = t
 			end
-			list[sid] = cid
+			t.n = t.n + 1
+			t["s" .. t.n], t["c" .. t.n] = hs, hc
 		end
 	end
-	local trust = C().mod("coop_trust")
-	if trust and trust.guard then ok = trust.guard("bounty_targets", ok, "a bounty target list from %s dropped", tostring(from)) end
-	if not ok then
-		stats.dropped = stats.dropped + 1
-		return
+	send_generation = send_generation % MAX_GENERATION + 1
+	for i, chunk in ipairs(chunks) do chunk.g, chunk.i, chunk.k = send_generation, i, #chunks end
+	return chunks
+end
+
+local function publish(force)
+	if not (C().active() and coop_mode.decides_world()) then return end
+	local now = time_global()
+	if not outgoing then
+		if not (snapshot_requested or dirty or (next(owner) ~= nil and force)
+			or (now >= next_publish and (repeat_snapshot or next(owner) ~= nil))) then return end
+		outgoing = { chunks = snapshot_chunks(), index = 1 }
+		dirty, snapshot_requested = false, false
+	elseif force then
+		return -- let actor_on_update pace the rest of this generation
 	end
-	mirror = list
-	stats.received = stats.received + 1
+	for _ = 1, CHUNKS_PER_UPDATE do
+		if not coop_mode.publish(SNAPSHOT, outgoing.chunks[outgoing.index]) then return end
+		outgoing.index = outgoing.index + 1
+		if outgoing.index > #outgoing.chunks then
+			outgoing = nil
+			stats.published = stats.published + 1
+			next_publish = now + PUBLISH_MS
+			return
+		end
+	end
+end
+
+local function uint(value, min, max)
+	return type(value) == "number" and value >= min and value <= max and value == math_floor(value)
+end
+
+local function decode_chunk(payload)
+	local t = coop_main.decode(payload)
+	if not (uint(t.g, 1, MAX_GENERATION) and uint(t.k, 1, MAX_CHUNKS) and uint(t.i, 1, t.k)
+		and uint(t.n, t.k == 1 and 0 or 1, TARGETS_PER_CHUNK) and count(t) == 4 + 2 * t.n) then return nil end
+	local list = {}
+	for i = 1, t.n do
+		local hs, hc = t["s" .. i], t["c" .. i]
+		if not (valid_id(hs) and hs ~= 0 and valid_id(hc)) then return nil end
+		local sid, cid = C().lid(hs), C().lid(hc)
+		if not (valid_id(sid) and sid ~= 0 and valid_id(cid)) or list[sid] ~= nil then return nil end
+		list[sid] = cid
+	end
+	if coop_main.encode(t) ~= payload then return nil end
+	return t, list
+end
+
+local function newer_generation(generation, previous)
+	if previous == 0 then return true end
+	local delta = (generation - previous) % MAX_GENERATION
+	return delta > 0 and delta <= MAX_GENERATION / 2
+end
+
+local function accept_chunk(payload, from)
+	if not event_ok("bounty_targets_sender", from == 0 and C().world_client(),
+		"bounty target snapshot from unexpected peer %s", tostring(from)) then return false end
+	if needs_remote_targets() and not event_ok("bounty_targets_link", update_target_link(true),
+		"bounty target snapshot before the link is live") then return false end
+	if not event_ok("bounty_targets_size", type(payload) == "string" and #payload <= MAX_CHUNK_BYTES,
+		"invalid bounty target chunk size") then return false end
+	local t, list = decode_chunk(payload)
+	if not event_ok("bounty_targets", t ~= nil, "invalid bounty target chunk") then return false end
+	if not newer_generation(t.g, received_generation) then return true end -- stale or delivered already
+
+	if not incoming or incoming.generation ~= t.g then
+		if incoming and not newer_generation(t.g, incoming.generation) then return true end
+		incoming = { generation = t.g, total = t.k, parts = {}, bindings = {}, remaining = t.k }
+	end
+	if not event_ok("bounty_targets_count", incoming.total == t.k, "inconsistent bounty target chunk count") then return false end
+	if incoming.parts[t.i] then return true end
+	for sid in pairs(list) do
+		if incoming.bindings[sid] ~= nil then
+			return event_ok("bounty_targets_overlap", false, "squad occurs in multiple bounty target chunks")
+		end
+	end
+	for sid, cid in pairs(list) do incoming.bindings[sid] = cid end
+	incoming.parts[t.i] = true
+	incoming.remaining = incoming.remaining - 1
+	if incoming.remaining == 0 then
+		if needs_remote_targets() then
+			for sid in pairs(previous_mirror or mirror) do
+				if incoming.bindings[sid] == nil then revoke_order(sid) end
+			end
+		end
+		mirror, received_generation = incoming.bindings, incoming.generation
+		previous_mirror = nil
+		incoming, have_snapshot = nil, true
+		stats.received = stats.received + 1
+	end
+	return true
+end
+
+local function on_targets(payload, from)
+	if not accept_chunk(payload, from) then stats.dropped = stats.dropped + 1 end
 end
 
 -- The character a squad hunts here: the decider's records, another process's copy of them.
@@ -493,21 +626,34 @@ local function load_state(m_data)
 		end
 	end
 	reindex()
-	dirty = true
+	dirty, outgoing = true, nil
 end
 
--- A squad that leaves the world leaves the targets at once, as the stock's own table does (sim_squad_bounty.script:242-244):
--- its id may go to another squad sent at "the actor" before the next pass.
+-- A local squad can leave the map, but only the world's unregister removes a character from the bounty book.
+-- Disconnect and handoff leave the authoritative character registered.
 local function server_entity_on_unregister(se_obj)
-	local sid = se_obj and se_obj.id
-	if type(sid) ~= "number" then return end
-	mirror[sid] = nil
-	local cid = owner[sid]
-	if cid == nil then return end
-	owner[sid] = nil
-	local rec = book[cid]
-	if rec then rec.squads[sid] = nil end
-	dirty = true
+	local id = se_obj and se_obj.id
+	if not valid_id(id) then return end
+	mirror[id] = nil
+	if previous_mirror then previous_mirror[id] = nil end
+	if not coop_mode.decides_world() then return end
+
+	local cid = owner[id] -- a removed squad's id may be reused before the next spawn pass
+	if cid ~= nil then
+		owner[id] = nil
+		if book[cid] then book[cid].squads[id] = nil end
+		dirty, outgoing = true, nil
+	end
+	local rec = book[id]
+	if not rec then return end
+	book[id] = nil
+	for sid, section in pairs(rec.squads) do
+		if owner[sid] == id then
+			owner[sid] = nil
+			dirty, outgoing = true, nil
+			revoke_order(sid, section)
+		end
+	end
 end
 
 local function on_game_load()
@@ -515,10 +661,20 @@ local function on_game_load()
 end
 
 local function actor_on_update()
+	local live = update_target_link(needs_remote_targets())
 	local now = time_global()
 	if now < next_look then return end
 	next_look = now + LOOK_MS
-	if dirty or next(owner) ~= nil then publish(false) end
+	if live and not (have_snapshot or request_sent) then
+		request_sent = coop_mode.publish(REQUEST, "")
+	end
+	if not C().active() then
+		if outgoing then outgoing, dirty = nil, true end
+		snapshot_requested, repeat_snapshot = false, false
+		if next(request_after) ~= nil then request_after = {} end
+	else
+		publish(false)
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -576,7 +732,12 @@ function on_game_start()
 			RegisterScriptCallback("actor_on_update", actor_on_update)
 			RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
 		end },
-		{ "events", function() if cfg then C().on(VERB, on_targets, "client") end end },
+		{ "events", function()
+			if not cfg then return end
+			if coop_main.reserve_world_event then coop_main.reserve_world_event(SNAPSHOT) end
+			coop_main.add_event_handler(SNAPSHOT, on_targets)
+			coop_main.add_event_handler(REQUEST, on_target_request)
+		end },
 		{ "status", function() C().status_line(TAG, status) end },
 	}
 	for _, s in ipairs(steps) do

@@ -19,7 +19,14 @@ for _, n in ipairs(MODE_FILES) do _G[n].on_game_start() end
 
 local ADAPTER = "coop_bounty"
 local EVENT = "mods.bounty_t"
+local REQUEST = "mods.bounty_req"
+local BRIDGE = 0x101
 local DAY = 60 * 60 * 24
+
+local function snapshot(g, entries)
+	entries.g, entries.i, entries.k = g, 1, 1
+	return coop_main.encode(entries)
+end
 
 -------------------------------------------------------------------------------
 -- The stock script, read from a corpus copy
@@ -234,6 +241,7 @@ local function boot(opts)
 	SENT, TIMEEV = {}, {}
 	PICK = 1
 	clear_callbacks()
+	load_script("coop_main") -- a new world has a new event bus as well as new script callbacks
 	coop.is_client = function() return MODE == "client" or opts.map == true end
 	coop.is_map_server = function() return opts.map == true end
 	coop.is_dedicated = function() return SET == "srv_world" end
@@ -461,16 +469,16 @@ local function client_tests()
 	check(#SPAWNED == 0, "co-op client: the client makes no bounty squad (" .. #SPAWNED .. ")")
 	check(r1 == true and r2 == true, "co-op client: the spawn timer is dropped here, as the router drops a host timer")
 	-- the host's word: squad 4000 hunts the client's character (500 in host numbering, 0 here)
-	coop_main.on_event(EVENT, coop_main.encode({ n = 1, s1 = 4000, c1 = 500 }), 0)
+	coop_main.on_event(EVENT, snapshot(1, { n = 1, s1 = 4000, c1 = 500 }), 0)
 	local cid, peer = nil, nil
 	if rawget(_G, ADAPTER) then cid, peer = coop_bounty.target_of(4000) end
 	check(cid == 0 and peer == 1, "co-op client: the published target is his own character here (" .. tostring(cid) .. ", " .. tostring(peer) .. ")")
 	-- only peer 0 (the host) is listened to; a bad list is dropped whole
-	coop_main.on_event(EVENT, coop_main.encode({ n = 1, s1 = 4000, c1 = 0 }), 2)
+	coop_main.on_event(EVENT, snapshot(2, { n = 1, s1 = 4000, c1 = 0 }), 2)
 	check(target(4000) == 0, "co-op client: a target list from another peer is ignored")
-	coop_main.on_event(EVENT, coop_main.encode({ n = 999, s1 = 4000, c1 = 0 }), 0)
+	coop_main.on_event(EVENT, snapshot(2, { n = 999, s1 = 4000, c1 = 0 }), 0)
 	check(target(4000) == 0, "co-op client: a list longer than the limit is dropped")
-	coop_main.on_event(EVENT, coop_main.encode({ n = 1, s1 = "x", c1 = 0 }), 0)
+	coop_main.on_event(EVENT, snapshot(2, { n = 1, s1 = "x", c1 = 0 }), 0)
 	check(target(4000) == 0, "co-op client: a list with a bad id is dropped")
 end
 
@@ -501,6 +509,75 @@ local function srv_world(b_gv, b_x, overrides)
 	FACTION_OF[501], FACTION_OF[502] = "dolg", "freedom"
 end
 
+local function request_tests()
+	print("== world server, bridge request audit and cooldown")
+	local second_bridge = BRIDGE + 1
+	for _, trust_mode in ipairs({ "log", "refuse", "off" }) do
+		srv_world(12, 0, { from_level = function(from) return from == BRIDGE or from == second_bridge end })
+		board({ "s_far" })
+		local trust = load_script("coop_trust")
+		local audit, bad = trust.pass, {}
+		trust.mode_of = function() return trust_mode end
+		trust.pass = function(name, ok, fmt, ...)
+			if not ok then bad[name] = (bad[name] or 0) + 1 end
+			return audit(name, ok, fmt, ...)
+		end
+		start()
+		coop_main.on_event(REQUEST, "", 1)
+		coop_main.on_event(REQUEST, "", 0)
+		coop_main.on_event(REQUEST, "from=n257", BRIDGE)
+		NOW = NOW + 1000
+		SendScriptCallback("actor_on_update")
+		check(sent_count(EVENT) == 0 and bad.bounty_request_sender == 2 and bad.bounty_request_payload == 1,
+			trust_mode .. ": invalid senders and a nonempty payload are audited and refused")
+		coop_main.on_event(REQUEST, "", BRIDGE)
+		NOW = NOW + 1000
+		SendScriptCallback("actor_on_update")
+		for _ = 1, 30 do coop_main.on_event(REQUEST, "", BRIDGE) end
+		NOW = NOW + 1000
+		SendScriptCallback("actor_on_update")
+		check(sent_count(EVENT) == 1 and bad.bounty_request_rate == 30,
+			trust_mode .. ": a burst on a later update is audited and does not queue another reply")
+		coop_main.on_event(REQUEST, "", second_bridge)
+		NOW = NOW + 1000
+		SendScriptCallback("actor_on_update")
+		check(sent_count(EVENT) == 2, trust_mode .. ": the first bridge cannot spend another bridge's cooldown")
+		NOW = NOW + 5000
+		coop_main.on_event(REQUEST, "", BRIDGE)
+		SendScriptCallback("actor_on_update")
+		check(sent_count(EVENT) == 3, trust_mode .. ": the bridge can request after its cooldown")
+	end
+end
+
+local function large_snapshot_tests()
+	print("== world server, 65 retained bindings")
+	srv_world(12, 0)
+	board({ "s_far" })
+	local retained = {}
+	for sid = 3001, 3064 do retained[sid] = "bandit_sim_squad_alpha" end
+	start({ coop_bounty = { c = {
+		[650] = { s = retained }, [502] = { s = { [3065] = "bandit_sim_squad_alpha" } },
+	} } })
+	for round = 1, 2 do
+		local before = #SENT
+		NOW = NOW + 31000
+		SendScriptCallback("actor_on_update")
+		local first, second = SENT[before + 1], SENT[before + 2]
+		local a = first and coop_main.decode(first.payload) or {}
+		local b = second and coop_main.decode(second.payload) or {}
+		check(#SENT == before + 2 and first and second and first.name == EVENT and second.name == EVENT
+			and a.g ~= nil and a.g == b.g and a.i == 1 and b.i == 2 and a.k == 2 and b.k == 2 and a.n == 64 and b.n == 1,
+			"large snapshot " .. round .. ": all 65 bindings use two bounded, numbered chunks in one generation")
+		local received = {}
+		for _, part in ipairs({ a, b }) do
+			for i = 1, part.n or 0 do received[part["s" .. i]] = part["c" .. i] end
+		end
+		local complete = received[3065] == 502
+		for sid = 3001, 3064 do complete = complete and received[sid] == 650 end
+		check(complete, "large snapshot " .. round .. ": the connected player's binding and all retained bindings go out")
+	end
+end
+
 local function server_tests()
 	print("== world server, both players on one map")
 	srv_world(12, 0)
@@ -508,6 +585,24 @@ local function server_tests()
 	REP[502] = -2000 -- a terrible reputation: one squad for him
 	board({ "s_near_host", "s_near_client", "s_far", "s_fake", "s_fake_far" }) -- s_near_host is 30 m from b at (0, 0, 0)
 	start()
+	SendScriptCallback("actor_on_update")
+	coop_main.on_event(REQUEST, "", 1)
+	coop_main.on_event(REQUEST, "", 0)
+	coop_main.on_event(REQUEST, "n=n0", BRIDGE)
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(EVENT) == 0, "world server: a player, the world seat and a malformed bridge request get no snapshot")
+	for _ = 1, 3 do coop_main.on_event(REQUEST, "", BRIDGE) end
+	SendScriptCallback("actor_on_update")
+	check(sent_count(EVENT) <= 1, "world server: bridge requests cannot cause a burst of replies")
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	local empty, reply = sent(EVENT)
+	check(sent_count(EVENT) == 1 and empty.n == 0 and reply.target == -1,
+		"world server: a valid bridge request publishes one authoritative empty snapshot")
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(EVENT) == 1, "world server: the fulfilled request does not cause another publication")
 	spawn_tick()
 	GAME_T = GAME_T + DAY + 1
 	spawn_tick()
@@ -596,7 +691,21 @@ local function map_tests()
 	character(502, 0, 0, 12, 122, true, "actor_freedom")
 	RANK[501], RANK[502] = 6000, 6000
 	board({ "s_far" })
+	local live = false
+	local old_live = coop.is_live
+	coop.is_live = function() return live end
 	start()
+	SendScriptCallback("actor_on_update")
+	check(sent_count(REQUEST) == 0, "map server: no startup request before the bridge can send")
+	live = true
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	local _, request = sent(REQUEST)
+	check(sent_count(REQUEST) == 1 and request.target == 0 and request.payload == "",
+		"map server: the first live update requests the list from the world without a player payload")
+	NOW = NOW + 5000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(REQUEST) == 1, "map server: no periodic requests while a snapshot is pending")
 	local r1 = spawn_tick()
 	GAME_T = GAME_T + DAY + 1
 	local r2 = spawn_tick() or r1
@@ -604,11 +713,39 @@ local function map_tests()
 	local sq = create_squad(SIMBOARD.smarts_by_names.s_far, "dolg_sim_squad_alpha")
 	SPAWNED = {}
 	sq.scripted_target, sq.assigned_target_id = "actor", 0
-	coop_main.on_event(EVENT, coop_main.encode({ n = 1, s1 = sq.id, c1 = 502 }), 0)
+	-- Carry the actual request and reply across the two facade answers in this single Lua fixture.
+	modes.install(coop_mode, "srv_world")
+	SendScriptCallback("load_state", { coop_bounty = { c = { [502] = { s = { [sq.id] = sq:section_name() } } } } })
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update") -- settle the load publication before delivering the request
+	local before = sent_count(EVENT)
+	coop_main.on_event(REQUEST, request and request.payload or "", BRIDGE)
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	local list, response = sent(EVENT)
+	check(sent_count(EVENT) == before + 1 and list.n == 1 and list.s1 == sq.id and list.c1 == 502,
+		"round trip: the world replies to the map's request with its current squad binding")
+	modes.install(coop_mode, "srv_map")
+	if response then coop_main.on_event(response.name, response.payload, 0) end
 	check(target(sq.id) == 502, "s38:3 map server: the world server's target of the squad is known here")
 	local t = sq:get_current_task()
 	check(t.gvid == 12 and t.lvid == 122, "s38:3 map server: the squad goes to its own target b, not the first player or the ghost ("
 		.. t.gvid .. ")")
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(REQUEST) == 1, "map server: receiving the reply does not send another request")
+	live = false
+	SendScriptCallback("actor_on_update")
+	check(target(sq.id) == nil, "map server: losing the bridge discards stale target bindings")
+	live = true
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(REQUEST) == 2, "map server: reconnect requests a fresh snapshot once")
+	if response then coop_main.on_event(response.name, response.payload, 0) end
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(REQUEST) == 2 and target(sq.id) == 502, "map server: the reconnect snapshot restores the binding")
+	coop.is_live = old_live
 	-- a squad with no published target stays the stock's (the ghost here; coop_npc_compat sends it to a player)
 	local other = create_squad(SIMBOARD.smarts_by_names.s_far, "dolg_sim_squad_alpha")
 	other.assigned_target_id = 0
@@ -619,15 +756,78 @@ local function map_tests()
 	SendScriptCallback("server_entity_on_unregister", sq, "sim")
 	check(target(sq.id) == nil, "map server unregister: the released squad has no mirrored target")
 	-- the target list is replaced by the next one: an empty list clears it
-	coop_main.on_event(EVENT, coop_main.encode({ n = 1, s1 = other.id, c1 = 502 }), 0)
+	coop_main.on_event(EVENT, snapshot(20, { n = 1, s1 = other.id, c1 = 502 }), 0)
 	check(target(other.id) == 502, "map server: the next list supplies another target")
-	coop_main.on_event(EVENT, coop_main.encode({ n = 0 }), 0)
+	coop_main.on_event(EVENT, snapshot(21, { n = 0 }), 0)
 	check(target(other.id) == nil, "map server: an empty list clears the targets")
 end
 
 -------------------------------------------------------------------------------
 -- Single player: the stock as it is
 -------------------------------------------------------------------------------
+local function missed_empty_tests()
+	print("== map server, missed empty bootstrap reply")
+	boot({ set = "srv_map", map = true })
+	start()
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	local _, request = sent(REQUEST)
+	srv_world(12, 0)
+	start()
+	if request then deliver(request, BRIDGE) end
+	NOW = NOW + 1000
+	SendScriptCallback("actor_on_update")
+	check(sent_count(EVENT) == 1, "empty recovery: the initial reply was queued but is lost in transport")
+	local _, first_reply = sent(EVENT)
+	NOW = NOW + 31000
+	SendScriptCallback("actor_on_update")
+	local empty, repair = sent(EVENT)
+	check(sent_count(EVENT) == 2 and empty.n == 0 and repair ~= first_reply,
+		"empty recovery: the world re-publishes even with zero bindings")
+
+	boot({ set = "srv_map", map = true })
+	start()
+	SendScriptCallback("actor_on_update")
+	NOW = NOW + 31000
+	SendScriptCallback("actor_on_update")
+	check(coop_bounty.targets_pending(), "empty recovery: startup is still pending after the loss")
+	if repair and repair ~= first_reply then deliver(repair, 0) end
+	check(not coop_bounty.targets_pending(), "empty recovery: the next empty generation ends the startup hold")
+	check(sent_count(REQUEST) == 1, "empty recovery: the map does not retry the request on the same connection")
+end
+
+local function snapshot_receive_tests()
+	print("== map server, snapshot assembly")
+	boot({ set = "srv_map", map = true })
+	start()
+	local function receive(g, i, k, n, sid, cid, from)
+		coop_main.on_event(EVENT, coop_main.encode({ g = g, i = i, k = k, n = n, s1 = sid, c1 = cid }), from or 0)
+	end
+	receive(1, 2, 2, 1, 4002, 502)
+	check(coop_bounty.targets_pending() and target(4002) == nil, "assembly: a last chunk arriving first cannot release the hold")
+	receive(1, 2, 2, 1, 4002, 502)
+	receive(1, 1, 2, 1, 4001, 501, BRIDGE)
+	receive(1, 1, 1025, 1, 4001, 501)
+	receive(1, 0, 2, 1, 4001, 501)
+	receive(1, 1, 2, 1, 4001, 65535)
+	receive(1, 1, 2, 1, 4002, 501)
+	check(coop_bounty.targets_pending() and target(4001) == nil, "assembly: invalid, cross-chunk duplicate and wrong-sender chunks do not commit")
+	receive(1, 1, 2, 1, 4001, 501)
+	check(not coop_bounty.targets_pending() and target(4001) == 501 and target(4002) == 502,
+		"assembly: both bindings become visible together after the complete out-of-order generation")
+	receive(2, 1, 2, 1, 4001, 502)
+	check(target(4001) == 501 and target(4002) == 502, "assembly: a partial refresh keeps the last complete generation")
+	receive(3, 1, 2, 1, 4003, 501)
+	receive(2, 2, 2, 1, 4002, 501)
+	check(target(4001) == 501 and target(4003) == nil, "assembly: late pieces cannot replace a newer in-flight generation")
+	receive(3, 2, 2, 1, 4004, 502)
+	receive(1, 1, 1, 0)
+	check(target(4001) == nil and target(4003) == 501 and target(4004) == 502,
+		"assembly: the complete refresh replaces the old snapshot and a stale empty cannot clear it")
+	receive(4, 1, 1, 1, 0, 502)
+	check(target(0) == nil and target(4003) == 501, "assembly: actor id zero cannot occupy a squad slot")
+end
+
 local function sp_tests()
 	print("== single player")
 	boot({ set = "none", mode = "sp", answers = "none" })
@@ -675,8 +875,12 @@ for _, name in ipairs(modes.names()) do
 		route_tests()
 	elseif name == "srv_world" then
 		server_tests()
+		request_tests()
+		large_snapshot_tests()
 	elseif name == "srv_map" then
 		map_tests()
+		missed_empty_tests()
+		snapshot_receive_tests()
 	elseif name == "none" then
 		sp_tests()
 	end

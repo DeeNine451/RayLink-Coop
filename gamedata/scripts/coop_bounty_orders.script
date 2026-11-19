@@ -1,0 +1,216 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- G18-4 (s38:5). Each bounty squad takes its orders on the process that runs its simulation.
+-- The co-op host has both player bodies. A level authority reads the body it holds, while an offline
+-- squad's simulation can use the target's ALife record. G18-3 supplies both the binding and the position.
+
+local TAG = "bounty_orders"
+local ACTOR_TARGET = 0
+local SAFE_DISTANCE_SQR = 40 * 40 -- stock sim_squad_bounty.state_timer
+local safe_levels, safe_smarts
+local stock_bounty, bounty_sections
+local held_orders = setmetatable({}, { __mode = "k" })
+local commander_target -- only during xr_reach_task's synchronous commander step
+
+local function position_of_target(character, peer)
+	if peer == nil or coop_mode.where(peer) == "joining" then return nil end
+	local pos, gv, lv, map = coop_bounty.position_of(character)
+	if pos and gv and lv and map then return pos, gv, lv, map end
+end
+
+local function can_hunt(character, peer)
+	local pos, _, _, map = position_of_target(character, peer)
+	if not pos then return false end
+	local map_name = alife():level_name(map)
+	if not map_name or safe_levels[map_name] then return false end
+	local graph = game_graph()
+	for name in pairs(safe_smarts) do
+		local smart = SIMBOARD.smarts_by_names[name]
+		local gv = smart and smart.m_game_vertex_id
+		if gv and graph:valid_vertex_id(gv) and graph:vertex(gv):level_id() == map
+			and smart.position:distance_to_sqr(pos) < SAFE_DISTANCE_SQR then
+			return false
+		end
+	end
+	return true
+end
+
+local function clear_actor_target(squad)
+	-- The native offline brain consumes the current task before stock Lua selects an assignment.
+	-- Generic simulation may also reuse current_target_id, so drop both copies of the pursuit.
+	if squad.assigned_target_id == ACTOR_TARGET then squad.assigned_target_id = nil end
+	if squad.current_target_id == ACTOR_TARGET then squad.current_target_id = nil end
+end
+
+local function set_order(squad, hunt)
+	squad.scripted_target = hunt and "actor" or nil
+	squad.rush_to_target = hunt
+	if not hunt then clear_actor_target(squad) end
+end
+
+-- The stock save marks known squads. A newly transferred squad may arrive before that record
+-- reaches this map, but G18-3 creates it from one of the stock's configured bounty sections.
+local function is_bounty(squad)
+	local section = squad:section_name()
+	if stock_bounty.get_active_squads()[squad.id] == section then return true end
+	for _, bounty_section in pairs(bounty_sections) do
+		if bounty_section == section then return true end
+	end
+	return false
+end
+
+-- A revoked hunt must not turn into a legacy hunt of the first player.
+function revoke(sid, section)
+	if not stock_bounty then return end
+	local active = stock_bounty.get_active_squads()
+	local squad = alife_object(sid)
+	if squad and ((section and squad:section_name() == section) or (not section and is_bounty(squad))) then
+		held_orders[squad] = nil
+		if squad.scripted_target == nil or squad.scripted_target == "actor" then
+			set_order(squad, false)
+		else
+			clear_actor_target(squad)
+		end
+	end
+	if section == nil or active[sid] == section then active[sid] = nil end
+end
+
+local function hold_for_snapshot(squad)
+	local order = held_orders[squad]
+	if not coop_bounty.targets_pending() then
+		if order then
+			held_orders[squad] = nil
+			if coop_bounty.target_of(squad.id) == nil and squad.scripted_target == nil then
+				squad.scripted_target, squad.rush_to_target = order.target, order.rush
+				squad.assigned_target_id = squad.assigned_target_id or order.assigned
+				squad.current_target_id = squad.current_target_id or order.current
+			end
+		end
+		return false
+	end
+
+	local target = squad.scripted_target
+	if target ~= nil and target ~= "actor" then
+		held_orders[squad] = nil
+		return false
+	end
+	if not order then
+		local assigned = squad.assigned_target_id == ACTOR_TARGET and ACTOR_TARGET or nil
+		local current = squad.current_target_id == ACTOR_TARGET and ACTOR_TARGET or nil
+		if (target == nil and assigned == nil and current == nil) or not is_bounty(squad) then return false end
+		held_orders[squad] = { target = target, rush = squad.rush_to_target, assigned = assigned, current = current }
+	end
+	set_order(squad, false)
+	return true
+end
+
+local function make_task(original)
+	return function(squad, ...)
+		hold_for_snapshot(squad)
+		return original(squad, ...)
+	end
+end
+
+local function make_update(original)
+	return function(squad, ...)
+		if coop_mods_core.active() and (coop_mode.leads_here() or coop_mode.decides_world()) and not hold_for_snapshot(squad) then
+			local character, peer = coop_bounty.target_of(squad.id)
+			if character ~= nil then
+				local ok, hunt = pcall(can_hunt, character, peer)
+				if not ok then coop_mods_core.report(TAG, "target safe zone", hunt) end
+				set_order(squad, ok and hunt)
+			end
+		end
+		return original(squad, ...)
+	end
+end
+
+local function make_legacy_attack(stock, original)
+	return function(state, ...)
+		if not coop_mods_core.active() then return original(state, ...) end
+		if not coop_mode.decides_world() then return end
+		-- Preserve the stock timer's cleanup, interval and orders for squads from old saves.
+		-- Bound squads are updated by their simulation, including ones currently held elsewhere.
+		for id, section in pairs(stock.get_active_squads()) do
+			if coop_bounty.target_of(id) == nil then
+				local squad = alife_object(id)
+				if squad and squad:section_name() == section then
+					squad.scripted_target = state and "actor" or nil
+					squad.rush_to_target = state and true or false
+				end
+			end
+		end
+	end
+end
+
+local function make_resolver(original)
+	return function(id, ...)
+		if id == ACTOR_TARGET and commander_target then return commander_target end
+		return original(id, ...)
+	end
+end
+
+local function make_commander(original)
+	return function(action, squad, ...)
+		if not coop_mods_core.active() or not coop_mode.leads_here() or hold_for_snapshot(squad)
+			or squad.assigned_target_id ~= ACTOR_TARGET or squad.scripted_target ~= "actor" then
+			return original(action, squad, ...)
+		end
+		local character, peer = coop_bounty.target_of(squad.id)
+		if character == nil then return original(action, squad, ...) end
+		local pos, gv, lv = position_of_target(character, peer)
+		if not pos then
+			set_order(squad, false)
+			return original(action, squad, ...)
+		end
+		-- Online movement looks up id 0 directly, while the offline task already goes through G18-3.
+		-- Give only this action a location for the bound character, retaining stock movement and combat.
+		local before = commander_target
+		commander_target = {
+			position = pos,
+			get_location = function() return pos, lv, gv end,
+			clsid = function() return clsid.script_actor end,
+		}
+		local ok, result = pcall(original, action, squad, ...)
+		commander_target = before
+		if not ok then error(result, 0) end
+		return result
+	end
+end
+
+local function install_orders()
+	local core = coop_mods_core
+	local stock = core.mod("sim_squad_bounty")
+	local sim = core.mod("sim_squad_scripted")
+	local class = sim and sim.sim_squad_scripted
+	if not stock or not core.fn(stock, "attack") or not core.fn(stock, "get_active_squads")
+		or not core.fn(class, "update") or not core.mod("coop_bounty") then return end
+	safe_levels = core.find_local(stock, "safe_levels")
+	safe_smarts = core.find_local(stock, "safe_smarts")
+	bounty_sections = core.find_local(stock, "faction_bounty_squads") or {}
+	stock_bounty = stock
+	if type(safe_levels) ~= "table" or type(safe_smarts) ~= "table" then
+		core.log(TAG, "stock safe zones unavailable")
+		return
+	end
+	core.wrap(class, "update", "bounty_orders.update", make_update)
+	core.wrap(class, "get_current_task", "bounty_orders.get_current_task", make_task)
+	core.wrap(stock, "attack", "bounty_orders.attack", function(original) return make_legacy_attack(stock, original) end)
+end
+
+local function install_commander()
+	if not safe_levels or not safe_smarts then return end
+	local core = coop_mods_core
+	local reach = core.mod("xr_reach_task")
+	local class = reach and reach.action_reach_task_location
+	local sim = core.mod("simulation_objects")
+	if not core.fn(class, "commander_execute") or not core.fn(sim, "get_server_entity") then return end
+	core.wrap(sim, "get_server_entity", "bounty_orders.resolve_commander_target", make_resolver)
+	core.wrap(class, "commander_execute", "bounty_orders.commander_execute", make_commander)
+end
+
+function on_game_start()
+	for _, step in ipairs({ { "orders", install_orders }, { "commander", install_commander } }) do
+		local ok, err = pcall(step[2])
+		if not ok then printf("! [coop_bounty_orders] start step %s failed: %s", step[1], tostring(err)) end
+	end
+end
