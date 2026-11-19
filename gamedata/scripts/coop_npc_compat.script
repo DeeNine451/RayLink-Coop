@@ -41,6 +41,7 @@ local function log(fmt, ...) P.log(TAG, fmt, ...) end
 local function report(what, err) P.report(TAG, what, err) end
 
 local EV_STAT = "npc.stat"
+local CIVIL_WAR_REWARD = "coop_g94_civil_reputation"
 
 local installed = false
 local host_on = false
@@ -84,7 +85,23 @@ local REWRITES = {
 		{ "function on_game_start()", "function relation_kill_check(victim, killer)\n\treturn coop_reputation.for_actor(killer, personal_kill_check, victim, killer)\nend\n\nfunction on_game_start()" },
 	},
 	smr_civil_war = {
-		{ "(not (killer.id == AC_ID) and", "(not coop_npc_is_player_id(killer.id) and" },
+		{ [[    if (not (killer.id == AC_ID) and civil_war_stalkers[squad.id]) then
+        return
+    end
+    local pf = db.actor:character_community()]], [[    local character, pf
+    if coop_npc_players.active() then
+        character, pf = coop_npc_compat.civil_war_killer(killer)
+        if not pf then return end
+    else
+        if (not (killer.id == AC_ID) and civil_war_stalkers[squad.id]) then
+            return
+        end
+        pf = db.actor:character_community()
+    end]] },
+		{ "db.actor:change_character_reputation(100)",
+			"if character then coop_npc_compat.credit_civil_war(npc, character, 100) else db.actor:change_character_reputation(100) end" },
+		{ "db.actor:change_character_reputation(75)",
+			"if character then coop_npc_compat.credit_civil_war(npc, character, 75) else db.actor:change_character_reputation(75) end" },
 	},
 	-- audit B3 (2026-10-31): the kill and loot checks of the New Tasks Addon tasks compared the killer / user with AC_ID, the
 	-- host's actor: a client's kill, hit or search of a body never counted. is_axe() reads db.actor's hand; it now gets
@@ -252,8 +269,36 @@ local function rerun(name, m, src, path)
 	return pcall(chunk, m)
 end
 
+-- The squad death is a world callback. A reported death already carries the killer's ALife record.
+function civil_war_killer(killer)
+	if not coop_mode.decides_world() then return end
+	local character = coop_credit.who(killer)
+	if character == nil then return end
+	local body = character == 0 and P.own_actor() or level.object_by_id(character)
+	if body then return character, body:character_community() end
+	if type(killer.community) == "function" then return character, killer:community() end
+end
+
+local function apply_civil_war_reward(actor, _, params)
+	local delta = params and tonumber(params[1])
+	if actor and (delta == 75 or delta == 100) then actor:change_character_reputation(delta) end
+end
+
+function credit_civil_war(victim, character, delta)
+	if not coop_credit.once(victim, CIVIL_WAR_REWARD) then return end
+	if character == 0 then
+		local actor = P.own_actor()
+		if actor then actor:change_character_reputation(delta) end
+	else
+		-- ZCP uses the direct reputation delta. The stock statistic helper also applies an arena veto and a cap.
+		coop_tasks.with_character(character, coop_tasks.send_personal,
+			{ k = "fx", f = CIVIL_WAR_REWARD, p1 = tostring(delta) })
+	end
+end
+
 local function apply_rewrite(name, list)
-	local m = mod(name)
+	local m
+	if name == "smr_civil_war" then m = coop_mods_core.mod(name) else m = mod(name) end
 	if not m then return end -- mod absent
 	local src, path = read_script(name)
 	if not src then
@@ -269,6 +314,10 @@ local function apply_rewrite(name, list)
 	if not ok then
 		report("rewrite " .. name, rerr)
 		return
+	end
+	if name == "smr_civil_war" then
+		xr_effects[CIVIL_WAR_REWARD] = apply_civil_war_reward
+		coop_tasks.forward_allow(CIVIL_WAR_REWARD)
 	end
 	applied[#applied + 1] = "rewrite:" .. name
 	log("rewrite %s applied (%d change(s))", name, #list)

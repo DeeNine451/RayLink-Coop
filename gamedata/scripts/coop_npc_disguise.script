@@ -17,6 +17,7 @@
 	    goodwill hits) and tells the player (npc.disg_expose): its machine drops the disguise, takes the
 	    reputation hit and shows the news. The meter and "does anybody see / remember me" go to the player
 	    every 2 s (npc.disg_meter), so the HUD bar and the "someone saw you" refusal of a disguise work there.
+	  - The level that sees a disguised player credits minutes_disguised through the personal statistics channel.
 	Single player and the host's own player: stock code, untouched.
 
 	Events: npc.disg (client -> host), npc.disg_meter / npc.disg_expose (host -> that client).
@@ -217,17 +218,43 @@ local function community_ok(c)
 	return COMMUNITIES[c] == true
 end
 
-local function host_on_state(t, from)
-	if not (community_ok(t.c) and community_ok(t.def)) then return end
+local function report_number(value, low, high, default)
+	local n = tonumber(value)
+	if not n or n ~= n then return default end
+	return math.max(low, math.min(high, n))
+end
+
+local function host_on_state(t, from, authenticated)
+	local known = community_ok(t.c) and community_ok(t.def)
+	if authenticated and not coop_trust.pass("g94_disguise_report", known and type(t.d) == "boolean",
+		"invalid disguise report from player %d", from) then return end
+	if not known then return end -- unknown communities cannot be passed to the engine
 	stats.reports_in = stats.reports_in + 1
 	local s = players_state[from] or { high = { v = 0, id = false }, mem = {}, next_cool = 0 }
 	players_state[from] = s
+	s.authenticated = authenticated
 	s.d = t.d == true
 	s.c, s.def = t.c, t.def
-	s.itm = math.max(0, math.min(100, tonumber(t.itm) or 1))
-	s.sp = math.max(0.1, math.min(10, tonumber(t.sp) or 1))
-	s.sk = math.max(0, math.min(100, tonumber(t.sk) or 0))
+	s.itm = report_number(t.itm, 0, 100, 1)
+	s.sp = report_number(t.sp, 0.1, 10, 1)
+	s.sk = report_number(t.sk, 0, 100, 0)
 	s.at = time_global()
+end
+
+local function install_state_event()
+	local tasks = coop_tasks
+	if not (coop_mode and tasks and tasks.send_personal) then
+		-- Suspicion can run without the personal-statistics channel.
+		P.on(EV_STATE, host_on_state, "host", TAG)
+		return
+	end
+	coop_mode.on_level_request(EV_STATE, function(payload, from)
+		if not coop_mode.leads_here() then return end
+		local ok, err = pcall(host_on_state, P.decode(payload), from, true)
+		if not ok then report("event " .. EV_STATE, err) end
+	end, function(_, from)
+		return P.active() and type(from) == "number" and from > 0 and from < 0x100
+	end)
 end
 
 local function in_disguise_zone(obj)
@@ -309,6 +336,28 @@ local function forget_companions(s, known_companion_id)
 	s.high = high
 end
 
+-- Match the mod's strict game-time interval, once per player regardless of the number of witnesses.
+local function credit_minute(s, peer, proxy, npc, comm, now)
+	local tasks = coop_tasks
+	if not (s.authenticated and tasks and coop_mode.where(peer) == "here"
+		and proxy:alive() and opt("state", true)) then return end
+	local character = proxy:id()
+	local elapsed = s.credit_character == character and now:diffSec(s.last_min_scan)
+	if elapsed and elapsed >= 0 and elapsed <= 60 then return end
+	local squad = get_object_squad and get_object_squad(npc)
+	if squad and axr_companions.companion_squads[squad.id] then return end
+	local current = proxy:character_community():gsub("^actor_", "")
+	if game_relations.is_factions_enemies(current, comm) then return end
+	if not coop_trust.pass("g94_disguise_faction", current == s.c and current ~= s.def,
+		"player %d reported a disguise that does not match the observed faction", peer) then return end
+	if not elapsed or elapsed < 0 then
+		s.credit_character, s.last_min_scan = character, now
+		return
+	end
+	s.last_min_scan = now
+	tasks.with_character(character, tasks.send_personal, { k = "stat", f = "minutes_disguised" })
+end
+
 local function npc_on_update(npc)
 	if not host_on or next(players_state) == nil or not (npc and npc:alive()) then return end
 	local g = gd()
@@ -350,6 +399,7 @@ local function npc_on_update(npc)
 						s.high.v = s.high.v - 5
 					end
 					if s.high.v > cfg().break_point then expose(s, peer, npc, comm, m.is_enem) end
+					credit_minute(s, peer, proxy, npc, comm, now)
 				end
 			elseif m then
 				m.first = nil
@@ -433,7 +483,8 @@ function on_game_start()
 		if not ok then report("install", err) end
 		installed = true
 	end
-	P.on(EV_STATE, host_on_state, "host", TAG)
+	local ok, err = pcall(install_state_event)
+	if not ok then report("install state event", err) end
 	P.on(EV_METER, client_on_meter, "client", TAG)
 	P.on(EV_EXPOSE, client_on_expose, "client", TAG)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
