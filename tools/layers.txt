@@ -59,9 +59,6 @@ hostplay engine/src/xrGame/coop/hostplay/**
 hostplay engine/src/xrCoop/hostplay/**
 
 # --- engine: removed in S2 ------------------------------------------------------------------------------------------
-dying engine/src/xrCoop/coop_soft_move.h
-dying engine/src/xrGame/coop/coop_world_server.cpp
-dying engine/src/xrGame/coop/coop_world_server.h
 
 # --- scripts --------------------------------------------------------------------------------------------------------
 srv gamedata/scripts/coop_srv_*.script
@@ -76,8 +73,6 @@ srv gamedata/scripts/coop_quests_far.script
 srv gamedata/scripts/coop_task_audience.script
 srv gamedata/scripts/coop_storyline.script
 srv gamedata/scripts/coop_scorcher.script
-dying gamedata/scripts/coop_world_wait.script
-dying gamedata/scripts/coop_world_stage_file.script
 
 # --- gate only: until step S4 the 9 server scripts also run in the co-op process (coop_scorcher.script:417 installs
 # condlist functions in every mode, coop_storyline.script:1472-1486 registers actor_on_update in every process), so a
