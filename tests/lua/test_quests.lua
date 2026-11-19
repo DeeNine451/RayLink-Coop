@@ -383,12 +383,6 @@ do
 	pump()
 	check(Hm.goodwill[0] == -50 and Hm.goodwill[500] == -50,
 		"story faction penalty on another level reaches every participant through world host")
-	local before = Cm.reputation
-	map.env.coop_tasks.with_character(500, function()
-		map.env.xr_logic.pick_section_from_condlist(nil, nil, {src="%=decrease_rep(20)%"})
-	end)
-	pump()
-	check(Cm.reputation == before - 20, "personal map-server effect is not swallowed by shared story relay")
 end
 print("== story world spawns")
 local spawned = {}

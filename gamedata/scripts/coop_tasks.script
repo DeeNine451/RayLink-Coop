@@ -490,7 +490,6 @@ local host = {
 	map_seen = {},
 	fines = {}, -- character -> pending guide fine; never a reusable peer slot
 	map_epoch = tostring(os.time()) .. ":" .. tostring(time_global()) .. ":" .. tostring({}),
-	map_retry = 0,
 	give_near = nil, -- object of the condlist effect that is giving a task
 	next_dead_update = 0,
 	talks = {}, -- round 4: peer -> the talks the host saw of a player who stepped a stage (host.talk_look)
@@ -1107,6 +1106,9 @@ end
 function _spoke_to(from, nid)
 	local qc = rawget(_G, "coop_quests_core")
 	if type(qc) == "table" and qc.is_far_peer and qc.is_far_peer(from) then
+		-- S5 (A-S5T): his map server names the NPC he talks to (the part "talk"): the talk with `nid` now or in the last 15 s
+		local cur = host.far_partner(from)
+		if cur ~= nil then return host.far_with(from, cur, nid) end
 		-- round 6 (S2 of the round 5 review): his map server's word means "he holds a dialog lock now"; the host remembers when
 		-- it last said so (host.far_said, looked at by the scan too) and takes a talk of the last 15 s, as the co-op's talk_recent
 		return host.far_said(from, (function()
@@ -1131,6 +1133,38 @@ function host.far_said(from, live)
 	return ft.now or (ft.at ~= nil and now() - ft.at <= 15000)
 end
 
+-- The NPC a player talks to on another level, as reported by that level: a world object id, false for nobody,
+-- or nil when no partner fact is available. An older engine only reports whether the player is in a dialog.
+function host.far_partner(from)
+	local qc = rawget(_G, "coop_quests_core")
+	if not (type(qc) == "table" and type(qc.is_far_peer) == "function" and qc.is_far_peer(from) == true) then return nil end
+	local ok, id = pcall(function() return qc.part("talk").partner(from) end)
+	if not ok or id == nil then return nil end
+	if type(id) == "number" and id > 0 and id < 65535 and id == math_floor(id) then return id end
+	return false
+end
+
+-- S5: player `from` talks to NPC `with` now (false: to nobody), as his map server names him: noted with the time. -> he talked to
+-- NPC `nid` now or in the last 15 s (the co-op's talk_recent window); nid 0 / nil: only noted, false. host.far_talk[from].with:
+-- NPC -> when last named; older than 15 s is forgotten.
+function host.far_with(from, with, nid)
+	local ft = host.far_talk[from]
+	if not ft then
+		ft = { now = false, at = nil }
+		host.far_talk[from] = ft
+	end
+	local t = now()
+	ft.with = ft.with or {}
+	for npc, at in pairs(ft.with) do
+		if t - at > 15000 then ft.with[npc] = nil end
+	end
+	ft.now = with ~= false
+	if with then ft.at, ft.with[with] = t, t end
+	nid = tonumber(nid)
+	if not nid or nid <= 0 then return false end
+	return ft.with[nid] ~= nil
+end
+
 -- Round 6: the scan's look at the dialogs of the players on a map server's level (host.far_said keeps when each was last in one);
 -- a player who left is forgotten.
 function host.far_watch()
@@ -1148,11 +1182,12 @@ function host.far_watch()
 end
 
 -- Host (round 3, R2-S3): true when _spoke_to's answer for player `from` names no partner. The talk of a player on a map server's
--- level is that server's word "he is in some dialog" (LevelBodyFacts.talking, one byte in coop_levels_wire.h): naming the NPC
--- needs a field there, a change of the protocol.
+-- level is that server's word "he is in some dialog" (LevelBodyFacts.talking, one byte in coop_levels_wire.h). S5 (A-S5T): protocol
+-- 33 also reports the NPC (LevelBodyFacts.partner), which can explicitly say he is talking to nobody.
 function _talk_vague(from)
 	local qc = rawget(_G, "coop_quests_core")
 	return type(qc) == "table" and type(qc.is_far_peer) == "function" and qc.is_far_peer(from) == true
+		and host.far_partner(from) == nil
 end
 
 function ops.give(tm, id, t, from)
@@ -1297,9 +1332,9 @@ end
 --     look runs every 0.5-1 s: right after a step it still points to the last NPC); without one, the host's last look;
 --   - the host saw the talk a moment ago (_spoke_to: its talk locks, 15 s);
 --   - one step per talk: a talk a step used moves nothing more; a new step needs a new talk (host.talk_of).
--- Server: his map server says only "in some dialog" and names no partner (_talk_vague; a field in LevelBodyFacts would name him,
--- a protocol change, the owner's decision). A step is then judged ok only for a task with neither a giver nor a target, at an
--- NPC its condlist names, one step per dialog.
+-- Server: S5 (A-S5T), protocol 33: his map server names the NPC of his talk (LevelBodyFacts.partner, the part "talk"): judged as
+-- above. An engine that does not name him says only "in some dialog" (_talk_vague): a step is then judged ok only for a task with
+-- neither a giver nor a target, at an NPC its condlist names, one step per dialog.
 function host.stage_talk(id, tsk, from, sp)
 	sp = tonumber(sp)
 	if not sp or sp <= 0 or sp >= 65535 or sp ~= math_floor(sp) then return false, "a step, and no talk named" end
@@ -1339,9 +1374,9 @@ end
 -- NPC the task points to (tasks_delivery complete_simulation_task: the parcel's receiver), or with an NPC of a task without a
 -- giver (dialogs_lostzone's story tasks, tasks_defense barrier_defense_*_complete). So: the host saw a talk a moment ago
 -- (_spoke_to) with the giver (round 5, S1: or a member of the giver's squad), with the NPC the task points to now (or a member of
--- its squad), or, for a task without a giver, with any NPC. Server: his map
--- server says only "in some dialog" (_talk_vague: the partner is not reported there): that is enough. A map server's turn-in is
--- its level's logic: not judged.
+-- its squad), or, for a task without a giver, with any NPC. Server: S5 (A-S5T), his map server names the NPC of his talk (the part
+-- "talk"): judged the same; an engine that does not name him says only "in some dialog" (_talk_vague): that is enough. A map
+-- server's turn-in is its level's logic: not judged.
 function host.complete_talk(tm, id, t, from)
 	if (tonumber(host.req_from) or 0) >= 0x100 then return true end
 	local tsk = tm.task_info[id]
@@ -1469,7 +1504,8 @@ end
 --   near         the turning-in player's character is within 50 m of that smart (the escort's destination: the dialog's
 --                check_nearest_smart_dist_le 40, the warfare escort's smart when one is set), and no escort anomaly is pending;
 --   loot         the companion squad's members (online here) looted at least that many (dialogs_darkvalley).
--- Server: the partner of his talk is not reported (_talk_vague), the rest is the world server's view (far bodies, its records).
+-- Server: the partner of his talk as his map server names it (S5, the part "talk"; an older engine: not reported, _talk_vague), the
+-- rest is the world server's view (far bodies, its records).
 host.DIALOG_TURN_INS = (function() -- (a function: the chunk has no room for more locals)
 	local DLG_ISG = { npc = { "jup_depo_isg_leader" }, squad = { "jup_depo_isg_leader_squad" } }
 	local DLG_OWL = { npc = { "esc_2_12_stalker_nimble" }, items = { "mar_base_owl_stalker_trader_task_1_pda" }, recent = true }
@@ -1720,8 +1756,11 @@ end
 -- Numbers are kept only for the keys a step used (host.talk_of); a talk the looks never saw gets one at the step that names
 -- it. Looked at by the scan (host.talk_watch) and at each step. nil: no talk facts here (an engine without the talk locks).
 function host.talk_look(from)
-	local cur
-	if _talk_vague(from) then
+	local cur = host.far_partner(from)
+	if cur ~= nil then
+		-- S5 (A-S5T): the NPC his map server names, as the co-op's talk lock; a new NPC is a new talk
+		host.far_with(from, cur, 0)
+	elseif _talk_vague(from) then
 		_spoke_to(from, 0) -- round 6: its answer has the 15 s window; a new dialog is told by the live word it noted
 		local ft = host.far_talk[from]
 		cur = ft and ft.now and "?" or false
@@ -2054,7 +2093,10 @@ function host.give_own(id, from, vars, t, bt, own, put, drop)
 		for k, part in pairs(judged) do
 			if k ~= "bt" and want[part] then put[k], own[k], drop[k] = nil, nil, true end
 		end
-		return own, put, want.job and false or bt, drop
+		-- P-STALE (F2 round 7 review): no bounty target when the host's own run is a bounty's ("job"): not his (`want.job and false
+		-- or bt` was always bt), not the last run's (false clears it, ops.give)
+		if want.job then return own, put, false, drop end
+		return own, put, bt, drop
 	end
 	for k, part in pairs(judged) do
 		if k ~= "bt" and want[part] then put[k], own[k], drop[k] = nil, nil, true end
@@ -2430,6 +2472,64 @@ local function host_resend_effects(peer)
 	for _, e in ipairs(wait) do send(EV_REWARD, e.s, peer) end
 end
 
+-- Host: effect `fname` on the own character of the player the effects being run now belong to (FORWARD_EFFECTS), params p: it goes
+-- to his machine (send_effect, k = "fx"), which runs it there. -> true: his (sent, or skipped: the task was not paid, or it is
+-- nobody's, character 0 where seat 0 plays none); false: run it here. Module functions below, not locals: the chunk is at Lua's
+-- limit (test_engine_header); the server's part (coop_srv_tasks, from coop_mode.when_srv) uses them too.
+function forward_fx(fname, p)
+	local peer = rcpt_client()
+	if ctx and ctx.character == 0 then
+		local away, seat = host.char0_elsewhere()
+		if away then
+			if seat == nil then return true end -- nobody's: not run on this process's ghost either
+			peer = seat
+		end
+	end
+	if peer and ctx.unpaid then
+		log("'%s': %s skipped, the task was not paid", tostring(ctx.task), fname)
+		return true
+	end
+	-- a world without split levels changes faction as a group: the host runs it once for all (coop_faction)
+	local cf = _G.coop_faction
+	local together = type(cf) == "table" and type(cf.group_mode) == "function" and cf.group_mode() == true
+	if peer and type(p) == "table" and not together then
+		local t = { k = "fx", f = fname }
+		for i = 1, 4 do
+			if p[i] ~= nil then t["p" .. i] = tostring(p[i]) end
+		end
+		send_effect(peer, t)
+		return true
+	end
+	return false
+end
+
+-- S5 (A-S5T): a server's part adds an effect a player's machine runs for the world (its name in FORWARD_EFFECTS: his machine takes it
+-- from the host, the world server takes it from a map server). Whoever wraps it calls forward_fx. Nothing adds one in the co-op.
+function forward_allow(fname)
+	if type(fname) ~= "string" or fname == "" or #fname > 80 then return false end
+	FORWARD_EFFECTS[fname] = true
+	return true
+end
+
+function forward_allowed(fname) return type(fname) == "string" and FORWARD_EFFECTS[fname] == true end
+
+-- Host: personal effect `t` (k = "stat" | "fx") for the player the effects being run now belong to (with_character): it waits for
+-- his machine's answer as a reward's does (send_effect). -> false outside such a scope.
+function send_personal(t)
+	if not (ctx and type(t) == "table") then return false end
+	send_effect(ctx.rcpt, t)
+	return true
+end
+
+-- The effects of players this process sent and nobody answered yet: character -> { { q, s }, ... } (a map server sends its own up
+-- again until the world server answers, coop_srv_tasks). The table itself: a load replaces it.
+function fx_pending() return host.fx_wait end
+
+-- The map servers' effects the host ran already: "<bridge>:<epoch>:<number>" -> true (kept in the save, save_effects).
+function map_seen() return host.map_seen end
+
+function decode_payload(s) return unpack_payload(s) end
+
 -- Host: money for (or from, n < 0) a client's character. The money is the host ledger's (F2 T6): coop.money_grant
 -- changes the character's money (never below 0) and the engine sends the client its new balance. A client's own
 -- Lua never adds it: the engine would count that as the client's income, limited by the Script allowance, and a
@@ -2679,10 +2779,24 @@ local function host_task_callback(orig, tsk, state)
 	if rcpt ~= 0 then log("rewards of '%s' go to #%s%s", id, tostring(rcpt), share and " (money shared)" or "") end
 end
 
+-- Character 0 is seat 0's player (the host's; a world server's seat plays none). Where this process's own actor is no player (a
+-- server's ghost: a map server, a world server), character 0 is not this actor. -> true and the peer whose it is: 0 when seat 0 plays
+-- a character, nil when it plays none (nobody's). false: this actor is a player (the co-op host), or no mode facade here.
+-- S5 (A-S5T): was "peer 0 on a map server", from the hybrid, where the host played; on a server it sent the effect up to a world
+-- server whose seat plays nobody, which dropped it without an answer, and the map server sent it again every second for good.
+function host.char0_elsewhere()
+	local m = coop_mode
+	if not (type(m) == "table" and type(m.actor_is_player) == "function" and m.actor_is_player() == false) then return false end
+	return true, (type(m.seat_plays) == "function" and m.seat_plays(0) == true) and 0 or nil
+end
+
 -- The client whose character the rank and reputation being changed now belong to, or nil: the host's.
 local function stat_peer()
-	-- Peer zero on a map server is the real host player, not this process's ghost actor.
-	if ctx and ctx.character == 0 and api.is_map_server and api.is_map_server() then return 0 end
+	-- character 0 where this process's actor is no player: seat 0's player, or nobody's (host.char0_elsewhere)
+	if ctx and ctx.character == 0 then
+		local away, seat = host.char0_elsewhere()
+		if away then return seat end
+	end
 	local p = rawget(_G, "coop_npc_players")
 	if ctx == nil and p and p.in_identity and p.in_identity() then
 		local peer = p.peer_of(db.actor)
@@ -3039,28 +3153,12 @@ local function patch_rewards()
 		end
 		-- tasks_multifetch pays on_complete with db.actor:give_money (the host's actor): to the one who turned it in
 		if type(xe.multifetch_remove) == "function" then xe.multifetch_remove = redirect_payout(xe.multifetch_remove) end
-		-- effects on the player's own character run on that player's machine
+		-- effects on the player's own character run on that player's machine (forward_fx)
 		for fname in pairs(FORWARD_EFFECTS) do
 			local orig = xe[fname]
 			if type(orig) == "function" then
 				xe[fname] = function(actor, npc, p)
-					local peer = rcpt_client()
-					if ctx and ctx.character == 0 and api.is_map_server and api.is_map_server() then peer = 0 end
-					if peer and ctx.unpaid then
-						log("'%s': %s skipped, the task was not paid", tostring(ctx.task), fname)
-						return
-					end
-					-- a world without split levels changes faction as a group: the host runs it once for all (coop_faction)
-					local cf = _G.coop_faction
-					local together = type(cf) == "table" and type(cf.group_mode) == "function" and cf.group_mode() == true
-					if peer and type(p) == "table" and not together then
-						local t = { k = "fx", f = fname }
-						for i = 1, 4 do
-							if p[i] ~= nil then t["p" .. i] = tostring(p[i]) end
-						end
-						send_effect(peer, t)
-						return
-					end
+					if forward_fx(fname, p) then return end
 					return orig(actor, npc, p)
 				end
 			end
@@ -4197,13 +4295,13 @@ local function patch_task_news()
 end
 
 -------------------------------------------------------------------------------
--- task_manager patches (installed once; every wrapper checks the role when called)
+-- task_manager patches (installed once, host.patched; every wrapper checks the role when called)
 -------------------------------------------------------------------------------
-local patched = false
+host.patched = false
 
 -- Host: the player a task given by a script belongs to: the one nearest to its giver, or to the zone of the effect that gave
--- it. A task nothing locates stays the host's.
-local function nearest_taker(giver)
+-- it. A task nothing locates stays the host's. (A field of `host`, not a local: the chunk is at Lua's limit.)
+function host.nearest_taker(giver)
 	local qc = rawget(_G, "coop_quests_core")
 	if not (type(qc) == "table" and qc.nearest_character) then return 0 end
 	local pos, gv
@@ -4312,7 +4410,7 @@ local function patch_task_manager()
 				host.given_by[id] = who
 				-- a follow-up task given by a reward belongs to the player who earned it
 				host.taker[id] = host.exec_peer or host.taker_note[id] or (ctx and ctx.rcpt) or 0
-				if who == nil and ctx == nil and has_clients() then host.taker[id] = nearest_taker(giver) end
+				if who == nil and ctx == nil and has_clients() then host.taker[id] = host.nearest_taker(giver) end
 				host.taker_note[id] = nil
 				host.finisher[id] = nil
 				host.taker_char[id] = character_of(host.taker[id])
@@ -4421,7 +4519,8 @@ end
 -- check runs for each client's active task, and the marker of a target somebody still needs stays when the host's own target
 -- is on this level. The markers are the group's, a client sees those of the others too. A player on a map server's level has
 -- his on the exits of his level: the check looks from there (far view); the stock spot goes to him through coop_story.
-local function target_elsewhere(target)
+-- (Both modes: in the co-op the clients' active tasks get their markers here too. S5 (A-S5T): fields of `host`, not locals.)
+function host.target_elsewhere(target)
 	local ok, yes = pcall(function()
 		local se = alife_object(target)
 		if not se then return false end
@@ -4430,17 +4529,17 @@ local function target_elsewhere(target)
 	return ok and yes == true
 end
 
-local function guide_wanted()
+function host.guide_wanted()
 	local tm = tmgr()
 	if not (tm and type(tm.task_info) == "table") then return false end
 	for _, id in pairs(host.active) do
 		local rt = tm.task_info[id]
-		if is_task(rt) and rt.current_target ~= nil and target_elsewhere(rt.current_target) then return true end
+		if is_task(rt) and rt.current_target ~= nil and host.target_elsewhere(rt.current_target) then return true end
 	end
 	return false
 end
 
-local function host_guides()
+function host.guides()
 	local tm = tmgr()
 	local qc = rawget(_G, "coop_quests_core")
 	if not (next(host.active) and tm and type(tm.task_info) == "table" and type(qc) == "table" and qc.with_actor) then return end
@@ -4454,7 +4553,7 @@ local function host_guides()
 			local ok, err = true, nil
 			if body.far then
 				ok, err = qc.with_level_of(peer, qc.with_actor, fields, rt.check_level, rt, rt.current_target)
-			elseif target_elsewhere(rt.current_target) then
+			elseif host.target_elsewhere(rt.current_target) then
 				ok, err = qc.with_actor(fields, rt.check_level, rt, rt.current_target)
 			end
 			if not ok then report("guide of #" .. tostring(peer), err) end
@@ -4462,11 +4561,12 @@ local function host_guides()
 	end
 end
 
-local function patch_guides()
+function host.patch_guides()
 	local mod = rawget(_G, "task_objects") or task_objects
 	local cls = mod and mod.CGeneralTask
 	local orig = cls and cls.remove_guider_spot
 	if type(orig) ~= "function" then return end
+	local guide_wanted = host.guide_wanted
 	cls.remove_guider_spot = function(self, ...)
 		if is_host() and guide_wanted() then return end
 		return orig(self, ...)
@@ -4492,71 +4592,17 @@ end
 -------------------------------------------------------------------------------
 -- Update, events, start
 -------------------------------------------------------------------------------
-local next_tick = 0
-
--------------------------------------------------------------------------------
--- Host: worlds hurt by a give that died
--------------------------------------------------------------------------------
--- Split levels, builds 45-49: a task whose on_init makes a squad next to the player died on the world server (the far view handed
--- the stock smart terrain a stand-in of the new squad, coop_srv_quests_far object_there). The dialog phrase had given its info already
--- and the dialog is closed by it (dont_has_info): the task can be asked for by nobody. `info` is taken back when the task is not
--- on and none of the infos its own run sets (`ran`) is here. Once a world: a task dropped later is the player's choice.
-host.lost_gives = {
-	{ info = "fanat_training_start_done", task = "task_fanat_training_1",
-		ran = { "fanat_training_boars_death_done", "fanat_training_back_to_village_done", "esc_2_12_stalker_fanat_death" } },
-	{ info = "cs_story_task0_ambush_renegade_start", task = "cs_task0_ambush_renegade_story",
-		ran = { "renegade_cs_story_squad_1_death", "cs_story_task0_ambush_renegade_done" } },
-	{ info = "cs_story_task0_ambush_renegade_done", task = "cs_task0_ambush_renegade_story2",
-		ran = { "renegade_cs_story_squad_2_death", "cs_story_task0_ambush_renegade_done2" } },
-	{ info = "cs_story_task0_ambush_renegade_done2", task = "cs_task0_ambush_renegade_story3",
-		ran = { "renegade_cs_story_squad_3_death", "cs_story_task0_ambush_renegade_done3" } },
-}
-
-function heal_lost_gives()
-	local tm = tmgr()
-	if not (tm and type(tm.task_info) == "table" and db.actor) then return 0 end
-	local healed = 0
-	for _, e in ipairs(host.lost_gives) do
-		-- the give that died left the task object in the journal with no task of the engine behind it: lost all the same
-		local half = tm.task_info[e.task] ~= nil and not engine_task_running(e.task)
-		local lost = has_alife_info(e.info) and task_known(e.task) and (tm.task_info[e.task] == nil or half)
-		for _, info in ipairs(e.ran) do lost = lost and not has_alife_info(info) end
-		if lost then
-			if half then tm.task_info[e.task] = nil end
-			db.actor:disable_info_portion(e.info)
-			healed = healed + 1
-			log("task '%s' was asked for and never given: info '%s' is taken back, its dialog offers it again", e.task, e.info)
-		end
-	end
-	return healed
-end
-
-function _heal_once()
-	local l = api.levels
-	if not (l and l.split and l.split()) or not db.actor then return end
-	if load_var(db.actor, "coop_lost_gives", false) then return end
-	save_var(db.actor, "coop_lost_gives", true)
-	local ok, err = pcall(heal_lost_gives)
-	if not ok then report("lost gives", err) end
-end
+-- S5 (A-S5T): the server's parts of these that were here - a world hurt by a give that died (heal_lost_gives), a map server's
+-- effects sent up again until the world server answers, the world server's coop_rep_map / coop_rep_map_ack - are coop_srv_tasks'.
+host.next_tick = 0
 
 local function actor_on_update()
 	if not api then return end
 	local t = now()
-	if api.is_map_server and api.is_map_server() == true and t >= host.map_retry then
-		host.map_retry = t + 1000
-		for _, wait in pairs(host.fx_wait) do
-			for _, e in ipairs(wait) do send("coop_rep_map", e.s, 0) end
-		end
-	end
-	if t < next_tick then return end
-	next_tick = t + 250
+	if t < host.next_tick then return end
+	host.next_tick = t + 250
 	if is_host() and next(host.fines) ~= nil then flush_fines() end
 	if is_host() then
-		if not host.healed then
-			host.healed = true
-			_heal_once()
-		end
 		if not has_clients() then
 			-- nobody to send to: host_scan does not run, the audiences of tasks that ended go here
 			local aud = task_audience()
@@ -4567,7 +4613,7 @@ local function actor_on_update()
 		if t >= host.next_scan then
 			host.next_scan = t + SCAN_MS
 			host_scan(false)
-			host_guides()
+			host.guides()
 			host.talk_watch()
 		end
 		if t >= host.next_list then
@@ -4583,7 +4629,7 @@ end
 -- task_manager:update and before the actor_on_update callback: the host's revive delay, longer for a wipe, would stop the
 -- group's tasks, their mirror and every client's turn-in (the stub falls back to open after PENDING_MS). A live actor's
 -- binder does all of this itself.
-local function actor_dead()
+function host.actor_dead()
 	local a = db and db.actor
 	if not a then return false end
 	local ok, alive = pcall(a.alive, a)
@@ -4591,7 +4637,7 @@ local function actor_dead()
 end
 
 local function dead_tick()
-	if not (api and active() and actor_dead()) then return false end
+	if not (api and active() and host.actor_dead()) then return false end
 	local t = now()
 	if is_host() and t >= host.next_dead_update then
 		host.next_dead_update = t + DEAD_UPDATE_MS
@@ -4650,39 +4696,7 @@ local function register_events()
 	cm.add_event_handler(EV_NEWS, guarded("task news", client_on_news))
 	cm.add_event_handler(EV_VAR, guarded("shared var", host_on_var))
 	cm.add_event_handler(EV_ACK, guarded("effect answer", host_on_effect_ack))
-	cm.add_event_handler("coop_rep_map_ack", guarded("map effect answer", function(payload, from)
-		if from ~= 0 or not (api.is_map_server and api.is_map_server() == true) then return end
-		local q = tonumber(payload)
-		for _, wait in pairs(host.fx_wait) do
-			for i, e in ipairs(wait) do if e.q == q then table.remove(wait, i); return end end
-		end
-	end))
-	cm.add_event_handler("coop_rep_map", guarded("map personal effect", function(payload, from)
-		if not is_host() or type(from) ~= "number" or from < 0x100 then return end
-		local effect = unpack_payload(payload)
-		if (effect.k ~= "stat" and not (effect.k == "fx" and FORWARD_EFFECTS[effect.f]))
-			or type(effect.f) ~= "string" or #effect.f > 80
-			or type(effect.e) ~= "string" or #effect.e > 100 or type(effect.q) ~= "number" or effect.q < 1 or effect.q % 1 ~= 0
-			or type(effect.i) ~= "number" then return end
-		-- character 0 is the host player's; a world server whose seat plays no character has only its ghost there (owner 2026-11-13)
-		local member = effect.i == 0 and not (api.is_dedicated and api.is_dedicated() == true)
-		for _, p in ipairs(players()) do if p.avatar_id == effect.i then member = true end end
-		local group = reward_group()
-		for _, m in ipairs(group and group.list() or {}) do if m.id == effect.i then member = true end end
-		if not member then return end
-		local q = effect.q
-		local key = tostring(from) .. ":" .. effect.e .. ":" .. tostring(q)
-		if not host.map_seen[key] then
-			with_character(effect.i, function()
-				if effect.i == 0 then
-					if effect.k == "stat" then apply_stat(effect)
-					else xr_effects[effect.f](db.actor, nil, {effect.p1, effect.p2, effect.p3, effect.p4}) end
-				else effect.q, effect.e, effect.i = nil, nil, nil; send_effect(ctx.rcpt, effect) end
-			end)
-			host.map_seen[key] = true
-		end
-		send("coop_rep_map_ack", tostring(q), from)
-	end))
+	-- (a map server's personal effects, coop_rep_map / coop_rep_map_ack: coop_srv_tasks, S5)
 	cm.add_event_handler(EV_VARS, guarded("shared vars", function(payload, from)
 		if from == 0 and is_client() then client_apply_shared(payload) end
 	end))
@@ -4756,15 +4770,15 @@ function on_game_start()
 	if not api then return end
 	local md = _G.coop_economy_mdata
 	if md and md.register_player_key then md.register_player_key("coop_task_fx_done", function() return cl.fx_done end) end
-	if not patched then
-		patched = true
+	if not host.patched then
+		host.patched = true
 		local steps = {
 			{ "task_manager", patch_task_manager },
 			{ "task news", patch_task_news },
 			{ "rewards", patch_rewards },
 			{ "statistics", patch_statistics },
 			{ "stash lines", patch_stash_line },
-			{ "guide markers", patch_guides },
+			{ "guide markers", host.patch_guides },
 			{ "group items", patch_party_items },
 			{ "shared vars", patch_shared_vars },
 			{ "events", register_events },

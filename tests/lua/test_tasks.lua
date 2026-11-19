@@ -1705,6 +1705,152 @@ do
 	for i = #MACHINES, 1, -1 do if MACHINES[i] == C2 then table.remove(MACHINES, i) end end
 end
 
+-- ---------------------------------------------------------------- S5 (A-S5T): the partner of a talk on another level
+-- Server (build 57, protocol 33): the map server of a player's level names the NPC he talks to there (LevelBodyFacts.partner, coop
+-- levels.talk_partner); coop_srv_tasks hands it to the Core as the part "talk" (test_srv_tasks). The world server then judges a stage
+-- step, a turn-in and a dialog's end as the co-op host does: the talk with that NPC now or in the last 15 s. An older engine
+-- reports only whether the player is in a dialog.
+print("== S5 (A-S5T), Server: the NPC a player talks to on a map server's level is named, his steps and turn-ins are judged as in the co-op")
+do
+	local trust = setmetatable({}, { __index = H.env })
+	local fh = assert(io.open("gamedata/scripts/coop_trust.script", "r"))
+	local tf = assert(loadstring(fh:read("*a"), "@coop_trust.script"))
+	fh:close()
+	setfenv(tf, trust)
+	tf()
+	H.env.coop_trust = trust
+	local function failed(name) return (trust.status()[name] or { failed = 0 }).failed end
+	for _, m in ipairs({ H, C }) do
+		local ti = m.env.task_manager.task_ini
+		local known = ti.section_exist
+		ti.section_exist = function(s, id) return id == "s5_talk" or id == "s5_story" or known(s, id) end
+	end
+	local function req(op, id, extra)
+		C.env.coop.send_event("coop_tq", "op=s" .. op .. ";i=s" .. id .. (extra or ""), 0)
+		pump()
+	end
+	local function turned(tsk)
+		local yes = tsk.forced_status == "complete"
+		tsk.forced_status = nil
+		return yes
+	end
+	C.tm:give_task("s5_talk", 777)
+	pump()
+	C.tm:give_task("s5_story")
+	pump()
+	local tk, st = H.tm.task_info.s5_talk, H.tm.task_info.s5_story
+	check(tk ~= nil and st ~= nil and tk.task_giver_id == 777, "(client 1 took a task of NPC 777 and a story task with no giver)")
+	-- client 1 stands on a map server's level: the world server holds no talk lock of his
+	local partner = nil
+	local part = { partner = function(p) return p == 1 and partner or false end }
+	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end, part = function(n) return n == "talk" and part or nil end }
+	H.env.coop.levels = { talking = function(p) return p == 1 and partner ~= nil end }
+	H.env.coop.talk_recent = function() return false end
+	trust.reset_for_test({ default = "log", task_stage = "refuse", task_complete_talk = "refuse" })
+
+	partner = 777
+	req("stage", "s5_talk", ";st=n1;sp=n777")
+	check(tk.stage == 1 and failed("task_stage") == 0,
+		"Server, partner named: a step of a task with a giver, in his talk with the giver: ok (vague before: refused)")
+	req("stage", "s5_talk", ";st=n2;sp=n777")
+	check(tk.stage == 1 and failed("task_stage") == 1, "Server, partner named: a second step in the same talk: refused (one step per talk)")
+	partner = 779
+	req("stage", "s5_talk", ";st=n2;sp=n779")
+	check(tk.stage == 1 and failed("task_stage") == 2, "Server, partner named: a step in a talk with 779, who is not its giver: refused")
+	NOW = NOW + 16000
+	req("stage", "s5_talk", ";st=n2;sp=n777")
+	check(tk.stage == 1 and failed("task_stage") == 3, "Server, partner named: 16 s after the talk with 777 he talks to 779: a step at 777 is refused")
+
+	partner = 777
+	req("complete", "s5_talk", ";sp=n777")
+	check(turned(tk) and failed("task_complete_talk") == 0, "Server, partner named: a turn-in in his talk with the giver: ok")
+	partner = nil
+	NOW = NOW + 1000
+	req("complete", "s5_talk", ";sp=n777")
+	check(turned(tk) and failed("task_complete_talk") == 0, "Server, partner named: 1 s after that talk closed (z_gavrilenko_tasks_fix): ok")
+	partner = 779
+	req("complete", "s5_talk", ";sp=n779")
+	check(not turned(tk) and failed("task_complete_talk") == 1,
+		"Server, partner named: a turn-in in a talk with 779, neither its giver nor its target: refused (vague before: ok)")
+	partner = 780
+	req("complete", "s5_story", ";sp=n780")
+	check(turned(st) and failed("task_complete_talk") == 1, "Server, partner named: a task without a giver, in a talk with any NPC: ok")
+	partner = 781
+	NOW = NOW + 16000
+	req("complete", "s5_story", ";sp=n780")
+	check(not turned(st) and failed("task_complete_talk") == 2,
+		"Server, partner named: he names 780, his map server says he talks to 781 and his talk with 780 is 16 s old: refused")
+
+	-- An older engine registers a callback with no partner facts.
+	part.partner = function() return nil end
+	NOW = NOW + 16000
+	partner = 779
+	local f0 = failed("task_stage")
+	req("stage", "s5_talk", ";st=n2;sp=n777")
+	check(tk.stage == 1 and failed("task_stage") == f0 + 1, "no partner fact on an older engine: a step of a task with a giver is refused")
+	req("complete", "s5_talk", ";sp=n779")
+	check(turned(tk) and failed("task_complete_talk") == 2, "no partner fact on an older engine: a turn-in in some dialog is still accepted")
+
+	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_recent = nil, nil, nil
+	for _, id in ipairs({ "s5_talk", "s5_story" }) do
+		H.tm.task_info[id], H.engine_tasks[id], C.tm.task_info[id] = nil, nil, nil
+	end
+	trust.reset_for_test({ default = "log" })
+	H.env.coop_trust = nil
+end
+
+-- ---------------------------------------------------------------- F2 round 7, P-STALE (temp\f2_r7\review7.json)
+-- host.give_own, "refuse": the host cannot make its own pick (no NPC of the give here: a giver id that is an item, a squad on another
+-- level). It returned `want.job and false or bt`, which Lua reads as `(want.job and false) or bt`: always his bt. So the dead target he
+-- named stayed the host's, or, when he named none, the last run's dead target in bounties_by_id, and the bounty turned in at once.
+print("== F2 round 7 P-STALE: a bounty the host cannot make for him keeps no dead target (refuse); log as build 56")
+do
+	local trust = setmetatable({}, { __index = H.env })
+	local fh = assert(io.open("gamedata/scripts/coop_trust.script", "r"))
+	local tf = assert(loadstring(fh:read("*a"), "@coop_trust.script"))
+	fh:close()
+	setfenv(tf, trust)
+	tf()
+	H.env.coop_trust = trust
+	for _, m in ipairs({ H, C }) do
+		local ti = m.env.task_manager.task_ini
+		local known = ti.section_exist
+		ti.section_exist = function(s, id) return id == "s5_bty" or known(s, id) end
+	end
+	local made = 0
+	H.env.coop_quests_offer = {
+		offers_of = function() return nil end, -- no offer of his giver
+		-- the task's own generator: his target is no pick of its setup; the host's own run is a bounty's ("job")
+		own_pick = function(id, vars, bt) return false, "a target the bounty's setup does not pick", { bt = "job" }, { job = true } end,
+		host_make = function() made = made + 1 error("no NPC of the give here") end,
+	}
+	local hb, cb = H.env.axr_task_manager.bounties_by_id, C.env.axr_task_manager.bounties_by_id
+	local function again()
+		H.tm.task_info.s5_bty, H.engine_tasks.s5_bty, C.tm.task_info.s5_bty = nil, nil, nil
+		hb.s5_bty, cb.s5_bty = nil, nil
+	end
+	trust.reset_for_test({ default = "log", task_give_offer = "refuse" })
+	cb.s5_bty = 4702 -- a target he killed already; his giver id 8800 is an item, no talker
+	C.tm:give_task("s5_bty", 8800)
+	pump()
+	check(H.tm.task_info.s5_bty ~= nil and made == 1, "(refuse: given; the host tried to make its own and could not)")
+	check(hb.s5_bty == nil, "refuse, P-STALE F3b: the dead target he named (4702) is not the host's target: " .. tostring(hb.s5_bty))
+	again()
+	hb.s5_bty = 4700 -- the last run's dead target, still in the host's table
+	C.tm:give_task("s5_bty", 8800)
+	pump()
+	check(H.tm.task_info.s5_bty ~= nil and hb.s5_bty == nil,
+		"refuse, P-STALE F3: he names none; the last run's dead target (4700) is not kept: " .. tostring(hb.s5_bty))
+	again()
+	trust.reset_for_test({ default = "log" })
+	cb.s5_bty = 4702
+	C.tm:give_task("s5_bty", 8800)
+	pump()
+	check(hb.s5_bty == 4702, "log: his target is written as in build 56 (a line only): " .. tostring(hb.s5_bty))
+	again()
+	H.env.coop_quests_offer, H.env.coop_trust = nil, nil
+end
+
 -- ---------------------------------------------------------------- single player untouched
 print("== no session")
 H.env.coop.is_active = function() return false end

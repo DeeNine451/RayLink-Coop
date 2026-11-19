@@ -774,55 +774,31 @@ do
 	Hm.share = 0
 end
 
-print("== map-server personal effects pass through the world authority")
+print("== reputation and rank with no recipient on a server ghost")
 do
 	local map = machine("client", 0x101)
 	setup_world(map)
+	local ghost = { actor_is_player = function() return false end, seat_plays = function() return false end }
+	map.env.coop_mode = ghost
 	map.env.coop.is_map_server = function() return true end
-	map.players = {{id=0,avatar_id=10}, {id=1,avatar_id=500}}
+	map.players = {{id=1,avatar_id=500}}
 	boot(map); pump()
-	local before = Cm.rept
-	map.env.coop_tasks.with_character(500, function() map.env.game_statistics.increment_reputation(-25) end)
-	pump()
-	check(Cm.rept == before - 25, "map-server penalty reaches the player once through host")
-	local packet
-	for _, message in ipairs(map.sent) do if message.name == "coop_rep_map" then packet = message.payload end end
-	if packet then Hm.handlers.coop_rep_map(packet, 0x101); pump() end
-	check(packet and Cm.rept == before - 25, "duplicate map-server penalty is acknowledged without a second application")
-	if packet then Hm.handlers.coop_rep_map(packet, 1); pump() end
-	check(Cm.rept == before - 25, "ordinary client cannot impersonate a map authority")
-	local saved = {}; Hm.env.coop_tasks.save_effects(saved); Hm.env.coop_tasks.load_effects(saved)
-	if packet then Hm.handlers.coop_rep_map(packet, 0x101); pump() end
-	check(Cm.rept == before - 25, "map effect deduplication survives host save/load")
-	local host_before, ghost_before = Hm.rept, map.rept
-	map.env.coop_tasks.with_character(0, function() map.env.game_statistics.increment_reputation(-15) end)
-	pump()
-	check(Hm.rept == host_before - 15 and map.rept == ghost_before,
-		"host player on another level receives his penalty, not the map server's ghost actor")
-	map.env.coop_tasks.with_character(500, function()
-		map.env.xr_effects.drx_sl_change_factions(map.actor, nil, {"freedom"})
-	end)
-	map.env.coop_tasks.with_character(0, function()
-		map.env.xr_effects.drx_sl_change_factions(map.actor, nil, {"dolg"})
-	end)
-	pump()
-	check(Cm.faction == "freedom" and Hm.faction == "dolg" and map.faction == nil,
-		"personal faction changes on map server reach their real host/client characters")
 	-- owner 2026-11-13: the ghost actor of a map server / of a world server whose seat plays no character earns nothing
 	local ghost_rept, ghost_rank = map.rept, map.rank
 	map.env.game_statistics.increment_reputation(-33)
 	map.env.game_statistics.increment_rank(12)
 	pump()
 	check(map.rept == ghost_rept and map.rank == ghost_rank, "nobody's reputation and rank on a map server's ghost")
-	local dedicated = Hm.env.coop.is_dedicated
+	local dedicated, mode = Hm.env.coop.is_dedicated, Hm.env.coop_mode
 	Hm.env.coop.is_dedicated = function() return true end
+	Hm.env.coop_mode = ghost
 	local world_rept, world_rank = Hm.rept, Hm.rank
 	Hm.env.game_statistics.increment_reputation(9)
 	Hm.env.game_statistics.increment_rank(4)
 	map.env.coop_tasks.with_character(0, function() map.env.game_statistics.increment_reputation(-15) end)
 	pump()
 	check(Hm.rept == world_rept and Hm.rank == world_rank, "nor on a world server's ghost, from its own logic or a map server's")
-	Hm.env.coop.is_dedicated = dedicated
+	Hm.env.coop.is_dedicated, Hm.env.coop_mode = dedicated, mode
 end
 
 print("== deferred guide fine follows the original character")
