@@ -6,36 +6,22 @@
 ; file's digest (profile_sha256), and this folder is part of the scenario digest: an edit here is an Ядро change.
 ; Values as the stand ran them on 2026-11-18. appdata_t is the test player's profile; the scenarios copy the host's and
 ; the single player's profiles from it (New-Profile). appdata_server is the world server's, appdata_ms1 / appdata_ms2
-; its map servers'. Step S2 (the hybrid removed) drops coop_story_together and coop_soft_host_move here.
+; its map servers'. Step S2 (docs/plans/2026-11-18-two-modes.md, the hybrid removed) took coop_split_levels,
+; coop_world_server, coop_story_together and coop_soft_host_move out of the engine: their lines still leave a profile,
+; and stand_head.py refuses a row of theirs here (layer guard round 6).
 [appdata_t]
-coop_split_levels 0
-coop_world_server 0
-coop_story_together 1
-coop_soft_host_move 1
 coop_max_map_servers 6
 coop_map_servers_rev 1
 coop_mapserver_linger 600
 [appdata_server]
-coop_split_levels 0
-coop_world_server 0
-coop_story_together 1
-coop_soft_host_move 1
 coop_max_map_servers 6
 coop_map_servers_rev 1
 coop_mapserver_linger 3
 [appdata_ms1]
-coop_split_levels 0
-coop_world_server 0
-coop_story_together 1
-coop_soft_host_move 1
 coop_max_map_servers 6
 coop_map_servers_rev 1
 coop_mapserver_linger 3
 [appdata_ms2]
-coop_split_levels 0
-coop_world_server 0
-coop_story_together 1
-coop_soft_host_move 1
 coop_max_map_servers 6
 coop_map_servers_rev 1
 coop_mapserver_linger 3

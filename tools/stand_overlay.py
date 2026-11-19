@@ -11,8 +11,15 @@ stand (a materialized game root with one merged gamedata\\), keeping everything 
 - Revert: copy <backup dir> back over the stand and delete the files of new_files.txt.
 - Hard links (TZ.md R21): the launcher's stand is hard links to the mods' own files. A stand file is never written in
   place: its old name is deleted first (read-only-safe) and a new file takes the name (tools/mo2_stand.py replace_file),
-  so the mod keeps its bytes and its read-only attribute.
+  so the mod keeps its bytes and its read-only attribute. A junction or symlink folder on the way to a file is refused
+  before anything is written: a write through it would land in another folder, a mod's (review 5 of the layer guard).
+- This copies the WORKING tree, untracked files included: the stand then runs code no commit has. The stand's own
+  record (.raylink-head-deploy.json, tools/mo2_stand.py remember_on_stand; review 5, B3/B4) names every gamedata file
+  this added and every mod file it replaced, before the first write; tools/stand/stand_head.py deploy (the first step of
+  tools/stand_hostplay.ps1 and stand_srv.ps1) moves away what HEAD does not have and puts the mods' files back, so no
+  stand mark ever certifies an overlay.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -21,6 +28,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I leaves the script
 import mo2_stand  # noqa: E402  (replace_file: never write into a hard-linked stand file)
 SKIP_NAMES = {"axr_options.ltx", "cache_dbg.ltx"}
 SKIP_EXT = {".bak", ".tmp", ".log", ".orig"}
+OURS = ("Anomaly Coop - Engine/", "Anomaly Coop - Core/", "Anomaly Coop - GAMMA/")  # our layers, as the launcher names them
+
+
+def mod_sources(stand: Path) -> dict:
+    """Lower-case stand path -> the mod file the launcher placed there (our own layers left out); {} without a
+    manifest."""
+    manifest = stand / ".raylink-stand.json"
+    if not manifest.is_file():
+        return {}
+    out = {}
+    for entry in json.loads(manifest.read_text(encoding="utf-8")).get("entries", []):
+        source = (entry.get("source") or "").replace("\\", "/")
+        if entry.get("rel") and source and not any(layer in source for layer in OURS):
+            out[entry["rel"].replace("\\", "/").lower()] = source
+    return out
 
 
 def main():
@@ -48,20 +70,31 @@ def main():
     latest = {}
     for src, rel in jobs:
         latest[rel] = src  # a GAMMA-layer file replaces the Core one of the same path
-    copied, added = [], []
+    through = sorted({f for f in (mo2_stand.link_folder(stand, rel.as_posix()) for rel in latest) if f})
+    if through:
+        sys.exit(f"refusing: {len(through)} junction or symlink folder(s) in the stand ({', '.join(through[:10])}): a "
+                 "write through one lands in another folder (a mod's); the launcher builds real folders")
+    mods = mod_sources(stand)
+    todo, copied, added = [], [], []
     for rel, src in latest.items():
         dst = stand / rel
         data = src.read_bytes()
         if dst.is_file() and dst.read_bytes() == data:
             continue
+        (copied if dst.is_file() else added).append(rel)
+        todo.append((rel, data))
+    if not dry and todo:
+        # the stand's record first (review 5, B4): a deploy from any worktree finds what this put there
+        mo2_stand.remember_on_stand(
+            stand, new_files=[r.as_posix() for r in added if r.parts[0] == "gamedata"],
+            replaced_files=[r.as_posix() for r in copied if r.parts[0] == "gamedata" and r.as_posix().lower() in mods])
+    for rel, data in todo:
+        dst = stand / rel
         if dst.is_file():
             keep = backup / rel
             if not keep.exists() and not dry:
                 keep.parent.mkdir(parents=True, exist_ok=True)
                 keep.write_bytes(dst.read_bytes())  # a copy of our own (copy2 would carry a mod's read-only bit)
-            copied.append(rel)
-        else:
-            added.append(rel)
         if not dry:
             dst.parent.mkdir(parents=True, exist_ok=True)
             mo2_stand.replace_file(dst, data)
@@ -75,6 +108,9 @@ def main():
         print("  ~", rel.as_posix())
     for rel in added:
         print("  +", rel.as_posix())
+    if todo and not dry:
+        print("stand_overlay: the stand runs this WORKING tree now (untracked files too); tools\\stand_hostplay.ps1 and "
+              "stand_srv.ps1 deploy HEAD first and move this overlay's extra files away")
 
 
 if __name__ == "__main__":

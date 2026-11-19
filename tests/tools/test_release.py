@@ -6,6 +6,8 @@ Run: python -m pytest tests\\tools\\test_release.py -q
 """
 import hashlib
 import json
+import os
+import re
 import subprocess
 import zipfile
 from pathlib import Path
@@ -550,3 +552,80 @@ def test_prepare_writes_the_plan(tmp_path, capsys):
     assert plan["tag"] == "dev-57" and plan["prerelease"] is True
     assert (tmp_path / "temp/dev-57/notes-coop.md").exists()
     capsys.readouterr()
+
+
+# --- review 5, B2: no way to publish around release.py ----------------------------------------------------------------
+# tools/publish_dev.sh and publish_dev_engine.sh ran `gh release create dev-<N>.<M> --prerelease` on any zip or exe: no
+# gate, no mark, no clean tree, no HEAD (temp/modes_review5b/a3_publish_dev.txt). The launcher serves the newest dev-*
+# prerelease, so that was a Dev build with no check at all. Every publishing command in tools/ must be release.py's,
+# whose draft and publish refuse without the verify of this tag (and verify runs check_gates --release --layers).
+
+PUBLISHES = re.compile(r"\bgh\s+release\s+(?:create|edit|upload|delete)\b|\bgh\s+api\b[^\n]*(?:-X|--method)\s*(?:POST|PATCH|"
+                       r"PUT|DELETE)\b|\bgit\b[^\n]*\bpush\b", re.I)
+TEXT_SUFFIXES = {".sh", ".ps1", ".py", ".cmd", ".bat", ".js", ".mjs", ".lua"}
+GATED_PUBLISHER = {"tools/release.py"}
+# Not the layer guard's file (the lead's): it publishes b<N> and pushes main of both public repositories with no gate.
+# The lead removes it or turns it into a refusal like publish_dev.sh; then this entry goes (the test fails while stale).
+NOT_YET_GATED = {"tools/publish_github.sh"}
+
+
+def publishing_tools() -> set[str]:
+    found = set()
+    for path in sorted((ROOT / "tools").rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES or "__pycache__" in path.parts:
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            code = line.lstrip()
+            if code.startswith(("#", "rem ", "REM ", "::", "--")):
+                continue
+            if PUBLISHES.search(code):
+                found.add(path.relative_to(ROOT).as_posix())
+                break
+    return found
+
+
+def test_only_release_py_publishes():
+    found = publishing_tools()
+    assert found - GATED_PUBLISHER - NOT_YET_GATED == set(), (
+        "these tools publish around release.py (no gate): make them refuse and name `python -I tools/release.py "
+        "--channel <dev|stable> --build <N> verify|draft|publish`")
+    assert NOT_YET_GATED <= found, "NOT_YET_GATED names a file that no longer publishes: drop it from the list"
+
+
+def git_bash():
+    """Git for Windows' bash (never System32's WSL launcher), or None."""
+    import shutil
+    found = [shutil.which("bash")]
+    exec_path = subprocess.run(["git", "--exec-path"], capture_output=True, text=True).stdout.strip()
+    if exec_path:
+        found.append(str(Path(exec_path).parents[2] / "bin" / "bash.exe"))
+    for path in found:
+        if path and Path(path).is_file() and "system32" not in path.lower():
+            return path
+    return None
+
+
+@pytest.mark.parametrize(("script", "asset"), [("publish_dev.sh", "anomaly-coop-0.57.0-dev.zip"),
+                                               ("publish_dev_engine.sh", "AnomalyCoopDX11AVX.exe")])
+def test_publish_dev_scripts_refuse_and_name_release_py(tmp_path, script, asset):
+    text = (ROOT / "tools" / script).read_text(encoding="utf-8")
+    assert "tools/release.py" in text
+    assert not any(PUBLISHES.search(l) for l in text.splitlines() if not l.lstrip().startswith("#")), text
+    bash = git_bash()
+    if bash is None:
+        pytest.skip("no Git bash here: the text checks above ran")
+    # a fake gh first on PATH: it leaves a file when anything calls it
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    called = tmp_path / "gh_called"
+    (fake_bin / "gh").write_text(f"#!/usr/bin/env bash\necho \"$@\" > '{called.as_posix()}'\nexit 0\n", encoding="utf-8",
+                                 newline="\n")
+    (tmp_path / asset).write_bytes(b"MZ a build")
+    (tmp_path / "notes.md").write_text("Что нового\n", encoding="utf-8")
+    env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))
+    done = subprocess.run([bash, str(ROOT / "tools" / script), "57.0", str(tmp_path / asset), str(tmp_path / "notes.md")],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=tmp_path,
+                          timeout=60)
+    assert done.returncode != 0, done.stdout + done.stderr
+    assert not called.exists(), "gh was called: " + called.read_text(encoding="utf-8")
+    assert "tools/release.py --channel dev --build" in done.stdout + done.stderr, done.stdout + done.stderr

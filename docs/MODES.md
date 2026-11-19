@@ -347,12 +347,13 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
   такой файл и падает. `coop_*.script`, который везёт мод GAMMA (манифест называет мод: сегодня это
   `coop_compat_alq.script` мода «Alife CENSORED» — у игроков он тоже есть), остаётся, называется в `stand_foreign=`, а его
   байты входят в `stand_fingerprint`.
-- **Профили (S2).** Режим процесса стенда решают и переменные профиля (`user.ltx`: `coop_split_levels`,
-  `coop_world_server`, `coop_story_together`, `coop_soft_host_move`, `coop_max_map_servers`, `coop_map_servers_rev`,
-  `coop_mapserver_*`), которые каждый прошлый запуск записал обратно. Перед выкладкой и **перед каждым сценарием**
-  `stand_head.py profile` убирает эти строки из `user.ltx` каждой папки, которую называет `tools\stand\stand_profile.ltx`
-  (`appdata_t`, `appdata_server`, `appdata_ms1`, `appdata_ms2`; профили хоста и одиночной игры сценарии копируют из
-  `appdata_t`), и пишет строки шаблона.
+- **Профили (S2).** Режим процесса стенда решают и переменные профиля (`user.ltx`: `coop_max_map_servers`,
+  `coop_map_servers_rev`, `coop_mapserver_*`), которые каждый прошлый запуск записал обратно. Перед выкладкой и **перед
+  каждым сценарием** `stand_head.py profile` убирает эти строки из `user.ltx` каждой папки, которую называет
+  `tools\stand\stand_profile.ltx` (`appdata_t`, `appdata_server`, `appdata_ms1`, `appdata_ms2`; профили хоста и одиночной
+  игры сценарии копируют из `appdata_t`), и пишет строки шаблона. Четыре переменные шаг S2 убрал из движка
+  (`coop_split_levels`, `coop_world_server`, `coop_story_together`, `coop_soft_host_move`): их строки `profile` тоже
+  убирает из `user.ltx`, а строку шаблона с ними отклоняет (шестой круг).
 - **Папка и exe (S3, C12).** Метка называет exe стенда; считается только exe по пути самого стенда (`--stand`, по
   умолчанию `E:\RayLinkGames\GAMMA\game-dev`) и только при том же `stand_fingerprint` (SHA-256 манифеста
   `.raylink-stand.json` и `coop_*.script` стенда, кроме проб). `exe_source=` — HEAD движка, из которого exe собран
@@ -379,10 +380,22 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
 - **PowerShell** (`tools\stand_common.ps1`: `Write-StandBytes`, `Write-StandText`, `Write-StandLines`, `Copy-StandFile`,
   `Copy-StandTree` вместо robocopy, `Remove-StandFile` вместо `Remove-Item -Force`) — во всех сценариях `tools\stand\*.ps1`
   (пробы `coop_zz_*` в `gamedata\scripts`, `axr_options.ltx` и его возврат из копии, `fsgame_*.ltx`, `user.ltx`,
-  `appdata_*`, `bin_b`), в `tools\deploy.ps1` и `tools\launch.ps1`. Тест `test_stand_scripts_write_into_the_stand_only_through_the_helpers`
-  не пускает в эти файлы `Copy-Item -Force`, `[IO.File]::WriteAll*`, `Set-Content`, `Out-File`, robocopy и
-  `Remove-Item -Force` (кроме копий в `temp\stand` репозитория). `tools\deploy.ps1` отказывается строить стенд поверх
-  папки с `.raylink-stand.json`.
+  `appdata_*`, `bin_b`), в `tools\deploy.ps1`, `tools\launch.ps1` и `tools\stand_server.ps1` (`fsgame_server.ltx`,
+  `appdata_server`; пятое ревью, B1). Тест `test_stand_scripts_write_into_the_stand_only_through_the_helpers`
+  не пускает `Copy-Item -Force`, `[IO.File]::WriteAll*`, `Set-Content`, `Out-File`, robocopy и `Remove-Item -Force`
+  (кроме копий в `temp\stand` репозитория) в **каждый** `tools\**\*.ps1`, который принимает или называет корень игры
+  (`$Stand`, `$GameDir`, `$TestRoot`, `$GameRoot`, `RayLinkGames`, `game-dev`): сегодня 18 файлов, в том числе
+  `ded_check.ps1`, `ded_probe.ps1`, `split_test.ps1`. `.ps1` без этих имён должен стоять в списке теста
+  `NOT_A_GAME_ROOT_WRITER` с причиной (`package.ps1`, `stand_common.ps1`): новый скрипт не проскочит без классификации.
+  Python-инструменты, которые пишут в корень игры (`--stand`, `--game`, `game-dev`, `import mo2_stand`: `stand_head.py`,
+  `stand_overlay.py`, `mo2_stand.py`, `check_gates.py`), проверяет `test_python_stand_tools_never_write_in_place`:
+  `write_bytes`/`write_text`, `open(…, "w"/"a"/"+")`, `shutil.copy*`, `os.chmod` допустимы только в строках списка
+  `PY_WRITES_ALLOWED` (резервная папка, свой новый файл, метка в `temp\gates`). `tools\deploy.ps1` отказывается строить
+  стенд поверх папки с `.raylink-stand.json`.
+- **Связи папок (пятое ревью, S14).** Папка стенда, которая — junction или symlink в папку мода: запись через неё удалила
+  бы файл мода и положила наш в папку мода. `stand_head.py deploy` до первой записи отказывает, `check` падает, `links`
+  считает её в `blocked=`; `stand_overlay.py` отказывает до записи; `Set-StandFile`, `Remove-StandFile` и `Copy-StandTree`
+  бросают ошибку. Лаунчер таких папок не делает (на 2026-11-19 на стенде их 0).
 - **Проверка до записи.** `stand_head.py deploy` до первой записи проверяет, что каждое имя, которое он удалит, удалить
   можно (открытие с `DELETE`: имя держит запущенная со стенда игра — отказ, ничего не записано), и печатает
   `replaced_links=` — сколько заменённых файлов были ссылками. `stand_head.py links --stand <стенд>` — тот же план без
@@ -412,6 +425,34 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
   содержит штампа исходников сейчас (`tools\test_lua.cmd`, когда не может пересобрать прогонщик, гоняет старый и
   возвращает 0). Штамп считается как в `test_lua.cmd`: первые 8 hex SHA-1 `runlua.c`, `native_coop.cpp`, заголовков
   `engine\src\xrCoop`, которые он включает, и `test_lua.cmd`.
+
+Пятое ревью (B1-B4, шестой круг, 2026-11-19):
+
+- **Пропущенный писатель (B1).** `tools\stand_server.ps1` писал `fsgame_server.ltx` через `[IO.File]::WriteAllText` и
+  гнал robocopy `appdata` → `appdata_server` прямо в файлы стенда (на поддельном стенде изменил 2 файла мода по жёстким
+  ссылкам). Теперь — `Write-StandText`, `Write-StandLines`, `Copy-StandTree`; тест запускает его на стенде из настоящих
+  жёстких ссылок, а проверка «запись только через помощники» находит писателей сама (выше).
+- **Публикация без ворот (B2).** `tools\publish_dev.sh` и `publish_dev_engine.sh` выкладывали `dev-<N>.<M>` без меток, без
+  чистого дерева и без HEAD. Теперь они ничего не публикуют: отказ (код 2) и команды `release.py`. Тест
+  `test_only_release_py_publishes` не пускает команду публикации (`gh release create/edit/upload/delete`, `gh api -X
+  POST…`, `git push`) ни в один файл `tools/`, кроме `release.py`. Исключение одно и временное: `tools/publish_github.sh`
+  (не файл защиты слоёв: выкладывает `b<N>` и двигает `main` без ворот) — ведущая убирает его или делает отказом, после
+  чего строка уходит из `NOT_YET_GATED` (тест падает, пока строка лишняя).
+- **Неотслеживаемые файлы оверлея (B3).** `stand_overlay.py` копирует рабочее дерево вместе с неотслеживаемыми файлами.
+  На стенде лаунчера (`.raylink-stand.json`) `stand_head.py` считает остатком **каждый** файл под `gamedata`, которого
+  манифест не называет и нет в HEAD, кто бы его ни положил: выкладка уносит его в `head_backup\removed`, `check` падает,
+  пока он есть. Не трогаются: `gamedata/configs/localization.ltx` (его пишет игра), имена, которые игра не читает
+  (`*.bak`, `*.tmp`, `*.log`, `*.orig`, `axr_options.ltx`, `cache_dbg.ltx`), пробы `coop_zz_*` из HEAD.
+- **Память выкладки (B4).** Списки «что добавили мы» и «какой файл мода мы перекрыли» живут теперь в самом стенде —
+  `<стенд>\.raylink-head-deploy.json` (свой новый файл, не ссылка; пишется до первой записи); их пишут и `stand_head.py`, и
+  `stand_overlay.py`. `temp\stand\head_backup\new_files.txt` и `replaced_files.txt` остаются историей этого рабочего
+  дерева и тоже читаются. Без всякой памяти (её удалили) решают манифест и история репозиториев: файл мода, который
+  лаунчер положил ссылкой (`copy=false`), чья запись в папке разошлась с размером и временем манифеста, имя уже не
+  ссылка и байты не мода, — возвращается из мода; файл, который лаунчер скопировал (`copy=true`), возвращается, если его
+  байты — блоб наших репозиториев (`git cat-file`): копии, которые переписывает сама игра, не блоб наших и остаются.
+  Цена: один обход `gamedata` стенда по записям папок (файлы не открываются) и `os.stat` только для разошедшихся.
+  Не закрыто: перекрытие копии мода (`copy=true`) **неотслеживаемым** файлом оверлея, если удалили и память стенда, —
+  таких байтов нет ни в одном блобе.
 
 Метка стенда считается, только если в ней `mode=` своего стенда, `dirty=0`, в `scenarios=` все сценарии своего стенда
 (`check_gates.SCENARIOS`, тест сверяет их со списками в `stand_*.ps1`), совпали оба HEAD и SHA-256 exe, `exe=` — exe
@@ -461,6 +502,11 @@ gates: FAIL (3)
 | HEAD уронил файл, которого не знает манифест, или наше перекрытие файла мода (B2, B3) | `new_files.txt` пополняется файлами HEAD без строки манифеста; `replaced_files.txt` и возврат файла мода; `check` падает |
 | exe собран из правки, которую `git checkout` вернул в engine-ci; правка `sdk/` или `xrGame.vcxproj` engine-ci (B4) | время каждого файла до доверия индексу; сравнение `sdk/` и `xrGame.vcxproj` без строк `vcxproj_add` |
 | `tests.ok` от старого `runlua.exe` (B5) | `--tests-mark write` ищет в прогонщике штамп исходников сейчас |
+| Инструмент, которого нет в списке, пишет в файл стенда на месте (пятое ревью, B1: `stand_server.ps1`) | тест сам находит каждый `.ps1` / `.py`, который берёт корень игры; новый `.ps1` без классификации не проходит |
+| Dev-сборка выложена скриптом мимо `release.py` (пятое ревью, B2) | `publish_dev*.sh` отказывают; тест не пускает команды публикации в `tools/` кроме `release.py` |
+| Неотслеживаемый файл оверлея (DLTX, DXML) остался на стенде, а метка его не видит (пятое ревью, B3) | на стенде лаунчера остаток — любой файл `gamedata`, которого нет ни в манифесте, ни в HEAD |
+| Память выкладки потеряна (`temp\stand` почищен, другое рабочее дерево) — уроненный HEAD хук и перекрытие мода остались (пятое ревью, B4) | память в самом стенде; без неё — манифест (ссылка заменена) и блобы наших репозиториев |
+| Запись через папку-junction в папку мода (пятое ревью, S14) | `stand_head`, `stand_overlay`, помощники PowerShell отказывают до записи |
 
 ---
 
@@ -558,7 +604,10 @@ gates: FAIL (3)
 
 Стенд — только `E:\RayLinkGames\GAMMA\game-dev`. Живая игра владельца не трогается. Файлы стенда — жёсткие ссылки на
 файлы модов MO2 (Р21): SC, SS и выкладка пишут в стенд только новыми файлами (раздел 5, «Жёсткие ссылки»); первую
-выкладку после пятого круга ведущая начинает с LN.
+выкладку после пятого круга ведущая начинает с LN. После шестого круга LN показывает и то, что выкладка уберёт без всякой
+памяти прошлых прогонов (`would_remove=`: файлы `gamedata`, которых нет ни в манифесте, ни в HEAD; `would_restore=`:
+файлы модов под нашей уроненной правкой): первую выкладку шестого круга ведущая начинает с LN и просматривает эти
+строки. Память выкладки теперь в стенде (`.raylink-head-deploy.json`), а не только в `temp\stand\head_backup`.
 
 **Выпуск (правило выпуска, третье ревью):** любая правка продукта в диапазоне выпуска — **G T SC SS на одном exe**, какой
 бы слой ни был у файлов, и exe — сборка engine-ci из HEAD движка. Таблица ниже — раннее предупреждение для коммита и
@@ -585,5 +634,11 @@ gates: FAIL (3)
 `publish` до правки проверяет оба
 черновика (черновик, канал, дайджесты) и для Dev — что Stable `latest` тот же, что сохранил `draft`; Stable выходит только
 на коммите, опубликованном как `dev-<N>`.
+
+Публикует **только** `release.py` (пятое ревью, B2): `tools\publish_dev.sh` и `publish_dev_engine.sh` отказывают (код 2)
+и печатают команды `release.py --channel dev --build <N> prepare / verify / draft / publish`; тест
+`test_only_release_py_publishes` не пускает команду публикации ни в один другой файл `tools/`. Пока не закрыто:
+`tools/publish_github.sh` (файл ведущей) выкладывает `b<N>` без ворот — для Stable им не пользоваться, только
+`release.py --channel stable`.
 
 Отчёт владельцу и `docs/TESTERS.md` — по каждому режиму отдельной строкой (`CLAUDE.md`, правила 4-5).

@@ -267,6 +267,70 @@ def replace_file(path, data: bytes) -> int:
     return links
 
 
+def link_folder(base, rel: str) -> "str | None":
+    """The first folder on the way from base to base/rel (base itself not counted) that is a junction or a symlink, as
+    a "/"-path under base, or None. A write through such a folder lands in another folder, a mod's (review 5, S14)."""
+    cur = Path(base)
+    parts = rel.replace("\\", "/").split("/")[:-1]
+    for number, part in enumerate(parts, 1):
+        cur = cur / part
+        if os.path.islink(cur) or os.path.isjunction(cur):
+            return "/".join(parts[:number])
+    return None
+
+
+# ---- the stand's own memory of what our tools put there (review 5 of the layer guard, B4) -------------------------------
+# tools/stand/stand_head.py and tools/stand_overlay.py record here which stand files they added (no mod has them) and
+# which mod files they replaced. The record lives in the stand (a file of ours, never a link: replace_file), so a
+# cleaned temp\stand, another worktree or another clone of the repository still knows it. Only paths under gamedata/.
+STAND_MEMORY = ".raylink-head-deploy.json"
+MEMORY_LISTS = ("new_files", "replaced_files")
+
+
+def memory_rel(rel: str) -> "str | None":
+    """rel as a stand path under gamedata/ ("/"-separated), or None when it is not one (absolute, .., a drive)."""
+    rel = str(rel).strip().replace("\\", "/")
+    parts = rel.split("/")
+    if not rel.lower().startswith("gamedata/") or ":" in rel or any(p in ("", ".", "..") for p in parts):
+        return None
+    return rel
+
+
+def read_stand_memory(stand) -> dict:
+    """{"new_files": [...], "replaced_files": [...]} of the stand (empty lists without a record). A path that is not
+    under gamedata/ is dropped: nothing outside gamedata is ever removed or restored because a record says so."""
+    out = {name: [] for name in MEMORY_LISTS}
+    path = Path(stand) / STAND_MEMORY
+    if not path.is_file():
+        return out
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for name in MEMORY_LISTS:
+        items = data.get(name, []) if isinstance(data, dict) else []
+        out[name] = [r for r in (memory_rel(i) for i in items if isinstance(i, str)) if r]
+    return out
+
+
+def remember_on_stand(stand, **lists) -> None:
+    """Adds stand paths to the stand's record (new_files=..., replaced_files=...); written as a new file."""
+    have = read_stand_memory(stand)
+    changed = False
+    for name, items in lists.items():
+        if name not in MEMORY_LISTS:
+            raise ValueError(f"no list {name!r} in the stand's memory")
+        known = {r.lower() for r in have[name]}
+        for rel in (memory_rel(i) for i in items):
+            if rel and rel.lower() not in known:
+                have[name].append(rel)
+                known.add(rel.lower())
+                changed = True
+    if not changed:
+        return
+    record = {"format": 1, "note": "tools/stand/stand_head.py and tools/stand_overlay.py: what our tools put on this "
+                                   "stand (review 5 of the layer guard, B4)",
+              **{name: sorted(have[name], key=str.lower) for name in MEMORY_LISTS}}
+    replace_file(Path(stand) / STAND_MEMORY, (json.dumps(record, ensure_ascii=False, indent=1) + "\n").encode("utf-8"))
+
+
 def _place(src: str, dst: Path, copy: bool) -> None:
     if os.path.lexists(dst):
         if dst.is_dir() and not os.path.islink(dst):

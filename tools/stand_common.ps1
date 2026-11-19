@@ -77,6 +77,7 @@ function Remove-StandFile {
     param([Parameter(Mandatory = $true)][string]$Path)
     $full = Get-StandFullPath $Path
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return }
+    Assert-NoJunction -Dir ([System.IO.Path]::GetDirectoryName($full))  # the name inside a junction is the mod's own
     Initialize-StandFiles
     try { [RayLinkStand.Files]::Delete($full) }
     catch [System.ComponentModel.Win32Exception] {
@@ -89,12 +90,22 @@ function Remove-StandFile {
     }
 }
 
+function Assert-NoJunction {
+    # review 5 (S14): a stand folder that is a junction or symlink into a mod's folder; a write through it would delete
+    # the mod's own file and put ours into the mod's folder
+    param([Parameter(Mandatory = $true)][string]$Dir)
+    if ((Test-Path -LiteralPath $Dir) -and ((Get-Item -LiteralPath $Dir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "refusing to write through a junction or symlink folder: $Dir (the launcher builds real folders)"
+    }
+}
+
 function Set-StandFile {
     # $Write fills a fresh file next to $Path (its argument: that file's path); then the old name goes and the fresh
-    # file takes it. The stand's file is never opened for writing.
+    # file takes it. The stand's file is never opened for writing, and never through a junction folder.
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Write)
     $full = Get-StandFullPath $Path
     $dir = [System.IO.Path]::GetDirectoryName($full)
+    Assert-NoJunction -Dir $dir
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     $tmp = Join-Path $dir ('.' + [System.IO.Path]::GetFileName($full) + '.' + $PID + '.new')
     Remove-StandFile -Path $tmp
@@ -163,6 +174,7 @@ function Copy-StandTree {
     $src = (Get-StandFullPath $From).TrimEnd('\')
     $dstRoot = Get-StandFullPath $To
     if (-not (Test-Path -LiteralPath $src -PathType Container)) { throw "no folder to copy: $src" }
+    Assert-NoJunction -Dir $dstRoot
     New-Item -ItemType Directory -Force -Path $dstRoot | Out-Null
     $todo = [System.Collections.Generic.Stack[string]]::new()
     $todo.Push($src)
@@ -173,6 +185,7 @@ function Copy-StandTree {
             if ($item.PSIsContainer) {
                 if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
                 if (@($ExcludeDirs | Where-Object { $item.Name -like $_ }).Count -gt 0) { continue }
+                Assert-NoJunction -Dir $dst  # a folder of the stand on the way: never through a junction
                 New-Item -ItemType Directory -Force -Path $dst | Out-Null
                 $todo.Push($item.FullName)
                 continue
