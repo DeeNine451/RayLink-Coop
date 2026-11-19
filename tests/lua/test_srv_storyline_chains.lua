@@ -1,6 +1,6 @@
 -- Anomaly Coop test (stage 2 of docs/plans/2026-11-16-storylines-per-faction.md): with split levels and story mode each
--- faction that has players runs its own DRX questlines chain (coop_srv_storyline.script, coop_storyline before step S4). The machines are harness_faction.lua's
--- (a world host and two clients), the stock chain code is the real text (tests/lua/support/harness_storyline.lua). Not shipped.
+-- faction that has players runs its own DRX questlines chain (coop_srv_storyline.script). The fixture uses the real mode
+-- layers over a dedicated world and its clients, or a co-op host and its clients. Not shipped.
 -- Run: tools\test_lua.cmd srv_storyline_chains
 dofile("tests/lua/support/harness_storyline.lua")
 
@@ -37,11 +37,12 @@ local function world(split, opts)
 	OLD_KEYS = opts.old
 	OLD_TASKS = opts.tasks
 	math.randomseed(1)
-	setup(split, opts.active)
+	setup_storyline(split, opts.active, opts.load)
 	if opts.active ~= false then
 		ticks(Hm)
 		ticks(A, 2)
 		ticks(B, 2)
+		if L then ticks(L, 2) end
 		ticks(Hm, 2)
 	end
 	return Hm.env.coop_srv_storyline
@@ -185,13 +186,11 @@ do
 	check(chain(Hm, "dolg", "drx_sl_current_task_number") == 2, "Duty at task 2")
 	check(Hm.env.coop_tasks.taker(meet) == 1, "the meet task is anna's")
 	check(same(snapshot(Hm, "stalker"), stalker0) and same(snapshot(Hm, "bandit"), bandit0), "nobody else's keys moved")
-	-- the host player's own start dialog at Sidorovich: Noah and Sultan are claimed, he is the current one: kept
+	-- the loner's start dialog at Sidorovich: Noah and Sultan are claimed, he is the current one: kept
 	local dolg1 = snapshot(Hm, "dolg")
-	Hm.talking = true
-	Hm.env.disable_info("drx_sl_start_game_" .. SID)
-	Hm.env.xr_effects.drx_sl_decrease_sl_tasks_count(Hm.actor, npc(Hm, SID))
-	Hm.env.xr_effects.drx_sl_meet_random_honcho(Hm.actor, npc(Hm, SID))
-	Hm.talking = false
+	L.env.xr_effects.drx_sl_decrease_sl_tasks_count(L.actor, npc(L, SID))
+	L.env.xr_effects.drx_sl_meet_random_honcho(L.actor, npc(L, SID))
+	pump()
 	check(chain(Hm, "stalker", "drx_sl_current_honcho") == SID, "nobody free: the loners keep Sidorovich (as the stock)")
 	check(chain(Hm, "stalker", "drx_sl_current_task") == "drx_sl_" .. SID .. "_meet_task_1"
 		and sl.owner_of_task("drx_sl_" .. SID .. "_meet_task_1") == "stalker", "their meet task is theirs")
@@ -376,11 +375,9 @@ do
 	local said = 0
 	for i = adv + 1, #Hm.log do if Hm.log[i]:find("Wish Granter", 1, true) then said = said + 1 end end
 	check(said == 1, "one log line says why")
-	-- the authority's wrapper of the effect (the host player's own endgame dialog): the same rule
-	Hm.talking = true
-	Hm.env.xr_effects.drx_sl_find_wish_granter(Hm.actor, nil, {})
-	Hm.talking = false
-	check(sl.owner_of_task(WISH) == "dolg" and Hm.env.coop_tasks.taker(WISH) == 1, "the host player's ending: still Duty's, anna's")
+	-- a stock effect on the authority, scoped to the world's faction: the same rule
+	sl.with_chain("stalker", Hm.env.xr_effects.drx_sl_find_wish_granter, Hm.actor, nil, {})
+	check(sl.owner_of_task(WISH) == "dolg" and Hm.env.coop_tasks.taker(WISH) == 1, "the world effect: still Duty's, anna's")
 	check(chain(Hm, "stalker", "drx_sl_current_task") ~= WISH, "the loners' chain did not take it")
 end
 
@@ -388,10 +385,8 @@ section("D3: the first chain to reach the Wish Granter owns it (the wrapper's po
 do
 	local sl = world(true)
 	local WISH = "drx_sl_find_wish_granter_task"
-	Hm.talking = true
-	Hm.env.xr_effects.drx_sl_find_wish_granter(Hm.actor, nil, {})
-	Hm.talking = false
-	check(Hm.tm.task_info[WISH] ~= nil and sl.owner_of_task(WISH) == "stalker", "nobody had it: the host player's chain owns it")
+	sl.with_chain("stalker", Hm.env.xr_effects.drx_sl_find_wish_granter, Hm.actor, nil, {})
+	check(Hm.tm.task_info[WISH] ~= nil and sl.owner_of_task(WISH) == "stalker", "nobody had it: the world's faction owns it")
 	check(chain(Hm, "stalker", "drx_sl_current_task") == WISH, "in the loners' keys")
 end
 
@@ -420,20 +415,25 @@ do
 	FACTIONS_OF = { [501] = "dolg", [502] = "bandit" }
 end
 
-section("D6: split levels -> one shared world -> split levels again: the shared world's progress is kept")
+section("D6: the stock keys restored from a per-faction save keep their progress on reimport")
 do
 	local sl = world(true, { old = { drx_sl_total_task_number = 9, drx_sl_current_task_number = 1, drx_sl_current_honcho = SID,
 		drx_sl_start_task = "drx_sl_esc_m_trader_start_game_1" } })
 	check(chain(Hm, "stalker", "drx_sl_current_task_number") == 1 and not bare_keys(Hm), "migrated")
-	SPLIT = false
-	fire(Hm, "actor_on_first_update") -- the world loaded without split levels
+	local server_pstor, server_storyline = pstor(Hm), Hm.storage_state.coop_storyline
+	world(false, { load = function(M)
+		M.env.db.storage[0].pstor = server_pstor
+		M.storage_state.coop_storyline = server_storyline
+	end })
 	check(pstor(Hm).drx_sl_current_task_number == 1 and pstor(Hm).drx_sl_current_honcho == SID, "the bare keys are back")
 	check(chain(Hm, "stalker", "drx_sl_current_task_number") == nil and chain(Hm, "stalker", "drx_sl_current_honcho") == nil,
 		"and the suffixed copies are gone")
 	pstor(Hm).drx_sl_current_task_number = 5 -- the shared world plays on (the stock writes the bare keys)
-	SPLIT = true
-	fire(Hm, "actor_on_first_update") -- split levels again
-	ticks(Hm, 8)
+	local co_op_pstor, co_op_storyline = pstor(Hm), Hm.storage_state.coop_storyline
+	sl = world(true, { load = function(M)
+		M.env.db.storage[0].pstor = co_op_pstor
+		M.storage_state.coop_storyline = co_op_storyline
+	end })
 	check(chain(Hm, "stalker", "drx_sl_current_task_number") == 5, "the progress of the shared world is the world faction's chain")
 	check(not bare_keys(Hm) and sl.has_chain("stalker"), "migrated again")
 end
@@ -482,14 +482,16 @@ section("S4: the server's storyline starts from coop_mode.when_srv; the co-op as
 do
 	world(true)
 	local cs, sl = Hm.env.coop_conditions_stock, Hm.env.coop_srv_storyline
-	check(#Hm.srv_waiting == 0 and cs.dlg_leader == sl.dlg_leader and cs.dlg_cf_free == sl.dlg_cf_free
+	check(Hm.env.coop_mode.decides_world() and not Hm.env.coop_mode.seat_plays(0)
+		and Hm.env.coop_faction.split_mode() and cs.dlg_leader == sl.dlg_leader and cs.dlg_cf_free == sl.dlg_cf_free
 		and cs.dlg_story_ll == sl.dlg_story_ll and cs.client_may_write == sl.client_may_write and cs.may_take == sl.may_take,
 		"split levels: the server's answers stand in coop_conditions_stock (the dialog gates, coop_tasks' questions)")
 	world(false)
 	for _, M in ipairs({ Hm, A, B }) do
 		local c, s = M.env.coop_conditions_stock, M.env.coop_srv_storyline
-		check(#M.srv_waiting == 1 and c.dlg_leader ~= s.dlg_leader and c.may_take ~= s.may_take,
-			M.nick .. ": the co-op: its when_srv waits, the stock answers stand")
+		check(M.env.coop_faction.group_mode() and not M.env.coop_faction.split_mode()
+			and c.dlg_leader ~= s.dlg_leader and c.may_take ~= s.may_take,
+			M.nick .. ": the co-op: the stock answers stand")
 		check(c.dlg_leader(M.actor, nil, "drx_sl_" .. SID .. "_meet_dialog") == true and c.dlg_cf_free(M.actor) == true
 			and c.dlg_story_ll(M.actor) == true and c.dlg_story_ms(M.actor) == true and c.dlg_story_oa(M.actor) == true
 			and c.may_take("lttz_ll_task_1", 1) == true, M.nick .. ": every gate open, every task takeable, as the stock")

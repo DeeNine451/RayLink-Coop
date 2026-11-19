@@ -1,11 +1,11 @@
--- Anomaly Coop test support: the machines of harness_faction.lua (a host and two clients, events between them) with
+-- Anomaly Coop test support: a co-op host or a dedicated world server, with clients and events between them,
 -- coop_srv_storyline (and the Core's stock answers, coop_conditions_stock) loaded and the stock DRX questlines code it relies on: the real bodies, copied with file and lines (the
 -- commented "old code" blocks of axr_task_manager left out). Globals: STORY, ALIVE, REL, LEADERS. Not shipped.
 dofile("tests/lua/support/harness_faction.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
--- coop_conditions_stock first, as axr_main runs the scripts by name; coop_srv_storyline starts from the facade's when_srv (harness_quests)
-FACTION_SCRIPTS = { "coop_conditions_stock", "coop_quests_core", "coop_reward_group", "coop_tasks", "coop_quests_news", "coop_faction",
-	"coop_srv_storyline" }
+local STORYLINE_SCRIPTS = { "coop_conditions_stock", "coop_faction", "coop_quests_core", "coop_quests_news",
+	"coop_reward_group", "coop_srv_faction", "coop_srv_storyline", "coop_tasks" }
 STORY = true
 ALIVE = nil -- story id -> true: the leaders alive (nil: everybody)
 REL = {} -- REL[a .. "|" .. b] = relation (default 0)
@@ -446,13 +446,22 @@ end
 
 STORYLINE_HOOK = function(M) end -- a test file's own additions
 
-SETUP_HOOK = function(M)
+local function setup_storyline_machine(M)
 	local e = M.env
 	M.declared, M.changed = {}, {}
 	e.AddScriptCallback = function(name) M.declared[name] = true end
 	e.coop.members = function() return {} end
-	e.coop.is_dedicated = function() return false end
+	e.coop.is_dedicated = function() return M.dedicated == true end
 	e.coop.is_map_server = function() return false end
+	local alife_object = e.alife_object
+	e.alife_object = function(id)
+		local se = alife_object(id)
+		if se then se.section_name = function() return se._o:section() end end
+		return se
+	end
+	if M.role == "client" then
+		M.actor._comm = "actor_" .. ({ "dolg", "bandit", "stalker" })[M.self_peer]
+	end
 	if M.role == "host" then M.world_faction = "stalker" end
 	e.USE_MARSHAL = nil
 	setfenv(assert(loadstring(STOCK_G, "=stock _g (storyline)")), e)()
@@ -494,6 +503,52 @@ SETUP_HOOK = function(M)
 	}
 	STORYLINE_HOOK_34(M)
 	STORYLINE_HOOK(M)
+	local function load(name) return load_script(M, name) end
+	local facade = load("coop_mode")
+	facade.on_game_start()
+	modes.live(facade, load)
+end
+
+-- The server's peer 0 is a ghost. Its world decides from the stored factions and
+-- client peer IDs. These world-state and client-dialog checks need no map-server facts.
+L = nil
+function setup_storyline(server, active, load_world)
+	SPLIT = server
+	MACHINES, QUEUE = {}, {}
+	Hm, A, B = machine("host", 0), machine("client", 1), machine("client", 2)
+	Hm.dedicated = server and active ~= false
+	L = Hm.dedicated and machine("client", 3) or nil
+	local names = { [0] = Hm.dedicated and "World" or "Host", "anna", "boris", "loner" }
+	local seats = {
+		{ id = 1, avatar_id = 501, level = "l01_escape" },
+		{ id = 2, avatar_id = 502, level = server and "l05_bar" or "l01_escape" },
+	}
+	if L then
+		seats[#seats + 1] = { id = 3, avatar_id = 503, level = "l01_escape" }
+	else
+		table.insert(seats, 1, { id = 0, avatar_id = 0, level = "l01_escape" })
+	end
+	for _, M in ipairs(MACHINES) do
+		setup_world(M, names[M.self_peer])
+		M.active = active ~= false
+		M.players = {}
+		for _, p in ipairs(seats) do
+			M.players[#M.players + 1] = {
+				id = p.id, nick = names[p.id], avatar_id = p.avatar_id, level = p.level, is_self = p.id == M.self_peer,
+			}
+		end
+	end
+	for _, p in ipairs(seats) do
+		if p.id > 0 then Hm.new_obj(p.avatar_id, "coop_player_avatar", vec(p.id, 0, 0), { _stalker = true }) end
+	end
+	for _, M in ipairs(MACHINES) do
+		setup_storyline_machine(M)
+		if M == Hm and load_world then load_world(M) end
+		for _, name in ipairs(STORYLINE_SCRIPTS) do load_script(M, name) end
+		for _, name in ipairs(STORYLINE_SCRIPTS) do M.env[name].on_game_start() end
+		fire(M, "actor_on_first_update")
+	end
+	pump()
 end
 
 -------------------------------------------------------------------------------

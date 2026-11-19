@@ -1,10 +1,18 @@
--- Anomaly Coop test (the group's faction, owner 2026-11-16): in a world WITHOUT split levels every player is in one faction.
--- A faction change is made once, on the host, for everybody (coop_faction.script); the dialogs say so first. With split
--- levels a change stays personal (coop_tasks forwards drx_sl_change_factions to the finisher, as before). A host and two
--- clients of tests/lua/support/harness_quests.lua with coop_tasks; the stock functions are their own text, copied below
--- with file and lines. Not shipped.
--- Run: tools\test_lua.cmd faction_group
+-- Co-op faction: one group, with the real mode facade and stock dialog stand-ins.
+-- Run: tools\test_lua.cmd hostplay_faction_group
 dofile("tests/lua/support/harness_faction.lua")
+
+local modes = dofile("tests/lua/support/modes.lua")
+
+local function load_modes(M)
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
+	load_script(M, "coop_trust")
+	-- Faction tests exercise the real handlers with the Dev 57 trust default.
+	M.env.coop_trust.reset_for_test({ default = "log" })
+end
+SETUP_HOOK = load_modes
+
 
 -------------------------------------------------------------------------------
 section("group mode: the host turns in, everybody is moved")
@@ -87,6 +95,7 @@ do
 	MACHINES[3] = nil
 	B = machine("client", 2)
 	setup_world(B, "boris")
+	load_modes(B)
 	B.players = A.players
 	B.storage_state.default_faction = "dolg" -- the host's m_data came with the join
 	for _, n in ipairs(FACTION_SCRIPTS) do load_script(B, n) end
@@ -114,37 +123,6 @@ do
 	pump()
 	check(count_sent(Hm, "coop_fac") == answers, "questions in a burst get no answer (" .. (count_sent(Hm, "coop_fac") - answers) .. ")")
 	check(Hm.world_faction == "dolg" and comm(Hm) == "actor_dolg", "a question changes nothing on the host")
-end
-
-section("split levels: forwarding as today, only the finisher changes")
-do
-	setup(true)
-	check(Hm.env.coop_faction.group_mode() == false, "split levels: no group mode")
-	client_turns_in(A, "dolg")
-	local fwd = 0
-	for _, s in ipairs(Hm.sent) do if s.name == "coop_trw" and s.payload:find("drx_sl_change_factions", 1, true) then fwd = fwd + 1 end end
-	check(fwd == 1, "the effect went to the finisher's machine (" .. fwd .. ")")
-	check(comm(A) == "actor_dolg", "the finisher is in Duty")
-	check(comm(Hm) == "actor_stalker" and comm(B) == "actor_stalker", "nobody else changed")
-	local group_words = 0
-	for _, s in ipairs(Hm.sent) do if s.name == "coop_fac" and H.decode(s.payload).k == "set" then group_words = group_words + 1 end end
-	check(Hm.world_faction == nil and group_words == 0, "no group word (only the news of split mode), the world's faction stays")
-	check(Hm.cancelled == 0, "the host ran no storyline recycle")
-	A.env.set_actor_true_community("freedom", true)
-	-- split mode (test_faction_split.lua): a client's own call changes nothing, only the world's forwarded effect does
-	check(comm(A) == "actor_dolg" and A.cancelled == 0, "a client's own call changes nothing")
-	local d, ph = new_dialog()
-	A.cf_offer = "drx_sl_bar_dolg_cf_task_1"
-	A.env.dialog_manager.drx_sl_init_change_faction_dialog(d)
-	local said = talk(A, ph, {})
-	check(said[2] == "Pay 10000 and you are one of us.", "the join dialog says no warning (" .. tostring(said[2]) .. ")")
-	local d2, ph2 = new_dialog()
-	A.env.dialog_manager.drx_sl_cf_task_completed_dialog(d2)
-	A.cf_ready = "t_other"
-	said = talk(A, ph2, {})
-	check(table.concat(said, "|") == "st_ordered_task_query_finished|cf_done_text|dm_universal_actor_exit_thanks",
-		"the turn-in dialog is the stock one (" .. table.concat(said, "|") .. ")")
-	check(A.cf_completions == 1, "and completes once")
 end
 
 section("no session: stock")
@@ -201,13 +179,12 @@ do
 	check(A.cf_completions == 1, "the stock completion ran once")
 	pump() engine_check(Hm) pump()
 	check(comm(Hm) == "actor_dolg" and comm(A) == "actor_dolg" and comm(B) == "actor_dolg", "and the whole group is in Duty")
-	-- the same dialog object with split levels: the stock branch (the engine built it once for the process)
-	SPLIT = true
+	-- Leaving the session uses the stock branch of the same cached dialog.
+	A.active = false
 	A.cf_ready = "t_other"
 	said = talk(A, ph, {})
 	check(table.concat(said, "|") == "st_ordered_task_query_finished|cf_done_text|dm_universal_actor_exit_thanks",
-		"the same dialog with split levels is the stock one (" .. table.concat(said, "|") .. ")")
-	SPLIT = false
+		"the same dialog outside a session is the stock one (" .. table.concat(said, "|") .. ")")
 end
 
 section("the world's faction survives a save and a load of the record")
@@ -266,6 +243,40 @@ do
 	local e2 = gs_env()
 	e2.coop_game_settings.load_state(saved)
 	check(e2.coop_game_settings.world_faction() == "dolg", "after a load the world is in Duty (" .. tostring(e2.coop_game_settings.world_faction()) .. ")")
+end
+
+section("group mode: the contract")
+do
+	setup(false)
+	local cf = Hm.env.coop_faction
+	check(cf.split_mode() == false, "no split mode")
+	Hm.env.xr_effects.drx_sl_change_factions(Hm.actor, nil, { "dolg" })
+	pump()
+	check(cf.faction_of(1) == "dolg" and cf.faction_of(0) == "dolg" and cf.faction_of_character(501) == "dolg", "faction_of is the group's faction")
+	check(A.env.coop_faction.faction_of(1) == nil, "a client says nil")
+end
+
+section("the facade decides who changes the group's faction")
+do
+	setup(false)
+	modes.install(Hm.env.coop_mode, "hostplay", { seat_plays = function(peer) return peer == 0 or peer == 1 or peer == 2 end })
+	Hm.env.coop.is_host = function() return false end
+	Hm.env.set_actor_true_community("dolg")
+	pump()
+	check(comm(Hm) == "actor_dolg" and comm(A) == "actor_dolg", "the facade's decider changes the faction even with a stale engine predicate")
+end
+
+section("faction requests validate the transport seat and count the answer limit")
+do
+	setup(false)
+	Hm.handlers.coop_fac_req("", 1)
+	for _, peer in ipairs({ 1.5, math.huge, 0, 200, 0xffffffff }) do Hm.handlers.coop_fac_req("", peer) end
+	Hm.handlers.coop_fac_req("", 1)
+	local checks = Hm.env.coop_trust.status()
+	local sender, rate = checks.faction_request_sender or {}, checks.faction_request_rate or {}
+	check(count_sent(Hm, "coop_fac") == 1, "only one valid request receives an answer")
+	check(sender.checked == 7 and sender.failed == 5, "trust records each request with an invalid transport seat")
+	check(rate.checked == 2 and rate.failed == 1, "trust records the rate limit for the repeated request")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

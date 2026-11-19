@@ -1,11 +1,18 @@
--- Anomaly Coop test (a player's own faction with split levels, owner 2026-11-16): each player joins a faction himself, at the
--- faction's leader; different players may be in different factions. The world keeps every character's true faction
--- (coop_faction.script, its own key of m_data), the finisher's machine changes only its own character (no storyline recycle,
--- nothing of the group's tasks), a join gives a returning player his own faction back, everybody gets a news line, and other
--- scripts read the faction of any character (split_mode, faction_of, faction_of_character, the callback coop_faction_changed).
--- The machines and stock stand-ins are tests/lua/support/harness_faction.lua's. Not shipped.
--- Run: tools\test_lua.cmd faction_split
+-- Server faction: personal records in the world process, forwarded effects on the player.
+-- Run: tools\test_lua.cmd srv_faction
 dofile("tests/lua/support/harness_faction.lua")
+
+local modes = dofile("tests/lua/support/modes.lua")
+
+local function load_modes(M)
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
+	load_script(M, "coop_trust")
+	-- Faction tests exercise the real handlers with the Dev 57 trust default.
+	M.env.coop_trust.reset_for_test({ default = "log" })
+end
+
+table.insert(FACTION_SCRIPTS, "coop_srv_faction")
 
 STRINGS.st_coop_faction_split_joined = "%s joined the %s faction."
 STRINGS.st_faction_csky = "Clear Sky"
@@ -14,7 +21,6 @@ local CF = "drx_sl_bar_dolg_cf_task_1"
 local CF2 = "drx_sl_mil_freedom_cf_task_1"
 local MEMBERS = {} -- coop.members() of the world: the characters of the save
 local ALL = { { id = 501, peer = 1, in_world = true }, { id = 502, peer = 2, in_world = true } }
-local DEDICATED = false
 
 SETUP_HOOK = function(M)
 	local e = M.env
@@ -22,8 +28,10 @@ SETUP_HOOK = function(M)
 	e.AddScriptCallback = function(name) M.declared[name] = true end
 	e.RegisterScriptCallback("coop_faction_changed", function(...) M.changed[#M.changed + 1] = { ... } end)
 	e.coop.members = function() return MEMBERS end
-	e.coop.is_dedicated = function() return M.role == "host" and DEDICATED end
-	e.coop.is_map_server = function() return false end
+	e.coop.is_dedicated = function() return M.role == "host" end
+	e.coop.is_map_server = function() return M.role == "map" end
+	for _, p in ipairs(M.players or {}) do if p.id ~= 0 then p.level = "l01_escape" end end
+	load_modes(M)
 	local ao = e.alife_object
 	e.alife_object = function(id)
 		local se = ao(id)
@@ -37,6 +45,11 @@ SETUP_HOOK = function(M)
 		M.cancelled = M.cancelled + 1
 		if M.role == "client" and M.tm.task_info.t_other then M.tm:set_task_failed("t_other") end
 	end
+end
+
+local function load_faction_scripts(M)
+	for _, n in ipairs(FACTION_SCRIPTS) do load_script(M, n) end
+	for _, n in ipairs(FACTION_SCRIPTS) do M.env[n].on_game_start() end
 end
 
 local function sent_since(M, mark, names)
@@ -97,8 +110,9 @@ do
 	check(A.storage_state.default_faction == "dolg", "his m_data says Duty")
 	check(comm(Hm) == "actor_stalker" and comm(B) == "actor_stalker", "nobody else changed")
 	check(cf.faction_of(1) == "dolg" and cf.faction_of_character(501) == "dolg", "the world records anna in Duty (" .. tostring(cf.faction_of(1)) .. ")")
-	check(cf.faction_of(2) == "stalker" and cf.faction_of(0) == "stalker", "boris and the host are loners")
-	for _, M in ipairs({ Hm, A, B }) do
+	check(cf.faction_of(2) == "stalker" and cf.faction_of(0) == nil, "boris is a loner and the ghost has no faction")
+	check(tips_with(Hm, "anna joined the Duty faction.") == 0, "the world server sees no player tip")
+	for _, M in ipairs({ A, B }) do
 		check(tips_with(M, "anna joined the Duty faction.") == 1, M.nick .. " got the news line once")
 	end
 	check(Hm.cancelled == 0 and Hm.setup == 0 and Hm.lttz == 0, "no storyline recycle on the world")
@@ -296,40 +310,82 @@ do
 	check(Hm.env.coop_faction.faction_of(1) == "dolg", "a world loaded from the save knows anna is in Duty")
 end
 
-section("the host player's own change in split mode")
+section("an older world loaded in the same Lua state takes a new membership snapshot")
 do
 	local cf = split_setup()
-	Hm.env.xr_effects.drx_sl_change_factions(Hm.actor, nil, { "dolg" })
-	pump()
-	check(comm(Hm) == "actor_dolg" and cf.faction_of(0) == "dolg", "the host is in Duty, the world records it")
-	check(comm(A) == "actor_stalker" and comm(B) == "actor_stalker", "nobody else moved")
-	check(Hm.cancelled == 0 and Hm.setup == 0, "no storyline recycle on the world")
-	check(has_tip(A, "Host joined the Duty faction.") and has_tip(Hm, "Host joined the Duty faction."), "everybody was told")
-	check(Hm.world_faction == "stalker", "the world's faction for new characters is not touched")
+	Hm.storage_state = {} -- another old save has no personal faction record
+	fire(Hm, "actor_on_first_update")
+	local rec = Hm.storage_state.coop_faction
+	check(rec and rec.old[501] and rec.old[502], "first update marks the loaded save's existing characters for bootstrap")
+	check(cf.faction_of_character(501) == nil, "an existing character's faction is unknown until its first claim")
 end
 
 section("a dedicated world server: its actor is nobody")
 do
-	DEDICATED = true
 	local cf = split_setup()
 	Hm.env.set_actor_true_community("dolg")
 	check(comm(Hm) == "actor_stalker" and Hm.cancelled == 0, "a call on the world server's ghost changes nothing")
 	check(cf.faction_of(0) == nil and #Hm.changed == 0, "the ghost has no faction")
 	turn_in(A, "dolg")
-	check(comm(A) == "actor_dolg" and cf.faction_of(1) == "dolg", "a client's change is recorded as on a listen host")
-	DEDICATED = false
+	check(comm(A) == "actor_dolg" and cf.faction_of(1) == "dolg", "the world records a client's change")
 end
 
-section("group mode: the contract")
+section("the server keeps the stock faction dialog")
 do
-	setup(false)
-	local cf = Hm.env.coop_faction
-	check(cf.split_mode() == false, "no split mode")
-	check(Hm.declared.coop_faction_changed == true, "the callback is declared in group mode too")
-	Hm.env.xr_effects.drx_sl_change_factions(Hm.actor, nil, { "dolg" })
-	pump()
-	check(cf.faction_of(1) == "dolg" and cf.faction_of(0) == "dolg" and cf.faction_of_character(501) == "dolg", "faction_of is the group's faction")
-	check(A.env.coop_faction.faction_of(1) == nil, "a client says nil")
+	split_setup()
+	local d, ph = new_dialog()
+	A.cf_offer = "drx_sl_bar_dolg_cf_task_1"
+	A.env.dialog_manager.drx_sl_init_change_faction_dialog(d)
+	local said = talk(A, ph, {})
+	check(said[2] == "Pay 10000 and you are one of us.", "the join dialog says no warning (" .. tostring(said[2]) .. ")")
+	local d2, ph2 = new_dialog()
+	A.env.dialog_manager.drx_sl_cf_task_completed_dialog(d2)
+	A.cf_ready = "t_other"
+	said = talk(A, ph2, {})
+	check(table.concat(said, "|") == "st_ordered_task_query_finished|cf_done_text|dm_universal_actor_exit_thanks",
+		"the turn-in dialog is the stock one (" .. table.concat(said, "|") .. ")")
+	check(A.cf_completions == 1, "and completes once")
+end
+
+section("a map server's ghost cannot apply even a forwarded faction effect")
+do
+	split_setup()
+	local map = machine("map", 257)
+	setup_world(map, "map server")
+	map.active = true
+	map.env.coop.is_client = function() return true end
+	SETUP_HOOK(map)
+	load_faction_scripts(map)
+	map.env.coop_faction.run_forwarded(map.env.set_actor_true_community, "dolg", true)
+	check(comm(map) == "actor_stalker" and #map.tips == 0, "a forwarded effect never changes a ghost or shows it a tip")
+	tick(map)
+	check(count_sent(map, "coop_fac_req") == 0 and map.storage_state.coop_faction == nil, "a map ghost neither asks for a faction nor keeps a record")
+end
+
+section("the server checks an old save's claim through trust")
+do
+	local cf = split_setup(ALL)
+	Hm.handlers.coop_fac_req(H.encode({ b = "unknown", peer = 2 }), 1)
+	local claim = Hm.env.coop_trust.status().faction_bootstrap_claim or {}
+	check(claim.checked == 1 and claim.failed == 1, "trust records the invalid claim before the answer is withheld")
+	check(cf.faction_of_character(501) == nil and cf.faction_of_character(502) == nil, "the invalid claim changes no record")
+	NOW = NOW + 5000
+	Hm.handlers.coop_fac_req(H.encode({ b = "dolg", peer = 2 }), 1)
+	check(cf.faction_of_character(501) == "dolg" and cf.faction_of_character(502) == nil, "a valid claim belongs only to the transport sender")
+end
+
+section("a server player keeps a disguise when the world restores the true faction")
+do
+	split_setup()
+	A.actor._comm = "actor_bandit"
+	local f = A.env.gameplay_disguise.is_actor_disguised
+	for i = 1, 20 do
+		local n = debug.getupvalue(f, i)
+		if not n then break end
+		if n == "is_disguised" then debug.setupvalue(f, i, true) break end
+	end
+	A.handlers.coop_fac(H.encode({ k = "sync", f = "dolg" }), 0)
+	check(A.env.get_actor_true_community() == "dolg" and comm(A) == "actor_bandit", "sync restores the true faction and leaves the disguise")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

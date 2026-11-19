@@ -1,58 +1,19 @@
 --[[
-	Anomaly Coop - the group's faction (gamedata\scripts\coop_faction.script)
-	Owner 2026-11-16: in a world WITHOUT split levels every player is in one and the same faction. A move to another faction
-	moves everybody, those who are offline as well, and the dialog says so first. With split levels (coop.levels.split) a
-	faction change stays one player's own, as before (coop_tasks forwards drx_sl_change_factions to the finisher).
+	Anomaly Coop - faction changes shared by both modes.
+	The world decider answers faction requests. Only the transport's peer 0 can
+	send a faction word to a player's mirror. Mirrors apply a true faction to
+	their own player, preserving a disguise on sync.
 
-	"Group mode" = a live co-op session whose levels are not split.
-	  - One place decides: the host. set_actor_true_community (_g.script) on the host runs the stock function (the host's
-	    character changes; in story mode the stock storyline recycle runs here, once, on the host's shared task manager), then
-	    the world's faction is set (coop_game_settings.set_world_faction: the record, saved with the world; and
-	    coop.game.set_world_faction: new characters get it), and every client is told ("coop_fac", k = set). Everybody gets a
-	    news line "<nick> joined <faction>: the whole group is in it now". coop_tasks does not forward drx_sl_change_factions
-	    in group mode: the task's on_complete runs it on the host (the payment from the finisher's ledger stays).
-	  - A client takes the word from peer 0 only and changes its OWN actor with gameplay_disguise.update_default(new, true),
-	    nothing else (the storyline and the LTTZ infos are the host's and shared). Its own scripts' calls of
-	    set_actor_true_community (a dialog's effect, the debug launcher) change nothing and ask nothing: a log line and a tip.
-	    No client verb changes the world's faction.
-	  - A client that is in the game asks the host for the group's faction ("coop_fac_req", read-only, answered at most once per
-	    ANSWER_GAP_MS per peer) until it gets an answer (k = sync); a character in another faction is moved and told "While you
-	    were away the group joined <faction>".
-	  - Dialogs (every machine: a dialog runs on the talking player's machine): the explanation of the join dialog
-	    (dialogs.drx_sl_text_npc_has_change_factions_task_to_give) ends with a warning; the turn-in dialog
-	    (dialog_manager.drx_sl_cf_task_completed_dialog) asks a last question before the stock completion, and "I need to think
-	    it over" leaves the task ready. The engine builds a dialog's phrases once per process (CPhraseDialog shared data), so the
-	    turn-in dialog carries both branches and preconditions choose at the time of the talk: outside group mode it is the
-	    stock dialog phrase for phrase.
-	Outside a session every wrapper calls the stock function unchanged; on an exe without co-op nothing is installed.
+	A group changes faction together on the host, including offline players.
+	The host runs the stock story updates once and saves the world's faction.
+	The join and turn-in dialogs warn the group before it commits.
 
-	"Split mode" = a live co-op session with split levels (owner 2026-11-16: "the first beginnings of different factions"). Each
-	player joins a faction himself, at the faction's leader; players may be in different factions.
-	  - The authority (coop.is_host() and not a map server: the host, or the world server) keeps character id -> true faction in
-	    its m_data (key coop_faction: chars[id] = { f = faction }, old[id] = true for the characters of a save made before this
-	    record existed). A new character's faction is the world's faction. A character of an older save tells its own (its
-	    community) once, with its first question (taken only when it is a known faction name); after that only the world
-	    changes the record. Records of characters that no longer exist are dropped at save.
-	  - coop_tasks forwards drx_sl_change_factions to the finisher (send_effect): the world records the new faction then
-	    (on_forward), tells everybody "<nick> joined <faction>" (k = news) and sends the script callback coop_faction_changed.
-	    The finisher's machine runs the effect inside run_forwarded: set_actor_true_community there is only
-	    gameplay_disguise.update_default(new, now) of its own character (no storyline recycle, no LTTZ infos: the stock does
-	    them on the task manager and the infos of the whole group). Any other call on a client changes nothing (a log line and
-	    the group mode's tip). The host player's own change (a listen host) is the same update_default plus the record. A
-	    dedicated world server's or a map server's actor is nobody: a call there changes nothing.
-	  - Join: the client asks (coop_fac_req, with its claim for the bootstrap); the world answers that character's record
-	    (k = sync) and the client applies it with update_default(f, true) when it differs. This keeps a client's change over a
-	    level change or a rejoin: a client loads the world's m_data, whose default_faction is the host's.
+	The optional faction change flow supplies personal faction records, forwarded
+	effects and news. It is installed when the server layer answers. Ordinary
+	single-player changes and the stock dialog remain available outside a session.
 
-	For other scripts:
-		coop_faction.group_mode() -> bool        a live session without split levels
-		coop_faction.split_mode() -> bool        a live session with split levels
-		coop_faction.group_faction() -> string   host: the faction of the group (nil elsewhere)
-		coop_faction.faction_of(peer) -> string|nil           authority: the true faction of the character this peer plays
-		                                                      (group mode: the group's faction; nil: no character / unknown)
-		coop_faction.faction_of_character(id) -> string|nil   authority: the same by character id (also one who is away)
-		script callback coop_faction_changed(peer, character_id, old, new): authority, split mode, after a recorded change
-		(declared in on_game_start in both modes; peer is nil when that player is not in the game)
+	Public queries: group_mode, split_mode, group_faction, faction_of(peer),
+	faction_of_character(id). The latter two are world-decider queries.
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -72,15 +33,13 @@ local FACTIONS = {
 	stalker = true, renegade = true, greh = true, isg = true,
 }
 
-local STORE = "coop_faction" -- m_data key of the world's record (split mode)
-local AVATAR_SECTION = "coop_player_avatar"
 local CHANGED = "coop_faction_changed" -- script callback (peer, character_id, old, new)
 
 local stock_set = nil -- set_actor_true_community as it was
 local installed = false
 local cl = { known = false, next_ask = 0 } -- client: the group's faction was answered in this Lua state
 local answered = {} -- host: peer -> time of the last answer
-local forwarding = 0 -- > 0 while a forwarded effect of the world runs on this machine (run_forwarded)
+local registered_flow -- optional faction change flow, installed by the answering layer
 local stats = { changes = 0, applied = 0, refused = 0, blocked = 0, answers = 0, errors = 0, boot = 0 }
 
 local function log(fmt, ...)
@@ -108,30 +67,24 @@ local function call(f, ...)
 end
 
 local function active() return api ~= nil and call(api.is_active) == true end
-local function is_host() return active() and call(api.is_host) == true end
-local function is_client() return active() and call(api.is_client) == true end
 local function now() return time_global() end
 
--- coop_economy_core.split_levels: true when the engine says the levels are split
-local function split_levels()
-	local l = api and api.levels
-	if type(l) ~= "table" or type(l.split) ~= "function" then return false end
-	local ok, v = pcall(l.split)
-	return ok and v == true
+local function faction_flow()
+	if not active() or not coop_mode then return nil end
+	if coop_mode.faction_change_flow then return coop_mode.faction_change_flow() end
+	-- The current facade has no faction flow slot. Asking it also runs any pending registrations.
+	if not coop_mode.group_travels() then return registered_flow end
 end
 
 function group_mode()
-	return active() and not split_levels()
+	return coop_mode ~= nil and coop_mode.group_travels()
 end
 
 function split_mode()
-	return active() and split_levels()
+	return faction_flow() ~= nil
 end
 
-local function is_map_server() return api ~= nil and call(api.is_map_server) == true end
-local function is_dedicated() return api ~= nil and call(api.is_dedicated) == true end
--- the process that keeps the world's record: the host or the world server, never a map server
-local function authority() return is_host() and not is_map_server() end
+local function authority() return coop_mode ~= nil and coop_mode.decides_world() end
 
 local function tr(id) return game.translate_string(id) end
 
@@ -206,8 +159,8 @@ end
 -------------------------------------------------------------------------------
 -- The faction of the group: the host's character's. A world server's own seat plays no character: the world's faction.
 function group_faction()
-	if not is_host() then return nil end
-	if call(api.is_dedicated) == true then
+	if not authority() then return nil end
+	if not coop_mode.seat_plays(0) then
 		local gs = mod("coop_game_settings")
 		local f = gs and call(gs.world_faction)
 		if type(f) ~= "string" or f == "" then f = call(api.game and api.game.world_faction) end
@@ -260,200 +213,53 @@ local function host_change(new_comm, now_flag)
 end
 
 -------------------------------------------------------------------------------
--- Split mode: the world's record (authority only)
+-- Faction queries and requests
 -------------------------------------------------------------------------------
-local function m_data()
-	local asm = mod("alife_storage_manager")
-	local m = asm and call(asm.get_state)
-	return type(m) == "table" and m or nil
-end
-
 local function known(f) return type(f) == "string" and FACTIONS[f] == true end
-
--- the world's faction for a new character: the chain of coop_menu_char.world_faction
-local function world_faction()
-	local gs = mod("coop_game_settings")
-	local f = gs and call(gs.world_faction)
-	if known(f) then return f end
-	f = call(api and api.game and api.game.world_faction)
-	return known(f) and f or nil
-end
-
--- the characters the world has now (coop.members: every character of the save, in the game or not)
-local function member_ids()
-	local list = call(api and api.members)
-	local ids = {}
-	for _, m in ipairs(type(list) == "table" and list or {}) do
-		if type(m) == "table" and type(m.id) == "number" and m.id ~= 0 then ids[#ids + 1] = m.id end
-	end
-	return ids
-end
-
--- The record, made when it is not there: a save without it is older than this record, so its characters (the members at
--- this moment, the first update of the world after a load) may tell their own faction once.
-local function store(create)
-	local m = m_data()
-	if not m then return nil end
-	local s = m[STORE]
-	if type(s) ~= "table" then
-		if not create then return nil end
-		s = { chars = {}, old = {} }
-		for _, id in ipairs(member_ids()) do s.old[id] = true end
-		m[STORE] = s
-	end
-	if type(s.chars) ~= "table" then s.chars = {} end
-	if type(s.old) ~= "table" then s.old = {} end
-	return s
-end
 
 -- the character a peer plays now; peer 0 is the host player (character 0), none on a dedicated world server
 local function char_of(peer)
 	if type(peer) ~= "number" or peer < 0 then return nil end
-	if peer == 0 then return not is_dedicated() and 0 or nil end
+	if peer == 0 then return not (authority() and not coop_mode.seat_plays(0)) and 0 or nil end
 	local ct = mod("coop_tasks")
 	local id = ct and call(ct.character_of, peer)
 	if type(id) ~= "number" then id = call(api and api.avatar_of, peer) end
 	return type(id) == "number" and id or nil
 end
 
-local function peer_of_char(id)
-	local ct = mod("coop_tasks")
-	local p = ct and call(ct.peer_for_character, id)
-	return type(p) == "number" and p or nil
-end
-
-local function character_exists(id)
-	if id == 0 then return not is_dedicated() end
-	local ao = rawget(_G, "alife_object") or alife_object
-	local se = type(id) == "number" and id > 0 and id < 65535 and call(ao, id)
-	if not se then return false end
-	local ok, sec = pcall(function() return se:section_name() end)
-	return ok and sec == AVATAR_SECTION
-end
-
-local function split_faction_of_character(id)
-	if type(id) ~= "number" then return nil end
-	if id == 0 and is_dedicated() then return nil end
-	local s = store(false)
-	local e = s and s.chars[id]
-	if type(e) == "table" and known(e.f) then return e.f end
-	if id == 0 then
-		local f = true_faction()
-		return known(f) and f or nil
-	end
-	if s and s.old[id] then return nil end -- a character of an older save that has not told its faction yet
-	if not character_exists(id) then return nil end
-	return world_faction()
-end
-
 function faction_of_character(id)
 	if not authority() then return nil end
+	local flow = faction_flow()
+	if flow then return flow.faction_of_character(id) end
 	if group_mode() then return group_faction() end
-	if not split_mode() then return nil end
-	return split_faction_of_character(id)
 end
 
 function faction_of(peer)
 	if not authority() then return nil end
-	if group_mode() then return char_of(peer) ~= nil and group_faction() or nil end
-	if not split_mode() then return nil end
 	local id = char_of(peer)
-	return id ~= nil and split_faction_of_character(id) or nil
+	if id == nil then return nil end
+	return faction_of_character(id)
 end
 
--- A character's own change, recorded by the world: everybody is told, other scripts get the callback.
-local function record_change(id, f, peer, before)
-	if not known(f) then
-		log("! a faction change of character %s to %s: no faction, not recorded", tostring(id), tostring(f))
-		return false
-	end
-	local s = store(true)
-	if not s then
-		log("! a faction change of character %s: no m_data, not recorded", tostring(id))
-		return false
-	end
-	local old = before or split_faction_of_character(id) -- before: the host player's, read before his own change
-	s.chars[id] = { f = f }
-	s.old[id] = nil
-	if old == f then return false end
-	stats.changes = stats.changes + 1
-	if type(peer) ~= "number" or peer < 0 then peer = peer_of_char(id) end
-	local nick = cut(peer ~= nil and nick_of(peer) or ("#" .. tostring(id)))
-	send(EV_SET, encode({ k = "news", f = f, n = nick }), -1)
-	log("character %s (%s) joined %s (was %s)", tostring(id), nick, f, tostring(old))
-	if not is_dedicated() then tip(text("st_coop_faction_split_joined", nick, faction_name(f))) end
-	local scb = rawget(_G, "SendScriptCallback") or SendScriptCallback
-	local ok, err = pcall(scb, CHANGED, peer, id, old, f)
-	if not ok then log("! %s: %s", CHANGED, tostring(err)) end
-	return true
-end
-
--- coop_tasks.send_effect: the world sends a player's own effect to his machine (character id, the effect, his peer or -1).
--- The world records drx_sl_change_factions itself, before his machine runs it: his word is never asked for.
-function on_forward(id, t, peer)
-	if not (authority() and split_mode()) or type(t) ~= "table" or t.k ~= "fx" or t.f ~= "drx_sl_change_factions" then return end
-	if type(id) ~= "number" then return end
-	record_change(id, t.p1, peer)
-end
-
--- The question of a client in split mode: the answer is that character's faction from the record. A character of an older
--- save with no record yet tells its own once (payload b); a new character gets the world's faction.
-local function host_split_ask(payload, from)
-	local id = char_of(from)
-	if id == nil then return end
-	local s = store(true)
-	if not s then return end
-	local e = s.chars[id]
-	if not (type(e) == "table" and known(e.f)) then
-		if s.old[id] then
-			local claim = decode(payload).b
-			if not known(claim) then
-				stats.refused = stats.refused + 1
-				log("! #%s told no faction for its character %s: not taken", tostring(from), tostring(id))
-				return
-			end
-			s.old[id] = nil
-			s.chars[id] = { f = claim }
-			stats.boot = stats.boot + 1
-			log("character %s of an older save is in %s (its own word, once)", tostring(id), claim)
-			-- no change, so no news line; but other scripts judged him without a faction until now (coop_srv_task_audience: his
-			-- faction's storyline tasks): they get the callback, old = nil
-			local scb = rawget(_G, "SendScriptCallback") or SendScriptCallback
-			local ok, err = pcall(scb, CHANGED, from, id, nil, claim)
-			if not ok then log("! %s: %s", CHANGED, tostring(err)) end
-		else
-			local f = world_faction()
-			if not f then return end
-			s.chars[id] = { f = f }
-		end
-		e = s.chars[id]
-	end
-	stats.answers = stats.answers + 1
-	send(EV_SET, encode({ k = "sync", f = e.f }), from)
-end
-
--- save_state: records of characters that no longer exist (a deleted player) are dropped
-local function host_save_state(m)
-	if not authority() or type(m) ~= "table" or type(m[STORE]) ~= "table" then return end
-	local s = m[STORE]
-	for _, part in ipairs({ "chars", "old" }) do
-		if type(s[part]) == "table" then
-			for id in pairs(s[part]) do
-				if not (type(id) == "number" and character_exists(id)) then s[part][id] = nil end
-			end
-		end
-	end
+-- Keep bounded inputs and the established answer limit even in trust log mode.
+local function request_ok(name, ok, fmt, ...)
+	if coop_trust and not coop_trust.pass(name, ok, fmt, ...) then return false end
+	return ok
 end
 
 local function host_on_ask(payload, from)
-	if not is_host() or type(from) ~= "number" or from <= 0 then return end
-	local split = split_mode()
-	if not (group_mode() or (split and authority())) then return end
+	local valid = type(from) == "number" and from > 0 and from < 0xffffffff and from % 1 == 0
+		and coop_mode.seat_plays(from)
+	if not request_ok("faction_request_sender", valid, "invalid faction requester %s", tostring(from)) then return end
+	if not authority() then return end
+	local flow = faction_flow()
+	if not (flow or group_mode()) then return end
 	local t = now()
 	local last = answered[from]
-	if last and t - last < ANSWER_GAP_MS and t >= last then return end
+	if not request_ok("faction_request_rate", not last or t < last or t - last >= ANSWER_GAP_MS,
+		"peer %d asked for a faction too soon", from) then return end
 	answered[from] = t
-	if split then return host_split_ask(payload, from) end
+	if flow then return flow.answer(payload, from) end
 	local f = group_faction()
 	if not f then return end
 	stats.answers = stats.answers + 1
@@ -475,7 +281,7 @@ local function client_apply(f)
 	if not differs(f) then return false end
 	local gd = mod("gameplay_disguise")
 	if not (gd and type(gd.update_default) == "function") then
-		log("! gameplay_disguise.update_default is not there: the group's faction %s is not applied", f)
+		log("! gameplay_disguise.update_default is not there: faction %s is not applied", f)
 		return false
 	end
 	-- Build 56 (live 2026-11-18): the stock's `now` sets the community at once even in a disguise (gameplay_disguise.script
@@ -485,39 +291,30 @@ local function client_apply(f)
 	local disguised = call(gd.is_actor_disguised) == true
 	gd.update_default(f, not disguised)
 	stats.applied = stats.applied + 1
-	log("this character joined the group's faction %s", f)
+	log("this character joined faction %s", f)
 	return true
 end
 
-local function client_on_word(payload, from)
-	if from ~= 0 then
+local function on_word(payload, from)
+	if not request_ok("faction_word_sender", from == 0, "faction word from peer %s", tostring(from)) then
 		stats.refused = stats.refused + 1
-		log("! a faction word from #%s, not the host: ignored", tostring(from))
 		return
 	end
-	if not is_client() then return end
-	local split = split_mode()
-	if not (split or group_mode()) then return end
+	if not coop_mode.is_player_mirror() then return end
+	local flow = faction_flow()
+	if not (flow or group_mode()) then return end
 	local t = decode(payload)
 	local f = t.f
-	if type(f) ~= "string" or not FACTIONS[f] then
+	if not known(f) then
 		stats.refused = stats.refused + 1
-		log("! the host's faction word names no faction: ignored")
-		return
-	end
-	if split then
-		-- this character's own faction from the world's record, or the news of somebody's change
-		if t.k == "sync" then
-			cl.known = true
-			client_apply(f)
-		elseif t.k == "news" then
-			tip(text("st_coop_faction_split_joined", cut(t.n), faction_name(f)))
-		end
+		log("! the world's faction word names no faction: ignored")
 		return
 	end
 	if t.k == "sync" then
 		cl.known = true
-		if client_apply(f) then tip(text("st_coop_faction_away", faction_name(f))) end
+		if client_apply(f) and not flow then tip(text("st_coop_faction_away", faction_name(f))) end
+	elseif flow then
+		flow.on_word(t)
 	elseif t.k == "set" then
 		cl.known = true
 		client_apply(f)
@@ -525,86 +322,51 @@ local function client_on_word(payload, from)
 	end
 end
 
-local function on_word(payload, from)
-	if is_host() then
-		if from ~= 0 then
-			stats.refused = stats.refused + 1
-			log("! a faction word from #%s reached the host: ignored", tostring(from))
-		end
-		return
-	end
-	client_on_word(payload, from)
-end
-
 local function actor_on_update()
-	if cl.known or not is_client() or call(api.is_live) ~= true then return end
-	local split = split_mode()
-	if not (split or group_mode()) then return end
+	if cl.known or not coop_mode or not coop_mode.is_player_mirror() or call(api.is_live) ~= true then return end
+	local flow = faction_flow()
+	if not (flow or group_mode()) then return end
 	local t = now()
 	if t < cl.next_ask then return end
 	cl.next_ask = t + ASK_RETRY_MS
-	-- split mode: the character's community goes along, the world takes it once for a character of an older save
-	-- (after a load the true faction here is the world's m_data's, the host's; the community is the character's own).
-	-- In a disguise the community is the disguise's: no claim then (the world answers nothing final to an older save's
-	-- character, and this asks again every ASK_RETRY_MS until the disguise is off).
-	local claim = nil
-	if split then
-		local gd = mod("gameplay_disguise")
-		if not (gd and call(gd.is_actor_disguised) == true) then claim = actor_faction() end
-	end
-	send(EV_ASK, split and encode({ b = claim }) or "", 0)
+	send(EV_ASK, flow and flow.make_request() or "", 0)
 end
 
--- coop_tasks.client_on_reward: a player's own effect forwarded by the world runs inside this (fn(...))
+local function reset_sync()
+	cl.known, cl.next_ask = false, 0
+end
+
+-- coop_tasks: the world records a forwarded effect; its recipient runs it in scope.
+function on_forward(id, t, peer)
+	local flow = faction_flow()
+	if flow then flow.on_forward(id, t, peer) end
+end
+
 function run_forwarded(fn, ...)
-	forwarding = forwarding + 1
-	local res = { pcall(fn, ...) }
-	forwarding = forwarding - 1
-	if not res[1] then error(res[2], 0) end
-	return unpack(res, 2)
+	local flow = faction_flow()
+	if flow then return flow.run_forwarded(fn, ...) end
+	return fn(...)
 end
 
 -------------------------------------------------------------------------------
 -- set_actor_true_community
 -------------------------------------------------------------------------------
--- this machine's own character, nothing else (the stock's first step without its storyline recycle and LTTZ infos)
-local function own_change(new_comm, now_flag)
-	local gd = mod("gameplay_disguise")
-	if not known(new_comm) or not (gd and type(gd.update_default) == "function") then
-		log("! a faction change to %s was not made: no such faction or no gameplay_disguise", tostring(new_comm))
-		return false
-	end
-	gd.update_default(new_comm, now_flag)
-	stats.applied = stats.applied + 1
-	log("this character joined %s", new_comm)
-	return true
-end
-
-local function split_set(new_comm, now_flag)
-	if is_host() then
-		if is_dedicated() or is_map_server() then
-			-- the actor of a world or map server plays no character (owner 2026-11-13)
-			stats.blocked = stats.blocked + 1
-			log("a faction change to %s of this server's own actor was not made: it is nobody's character", tostring(new_comm))
-			return
-		end
-		-- the host player's own change: his character, and the world's record of it
-		local before = split_faction_of_character(0)
-		if own_change(new_comm, now_flag) then record_change(0, new_comm, 0, before) end
-		return
-	end
-	if forwarding > 0 then
-		own_change(new_comm, now_flag)
-		return
-	end
-	stats.blocked = stats.blocked + 1
-	log("a faction change to %s on this machine was not made: the group changes it at the faction's leader", tostring(new_comm))
-	tip(tr("st_coop_faction_by_group"))
+-- Installation and shared operations for the optional flow.
+function register_faction_change_flow(flow)
+	registered_flow = flow
+	if coop_mode.set_faction_change_flow then coop_mode.set_faction_change_flow(flow) end
+	return {
+		call = call, mod = mod, log = log, request_ok = request_ok, known = known,
+		encode = encode, decode = decode, send_word = function(t, peer) return send(EV_SET, encode(t), peer) end,
+		actor_faction = actor_faction, true_faction = true_faction, char_of = char_of, reset_sync = reset_sync,
+		cut = cut, tip = tip, text = text, tr = tr, nick_of = nick_of, faction_name = faction_name, stats = stats,
+	}
 end
 
 local function wrapped_set(new_comm, now_flag)
-	if split_mode() then
-		local ok, err = pcall(split_set, new_comm, now_flag)
+	local flow = faction_flow()
+	if flow then
+		local ok, err = pcall(flow.set, new_comm, now_flag)
 		if not ok then
 			stats.errors = stats.errors + 1
 			log("! a faction change: %s", tostring(err))
@@ -612,7 +374,7 @@ local function wrapped_set(new_comm, now_flag)
 		return
 	end
 	if not group_mode() then return stock_set(new_comm, now_flag) end
-	if is_host() then
+	if authority() then
 		local ok, err = pcall(host_change, new_comm, now_flag)
 		if not ok then
 			stats.errors = stats.errors + 1
@@ -755,12 +517,6 @@ function on_game_start()
 	end)
 	start_step("callbacks", function()
 		RegisterScriptCallback("actor_on_update", actor_on_update)
-		RegisterScriptCallback("coop_world_back", function() cl.known, cl.next_ask = false, 0 end)
-		RegisterScriptCallback("actor_on_first_update", function()
-			if not split_mode() then return end
-			cl.known, cl.next_ask = false, 0 -- a level change: this character's faction is asked again
-			if authority() then store(true) end -- the record of this world; made now when the save has none
-		end)
-		RegisterScriptCallback("save_state", host_save_state)
+		RegisterScriptCallback("coop_world_back", reset_sync)
 	end)
 end

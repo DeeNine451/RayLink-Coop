@@ -7,7 +7,7 @@ dofile("tests/lua/support/harness_storyline.lua")
 
 local LL1, LL2, MS1 = "lttz_ll_find_doctor", "lttz_ll_turn_off_brain_scorcher", "lttz_ms_greh_envoy"
 local FACTIONS_OF = { [501] = "dolg", [502] = "bandit" }
-local OWN = { [1] = "dolg", [2] = "bandit" }
+local OWN = { [1] = "dolg", [2] = "bandit", [3] = "stalker" }
 local OLD_INFOS = nil -- infos of the host's world at load (a save of before)
 
 STORYLINE_HOOK = function(M)
@@ -36,11 +36,12 @@ local function world(split, opts)
 	REL = {}
 	OLD_INFOS = opts.infos
 	math.randomseed(1)
-	setup(split, opts.active)
+	setup_storyline(split, opts.active)
 	if opts.active ~= false then
 		ticks(Hm)
 		ticks(A, 2)
 		ticks(B, 2)
+		if L then ticks(L, 2) end
 		ticks(Hm, 2)
 	end
 	return Hm.env.coop_srv_storyline
@@ -112,10 +113,11 @@ do
 		"authority twin may_take: an LL task for a bandit no, for Duty yes; MS (no owner) yes; HB for Duty no")
 	-- the clients read the owner from the world's mirror
 	ticks(Hm, 4)
-	check(pstor(A).drx_sl_coop_story_ll == "dolg" and pstor(B).drx_sl_coop_story_ll == "dolg", "mirrored to the clients")
+	check(pstor(A).drx_sl_coop_story_ll == "dolg" and pstor(B).drx_sl_coop_story_ll == "dolg"
+		and pstor(L).drx_sl_coop_story_ll == "dolg", "mirrored to the clients")
 	check(A.env.coop_srv_storyline.dlg_story_ll(A.actor) == true, "anna (Duty): the Doctor, Barkeep, ... talk to her")
 	check(B.env.coop_srv_storyline.dlg_story_ll(B.actor) == false, "boris (bandit): closed")
-	check(sl.dlg_story_ll(Hm.actor) == false, "the host player (loner): closed")
+	check(L.env.coop_srv_storyline.dlg_story_ll(L.actor) == false, "the loner client: closed")
 	check(A.env.coop_srv_storyline.dlg_story_ms(B.actor) == true and B.env.coop_srv_storyline.dlg_story_oa(B.actor) == true,
 		"MS and OA (no owner): open")
 	check(Hm.env.coop_srv_storyline.client_may_write("drx_sl_coop_story_ll") == false, "a client cannot write the mirror (coop_tvd)")
@@ -148,18 +150,23 @@ do
 	Hm.infos.bar_deactivate_radar_done = true
 	ticks(Hm, 4)
 	ticks(Hm, 4)
-	local targets = {}
-	for _, ev in ipairs(Hm.sent) do if ev.name == "coop_sl_news" then targets[#targets + 1] = tostring(ev.target) end end
-	check(count_sent(Hm, "coop_sl_news") == sent0 + 1 and last_sent(Hm, "coop_sl_news").n == "scorcher_off"
-		and table.concat(targets, ",") == "2", "one event, to boris only")
+	local mark = {}
+	for _, ev in ipairs(Hm.sent) do
+		if ev.name == "coop_sl_news" and H.decode(ev.payload).n == "scorcher_off" then
+			mark[ev.target] = (mark[ev.target] or 0) + 1
+		end
+	end
+	check(count_sent(Hm, "coop_sl_news") == sent0 + 2 and mark[2] == 1 and mark[3] == 1,
+		"one event each, to boris and the loner only")
 	check(news_to(B, "scorcher_off") == 1 and news_to(A, "scorcher_off") == 0, "boris (bandit) reads it once, anna (Duty, the owner) not")
-	check(news_to(Hm, "scorcher_off") == 1, "the host player (loner) reads it on his machine")
+	check(news_to(L, "scorcher_off") == 1 and news_to(Hm, "scorcher_off") == 0,
+		"the loner reads it on his machine, the world server has no player to tell")
 	Hm.infos.yan_labx16_switcher_primary_off = true
 	ticks(Hm, 4)
-	check(news_to(B, "mm_off") == 1 and news_to(A, "mm_off") == 0 and news_to(Hm, "mm_off") == 1, "the Miracle Machine off: the same")
+	check(news_to(B, "mm_off") == 1 and news_to(A, "mm_off") == 0 and news_to(L, "mm_off") == 1, "the Miracle Machine off: the same")
 	Hm.infos.bar_deactivate_radar_done = nil
 	ticks(Hm, 4)
-	check(news_to(B, "scorcher_on") == 1 and news_to(A, "scorcher_on") == 0, "the Scorcher on again: once")
+	check(news_to(B, "scorcher_on") == 1 and news_to(A, "scorcher_on") == 0 and news_to(L, "scorcher_on") == 1, "the Scorcher on again: once")
 	-- forged or unknown lines
 	B.env.coop.send_event("coop_sl_news", H.encode({ n = "scorcher_off" }), 1)
 	Hm.env.coop.send_event("coop_sl_news", H.encode({ n = "%s%s" }), 1)

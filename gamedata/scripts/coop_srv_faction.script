@@ -1,0 +1,254 @@
+-- Server faction changes: the world keeps each character's faction, keyed by
+-- character id. Only the player receiving a forwarded effect changes actor.
+-- The world can read or answer the record while the character is on another map.
+
+local api = rawget(_G, "coop")
+local STORE = "coop_faction"
+local AVATAR_SECTION = "coop_player_avatar"
+local CHANGED = "coop_faction_changed"
+
+local common
+local installed = false
+local forwarding = 0
+
+local function world_seat_is_ghost()
+	return coop_mode.decides_world() and not coop_mode.seat_plays(0)
+end
+
+local function m_data()
+	local asm = common.mod("alife_storage_manager")
+	local m = asm and common.call(asm.get_state)
+	return type(m) == "table" and m or nil
+end
+
+-- the world's faction for a new character: the chain of coop_menu_char.world_faction
+local function world_faction()
+	local gs = common.mod("coop_game_settings")
+	local f = gs and common.call(gs.world_faction)
+	if common.known(f) then return f end
+	f = common.call(api and api.game and api.game.world_faction)
+	return common.known(f) and f or nil
+end
+
+-- the characters the world has now (coop.members: every character of the save, in the game or not)
+local function member_ids()
+	local list = common.call(api and api.members)
+	local ids = {}
+	for _, m in ipairs(type(list) == "table" and list or {}) do
+		if type(m) == "table" and type(m.id) == "number" and m.id ~= 0 then ids[#ids + 1] = m.id end
+	end
+	return ids
+end
+
+-- The record, made when it is not there: a save without it is older than this record, so its characters (the members at
+-- this moment, the first update of the world after a load) may tell their own faction once.
+local function store(create)
+	local m = m_data()
+	if not m then return nil end
+	local s = m[STORE]
+	if type(s) ~= "table" then
+		if not create then return nil end
+		s = { chars = {}, old = {} }
+		for _, id in ipairs(member_ids()) do s.old[id] = true end
+		m[STORE] = s
+	end
+	if type(s.chars) ~= "table" then s.chars = {} end
+	if type(s.old) ~= "table" then s.old = {} end
+	return s
+end
+
+local function peer_of_char(id)
+	local ct = common.mod("coop_tasks")
+	local p = ct and common.call(ct.peer_for_character, id)
+	return type(p) == "number" and p or nil
+end
+
+local function character_exists(id)
+	if id == 0 then return not world_seat_is_ghost() end
+	local ao = rawget(_G, "alife_object") or alife_object
+	local se = type(id) == "number" and id > 0 and id < 65535 and id % 1 == 0 and common.call(ao, id)
+	if not se then return false end
+	local ok, sec = pcall(function() return se:section_name() end)
+	return ok and sec == AVATAR_SECTION
+end
+
+local function split_faction_of_character(id)
+	if type(id) ~= "number" then return nil end
+	if id == 0 and world_seat_is_ghost() then return nil end
+	local s = store(false)
+	local e = s and s.chars[id]
+	if type(e) == "table" and common.known(e.f) then return e.f end
+	if id == 0 then
+		local f = common.true_faction()
+		return common.known(f) and f or nil
+	end
+	if s and s.old[id] then return nil end -- a character of an older save that has not told its faction yet
+	if not character_exists(id) then return nil end
+	return world_faction()
+end
+
+-- A character's own change, recorded by the world: everybody is told, other scripts get the callback.
+local function record_change(id, f, peer)
+	if not common.known(f) then
+		common.log("! a faction change of character %s to %s: no faction, not recorded", tostring(id), tostring(f))
+		return false
+	end
+	local s = store(true)
+	if not s then
+		common.log("! a faction change of character %s: no m_data, not recorded", tostring(id))
+		return false
+	end
+	local old = split_faction_of_character(id)
+	s.chars[id] = { f = f }
+	s.old[id] = nil
+	if old == f then return false end
+	common.stats.changes = common.stats.changes + 1
+	if type(peer) ~= "number" or peer < 0 then peer = peer_of_char(id) end
+	local nick = common.cut(peer ~= nil and common.nick_of(peer) or ("#" .. tostring(id)))
+	common.send_word({ k = "news", f = f, n = nick }, -1)
+	common.log("character %s (%s) joined %s (was %s)", tostring(id), nick, f, tostring(old))
+	if coop_mode.actor_is_player() then common.tip(common.text("st_coop_faction_split_joined", nick, common.faction_name(f))) end
+	local scb = rawget(_G, "SendScriptCallback") or SendScriptCallback
+	local ok, err = pcall(scb, CHANGED, peer, id, old, f)
+	if not ok then common.log("! %s: %s", CHANGED, tostring(err)) end
+	return true
+end
+
+-- coop_tasks.send_effect: the world sends a player's own effect to his machine (character id, the effect, his peer or -1).
+-- The world records drx_sl_change_factions itself, before his machine runs it: his word is never asked for.
+local function on_forward(id, t, peer)
+	if not coop_mode.decides_world() or type(t) ~= "table" or t.k ~= "fx" or t.f ~= "drx_sl_change_factions" then return end
+	if type(id) ~= "number" or not (id > 0 and id < 65535 and id % 1 == 0) then return end
+	record_change(id, t.p1, peer)
+end
+
+-- The question of a client in split mode: the answer is that character's faction from the record. A character of an older
+-- save with no record yet tells its own once (payload b); a new character gets the world's faction.
+local function answer(payload, from)
+	local id = common.char_of(from)
+	local valid = type(id) == "number" and id > 0 and id < 65535 and id % 1 == 0
+	if not common.request_ok("faction_request_character", valid, "peer %d has no character for faction sync", from) then return end
+	local s = store(true)
+	if not s then return end
+	local e = s.chars[id]
+	if not (type(e) == "table" and common.known(e.f)) then
+		if s.old[id] then
+			local claim = common.decode(payload).b
+			if not common.request_ok("faction_bootstrap_claim", common.known(claim),
+				"peer %d gave no known faction for character %d", from, id) then
+				common.stats.refused = common.stats.refused + 1
+				return
+			end
+			s.old[id] = nil
+			s.chars[id] = { f = claim }
+			common.stats.boot = common.stats.boot + 1
+			common.log("character %s of an older save is in %s (its own word, once)", tostring(id), claim)
+			-- no change, so no news line; but other scripts judged him without a faction until now (coop_srv_task_audience: his
+			-- faction's storyline tasks): they get the callback, old = nil
+			local scb = rawget(_G, "SendScriptCallback") or SendScriptCallback
+			local ok, err = pcall(scb, CHANGED, from, id, nil, claim)
+			if not ok then common.log("! %s: %s", CHANGED, tostring(err)) end
+		else
+			local f = world_faction()
+			if not f then return end
+			s.chars[id] = { f = f }
+		end
+		e = s.chars[id]
+	end
+	common.stats.answers = common.stats.answers + 1
+	common.send_word({ k = "sync", f = e.f }, from)
+end
+
+-- save_state: records of characters that no longer exist (a deleted player) are dropped
+local function host_save_state(m)
+	if not coop_mode.decides_world() or type(m) ~= "table" or type(m[STORE]) ~= "table" then return end
+	local s = m[STORE]
+	for _, part in ipairs({ "chars", "old" }) do
+		if type(s[part]) == "table" then
+			for id in pairs(s[part]) do
+				if not (type(id) == "number" and character_exists(id)) then s[part][id] = nil end
+			end
+		end
+	end
+end
+
+-- An old save's character may claim its own community once. While disguised,
+-- the player asks without a claim and can try again when the disguise is off.
+local function make_request()
+	local gd = common.mod("gameplay_disguise")
+	local claim = nil
+	if not (gd and common.call(gd.is_actor_disguised) == true) then claim = common.actor_faction() end
+	return common.encode({ b = claim })
+end
+
+local function on_word(t)
+	if t.k == "news" then
+		common.tip(common.text("st_coop_faction_split_joined", common.cut(t.n), common.faction_name(t.f)))
+	end
+end
+
+local function run_forwarded(fn, ...)
+	forwarding = forwarding + 1
+	local res = { pcall(fn, ...) }
+	forwarding = forwarding - 1
+	if not res[1] then error(res[2], 0) end
+	return unpack(res, 2)
+end
+
+-- this machine's own character, nothing else (the stock's first step without its storyline recycle and LTTZ infos)
+local function own_change(new_comm, now_flag)
+	local gd = common.mod("gameplay_disguise")
+	if not common.known(new_comm) or not (gd and type(gd.update_default) == "function") then
+		common.log("! a faction change to %s was not made: no such faction or no gameplay_disguise", tostring(new_comm))
+		return false
+	end
+	gd.update_default(new_comm, now_flag)
+	common.stats.applied = common.stats.applied + 1
+	common.log("this character joined %s", new_comm)
+	return true
+end
+
+local function set(new_comm, now_flag)
+	if not coop_mode.actor_is_player() then
+		common.stats.blocked = common.stats.blocked + 1
+		common.log("a faction change to %s was not made: this actor plays no character", tostring(new_comm))
+		return
+	end
+	if forwarding > 0 then
+		own_change(new_comm, now_flag)
+		return
+	end
+	common.stats.blocked = common.stats.blocked + 1
+	common.log("a faction change to %s on this machine was not made: finish a task at the faction's leader", tostring(new_comm))
+	common.tip(common.tr("st_coop_faction_by_group"))
+end
+
+local FLOW = {
+	faction_of_character = split_faction_of_character,
+	on_forward = on_forward,
+	answer = answer,
+	make_request = make_request,
+	on_word = on_word,
+	run_forwarded = run_forwarded,
+	set = set,
+}
+
+function on_game_start()
+	if installed then return end
+	installed = true
+	coop_mode.when_srv(function()
+		common = coop_faction.register_faction_change_flow(FLOW)
+		local initialized = false
+		local function init_record()
+			if not initialized and coop_mode.decides_world() then initialized = store(true) ~= nil end
+		end
+		RegisterScriptCallback("actor_on_first_update", function()
+			common.reset_sync()
+			initialized = false
+			init_record()
+		end)
+		-- A world server can start the session after its actor has loaded.
+		RegisterScriptCallback("actor_on_update", init_record)
+		RegisterScriptCallback("save_state", host_save_state)
+	end)
+end

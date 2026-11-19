@@ -1,8 +1,20 @@
 -- Anomaly Coop test (build 56, live 2026-11-18): a client in a disguise keeps it when the host's faction word comes after
 -- his load (coop_faction.client_apply). The stock's update_default(comm, now) sets the community at once only with `now` or
 -- when the player is not disguised (G.A.M.M.A. gameplay_disguise.script:181-193). Not shipped.
--- Run: tools\test_lua.cmd faction_disguise
+-- Run: tools\test_lua.cmd hostplay_faction_disguise
 dofile("tests/lua/support/harness_faction.lua")
+
+local modes = dofile("tests/lua/support/modes.lua")
+
+local function load_modes(M)
+	local facade = load_script(M, "coop_mode")
+	modes.live(facade, function(name) return load_script(M, name) end)
+	load_script(M, "coop_trust")
+	-- Faction tests exercise the real handlers with the Dev 57 trust default.
+	M.env.coop_trust.reset_for_test({ default = "log" })
+end
+SETUP_HOOK = load_modes
+
 
 -- the disguise flag of the stand-in module (a file local, as in the stock)
 local function set_disguised(M, v)
