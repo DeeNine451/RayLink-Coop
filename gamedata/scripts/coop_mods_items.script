@@ -273,7 +273,7 @@ end
 -- Items Model Drop After Usage
 -------------------------------------------------------------------------------
 local MD_CLEAN_DIST = 65
-local md = { dropped = {}, next_clean = 0 } -- host: id -> position of a client's debris
+local md = { dropped = {}, next_clean = 0 }
 
 local function md_has_model(sec)
 	if type(sec) ~= "string" or #sec > 96 then return false end
@@ -284,75 +284,120 @@ local function md_has_model(sec)
 	return false
 end
 
-local function host_md_drop(t, from)
-	local M = C().mod("model_dropper_mcm")
-	local who = C().avatar(from)
-	if not (M and who and md_has_model(t.s)) then return refuse("md_drop", from, "no model for that item") end
-	-- The mod's own drop with the requester's character as the actor; what it creates is ours to clean.
+local function md_spawn(orig, from, who, ...)
+	-- The mod's variants call the wrapped spawn_object recursively, under the same capture.
 	local real = _G.alife_create
+	local map = level.name()
 	local made = {}
-	_G.alife_create = function(...)
-		local se = real(...)
-		if se then made[#made + 1] = se end
+	_G.alife_create = function(sec, ...)
+		local se = real(sec, ...)
+		if se and sec:find("^dropper_") then
+			local drop = { section = sec, map = map, pos = vector():set(se.position) }
+			md.dropped[se.id], made[se.id] = drop, drop
+		end
 		return se
 	end
-	-- The mod places the drop at "the actor" in a time event, after this call: it landed at the host (live 2026-10-31).
 	local events = rawget(_G, "demonized_time_events")
 	local real_event = events and events.CreateTimeEvent
 	if real_event then
-		events.CreateTimeEvent = function(ev, action, delay, f, ...)
+		events.CreateTimeEvent = function(ev, action, delay, f, id, ...)
+			local drop = made[id]
+			if not drop then return real_event(ev, action, delay, f, id, ...) end
 			return real_event(ev, action, delay, function(...)
-				local body = C().avatar(from)
+				if md.dropped[id] ~= drop or level.name() ~= drop.map then return true end
+				local body = coop_mode.where(from) == "here" and C().avatar(from)
 				if not body then return true end
 				local run, done = C().as_player(body, f, ...)
+				-- The stock timer appends a cleanup entry after positioning the debris. Take it over.
+				local list = md.stock_drops
+				local last = list and list[#list]
+				if last and last[1] == id then
+					drop.pos = last[2]
+					table.remove(list)
+				end
+				if not run then C().report("items", "model drop force", done) end
 				return done or not run
-			end, ...)
+			end, id, ...)
 		end
 	end
-	local okp, ok, e = pcall(C().as_player, who, M.spawn_object, t.s, t.a == true)
+	md.spawning = true
+	local okp, ok, result = pcall(C().as_player, who, orig, ...)
+	md.spawning = false
 	if real_event then events.CreateTimeEvent = real_event end
-	_G.alife_create = real -- restored even if as_player itself failed (W5)
-	if not (okp and ok) then C().report("items", "model drop", okp and e or ok) end
-	for _, se in ipairs(made) do md.dropped[se.id] = vector():set(se.position) end
+	_G.alife_create = real
+	if not (okp and ok) then C().report("items", "model drop", okp and result or ok) end
 	st.md = st.md + 1
+	if okp and ok then return result end
+end
+
+local function host_md_drop(t, from)
+	local who = C().avatar(from)
+	local valid = who ~= nil and md_has_model(t.s) and (t.a == nil or type(t.a) == "boolean")
+	if not coop_trust.pass("md_drop_model", valid, "peer %s requested an unavailable model or sent invalid data", tostring(from))
+		or not valid then return refuse("md_drop", from, "no model for that item") end
+	return md_spawn(md.original, from, who, t.s, t.a == true)
 end
 
 local function host_md_clean()
-	if not next(md.dropped) then return end
+	if not next(md.dropped) or not coop_mode.leads_here() then return end
 	local tg = time_global()
 	if tg < md.next_clean then return end
 	md.next_clean = tg + 5000
-	local players = C().player_objects()
-	for id, pos in pairs(md.dropped) do
-		local near_any = false
-		for _, p in ipairs(players) do
-			if p.obj:position():distance_to_sqr(pos) <= MD_CLEAN_DIST * MD_CLEAN_DIST then near_any = true break end
+	local map = level.name()
+	local positions = {}
+	for _, p in ipairs(C().player_objects()) do
+		if coop_mode.where(p.peer) == "here" and p.obj:alive() then
+			positions[#positions + 1] = p.obj:position()
 		end
-		if not near_any then
-			local se = alife_object(id)
-			if se and se:section_name():find("^dropper_") then
+	end
+	for id, drop in pairs(md.dropped) do
+		local se = alife_object(id)
+		if not se or se:section_name() ~= drop.section then
+			md.dropped[id] = nil
+		else
+			local near_any = false
+			if drop.map == map then
+				local obj = level.object_by_id(id)
+				local pos = obj and obj:position() or drop.pos
+				for _, player_pos in ipairs(positions) do
+					if player_pos:distance_to_sqr(pos) <= MD_CLEAN_DIST * MD_CLEAN_DIST then near_any = true break end
+				end
+			end
+			if not near_any then
 				alife_release(se)
+				md.dropped[id] = nil
 				st.md_clean = st.md_clean + 1
 			end
-			md.dropped[id] = nil
 		end
 	end
 end
 
 local function install_model_dropper()
 	local M = C().mod("model_dropper_mcm")
-	if not (M and C().fn(M, "spawn_object")) then return end
+	md.original = C().fn(M, "spawn_object")
+	if not md.original then return end
+	md.stock_drops = C().find_local(M, "dropper_id")
 	installed[#installed + 1] = "model_dropper"
 	C().wrap(M, "spawn_object", "model_dropper_mcm.spawn_object", function(orig)
 		return function(item_sec, alted, ...)
-			if not C().is_client() then return orig(item_sec, alted, ...) end
-			if alted then return true end -- the variants are the host's to expand
-			if md_has_model(item_sec) then C().to_host("md_drop", { s = item_sec, a = false }) end
-			return true
+			if not C().active() or md.spawning then return orig(item_sec, alted, ...) end
+			if coop_mode.leads_here() and coop_mode.actor_is_player() then
+				return md_spawn(orig, C().self_peer(), db.actor, item_sec, alted, ...)
+			end
+			if coop_mode.is_player_mirror() then
+				if not alted and md_has_model(item_sec) then C().to_host("md_drop", { s = item_sec, a = false }) end
+				return true
+			end
+			return orig(item_sec, alted, ...)
 		end
 	end)
 	C().on("md_drop", host_md_drop, "host")
 	C().set_limit("md_drop", 6, 1)
+	RegisterScriptCallback("server_entity_on_unregister", function(se)
+		if se then md.dropped[se.id] = nil end
+	end)
+	RegisterScriptCallback("load_state", function() md.dropped, md.next_clean = {}, 0 end)
+	RegisterScriptCallback("actor_on_update", host_md_clean)
 end
 
 -------------------------------------------------------------------------------
@@ -1229,7 +1274,6 @@ local first_done = false
 local function actor_on_update()
 	if C().is_host() then
 		for id in pairs(spent) do if not alife_object(id) then spent[id] = nil end end
-		host_md_clean()
 	elseif not first_done and C().is_client() and GS.mod then
 		-- The save's lamp table describes the host's lamps; a client never burns or picks them up itself.
 		first_done = true
