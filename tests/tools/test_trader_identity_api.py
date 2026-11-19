@@ -101,6 +101,10 @@ int main(int argc, char** argv) {
         function coop.is_host() return true end
         function coop.players() return {{id=0,is_self=true},{id=1,avatar_id=501},{id=2,avatar_id=502}} end
         local data={}
+        -- the host's rule trader_rep (f77f52a, 2026-11-12): the default "best" would give the best player's 1200; the
+        -- identity check needs every player's value, so it runs under "mean_online" and checks "best" at the end
+        TRADER_MODE="mean_online"
+        coop_economy_core={rule=function(key) if key=="trader_rep" then return TRADER_MODE end end}
         alife_storage_manager={get_state=function() return data end}
         game_relations={factions_table={"stalker"}}
         game={get_game_time=function() return {get=function() return 2026,11,10,12,0,0,0 end} end}
@@ -129,6 +133,9 @@ int main(int argc, char** argv) {
         coop.sync.player_digest=binding
         reputation.refresh()
         assert(reputation.average("stalker")==700)
+        TRADER_MODE="best"
+        reputation.refresh()
+        assert(reputation.average("stalker")==1200,"the best player's standing (the host's 1200) under the rule best")
     )lua");
     lua_close(L);
 }
