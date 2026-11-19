@@ -1,0 +1,482 @@
+-- Core, Dev 57 G4-4 (m10:1, m10:4, m10:5).
+-- Co-op: the playing host checks and changes the player's inventory on its map.
+-- Server: the world server relays the request with its sender to the player's map, which has the inventory.
+-- FDDA pickup and skinning animations run where the player acts. G4-1 carries the battery operation and its reply.
+-- No saved state or new event verbs.
+
+local api = rawget(_G, "coop")
+local BATTERY_OP = "fdda_battery"
+local SKIN_WAIT_MS = 10000
+local CHARGE_TOLERANCE = 0.02
+local NO_PARENT = 65535
+local device_mod, condition_holder, condition_slot
+local battery_pending = {}
+
+local function C() return coop_mods_core end
+local function X() return coop_mods_xchg end
+local function report(what, err) C().report("xchg_fdda", what, err) end
+local function pack(...) return { n = select("#", ...), ... } end
+
+local function owned(id, owner)
+	local se = alife_object(id)
+	return se ~= nil and se.parent_id == owner
+end
+
+local function charge(value)
+	return type(value) == "number" and value >= 0 and value <= 1
+end
+
+local function same_charge(observed, current)
+	return charge(observed) and charge(current) and math.abs(observed - current) <= CHARGE_TOLERANCE
+end
+
+local function set_charge(obj, value)
+	obj:set_condition(value)
+	if condition_holder then
+		local _, conditions = debug.getupvalue(condition_holder, condition_slot)
+		if type(conditions) == "table" then conditions[obj:id()] = obj:condition() end
+	end
+end
+
+-- Both the trust check and the reservation use only objects the requester currently owns.
+local function battery_inputs(t, who)
+	local device_id = X().wire_id(t.d)
+	local battery_id = X().wire_id(t.b)
+	if not device_id or (t.b ~= nil and (not battery_id or battery_id == device_id)) then return nil, "id" end
+	if not charge(t.dc) or (battery_id and not charge(t.bc)) or (not battery_id and t.bc ~= nil) then
+		return nil, "charge"
+	end
+	local m = device_mod
+	local section = m and m.device_battery
+	if not (section and ini_sys:section_exist(section)) then return nil, "device" end
+	local owner = who and who:id()
+	if not (owner and owned(device_id, owner) and (not battery_id or owned(battery_id, owner))) then
+		return nil, "owner"
+	end
+	local device = level.object_by_id(device_id)
+	local battery = battery_id and level.object_by_id(battery_id)
+	local device_section = device and device:section()
+	local critical = device_section and m.dev_critical[device_section]
+	if not (charge(critical) and device_section ~= section) or (battery_id and
+		not (battery and battery:section() == section and m.dev_consumption[device_section])) then
+		return nil, "device"
+	end
+	local original = device:condition()
+	local input = battery and battery:condition()
+	if not charge(original) or (battery_id and not charge(input)) then return nil, "charge" end
+	if input and input < original then return nil, "more_power" end
+	if not battery_id and original <= critical then return nil, "empty" end
+	local new_charge = input or C().find_local(m, "c_zero")
+	if not charge(new_charge) then return nil, "device" end
+	return {
+		ids = { device_id, battery_id }, spent = battery_id and { battery_id },
+		device = device, battery_id = battery_id, owner = owner,
+		section = section, original = original, new_charge = new_charge, returns_battery = original > critical,
+	}
+end
+
+local function create_battery(who, token)
+	-- Set the output condition before the spawn is published, including to a remote owner's inventory.
+	local sim = alife()
+	local prepared = sim:create(token.section, who:position(), who:level_vertex_id(), who:game_vertex_id(),
+		token.owner, false)
+	if not prepared then return false end
+	local initialized, err = pcall(function()
+		local data = utils_stpk.get_item_data(prepared)
+		data.condition = token.original
+		utils_stpk.set_item_data(data, prepared)
+	end)
+	local made = sim:register(prepared)
+	if made then token.output = made.id end
+	if not initialized then report("prepare battery charge", err) end
+	if not (initialized and token.output and owned(token.output, token.owner) and made:section_name() == token.section) then
+		return false
+	end
+	if alife_record then alife_record(made, true) end
+	return true
+end
+
+local function commit_battery(_, _, who, token)
+	if token.returns_battery and not create_battery(who, token) then return false, "create" end
+	token.changed = true
+	set_charge(token.device, token.new_charge)
+	if math.abs(token.new_charge - token.device:condition()) > 0.00001 then return false, "condition" end
+	if token.battery_id then
+		local input = alife_object(token.battery_id)
+		if not (input and input.parent_id == token.owner) then return false, "release" end
+		alife_release(input)
+		-- The local server processes GE_DESTROY synchronously. The online copy can survive until the next frame.
+		if alife_object(token.battery_id) then return false, "release" end
+	end
+	return true, { charge = token.new_charge }
+end
+
+local function rollback_battery(_, _, _, token)
+	if token.changed then
+		local ok, err = pcall(set_charge, token.device, token.original)
+		if not ok then report("restore device charge", err) end
+	end
+	if token.output then
+		local made = alife_object(token.output)
+		if made and made.parent_id == token.owner then alife_release(made) end
+		if alife_object(token.output) then report("rollback battery spawn", "output is still present") end
+	end
+end
+
+local function install_battery()
+	X().serve(BATTERY_OP, {
+		check = function(t, _, who)
+			local token, why = battery_inputs(t, who)
+			if not token then return false, why end
+			if not same_charge(t.dc, token.original) or (token.battery_id and not same_charge(t.bc, token.new_charge)) then
+				return false, "charge"
+			end
+			return true
+		end,
+		reserve = function(t, _, who) return battery_inputs(t, who) end,
+		commit = commit_battery,
+		rollback = rollback_battery,
+	})
+end
+
+local function request_battery(device, battery)
+	local x = X()
+	local id = device:id()
+	local input = battery and battery:id()
+	local d = C().hid(id)
+	local b = input and C().hid(input)
+	if not d or (input and not b) or battery_pending[id] or (input and battery_pending[input]) then return end
+	local name = device:name()
+	local request = { key = d, d = d, b = b, dc = device:condition(), bc = battery and battery:condition() }
+	local entry = { device = id }
+	battery_pending[id] = entry
+	if input then battery_pending[input] = entry end
+	local function clear()
+		if battery_pending[id] == entry then battery_pending[id] = nil end
+		if input and battery_pending[input] == entry then battery_pending[input] = nil end
+	end
+	local function accept(ok, result, why)
+		if battery_pending[id] ~= entry then return end
+		clear()
+		if not ok then
+			if why == "more_power" then
+				C().hud("ui_st_battery_more_power")
+			else
+				C().log("xchg_fdda", "battery exchange for device %d ended: %s", id, tostring(why))
+			end
+			return
+		end
+		if entry.device_gone then return end
+		local current = level.object_by_id(id)
+		local parent = current and current:parent()
+		if not (parent and db.actor and parent:id() == db.actor:id() and current:name() == name) then return end
+		if coop_mode.is_player_mirror() and type(result) == "table" and charge(result.charge) then
+			set_charge(current, result.charge)
+		end
+		actor_effects.play_item_fx(device_mod.device_battery)
+		utils_obj.play_sound("interface\\inv_batt")
+	end
+	if not x.ask(BATTERY_OP, request, accept) then clear() end
+end
+
+local function install_device_hooks(mcm)
+	if not mcm then return end
+	local m = C().mod("item_device")
+	if not (m and C().fn(m, "func_battery")) then return end
+	local drag = C().find_local(m, "on_item_drag_dropped")
+	if type(drag) ~= "function" then return end
+	device_mod = m
+	local _
+	_, condition_holder, condition_slot = C().find_local(m, "dev_condition")
+	C().wrap(m, "func_battery", "item_device.func_battery", function(orig)
+		return function(obj, ...)
+			if not C().active() then return orig(obj, ...) end
+			if obj and coop_mode.actor_is_player() then request_battery(obj) end
+		end
+	end)
+	-- The drag callback is a private closure registered by value in item_device.on_game_start.
+	local callback = { drag = drag }
+	C().wrap(callback, "drag", "item_device.on_item_drag_dropped", function(orig)
+		return function(battery, device, from, to, ...)
+			if not C().active() then return orig(battery, device, from, to, ...) end
+			if not (coop_mode.actor_is_player() and battery and device and from == EDDListType.iActorBag
+				and (to == EDDListType.iActorBag or to == EDDListType.iActorSlot)
+				and battery:section() == m.device_battery and m.dev_consumption[device:section()]) then return end
+			request_battery(device, battery)
+		end
+	end)
+	C().swap_callback("ActorMenu_on_item_drag_drop", drag, callback.drag)
+end
+
+local pickup_marks = {}
+local pickup_call
+
+local function clear_mark(entry)
+	if pickup_marks[entry.id] == entry then pickup_marks[entry.id] = nil end
+	if entry.marks[entry.id] == entry then entry.marks[entry.id] = nil end
+end
+
+local function world_item(obj, id)
+	if not obj or obj:parent() then return false end
+	local se = alife_object(id)
+	return not se or se.parent_id == NO_PARENT
+end
+
+local function pickup_action(action, call)
+	local entries = {}
+	local ids = action.items or { action.item_id }
+	for _, id in ipairs(ids) do
+		local obj = level.object_by_id(id)
+		if not pickup_marks[id] and world_item(obj, id) then
+			local entry = { id = id, name = obj:name(), section = obj:section(), marks = call.marks }
+			entries[#entries + 1] = entry
+			pickup_marks[id], call.marks[id] = entry, entry
+		else
+			call.marks[id] = pickup_marks[id]
+		end
+	end
+	local actor_id = db.actor:id()
+	local attachments = C().upvalue(action.on_take, "mcm_use_attachments")
+	local on_exit = action.on_exit
+	action.on_take = function(self)
+		local last
+		for _, entry in ipairs(entries) do
+			local current = pickup_marks[entry.id] == entry
+			clear_mark(entry)
+			local obj = current and level.object_by_id(entry.id)
+			if C().active() and db.actor and db.actor:id() == actor_id and world_item(obj, entry.id)
+				and obj:section() == entry.section and obj:name() == entry.name then
+				if attachments then
+					last = entry.section
+					if not self.items then call.mod.attach_to_hand(last, self.hands) end
+				end
+				db.actor:take_item(obj)
+			end
+		end
+		if last and self.items then call.mod.attach_to_hand(last, self.hands) end
+	end
+	action.on_skip = function()
+		for _, entry in ipairs(entries) do clear_mark(entry) end
+	end
+	action.on_exit = function(self)
+		for _, entry in ipairs(entries) do clear_mark(entry) end
+		if on_exit then on_exit(self) end
+	end
+end
+
+local function install_pickup()
+	local m = C().mod("liz_fdda_redone_item_pickup")
+	local anim = m and C().mod("lam2")
+	local orig = m and C().fn(m, "actor_on_item_before_pickup")
+	if not (anim and orig and C().fn(anim, "add_action")) then return end
+	C().wrap(anim, "add_action", "lam2.add_action (FDDA pickup)", function(add)
+		return function(action, ...)
+			if pickup_call and action.tag == "item_pickup" then pickup_action(action, pickup_call) end
+			return add(action, ...)
+		end
+	end)
+	C().wrap(m, "actor_on_item_before_pickup", "liz_fdda_redone_item_pickup.actor_on_item_before_pickup", function(before)
+		return function(...)
+			if not C().active() then return before(...) end
+			if not (coop_mode.actor_is_player() and db.actor) then return end
+			local marks = C().upvalue(m.get_template_action_pickup, "items_in_pickup")
+			if type(marks) ~= "table" then return before(...) end
+			local previous = pickup_call
+			pickup_call = { mod = m, marks = marks }
+			local result = pack(pcall(before, ...))
+			pickup_call = previous
+			if not result[1] then error(result[2], 0) end
+			return unpack(result, 2, result.n)
+		end
+	end)
+	C().swap_callback("actor_on_item_before_pickup", orig, m.actor_on_item_before_pickup)
+end
+
+local skin_ops = {}
+local skin_hook
+local skin_subscribed = false
+
+local function stop_skin_subscription()
+	if not skin_subscribed then return end
+	UnregisterScriptCallback("actor_on_item_take", skin_hook)
+	skin_subscribed = false
+end
+
+local function epoch()
+	return api.world_epoch and api.world_epoch()
+end
+
+local function needs_lease()
+	return coop_mode.is_player_mirror() and api.lease_ids and api.lease_ids() == 0
+end
+
+local function skin_record(op, section, made)
+	local id = made and made.id
+	if type(id) == "number" and id > 0 and id < NO_PARENT then
+		op.parts[id] = section
+	end
+end
+
+local function try_skin_part(op, id, obj)
+	local section = op.parts[id]
+	if not (section and obj and obj:section() == section and owned(id, op.owner)) then return end
+	if api.lease_waiting and api.lease_waiting(id) then return end
+	op.parts[id] = nil
+	if op.played and not op.every then return end
+	local corpse = level.object_by_id(op.corpse)
+	if not (corpse and corpse:name() == op.name) then return end
+	-- The original animation callback normally gets these from GUI_on_show (or automatic loot).
+	local _, first = debug.getupvalue(op.animate, op.first)
+	local _, target = debug.getupvalue(op.animate, op.target)
+	debug.setupvalue(op.animate, op.first, not op.played)
+	debug.setupvalue(op.animate, op.target, corpse)
+	op.played = true
+	local ok, err = pcall(op.animate, obj)
+	debug.setupvalue(op.animate, op.first, first)
+	debug.setupvalue(op.animate, op.target, target)
+	if not ok then report("animate mutant loot", err) end
+end
+
+skin_hook = function(obj)
+	if not (C().active() and obj) then return end
+	local id = obj:id()
+	local now = time_global()
+	for _, op in ipairs(skin_ops) do
+		if now < op.deadline and op.epoch == epoch() then try_skin_part(op, id, obj) end
+	end
+end
+
+local function update_skinning(now)
+	if #skin_ops == 0 then return end
+	local remaining = {}
+	for _, op in ipairs(skin_ops) do
+		if C().active() and op.epoch == epoch() and db.actor and db.actor:id() == op.owner then
+			local timed_out = now >= op.deadline
+			while op.queued[op.next] and (timed_out or not needs_lease()) do
+				local give = op.queued[op.next]
+				op.next = op.next + 1
+				local ok, made = pcall(op.create, give.section, db.actor, unpack(give.args, 1, give.args.n))
+				if not ok then
+					report("give mutant loot", made)
+				elseif not timed_out then
+					skin_record(op, give.section, made)
+				end
+			end
+			if not timed_out then
+				for id in pairs(op.parts) do try_skin_part(op, id, level.object_by_id(id)) end
+				if op.queued[op.next] or next(op.parts) then remaining[#remaining + 1] = op end
+			end
+		end
+	end
+	skin_ops = remaining
+	if #skin_ops == 0 then stop_skin_subscription() end
+end
+
+local function install_skinning(mcm)
+	local mod = mcm and C().mod("liz_fdda_redone_mutant_skinning")
+	local ui = mod and C().mod("ui_mutant_loot")
+	local cls = ui and ui.UIMutantLoot
+	local animate = mod and C().fn(mod, "actor_on_item_take")
+	local _, _, first = C().upvalue(animate, "first_take")
+	local _, _, target = C().upvalue(animate, "target_mutant")
+	if not (first and target and C().fn(cls, "Loot")) then return end
+	-- Automatic loot still registers this name. Only the operation-specific subscription can animate in a session.
+	C().wrap(mod, "actor_on_item_take", "liz_fdda_redone_mutant_skinning.actor_on_item_take", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+		end
+	end)
+	C().swap_callback("actor_on_item_take", animate, mod.actor_on_item_take)
+	-- In a session the ordinary UI does not subscribe on open or schedule an unsubscribe on close.
+	for _, name in ipairs({ "GUI_on_show", "GUI_on_hide" }) do
+		local wrapped, orig = C().wrap(mod, name, "liz_fdda_redone_mutant_skinning." .. name, function(original)
+			return function(...)
+				if not C().active() then return original(...) end
+			end
+		end)
+		if wrapped then C().swap_callback(name, orig, mod[name]) end
+	end
+	C().wrap(cls, "Loot", "ui_mutant_loot.UIMutantLoot.Loot (FDDA skinning)", function(orig)
+		return function(self, ...)
+			if not C().active() then return orig(self, ...) end
+			UnregisterScriptCallback("actor_on_item_take", mod.actor_on_item_take)
+			local corpse = self.id and level.object_by_id(self.id)
+			local actor = db.actor
+			local create = rawget(_G, "alife_create_item")
+			if not (corpse and actor and coop_mode.actor_is_player() and mcm.get_config("skinning/enable")
+				and type(create) == "function") then return orig(self, ...) end
+			local op = {
+				owner = actor:id(), corpse = corpse:id(), name = corpse:name(), deadline = time_global() + SKIN_WAIT_MS,
+				epoch = epoch(), every = mcm.get_config("skinning/every_part_pickup") == true,
+				animate = animate, first = first, target = target, parts = {}, queued = {}, next = 1, create = create,
+			}
+			rawset(_G, "alife_create_item", function(section, owner, ...)
+				-- Nested callbacks (even for the same section) are independent of this Loot call.
+				local caller = debug.getinfo(2, "f")
+				if not (caller and caller.func == orig and owner and owner:id() == op.owner) then
+					return create(section, owner, ...)
+				end
+				if #op.queued > 0 or needs_lease() then
+					op.queued[#op.queued + 1] = { section = section, args = pack(...) }
+					return nil
+				end
+				local made = create(section, owner, ...)
+				skin_record(op, section, made)
+				return made
+			end)
+			local result = pack(pcall(orig, self, ...))
+			rawset(_G, "alife_create_item", create)
+			if next(op.parts) or op.queued[1] then
+				skin_ops[#skin_ops + 1] = op
+				if not skin_subscribed then
+					RegisterScriptCallback("actor_on_item_take", skin_hook)
+					skin_subscribed = true
+				end
+			end
+			if not result[1] then error(result[2], 0) end
+			return unpack(result, 2, result.n)
+		end
+	end)
+end
+
+local function on_net_destroy(obj)
+	if not obj then return end
+	local id = obj:id()
+	local pending = battery_pending[id]
+	if pending and pending.device == id then pending.device_gone = true end
+	local mark = pickup_marks[id]
+	if mark then clear_mark(mark) end
+	for _, op in ipairs(skin_ops) do
+		if id == op.corpse then op.name = nil end
+		op.parts[id] = nil
+	end
+end
+
+local function step(name, fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then printf("! [coop_mods_xchg_fdda] %s: %s", name, tostring(err)) end
+end
+
+local installed = false
+local function actor_on_update()
+	local active = C().active()
+	if active and not installed then
+		installed = true
+		local mcm = C().mod("liz_fdda_redone_mcm")
+		step("device hooks", install_device_hooks, mcm)
+		step("pickup hooks", install_pickup)
+		step("skinning hooks", install_skinning, mcm)
+	end
+	if not active then
+		if next(battery_pending) then battery_pending = {} end
+		for _, entry in pairs(pickup_marks) do clear_mark(entry) end
+	end
+	update_skinning(time_global())
+end
+
+function on_game_start()
+	if not api then return end
+	step("battery exchange", install_battery)
+	step("actor update", RegisterScriptCallback, "actor_on_update", actor_on_update)
+	step("object destroyed", RegisterScriptCallback, "game_object_on_net_destroy", on_net_destroy)
+end
