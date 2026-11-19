@@ -17,8 +17,7 @@
 	   Lua has no way to set it: a client that joins a long rain stays dry, at 144 fps it gets wet 3.6 times as fast as a
 	   host at 40. The host writes its value; a client outside a small band steers its own with the two console rates of
 	   ssfx_wetness_multiplier (x build-up in rain, y drying), and puts the player's numbers back inside the band and
-	   when it leaves the world, so user.ltx never keeps a correction. On a map server's level it rains by that level's sky:
-	   the host's number says nothing there, the player's own wetness runs on.
+	   when it leaves the world, so user.ltx never keeps a correction. A server player has local wetness for their map.
 	Everything here is a no-op outside a co-op session.
 --]]
 
@@ -41,6 +40,11 @@ local FIELDS = { c = "cycle", p = "preset", f = "weather_file", lf = "last_weath
 	cw = "curr_weather", nw = "next_weather", lw = "levelWeather" }
 -- A field the host may not have yet is left as it is here, except these: nil means something (get_curr_weather of GAMMA).
 local MAY_BE_EMPTY = { last_weather_file = true, last_cycle = true }
+
+local weather_policy = {}
+function set_weather_policy(policy)
+	weather_policy = policy
+end
 
 local stats = { sent = 0, applied = 0, wet_sent = 0, wet_rates = 0 }
 
@@ -76,6 +80,7 @@ local function snapshot(wm)
 end
 
 local function host_tick(wm)
+	if weather_policy.prepare then weather_policy.prepare(wm) end
 	local t, sig = snapshot(wm)
 	if sig ~= last_sent and sync_set(KEY_STATE, t) then
 		last_sent = sig
@@ -85,8 +90,9 @@ end
 
 -- Client: the host's state goes into this machine's manager. -> have a state, the weather file changed
 local function apply(wm)
+	if weather_policy.accepts and not weather_policy.accepts(wm) then return false, false end
 	local t = sync_get(KEY_STATE)
-	if type(t) ~= "table" then return false, false end
+	if type(t) ~= "table" or (weather_policy.draw and type(t.f) ~= "string") then return false, false end
 	local file_changed = false
 	for wire, field in pairs(FIELDS) do
 		local v = t[wire]
@@ -100,8 +106,15 @@ local function apply(wm)
 end
 
 -- What select_weather leaves behind on a client, from the host's state instead of its own roll.
-local function client_select(wm)
+local function select_from_snapshot(wm, now)
 	if not apply(wm) then return false end
+	if weather_policy.draw then
+		if now then
+			wm.last_hour = level.get_time_hours()
+			wm.next_hour = (wm.last_hour + 1) % 24
+		end
+		weather_policy.draw(wm, now or wm.forced_weather_change_on_time_change == true)
+	end
 	wm.forced_weather_change_on_time_change = false
 	wm.transition_period, wm.pre_blowout_period = false, false
 	wm:set_brightness_boosts()
@@ -131,7 +144,8 @@ local function patch_class()
 	end)
 	local function selecting(orig)
 		return function(self, ...)
-			if P.is_client() and client_select(self) then return end
+			if weather_policy.choose then return weather_policy.choose(orig, self, ...) end
+			if (weather_policy.draw or P.is_client()) and select_from_snapshot(self, ...) then return end
 			return orig(self, ...)
 		end
 	end
@@ -208,11 +222,19 @@ end
 -------------------------------------------------------------------------------
 local next_tick = 0
 
--- A map server: its level's sky is its own, on the world's cycle: a cellar stays a cellar. The world server's cycle and preset go into
--- this manager and the stock picks this level's weather from them; the engine sends the sky to the players of this level.
+-- The map authority applies the world forecast through the renderer supplied by
+-- its policy. The stock selector can also take the cycle and preset alone.
 local cycle_seen = nil
 
 local function map_server_tick(wm)
+	if weather_policy.draw then
+		local have, file_changed = apply(wm)
+		if have then
+			weather_policy.draw(wm, false)
+			if file_changed then wm:set_brightness_boosts() end
+		end
+		return
+	end
 	local t = sync_get(KEY_STATE)
 	if type(t) ~= "table" then return end
 	local sig = table.concat({ tostring(t.c), tostring(t.p), tostring(t.lw) }, "|")

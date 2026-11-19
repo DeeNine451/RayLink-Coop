@@ -62,9 +62,48 @@ local function report_peer(from, report)
 	if trusted then return peer end
 end
 
+local function outdoor_forecast(select_weather, wm, ...)
+	-- The service level has no outdoor weather type. Run the stock forecast with
+	-- the type shared by outdoor maps, including the stock pre-blowout preset roll.
+	local weather_type = wm.weatherType
+	wm.weatherType = "atmosfear"
+	local ok, err = pcall(select_weather, wm, ...)
+	wm.weatherType = weather_type
+	if not ok then error(err, 0) end
+end
+
+local function install_weather()
+	local sync = rawget(_G, "coop_world_weather") or coop_world_weather
+	if not sync then return end
+	if coop_mode.decides_world() then
+		sync.set_weather_policy({
+			choose = outdoor_forecast,
+			prepare = function(wm)
+				if wm.weatherType and not (wm.levelWeather or ""):find("^atmosfear") then wm:select_weather(false) end
+			end,
+		})
+		return
+	end
+	local policy = { accepts = function(wm) return wm.weatherType == "atmosfear" end }
+	if coop_mode.leads_here() then
+		local last_manager, last_file
+		policy.draw = function(wm, force)
+			if weather and weather.is_paused and weather.is_paused() then return end
+			if force or wm ~= last_manager or wm.weather_file ~= last_file then
+				-- Replacing the base sky during a weather effect must preserve the effect.
+				local playing = level.is_wfx_playing and level.is_wfx_playing()
+				level.set_weather(wm.weather_file, not playing and (force or wm ~= last_manager))
+				last_manager, last_file = wm, wm.weather_file
+			end
+		end
+	end
+	sync.set_weather_policy(policy)
+end
+
 function on_game_start()
 	if not api then return end
 	coop_mode.when_srv(function()
+		install_weather()
 		local policy = { reaches_here = reaches_here }
 		if coop_mode.decides_world() then
 			policy.publish = publish_phase
