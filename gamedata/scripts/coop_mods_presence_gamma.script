@@ -1,0 +1,356 @@
+-- G8-5: the map leader has the bodies, restrictors and spawn vertices. The world owner keeps
+-- the RF roll and the Swamps story flag. In co-op the same process has all of those answers.
+
+local TAG = "presence_gamma"
+local DARKNESS = "zone_mine_darkness"
+local BAR, BAR_ZONE = "l05_bar", "bar_visitors_sr_light"
+local RF_FACT, RF_ORDER = "g85_rf_near", "g85_rf_ambush"
+local HINT_FACT, HINT_ORDER = "g85_swamps_bar", "g85_swamps_hint"
+local HINT_READY = "task_mystery_of_the_swamps_available"
+local HINT_SENT = "task_mystery_of_the_swamps_barman_hint_sent"
+local HINT_PASSED = "yan_stalker_sakharov_mystery_of_the_swamps_1_passed"
+local HINT_TEXT = "mystery_of_the_swamps_barman_msg_1"
+local BARMAN = "bar_visitors_barman_stalker_trader"
+
+local packages, radio, swamps, nta, news
+local rf_due, hint_due = 0, 0
+local pending_roll, map_results = nil, {}
+local started = false
+
+local function C() return coop_mods_core end
+
+local function object_id(id)
+	return type(id) == "number" and id >= 1 and id <= 65534 and id % 1 == 0
+end
+
+local function map_name(vertex)
+	local graph = game_graph()
+	if vertex ~= nil and graph:valid_vertex_id(vertex) then
+		return alife():level_name(graph:vertex(vertex):level_id())
+	end
+end
+
+local function players_here(map)
+	local players = {}
+	for _, obj in ipairs(coop_npc_players.everyone()) do
+		local peer = coop_npc_players.peer_of(obj)
+		if peer ~= nil and coop_mode.seat_plays(peer) and coop_mode.where(peer) == "here"
+			and coop_npc_players.standing(obj) and map_name(obj:game_vertex_id()) == map then
+			players[#players + 1] = obj
+		end
+	end
+	return players
+end
+
+local function nearest(players, pos)
+	local player, distance = nil, math.huge
+	for _, obj in ipairs(players) do
+		local d = pos:distance_to_sqr(obj:position())
+		if d < distance then player, distance = obj, d end
+	end
+	return player, distance
+end
+
+local function check_fact(verb, valid, from)
+	-- Log mode must still keep malformed values and non-authorities out of the state machine.
+	return coop_trust.pass(verb, valid, "invalid map fact from peer %s", tostring(from)) and valid
+end
+
+local function map_reporter(from)
+	-- Transport-reserved peers 0x101..0x107, as defined in coop_mapserver_rules.h.
+	return type(from) == "number" and from >= 0x101 and from <= 0x107 and from % 1 == 0
+end
+
+local function assigned_to(character, map)
+	if not object_id(character) then return false end
+	local id = C().lid(character)
+	if not id then return false end
+	for _, p in ipairs(C().players()) do
+		if p.avatar_id == id and p.level ~= nil and coop_mode.seat_plays(p.id)
+			and coop_mode.where(p.id) ~= "joining" and alife():level_name(p.level) == map then return true end
+	end
+	return false
+end
+
+local function try_step(step, f)
+	local ok, err = pcall(f)
+	if not ok then C().report(TAG, step, err) end
+end
+
+-------------------------------------------------------------------------------
+-- DAO: keep the original roll, spawn positions, count and private clock.
+-------------------------------------------------------------------------------
+local function darkness_for(original, binder, player, distance)
+	local env = getfenv(original)
+	-- This stock effect only calls alife() to read the spawning character's game vertex.
+	local sim = { actor = function() return { m_game_vertex_id = player:game_vertex_id() } end }
+	setfenv(original, setmetatable({ alife = function() return sim end }, { __index = env, __newindex = env }))
+	local ok, err = pcall(original, binder, player, distance, binder.radius_sqr)
+	setfenv(original, env)
+	if not ok then C().report(TAG, "Darkness spawn", err) end
+end
+
+local function install_dao()
+	local dao = C().mod("drx_da_main")
+	local bind = dao and C().mod("bind_anomaly_field")
+	local class = bind and bind.anomaly_field_binder
+	if not C().fn(class, "update") then return end
+	local wrapped, effect = C().wrap(dao.anomalies_near_actor_functions, DARKNESS, TAG .. ".darkness_effect", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+		end
+	end)
+	if not wrapped then return end
+	C().wrap(class, "update", TAG .. ".darkness_binder", function(orig)
+		return function(self, ...)
+			if self.section ~= DARKNESS or not C().active() then return orig(self, ...) end
+			orig(self, ...)
+			if not (coop_mode.leads_here() and self.object and self.radius_sqr) then return end
+			local player, distance = nearest(players_here(level.name()), self.object:position())
+			if player and distance <= self.radius_sqr then darkness_for(effect, self, player, distance) end
+		end
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- RF: the radio adapter already mirrors the active RF target to map leaders.
+-------------------------------------------------------------------------------
+local function package_at(id)
+	local se = object_id(id) and alife_object(id)
+	if not (se and se.parent_id == 65535 and se:section_name():match("^quest_tb_package_%d+$")) then return end
+	local name = se:name()
+	if type(name) == "string" and #name > 0 and #name <= 256 then
+		return se, name, map_name(se.m_game_vertex_id)
+	end
+end
+
+local function active_package()
+	if not packages.tb_package_active or packages.tb_package_in_level == BAR then return end
+	local se, name, map = package_at(packages.tb_target_item)
+	if map and map == packages.tb_package_in_level then return se, name, map end
+end
+
+local function package_faction(id)
+	local obj = level.object_by_id(id)
+	local peer = obj and coop_npc_players.peer_of(obj)
+	local faction = peer and coop_mode.seat_plays(peer) and coop_npc_player_community(obj)
+	if faction then return faction end
+	-- A map report can still be in flight when its player leaves the level.
+	local se = alife_object(id)
+	if se and se:section_name() == "coop_player_avatar" then return se:community() end
+end
+
+local function spawn_ambush(se, faction)
+	if not faction then return end
+	local enemies = {}
+	for _, community in ipairs(packages.tb_cut_factions) do
+		local sections = packages.tb_maybe_badguys[community]
+		if sections and #sections > 0 and relation_registry.community_relation(faction, community) < 0 then
+			enemies[#enemies + 1] = sections
+		end
+	end
+	if #enemies == 0 then return end
+	local sections = enemies[math.random(#enemies)]
+	local p = se.position
+	local pos = vector():set(p.x, p.y + 5, p.z)
+	for _ = 1, math.random(1, 2) do
+		alife_create(sections[math.random(#sections)], pos, se.m_level_vertex_id, se.m_game_vertex_id)
+	end
+end
+
+local function reserve_roll(se, name, character)
+	if not pending_roll or pending_roll.id ~= se.id or pending_roll.name ~= name then
+		pending_roll = { id = se.id, name = name, character = character, win = math.random() < 0.5 }
+	end
+	return pending_roll
+end
+
+local function rf_fact(t, from)
+	local se, name, map
+	if map_reporter(from) and object_id(t.p) and object_id(t.c) then se, name, map = active_package() end
+	local valid = se and C().hid(se.id) == t.p and t.n == name and assigned_to(t.c, map)
+	if not check_fact(RF_FACT, valid, from) then return end
+	if packages.tb_badguy_spawned then
+		C().to_peer(from, RF_ORDER, { p = t.p, n = name, a = false })
+		return
+	end
+	local roll = reserve_roll(se, name, t.c)
+	if C().to_peer(from, RF_ORDER, { p = t.p, n = name, c = roll.character, a = roll.win }) then
+		packages.tb_badguy_spawned = true -- the stock save/load callbacks persist wins and losses
+		pending_roll = nil
+	end
+end
+
+local function rf_order(t, from)
+	local valid = from == 0 and object_id(t.p) and type(t.n) == "string" and #t.n <= 256
+		and type(t.a) == "boolean" and (not t.a or object_id(t.c))
+	if not check_fact(RF_ORDER, valid, from) then return end
+	if not coop_mode.leads_here() or coop_mode.decides_world() then return end
+	local id = C().lid(t.p)
+	local se, name, map = package_at(id)
+	if not (se and map == level.name() and map ~= BAR and name == t.n) or map_results[id] == name then return end
+	map_results[id] = name
+	if t.a then
+		local character = C().lid(t.c)
+		if character then spawn_ambush(se, package_faction(character)) end
+	end
+end
+
+local function rf_scan(now, map)
+	if now <= rf_due then return end
+	rf_due = now + 2000
+	if map == BAR then return end
+	if coop_mode.decides_world() then
+		local se, name, package_map = active_package()
+		if not se or packages.tb_badguy_spawned or map ~= package_map then return end
+		local player, distance = nearest(players_here(map), se.position)
+		if not player or distance >= 100 * 100 then return end
+		local roll = reserve_roll(se, name, player:id())
+		packages.tb_badguy_spawned = true
+		pending_roll = nil
+		if roll.win then spawn_ambush(se, coop_npc_player_community(player)) end
+		return
+	end
+	local targets = radio and radio.RF_targets or {}
+	for id in pairs(map_results) do
+		if not targets[id] then map_results[id] = nil end
+	end
+	local players = players_here(map)
+	if not players[1] then return end
+	for id in pairs(targets) do
+		local se, name, package_map = package_at(id)
+		if se and map == package_map and map_results[id] ~= name then
+			local player, distance = nearest(players, se.position)
+			if player and distance < 100 * 100 then
+				local package, character = C().hid(id), C().hid(player:id())
+				if package and character then C().publish(RF_FACT, { p = package, n = name, c = character }) end
+			end
+		end
+	end
+end
+
+local function install_rf()
+	packages = C().mod("tb_rf_receiver_packages")
+	if not packages then return end
+	radio = C().mod("item_radio")
+	local wrapped, stock_update = C().wrap(packages, "actor_on_update", TAG .. ".rf_update", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			if not coop_mode.actor_is_player() then return end
+			-- Keep the original receiver update. Its actor-only ambush check has a separate timer.
+			local timer = packages.tb_tg_badguys
+			packages.tb_tg_badguys = math.huge
+			local ok, err = pcall(orig, ...)
+			packages.tb_tg_badguys = timer
+			if not ok then C().report(TAG, "RF receiver update", err) end
+		end
+	end)
+	if wrapped then C().swap_callback("actor_on_update", stock_update, packages.actor_on_update) end
+	C().set_limit(RF_FACT, 4, 2)
+	C().on(RF_FACT, rf_fact, "world")
+	C().set_limit(RF_ORDER, 4, 2)
+	C().on(RF_ORDER, rf_order)
+end
+
+-------------------------------------------------------------------------------
+-- Swamps: a report says who entered Bar. Only the world may consume the hint.
+-------------------------------------------------------------------------------
+local function hint_pending()
+	return has_alife_info(HINT_READY) and not has_alife_info(HINT_SENT) and not has_alife_info(HINT_PASSED)
+end
+
+local function show_hint(t)
+	if not (C().active() and coop_mode.actor_is_player() and db.actor) then return end
+	CreateTimeEvent(0, HINT_ORDER, 2, function()
+		local icon = t.i
+		news.send_tip(HINT_TEXT, t.n, nil, 7, icon, nil, icon and "npc" or nil)
+		return true
+	end)
+end
+
+local function send_hint()
+	if not hint_pending() then return end
+	local props = nta.get_sender_props_by_story_id(BARMAN) or {}
+	local t = { n = props.name, i = props.icon }
+	if C().to_all(HINT_ORDER, t) then
+		give_info(HINT_SENT) -- the stock info portion is the shared, persisted one-shot guard
+		if coop_mode.actor_is_player() then show_hint(t) end
+	end
+end
+
+local function hint_fact(t, from)
+	if check_fact(HINT_FACT, map_reporter(from) and assigned_to(t.c, BAR), from) then send_hint() end
+end
+
+local function hint_scan(now, map)
+	if map ~= BAR or has_alife_info(HINT_SENT) then return end
+	local world_here = coop_mode.decides_world()
+	if (world_here and not hint_pending()) or (not world_here and now <= hint_due) then return end
+	local zone = db.zone_by_name[BAR_ZONE]
+	if not zone then return end
+	for _, player in ipairs(players_here(map)) do
+		if zone:inside(player:position()) then
+			if world_here then
+				send_hint()
+			else
+				local c = C().hid(player:id())
+				if c and C().publish(HINT_FACT, { c = c }) then hint_due = now + 2000 end
+			end
+			return
+		end
+	end
+end
+
+local function install_swamps_update()
+	-- The NPC compatibility adapter reloads the task module during game start. Wrap its final callback.
+	local wrapped, original = C().wrap(swamps, "actor_on_update", TAG .. ".swamps_update", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+		end
+	end)
+	if wrapped then C().swap_callback("actor_on_update", original, swamps.actor_on_update) end
+end
+
+local function install_swamps()
+	local mod = C().mod("tasks_mystery_of_the_swamps")
+	if not mod then return end
+	nta, news = C().mod("nta_utils"), C().mod("dynamic_news_helper")
+	if not (C().fn(nta, "get_sender_props_by_story_id") and C().fn(news, "send_tip")) then return end
+	swamps = mod
+	local installed = false
+	RegisterScriptCallback("actor_on_first_update", function()
+		if not installed then
+			installed = true
+			try_step("Swamps callback", install_swamps_update)
+		end
+	end)
+	C().set_limit(HINT_FACT, 4, 2)
+	C().on(HINT_FACT, hint_fact, "world")
+	C().on(HINT_ORDER, show_hint, "player")
+end
+
+local function actor_on_update()
+	if not (C().active() and coop_mode.leads_here()) then return end
+	local now, map = time_global(), level.name()
+	if packages then rf_scan(now, map) end
+	if swamps then hint_scan(now, map) end
+end
+
+local function reset()
+	rf_due, hint_due = 0, 0
+	pending_roll, map_results = nil, {}
+end
+
+function on_game_start()
+	if started or not rawget(_G, "coop") then return end
+	started = true
+	try_step("install DAO", install_dao)
+	try_step("install RF", install_rf)
+	try_step("install Swamps", install_swamps)
+	if packages or swamps then
+		try_step("register updates", function()
+			RegisterScriptCallback("actor_on_update", actor_on_update)
+			RegisterScriptCallback("load_state", reset)
+		end)
+	end
+end
