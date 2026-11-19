@@ -1,0 +1,241 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - Dynamic Anomalies Overhaul across machines: the wander path of its "Ghost"
+	(gamedata\scripts\coop_mods_dao_fx.script), F4 G11-2, review m19:1.
+
+	DAO (drx_da_main.script anomalies_spawn_functions.zone_mine_ghost) gives every Ghost a path around the point it spawned
+	at, rolled on the spot, and an actor_on_update handler that moves the zone (set_anomaly_position) every frame by a step
+	that depends on the frame time. Each machine rolled its own path and stepped it at its own frame rate - and that zone is
+	also each player's own anomaly damage (the engine: a player's machine hurts only its own actor, from its own copy of the
+	zone). Players saw the Ghost in different places; a client's damage was away from the Ghost the host saw.
+
+	In a session now:
+	  - The process that leads the map (coop_mode.leads_here(): the co-op host; the map server of that map) rolls the path
+	    with DAO's own choices and hands it to the engine: coop.zone_path(id, spawn x, y, z, i, i_step, j_step, x_mod, z_mod).
+	    The engine runs it there and on the copy of every player of that map by one clock rule, and gives it to a player who
+	    comes later with the time it has run (xrCoop/coop_zone_path_rules.h; ZoneState kind Paths). DAO's own handler is not
+	    registered: nothing in Lua moves the zone.
+	  - With coop.zone_path, a player's machine and the world server (it has no map) roll nothing and move nothing in Lua.
+	    The engine moves a player's copy on the path of the map's authority.
+	  - A Ghost that was online before the session started (single player, then hosting) loses DAO's handler when the session
+	    starts and gets an engine path around its spawn point; when the session is over, it gets DAO's own wander back.
+	Single player: DAO's function, unchanged. An exe without coop.zone_path, or a path the engine refuses: DAO's own wander on
+	that machine, as before (said once in the log; counted in coop_status).
+
+	Nothing is saved; no event of its own (the engine carries the path). Ids are this process's own (the one that leads the
+	map numbers its objects as the host does).
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local tostring, type, pairs, pcall = tostring, type, pairs, pcall
+local math_random, string_format = math.random, string.format
+
+local function C() return coop_mods_core end
+
+local TAG = "dao_fx"
+local SECTION = "zone_mine_ghost"
+
+local st = { paths = 0, refused = 0, no_engine = 0, quiet = 0, taken_back = 0, given_back = 0, warned = false,
+	want = nil, installed = false }
+local tracked = {} -- zone id -> its binder (DAO's anomaly table) while it is online here
+local state = {} -- zone id -> "stock": DAO's wander runs here | "engine": the engine runs our path | "quiet": nothing here
+local dao_spawn = nil -- DAO's own spawn function of the Ghost
+local dao = nil -- drx_da_main
+
+local function warn_no_engine()
+	if st.warned then return end
+	st.warned = true
+	C().log(TAG, "! the engine has no coop.zone_path: DAO's Ghost wanders on each machine on its own, as before")
+end
+
+-- What this machine does with a Ghost now.
+local function wanted()
+	if not C().active() then return "stock" end
+	if coop_mode.leads_here() then return "engine" end
+	if type(api and api.zone_path) == "function" then return "quiet" end
+	warn_no_engine()
+	return "stock"
+end
+
+local function pick(...)
+	local rc = rawget(_G, "random_choice")
+	if type(rc) == "function" then return rc(...) end
+	local a = { ... }
+	return a[math_random(1, #a)]
+end
+
+-- DAO's roll (drx_da_main zone_mine_ghost: i, i_step, j_step, generate_distance() * random_choice(1, -1)).
+local function roll()
+	local i = pick(0, 45, 90, 135, 180)
+	local i_step = pick(1, 2, 3)
+	local j_step = 1
+	if i_step == 1 then
+		j_step = pick(2, 3)
+	elseif i_step == 2 then
+		j_step = pick(1, 3)
+	elseif i_step == 3 then
+		j_step = pick(2, 4)
+	end
+	local x_mod = (math_random() * 2.5 + 0.5) * pick(1, -1)
+	local z_mod = (math_random() * 2.5 + 0.5) * pick(1, -1)
+	return i, i_step, j_step, x_mod, z_mod
+end
+
+-- The engine runs a path rolled here: true when it took it.
+local function to_engine(b, id)
+	local f = api and api.zone_path
+	if type(f) ~= "function" then
+		st.no_engine = st.no_engine + 1
+		warn_no_engine()
+		return false
+	end
+	local sp = b.spawn_position
+	if not sp then
+		st.refused = st.refused + 1
+		return false
+	end
+	local i, i_step, j_step, x_mod, z_mod = roll()
+	local ok, took = pcall(f, id, sp.x, sp.y, sp.z, i, i_step, j_step, x_mod, z_mod)
+	if ok and took == true then
+		st.paths = st.paths + 1
+		return true
+	end
+	st.refused = st.refused + 1
+	if st.refused <= 3 then C().log(TAG, "! the engine refused the path of zone %s: %s", tostring(id), tostring(took)) end
+	return false
+end
+
+-- DAO's own wander handler of this Ghost goes (it is keyed by the zone's name).
+local function take_back(b)
+	local un = dao and C().fn(dao, "unregister_callback")
+	local ok, name = pcall(function() return b.object:name() end)
+	if un and ok and name then
+		un(name)
+		st.taken_back = st.taken_back + 1
+	end
+end
+
+-- DAO's own callback is routed to the map leader. On an older exe this Ghost's stock callback has to run
+-- here too, including when it spawned before the session or the first actor update.
+local function keep_stock_local(b, ...)
+	if type(api and api.zone_path) ~= "function" and type(dao.callbacks) == "table" then
+		local name = b.object:name()
+		local entry = dao.callbacks[name]
+		if entry then
+			local move = entry.func
+			dao.register_callback(entry.callback, function(...) return move(...) end, entry.on_end, name)
+		end
+	end
+	return ...
+end
+
+-- Puts Ghost `id` the way this machine wants it now (`w` of wanted()).
+local function place(b, id, w)
+	local s = state[id]
+	if s == w then return end
+	if w == "engine" then
+		if to_engine(b, id) then
+			if s == "stock" then take_back(b) end
+			state[id] = "engine"
+			return
+		end
+		if s == "stock" then return end -- no engine path: DAO's wander goes on here
+		w = "stock"
+	elseif w == "quiet" then
+		if s == "stock" then take_back(b) end
+		state[id] = "quiet"
+		st.quiet = st.quiet + 1
+		return
+	end
+	state[id] = "stock"
+	if s ~= nil then st.given_back = st.given_back + 1 end
+	keep_stock_local(b, dao_spawn(b))
+end
+
+local function zone_id(b)
+	local ok, id = pcall(function() return b.object:id() end)
+	return ok and type(id) == "number" and id or nil
+end
+
+-- DAO's spawn function of the Ghost, wrapped: called by the anomaly binder's net_spawn.
+local function make_spawn(orig)
+	dao_spawn = orig
+	return function(b, ...)
+		local id = zone_id(b)
+		if not id then return orig(b, ...) end
+		tracked[id] = b
+		local w = wanted()
+		if w == "stock" then
+			state[id] = "stock"
+			return keep_stock_local(b, orig(b, ...))
+		end
+		local ok, e = pcall(place, b, id, w)
+		if not ok then
+			C().report(TAG, "spawn", e)
+			if state[id] == nil then
+				state[id] = "stock"
+				return orig(b, ...)
+			end
+		end
+	end
+end
+
+-- DAO's destroy function of the Ghost (unregisters its handler), wrapped: we forget the binder first.
+local function make_destroy(orig)
+	return function(b, ...)
+		local id = zone_id(b)
+		if id then
+			tracked[id] = nil
+			state[id] = nil
+		end
+		return orig(b, ...)
+	end
+end
+
+-- A session started or ended: every Ghost online here is put the new way (once per change).
+local function step()
+	local w = wanted()
+	if w == st.want then return end
+	st.want = w
+	for id, b in pairs(tracked) do
+		if state[id] ~= w then
+			local ok, e = pcall(place, b, id, w)
+			if not ok then C().report(TAG, "session change", e) end
+		end
+	end
+end
+
+local function actor_on_update()
+	local ok, e = pcall(step)
+	if not ok then pcall(C().report, TAG, "update", e) end
+end
+
+function status()
+	local n = 0
+	for _ in pairs(tracked) do n = n + 1 end
+	return string_format("Ghosts online %d | engine paths %d, refused %d, no engine %d | quiet %d | DAO's wander taken back %d, given back %d",
+		n, st.paths, st.refused, st.no_engine, st.quiet, st.taken_back, st.given_back)
+end
+
+local function install()
+	if st.installed then return end
+	local da = C().mod("drx_da_main")
+	if not da then return end
+	local spawns, destroys = da.anomalies_spawn_functions, da.anomalies_destroy_functions
+	if type(spawns) ~= "table" or type(destroys) ~= "table" then return end
+	local ok_s = C().wrap(spawns, SECTION, "drx_da_main.anomalies_spawn_functions." .. SECTION, make_spawn)
+	if not ok_s then return end
+	C().wrap(destroys, SECTION, "drx_da_main.anomalies_destroy_functions." .. SECTION, make_destroy)
+	dao = da
+	st.installed = true
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	C().status_line(TAG, status)
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5).
+function on_game_start()
+	if not api then return end
+	local ok, err = pcall(install)
+	if not ok then printf("! [coop_mods_dao_fx] start failed: %s", tostring(err)) end
+end
