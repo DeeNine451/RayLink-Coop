@@ -280,17 +280,49 @@ local function dist_factor(d)
 	return d < f and f / d or 1
 end
 
+local function tosox_enabled()
+	return coop_mods_core and coop_mods_core.mod("z_companions_dont_blow_disguises") ~= nil
+end
+
+local function is_companion(npc)
+	return npc and npc:has_info("npcx_is_companion")
+end
+
+local function forget_companions(s, known_companion_id)
+	local hid = s.high.id
+	local removed_high = hid and (hid == known_companion_id or is_companion(level.object_by_id(hid)))
+	for id in pairs(s.mem) do
+		if id == known_companion_id or is_companion(level.object_by_id(id)) then
+			s.mem[id] = nil
+			s.forgot_companion = true
+		end
+	end
+	if not removed_high then return end
+	s.forgot_companion = true
+	local high = { v = 0, id = false }
+	local now = game.get_game_time()
+	for id, m in pairs(s.mem) do
+		if m.susp and m.susp > high.v and m.last and now:diffSec(m.last) < m.memo then
+			high.v, high.id = m.susp, id
+		end
+	end
+	s.high = high
+end
+
 local function npc_on_update(npc)
 	if not host_on or next(players_state) == nil or not (npc and npc:alive()) then return end
 	local g = gd()
 	if not g then return end
 	local id = npc:id()
+	local tosox = tosox_enabled()
+	local ignored = tosox and is_companion(npc)
 	local comm = character_community(npc)
 	for peer, s in pairs(players_state) do
 		local proxy = P.object_of_peer(peer)
 		if proxy and proxy:id() ~= 0 then
+			if ignored and (s.mem[id] or s.high.id == id) then forget_companions(s, id) end
 			local m = s.mem[id]
-			if npc:see(proxy) and not in_disguise_zone(proxy) then
+			if not ignored and npc:see(proxy) and not in_disguise_zone(proxy) then
 				if not m then
 					local c = cfg()
 					local is_enem = game_relations.is_factions_enemies(s.def, comm)
@@ -303,6 +335,9 @@ local function npc_on_update(npc)
 				m.first = m.first or now
 				m.last = now
 				if s.d and not game_relations.is_factions_enemies(s.c, comm) then
+					-- The former highest witness may have joined a squad before its next NPC update.
+					local hid = s.high.id
+					if tosox and hid and hid ~= id and is_companion(level.object_by_id(hid)) then forget_companions(s) end
 					local be = npc:best_enemy()
 					local busy = be and be:id() ~= proxy:id() and 50 or 0
 					local susp = m.awareness * (stay_factor(m) * dist_factor(npc:position():distance_to(proxy:position())) * s.sp) * s.itm
@@ -331,6 +366,7 @@ local function host_tick(now)
 			players_state[peer] = nil
 		elseif now >= s.next_cool then
 			s.next_cool = now + STEP_MS
+			if tosox_enabled() then forget_companions(s) end
 			-- Stock cool-down: the watching NPC lost sight, or the player is not disguised any more.
 			local hid = s.high.id
 			local npc = hid and level.object_by_id(hid)
@@ -345,8 +381,8 @@ local function host_tick(now)
 				local o = level.object_by_id(nid)
 				if o and o:alive() and o:see(proxy) then seen = true end
 			end
-			if s.d or seen or rem then
-				P.send(EV_METER, { v = s.high.v, s = seen, m = rem }, peer)
+			if s.d or seen or rem or s.forgot_companion then
+				if P.send(EV_METER, { v = s.high.v, s = seen, m = rem }, peer) then s.forgot_companion = nil end
 				stats.meters = stats.meters + 1
 			end
 		end

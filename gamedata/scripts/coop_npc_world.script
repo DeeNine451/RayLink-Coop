@@ -624,6 +624,35 @@ end
 -------------------------------------------------------------------------------
 local fresh_victims
 
+local function silent_witness(id)
+	if not P.is_player_id(id) then return level.object_by_id(id) end
+end
+
+local function silent_anybody_see(obj)
+	local target = obj or db.actor
+	for _, id in ipairs(db.OnlineStalkers) do
+		local npc = silent_witness(id)
+		if npc and IsStalker(npc, npc:clsid()) and npc:alive() and npc:see(target) then return npc end
+	end
+	return false
+end
+
+local function silent_closest_npc_dist(obj, victim)
+	local subject = obj or db.actor
+	local pos = subject:position()
+	local subject_id, victim_id = subject:id(), victim:id()
+	local closest = 99999999999 -- stock distance when there is no witness
+	for _, id in ipairs(db.OnlineStalkers) do
+		if id ~= subject_id and id ~= victim_id then
+			local npc = silent_witness(id)
+			if npc and IsStalker(npc) and npc:alive() then
+				closest = math.min(closest, npc:position():distance_to(pos))
+			end
+		end
+	end
+	return closest
+end
+
 local function silent_kill(npc, shit, bone_id, flags)
 	if not (fresh_victims and P.active() and coop_mode.leads_here()) then return end
 	local sk = gameplay_silent_kills
@@ -702,6 +731,17 @@ local function install_silent_kills()
 		local _, state = debug.getupvalue(holder, index) -- stock replaces M when it loads a save
 		return state and state.victims
 	end
+	-- The stock host hit and the proxy hit use the same witness queries.
+	local function session_witness_query(query)
+		return function(original)
+			return function(...)
+				if P.active() then return query(...) end
+				return original(...)
+			end
+		end
+	end
+	C.wrap(sk, "anybody_see", "silent_kills.anybody_see", session_witness_query(silent_anybody_see))
+	C.wrap(sk, "closest_npc_dist", "silent_kills.closest_npc_dist", session_witness_query(silent_closest_npc_dist))
 	local function wrap_callback(name, make)
 		local wrapped, original = C.wrap(sk, name, "silent_kills." .. name, make)
 		if not wrapped then return end
