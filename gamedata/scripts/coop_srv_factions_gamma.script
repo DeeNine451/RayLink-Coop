@@ -1,0 +1,147 @@
+-- Server: GAMMA Scorcher ceasefire and southern NPC exclusions (Dev 57, G13-5).
+-- Co-op keeps GAMMA's shared-faction rules: the host has both the map and the group's faction.
+-- Server: the world owns task recipients and their true factions. It applies the ceasefire
+-- once per eligible faction and sends each map's roster through the existing level share.
+-- A map server runs the stock southern filters on its local NPCs. Any Monolith, Sin or ISG
+-- player on that map exempts the whole map from both filters. An empty or incomplete roster
+-- defers removals. GAMMA still decides which maps, NPCs and outfits the filters cover.
+
+local TAG = "srv_factions_gamma"
+local SHARE = "srv_factions_gamma"
+local POLL_MS = 1000
+local SOUTH_FILTERS = { "grok_nes", "grok_no_north_faction_in_south" }
+local NORTH = { monolith = true, greh = true, isg = true }
+local CEASEFIRE_BLACKLIST = { bandit = true, monolith = true, zombied = true, army = true }
+
+local factions_by_level = {}
+
+local function character_id(id)
+	return type(id) == "number" and id > 0 and id < 65535 and id % 1 == 0
+end
+
+local function apply_ceasefire()
+	local factions = {}
+	local function collect()
+		local id = coop_tasks.personal_character()
+		if not character_id(id) then return end
+		local faction = coop_faction.faction_of_character(id)
+		if faction and not CEASEFIRE_BLACKLIST[faction] then factions[faction] = true end
+	end
+
+	-- The direct recipient and the task's scoped personal-effect recipients can differ.
+	-- Both are character IDs, including saved characters that have no live peer.
+	collect()
+	coop_tasks.each_personal(collect)
+	local relations = game_relations
+	for faction in pairs(factions) do
+		if relations.is_factions_enemies("stalker", faction) then
+			relations.save_relation("stalker", faction, 2000)
+			relations.save_relation("actor_stalker", faction, 2000)
+			relations.save_relation("stalker", "actor_" .. faction, 2000)
+			coop_core_world.in_world_scope(relations.send_news, "stalker", faction, "st_relations_cease_fire", nil)
+		end
+	end
+end
+
+local function world_rosters()
+	local sim = alife()
+	if not sim then return end
+	local by_level = {}
+	for _, player in ipairs(coop_mods_core.players()) do
+		if player.id ~= 0 and player.level and coop_mode.seat_plays(player.id) then
+			local name = sim:level_name(player.level)
+			if name then
+				local roster = by_level[name] or {}
+				by_level[name] = roster
+				local id = player.avatar_id
+				-- The world knows somebody is assigned to the map even before the avatar is ready.
+				if character_id(id) then
+					roster[id] = coop_faction.faction_of_character(id) or false
+				else
+					roster.pending = true
+				end
+			end
+		end
+	end
+	return by_level
+end
+
+local function receive_rosters(snapshot)
+	factions_by_level = type(snapshot) == "table" and snapshot or {}
+end
+
+local function south_filter_faction()
+	local roster = factions_by_level[level.name()]
+	-- The stock getters below are used only to test membership in the northern set.
+	-- Use a northern value to pause removals until both sides know the population.
+	if type(roster) ~= "table" or roster.pending then return "monolith" end
+	local southern
+	for _, faction in pairs(roster) do
+		if not faction then return "monolith" end
+		if NORTH[faction] then return faction end
+		southern = faction
+	end
+	local present = false
+	for _, player in ipairs(coop_mods_core.players()) do
+		if coop_mode.where(player.id) == "here" then
+			if not roster[player.avatar_id] then return "monolith" end
+			present = true
+		end
+	end
+	return present and southern or "monolith"
+end
+
+local function step(what, fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then coop_mods_core.report(TAG, what, err) end
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	coop_mode.when_srv(function()
+		if coop_mode.decides_world() then
+			step("Scorcher ceasefire", function()
+				local effects = coop_mods_core.mod("xr_effects")
+				coop_mods_core.wrap(effects, "stalker_ceasefire", TAG .. ".stalker_ceasefire", function(original)
+					return function(...)
+						if not coop_mods_core.active() then return original(...) end
+						-- The earlier server task wrapper supplies one faction via the global getter.
+						-- The relation writes here come from the entire explicit recipient scope.
+						return apply_ceasefire()
+					end
+				end)
+			end)
+		end
+		local map = coop_mode.leads_here() and not coop_mode.actor_is_player()
+		if map or coop_mode.decides_world() then
+			step("map rosters", function()
+				coop_quests_core.share().down(SHARE, world_rosters, receive_rosters, POLL_MS)
+				if map then RegisterScriptCallback("coop_world_back", function() receive_rosters(nil) end) end
+			end)
+		end
+		if not map then return end
+		for _, name in ipairs(SOUTH_FILTERS) do
+			step(name, function()
+				local mod = coop_mods_core.mod(name)
+				if not mod then return end
+				-- These names are resolved in each script's own environment. The registered
+				-- NPC callback (including the local one) keeps its original source and cadence.
+				coop_mods_core.wrap(mod, "get_actor_true_community", TAG .. "." .. name .. ".faction", function(original)
+					return function(...)
+						if not coop_mods_core.active() then return original(...) end
+						return south_filter_faction()
+					end
+				end)
+				coop_mods_core.wrap(mod, "IsStalker", TAG .. "." .. name .. ".npc", function(original)
+					return function(npc, ...)
+						if coop_mods_core.active() and npc and
+							(coop_npc_players.is_player_id(npc:id()) or npc:section() == "coop_player_avatar") then
+							return false
+						end
+						return original(npc, ...)
+					end
+				end)
+			end)
+		end
+	end)
+end
