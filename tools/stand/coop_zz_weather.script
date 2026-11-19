@@ -1,0 +1,156 @@
+-- Dev 57 SS probe. One player changes map; both then observe the real sky and the emission mirror.
+local STAY, MOVE = "weatherstay", "weathermove"
+local FROM = "stand.weather_from"
+local role, travel, ready, forecast_seen, active
+local next_poll = 0
+
+local function out(fmt, ...)
+	printf("%s", "[weather-stand] " .. string.format(fmt, ...))
+	get_console():execute("flush")
+end
+
+local function clock(t)
+	local y, m, d, h, min, s = t:get(0, 0, 0, 0, 0, 0, 0)
+	return string.format("%04d%02d%02dT%02d%02d%02d", y, m, d, h, min, s)
+end
+
+local function partner()
+	local nick = role == STAY and MOVE or STAY
+	for _, p in ipairs(coop.players()) do
+		if not p.is_self and p.nick == nick then return p end
+	end
+end
+
+local function nearest_exit(actor)
+	local target, best
+	local from = actor:position()
+	for id = 1, 65534 do
+		local obj = level.object_by_id(id)
+		if obj and (obj:clsid() == clsid.level_changer or obj:clsid() == clsid.level_changer_s) then
+			local pos = obj:position()
+			local distance = pos:distance_to(from)
+			if not best or distance < best then target, best = pos, distance end
+		end
+	end
+	return target
+end
+
+local function beside_exit(exit)
+	for _, r in ipairs({ 12, 16, 20 }) do
+		for i = 0, 15 do
+			local a = i * math.pi / 8
+			local near = vector():set(exit.x + r * math.cos(a), exit.y, exit.z + r * math.sin(a))
+			local node = level.vertex_id(near)
+			if node and node < 0xffffffff then
+				local pos = level.vertex_position(node)
+				local distance = pos:distance_to(exit)
+				if distance >= 8 and distance <= 24 and math.abs(pos.y - exit.y) < 6 then return pos end
+			end
+		end
+	end
+end
+
+local function move(actor, from, now)
+	if not travel then
+		local exit = nearest_exit(actor)
+		local beside = exit and beside_exit(exit)
+		if not beside or not coop.stash_set(FROM, from) then
+			out("FAIL: cannot prepare a real exit from %s", from)
+			return
+		end
+		actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))
+		travel = { exit = exit, at = now + 10000 }
+	elseif now >= travel.at then
+		if not travel.entered then
+			local p = travel.exit
+			actor:set_actor_position(vector():set(p.x, p.y + 0.2, p.z))
+			travel.entered = true
+			travel.at = now + 2000
+		else
+			get_console():execute("coop_transition_confirm")
+			travel.at = now + 2500
+		end
+	end
+end
+
+local function update()
+	local actor = db.actor
+	if not (actor and coop.is_live() and coop_mode.is_player_mirror()) then return end
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+
+	local friend = partner()
+	if not friend then return end
+	local here, where = level.name(), coop_mode.where(friend.id)
+	if not ready then
+		if role == MOVE then
+			local from = coop.stash_get(FROM)
+			if where == "here" and (not from or from == here) then return move(actor, here, now) end
+			if from == here then return end
+		end
+		if where ~= "away" then return end
+		local other_id = coop.levels.level_of_player(friend.id)
+		local other_map = other_id and coop.levels.level_name(other_id)
+		if not other_map or other_map == "" or other_map == here then return end
+		local wm = level_weathers.get_weather_manager()
+		if wm.weatherType ~= "atmosfear" or not level_weathers.valid_levels[here]
+			or here == "l11_hospital" or here == "l13_generators" then
+			out("FAIL: expected an open emission map, got %s", here)
+			return
+		end
+		ready = here
+		out("ready map=%s", here)
+	elseif ready ~= here then
+		out("FAIL: player left %s for %s", ready, here)
+		return
+	end
+
+	local wm = level_weathers.get_weather_manager()
+	local state = coop.sync.get("session", "world.weather")
+	if state and state.lw == "atmosfear_pre_blowout" and state.f == wm.weather_file
+		and state.f == level.get_weather() and forecast_seen ~= state.f then
+		forecast_seen = state.f
+		out("forecast map=%s weather=%s", here, forecast_seen)
+	end
+	local sm = surge_manager.get_surge_manager()
+	local running = sm.started == true
+	if active ~= nil and active ~= running then
+		local now_game = game.get_game_time()
+		if running then
+			out("start map=%s clock=%s seen=%s", here, clock(sm.inited_time), clock(now_game))
+		else
+			out("end map=%s seen=%s", here, clock(now_game))
+		end
+	end
+	active = running
+end
+
+function select_forecast()
+	if not (coop.is_dedicated() and coop.is_live()) then return end
+	local wm = level_weathers.get_weather_manager()
+	wm.transition_period = false
+	wm.pre_blowout_period = true
+	wm:select_weather(true)
+	out("world forecast weather=%s", wm.weather_file)
+end
+
+function start_emission()
+	if not (coop.is_dedicated() and coop.is_live()) then return end
+	local sm = surge_manager.get_surge_manager()
+	if sm.started then return out("FAIL: emission was already active") end
+	surge_manager.start_surge()
+	if not sm.started then return out("FAIL: stock emission start was refused") end
+	out("world start clock=%s tf=%.0f", clock(sm.inited_time), level.get_time_factor())
+end
+
+function stop_emission()
+	if not (coop.is_dedicated() and coop.is_live()) then return end
+	surge_manager.stop_surge()
+	out("world end seen=%s", clock(game.get_game_time()))
+end
+
+function on_game_start()
+	role = command_line():match("%-coop_probe%s+(%w+)")
+	if role == STAY or role == MOVE then RegisterScriptCallback("actor_on_update", update) end
+end

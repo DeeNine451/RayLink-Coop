@@ -1,0 +1,237 @@
+-- Server stand only, Dev 57 (K-61). The driver supplies the local fixture IDs.
+-- A spawns a neutral recruit and verifies the real client talk and owner. B reads
+-- the live squad and body. The restarted world reads the owner from load_state.
+local NICK = "cmp_srv"
+local NO_VERTEX = 4294967295
+local CAP_MS = 90000
+local source, spawn_at, last_step = nil, nil, 0
+local armed, client, finished = false, false, false
+local travel = {}
+
+local function out(fmt, ...)
+	printf("[cmp-srv] %s", string.format(fmt, ...))
+	get_console():execute("flush")
+end
+
+local function valid_id(id) return id and id > 0 and id < 65535 end
+
+-- A stand-local file, written by PowerShell. Map servers start with their own
+-- command line and see this same file through $fs_root$.
+local function instruction()
+	local file = io.open(getFS():update_path("$fs_root$", "zz_companions_srv.txt"), "r")
+	if not file then return end
+	local line = file:read("*l")
+	file:close()
+	if line == "spawn" then return { phase = line } end
+	if not line or #line > 128 then return end
+	local phase, s, n, o, from, rest = line:match("^(%w+) (%d+) (%d+) (%d+) ([%w_]+)(.*)$")
+	s, n, o = tonumber(s), tonumber(n), tonumber(o)
+	if not (valid_id(s) and valid_id(n) and valid_id(o)) then return end
+	if phase == "travel" and rest == "" then return { phase = phase, squad = s, npc = n, owner = o, from = from } end
+	local to = rest and rest:match("^ ([%w_]+)$")
+	if phase == "reload" and to and to ~= from then return { phase = phase, squad = s, npc = n, owner = o, from = from, to = to } end
+end
+
+local function player_here()
+	for _, p in ipairs(coop.players()) do
+		if p.nick == NICK and not p.is_self and p.avatar_id then
+			local body = level.object_by_id(p.avatar_id)
+			if body and body:alive() then return p.id, body end
+		end
+	end
+end
+
+local function stand_point(center, radii, accept)
+	for _, radius in ipairs(radii) do
+		for step = 0, 15 do
+			local angle = step * math.pi / 8
+			local at = vector():set(center.x + radius * math.cos(angle), center.y, center.z + radius * math.sin(angle))
+			local id = level.vertex_id(at)
+			if id and id < NO_VERTEX then
+				local pos = level.vertex_position(id)
+				if accept(pos, pos:distance_to(center)) then return id, pos end
+			end
+		end
+	end
+end
+
+local function spawn(body)
+	local lv, pos = stand_point(body:position(), { 5, 4.75, 5.25 }, function(_, d) return d >= 4.5 and d <= 5.5 end)
+	assert(lv, "no AI vertex approximately 5 m from the player")
+	local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
+	-- Same single ordinary stalker fixture as companions_group. Hire it through the dialog later.
+	local squad = assert(alife_create("stalker_sim_squad_novice", pos, lv, gv), "squad spawn failed")
+	local id = assert(squad:add_squad_member("sim_default_stalker_0", pos, lv, gv), "stalker spawn failed")
+	local se = assert(alife():object(id), "missing stalker server object")
+	SIMBOARD:setup_squad_and_group(se)
+	SendScriptCallback("squad_on_npc_creation", squad, se, nil)
+	squad:refresh()
+	return { squad = squad.id, npc = id }
+end
+
+local function map_step(job, now)
+	local peer, body = player_here()
+	if not body then return end
+	local map = level.name()
+	if job.phase == "spawn" then
+		spawn_at = spawn_at or now + 3000
+		if now < spawn_at then return end
+		source = source or spawn(body)
+		local npc = level.object_by_id(source.npc)
+		if not (npc and npc:alive()) or source.ready then return end
+		local squad = alife_object(source.squad)
+		assert(squad and squad:commander_id() == npc:id(), "wrong fixture commander")
+		assert(coop_npc_companions.owner_character(npc) == nil, "fixture is already a companion")
+		npc:enable_talk()
+		out("ready squad=%d npc=%d owner=%d map=%s", source.squad, source.npc, body:id(), map)
+		source.ready = true
+		return
+	end
+	if job.phase ~= "travel" or body:id() ~= job.owner then return end
+	local npc = level.object_by_id(job.npc)
+	if not (npc and npc:alive()) then return end
+	if map == job.from then
+		if not (source and source.ready and source.npc == job.npc and source.squad == job.squad) then return end
+		if not source.talk and coop.talk_recent(peer, job.npc, 5000) then
+			source.talk = true
+			out("talk npc=%d owner=%d map=%s", job.npc, job.owner, map)
+		end
+		if source.talk and coop_npc_companions.owner_character(npc) == job.owner then
+			out("recruited squad=%d npc=%d owner=%d map=%s", job.squad, job.npc, job.owner, map)
+			finished = true
+		end
+		return
+	end
+	local squad = alife_object(job.squad)
+	if not (squad and squad:commander_id() == job.npc) then return end
+	local vertex = game_graph():vertex(squad.m_game_vertex_id)
+	if alife():level_name(vertex:level_id()) ~= map then return end
+	local lead = coop_npc_companions.leader_of(npc)
+	local distance = npc:position():distance_to(body:position())
+	if lead and lead:id() == job.owner and coop_npc_companions.owner_character(npc) == job.owner and distance <= 5 then
+		out("adopted squad=%d npc=%d owner=%d map=%s distance=%.3f", job.squad, job.npc, job.owner, map, distance)
+		finished = true
+	end
+end
+
+local function nearest_exit(pos)
+	local target, distance
+	local kinds = { [clsid.level_changer or -1] = true, [clsid.level_changer_s or -1] = true }
+	for id = 1, 65534 do
+		local obj = level.object_by_id(id)
+		if obj and kinds[obj:clsid()] then
+			local at = obj:position()
+			local d = pos:distance_to(at)
+			if not distance or d < distance then target, distance = at, d end
+		end
+	end
+	return target
+end
+
+local function step_to(actor, pos, dy)
+	actor:set_actor_position(vector():set(pos.x, pos.y + dy, pos.z))
+end
+
+-- carry_server: report a position beside the exit, enter the real trigger,
+-- and confirm as the player would. Repeat the trigger if the first pass is missed.
+local function walk_out(actor, now, map)
+	if not travel.exit then
+		travel.exit = assert(nearest_exit(actor:position()), "no level changer on the source map")
+		local _, pos = stand_point(travel.exit, { 12, 16, 9, 20, 24 }, function(p, d)
+			return d >= 8 and d <= 24 and math.abs(p.y - travel.exit.y) < 6
+		end)
+		travel.beside = assert(pos, "no AI vertex beside the exit")
+		step_to(actor, travel.beside, 0.3)
+		travel.enter_at = now + 8000
+	elseif travel.enter_at and now >= travel.enter_at then
+		travel.enter_at, travel.confirm_at, travel.retry_at = nil, now + 250, now + 20000
+		step_to(actor, travel.exit, 0.2)
+		out("entered exit map=%s", map)
+	elseif travel.retry_at and now >= travel.retry_at then
+		travel.retry_at, travel.confirm_at, travel.enter_at = nil, nil, now + 3000
+		step_to(actor, travel.beside, 0.3)
+	elseif travel.confirm_at and now >= travel.confirm_at then
+		travel.confirm_at = now + 2500
+		get_console():execute("coop_transition_confirm")
+	end
+end
+
+local function client_step(job, now)
+	if job.phase ~= "travel" then return end
+	local actor, map = db.actor, level.name()
+	local id = coop.to_local_id(job.npc)
+	local npc = id and level.object_by_id(id)
+	if map ~= job.from then
+		if not travel.arrived_at then
+			travel.arrived_at = now
+			out("client arrived map=%s", map)
+		end
+		assert(now - travel.arrived_at <= CAP_MS, "client did not see its companion within 90 s of arrival")
+		if npc and npc:alive() and coop_npc_companions.held_here(npc) then
+			out("client sees npc=%d map=%s", job.npc, map)
+			finished = true
+		end
+		return
+	end
+	if travel.hired_at then return walk_out(actor, now, map) end
+	if not (npc and npc:alive()) then return end
+	if not travel.talk_at then
+		local pos = npc:position()
+		if actor:position():distance_to(pos) > 2.5 then
+			local lv, near = stand_point(pos, { 1.8, 2, 1.5 }, function(_, d) return d >= 1 and d <= 2.3 end)
+			assert(lv, "no AI vertex within talk distance")
+			step_to(actor, near, 0.3)
+		elseif npc:is_talk_enabled() then
+			actor:run_talk_dialog(npc, false)
+			travel.talk_at = now
+		end
+	elseif not travel.ask_hire then
+		assert(now - travel.talk_at < 10000, "the actual talk did not open")
+		if actor:is_talking() and npc:is_talking() then
+			dialogs_axr_companion.become_actor_companion(actor, npc, "dm_is_not_actor_companion_dialog")
+			travel.ask_hire = true
+			out("client requested recruit npc=%d", job.npc)
+		end
+	elseif coop_npc_companions.held_here(npc) then
+		actor:stop_talk()
+		travel.hired_at = now
+	end
+end
+
+local function observe_loaded_owner(data)
+	local job = instruction()
+	if not job or job.phase ~= "reload" then return end
+	local owners = data.coop_npc_leaders
+	if type(owners) ~= "table" or owners[job.squad] ~= job.owner then
+		out("FAIL saved squad %d lacks owner %d", job.squad, job.owner)
+		return
+	end
+	out("loaded squad=%d npc=%d owner=%d", job.squad, job.npc, job.owner)
+end
+
+local function tick()
+	local now = time_global()
+	if finished or now < last_step or not (db.actor and coop.is_live()) then return end
+	last_step = now + 250
+	local job = instruction()
+	if not job then return end
+	if client then client_step(job, now) elseif coop.is_map_server() then map_step(job, now) end
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	local line = command_line()
+	client = type(line) == "string" and line:match("%-coop_probe%s+cmp_srv%f[%W]") ~= nil
+	coop_mode.when_srv(function()
+		if armed then return end
+		if coop.is_dedicated() then
+			RegisterScriptCallback("load_state", observe_loaded_owner)
+		elseif client or coop.is_map_server() then
+			RegisterScriptCallback("actor_on_update", function()
+				local ok, err = pcall(tick)
+				if not ok then finished = true; out("FAIL %s", tostring(err)) end
+			end)
+		end
+		armed = true
+	end)
+end

@@ -1,0 +1,140 @@
+-- Dev 57 SS only. The mover takes a real level exit. The observer stays behind
+-- and checks the production HUD's spot against the offline record on the new map.
+local OBSERVER, MOVER = "allyobserver", "allymover"
+local START_KEY = "stand.allymark_from" -- session stash survives the mover's level load
+local role, next_poll, finished = nil, 0, false
+local travel, initial_level, stable_id, stable_level, stable_at
+
+local function out(fmt, ...)
+	printf("%s", "[allymark] " .. string.format(fmt, ...))
+	get_console():execute("flush")
+end
+
+local function player(nick)
+	for _, p in ipairs(coop.players()) do
+		if not p.is_self and p.nick == nick then return p end
+	end
+end
+
+local function nearest_exit(actor)
+	local best, distance
+	local from = actor:position()
+	for id = 1, 65534 do
+		local obj = level.object_by_id(id)
+		if obj and (obj:clsid() == clsid.level_changer or obj:clsid() == clsid.level_changer_s) then
+			local pos = obj:position()
+			local d = pos:distance_to(from)
+			if not distance or d < distance then best, distance = pos, d end
+		end
+	end
+	return best
+end
+
+local function beside_exit(exit, from)
+	local angle = math.atan2(from.z - exit.z, from.x - exit.x)
+	for _, r in ipairs({ 12, 16, 20 }) do
+		for i = 0, 15 do
+			local a = angle + i * math.pi / 8
+			local near = vector():set(exit.x + r * math.cos(a), exit.y, exit.z + r * math.sin(a))
+			local node = level.vertex_id(near)
+			if node and node < 0xffffffff then
+				local pos = level.vertex_position(node)
+				local d = pos:distance_to(exit)
+				if d >= 8 and d <= 24 and math.abs(pos.y - exit.y) < 6 then return pos end
+			end
+		end
+	end
+end
+
+local function move(now, actor)
+	local here = level.name()
+	local from = coop.stash_get(START_KEY)
+	if type(from) == "string" and from ~= "" and from ~= here then
+		finished = true
+		out("mover arrived %s -> %s", from, here)
+		return
+	end
+	if not travel then
+		local observer = player(OBSERVER)
+		if not observer or coop_mode.where(observer.id) ~= "here" then return end
+		local target = nearest_exit(actor)
+		local beside = target and beside_exit(target, actor:position())
+		if not beside or not coop.stash_set(START_KEY, here) then
+			finished = true
+			out("FAIL: mover could not prepare a level exit from %s", here)
+			return
+		end
+		actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))
+		travel = { target = target, enter_at = now + 10000 }
+		out("mover preparing exit from %s", here)
+		return
+	end
+	if now < travel.enter_at then return end
+	if not travel.confirm_at then
+		local p = travel.target
+		actor:set_actor_position(vector():set(p.x, p.y + 0.2, p.z))
+		travel.confirm_at = now + 2000
+	elseif now >= travel.confirm_at then
+		get_console():execute("coop_transition_confirm")
+		travel.confirm_at = now + 2500
+	end
+end
+
+local function observe(now)
+	local friend = player(MOVER)
+	if not friend then return end
+	local id, here = friend.avatar_id, level.name()
+	if not initial_level then
+		if coop_mode.where(friend.id) == "here" and id and level.object_by_id(id) then
+			initial_level = here
+			out("both players on %s", here)
+		end
+		return
+	end
+	if here ~= initial_level then
+		finished = true
+		out("FAIL: observer changed level from %s to %s", initial_level, here)
+		return
+	end
+	local destination
+	if coop_mode.where(friend.id) == "away" and id and not level.object_by_id(id) then
+		local record = alife_object(id)
+		local view = select(2, coop_core_hud.views(now))[id]
+		local kind = coop_allies_map.ally_type(coop_allies.slot(friend.id))
+		if record and view and view.far and view.elsewhere and view.state == "alive"
+			and level.map_has_object_spot(id, kind) ~= 0 and level.map_get_object_spot_static(id, kind) then
+			local graph = game_graph()
+			local vertex = record.m_game_vertex_id
+			local lid = coop.levels.level_of_player(friend.id)
+			if graph:valid_vertex_id(vertex) and graph:vertex(vertex):level_id() == lid then
+				destination = coop.levels.level_name(lid)
+			end
+		end
+	end
+	if not destination then
+		stable_id, stable_level, stable_at = nil, nil, nil
+		return
+	end
+	if stable_id ~= id or stable_level ~= destination then
+		stable_id, stable_level, stable_at = id, destination, now
+		return
+	end
+	if now - stable_at >= 1000 then
+		finished = true
+		out("PDA spot confirmed: observer=%s friend=%s id=%d", here, destination, id)
+	end
+end
+
+local function update()
+	local actor = db.actor
+	if finished or not (actor and coop.is_live() and coop_mode.is_player_mirror() and coop.levels) then return end
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+	if role == MOVER then move(now, actor) else observe(now) end
+end
+
+function on_game_start()
+	role = command_line():match("%-coop_probe%s+(%w+)")
+	if role == OBSERVER or role == MOVER then RegisterScriptCallback("actor_on_update", update) end
+end

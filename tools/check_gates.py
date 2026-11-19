@@ -153,7 +153,10 @@ DEPLOY_SKIP_EXT = frozenset({".bak", ".tmp", ".log", ".orig"})
 SCENARIOS = {
     # guard round 8 (the review of round 7, R7): companions_group (F5-CMP-1) and phantoms_server (S3) were in no runner
     "hostplay": ("carry_group", "base_group", "sil_group", "squads_group", "sp_smoke", "companions_group"),
-    "srv": ("ded_check", "base_server", "carry_server", "taskboard_ws", "phantoms_server"),
+    "srv": (
+        "ded_check", "base_server", "carry_server", "taskboard_ws", "phantoms_server",
+        "allymark_server", "companions_server", "weather_server",
+    ),
 }
 
 
