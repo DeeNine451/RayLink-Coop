@@ -10,6 +10,8 @@
 -- Roles: "host", "client" and "sp" (no session); the script asks coop.is_active() at every call.
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
+load_script("coop_mode")
+load_script("coop_hostplay_mode").on_game_start()
 dofile("tests/lua/support/menu_stubs.lua") -- UI stand-ins (class, CUIScriptWnd, CScriptXmlInit, click)
 
 -- menu_stubs.lua prints every log line; keep them quiet (VERBOSE=1 shows them)
@@ -1337,12 +1339,12 @@ case("fold_button", function()
 	release_id(781)
 	ui_sleep_dialog.GUI:OnButtonSleep()
 	check(win() ~= nil and not win().btn_fold:IsShown(), "a bag that is gone: no Fold")
-	-- the host folds with the stock compression bag: no claim, no button
+	-- The co-op host is a player and can fold his bag through the same claim path.
 	fresh("host")
 	spawn("ph_sleepbag", vec3(1, 0, 0), nil, { id = 782 })
 	ui_sleep_dialog.sleep_bag(782, "itm_sleepbag")
 	ui_sleep_dialog.GUI:OnButtonSleep()
-	check(win() ~= nil and not win().btn_fold:IsShown(), "the host: no Fold")
+	check(win() ~= nil and win().btn_fold:IsShown(), "the co-op host can Fold")
 	-- the bag is forgotten once the rest is over: another sleep at a tent has no Fold
 	fresh("client")
 	spawn("ph_sleepbag", vec3(1, 0, 0), nil, { id = 783 })

@@ -34,10 +34,8 @@
 	   is run. Outside a session the original function runs.
 
 	3. Claims of a player (the world server puts the tent up and takes the item, Ruling F3-6): request(what, delay_ms) with what
-	   "tent" | "sleepbag" | "pack". The player never touches the item. F3a T6: a player is the host player too - the host's
-	   process is the world server AND a client of it over the internal channel, so its claim is the same
-	   coop.checkpoint.claim_tent a remote client sends (a role question, coop.is_player(), not "am I a client"). One claim at
-	   a time. It ends by the world server's answer: the
+	   "tent" | "sleepbag" | "pack". The co-op host uses the same coop.checkpoint.claim_tent as a remote player.
+	   One claim at a time. It ends by the world's answer: the
 	   camp on a tent (coop_checkpoint_changed with kind tent), the item arriving (pack-up), a refusal
 	   (coop_checkpoint_refused(reason, what): st_coop_cp_refused_<reason>), or after about 5 s with nothing (a lost callback; no
 	   tip, nothing was taken). reason "far" for a pack-up also means "no tent of yours here" (its own text).
@@ -90,28 +88,9 @@ local function in_session()
 	return ok and active == true
 end
 
--- F3a task 6 (docs/plans/2026-10-24-f3a-split-levels.md 1.1, 1.2): the roles of this process. The host process is the world
--- server AND a player (the host player, a client of its own server over the internal channel); a remote client is a player.
--- The world server decides (story checkpoints); the player asks (claims), the host player the same way a remote client does
--- (F3a task 7: report_placed, the host's report of a stock tent, is gone). A build without the role functions has the old pair.
-local function is_world_server()
-	if not in_session() then return false end
-	local f = type(api.is_world_server) == "function" and api.is_world_server or api.is_host
-	local ok, yes = pcall(f)
-	return ok and yes == true
-end
-
-local function is_map_server()
-	if not in_session() or type(api.is_map_server) ~= "function" then return false end
-	local ok, yes = pcall(api.is_map_server)
-	return ok and yes == true
-end
-
+-- Claims are made by a playing actor in the session, including the co-op host.
 local function is_player()
-	if not in_session() then return false end
-	local f = type(api.is_player) == "function" and api.is_player or api.is_client
-	local ok, yes = pcall(f)
-	return ok and yes == true
+	return in_session() and coop_mode.actor_is_player()
 end
 
 local function checkpoint_api()
@@ -671,11 +650,12 @@ end
 -- function it wraps runs.
 local function story_dispatch(orig, actor, npc, p)
 	if in_session() then
-		if is_world_server() then
+		if coop_mode.decides_world() then
 			set_story(reason_of(p))
-		elseif is_map_server() then
-			local sent, why = api.send_event(EV_STORY, cmain().encode({ r = reason_of(p) }), 0)
-			if sent ~= true then log("! story checkpoint not passed on to the world server: %s", tostring(why)) end
+		elseif coop_mode.leads_here() then
+			if not coop_mode.publish(EV_STORY, { r = reason_of(p) }) then
+				log("! story checkpoint not passed on to the world server")
+			end
 		end
 		return
 	end
@@ -684,12 +664,15 @@ end
 
 -- The world server: a map server's logic ran the effect.
 local function on_story_event(payload, from)
-	if not is_world_server() then return end
-	if not coop_mods_core.is_bridge(from) then
-		log("! a story checkpoint from #%s refused: not a map server", tostring(from))
-		return
-	end
-	set_story(cmain().decode(payload).r)
+	local source = coop_mode.decides_world()
+		and type(coop_mode.from_level) == "function" and coop_mode.from_level(from)
+	if not coop_trust.pass("cp_story_sender", source, "story checkpoint from unexpected peer %s", tostring(from))
+		or not source then return end
+	local reason = cmain().decode(payload).r
+	local valid = type(payload) == "string" and (reason == nil or (type(reason) == "string" and #reason <= MAX_REASON))
+	if not coop_trust.pass("cp_story_reason", valid, "invalid story checkpoint reason from peer %s", tostring(from))
+		or not valid then return end
+	set_story(reason)
 end
 
 -- One closure per wrapped function, with its own "I am running" flag: a chain of wrappers that comes back to this one (a mod

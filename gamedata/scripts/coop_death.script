@@ -101,24 +101,10 @@ local function in_session()
 	return ok and active == true
 end
 
--- F3a task 6 (docs/plans/2026-10-24-f3a-split-levels.md 1.1, 1.2): the PDA marks of the dead are the world server's work (its
--- spots reach every player through coop_story's replication). What the dead player's own screen shows - the respawn tip, the
--- contusion, the rank cut - runs on the owner's machine whatever role it has, the host player's included, so nothing of it
--- asks "am I the host". A build without coop.is_world_server() has the old name.
-local function is_world_server()
-	if not in_session() then return false end
-	local f = type(api.is_world_server) == "function" and api.is_world_server or api.is_host
-	local ok, yes = pcall(f)
-	return ok and yes == true
-end
-
--- The bag of a player on a map server's level is an object of that level: the world server hears of it neither the callback nor
--- the object. The map server marks it, and coop_story takes that spot through the world server to every player.
+-- The authority with the death stash marks it for replication. The player's own screen and penalties run on their machine.
+-- In server mode the map server sees the stash on its level and marks it there.
 local function marks_here()
-	if is_world_server() then return true end
-	if not in_session() or type(api.is_map_server) ~= "function" then return false end
-	local ok, yes = pcall(api.is_map_server)
-	return ok and yes == true
+	return in_session() and (coop_mode.decides_world() or coop_mode.leads_here())
 end
 
 -------------------------------------------------------------------------------

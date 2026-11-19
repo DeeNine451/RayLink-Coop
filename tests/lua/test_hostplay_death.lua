@@ -11,6 +11,8 @@
 -- Roles: "host", "client" and "sp" (no session); the script asks coop.is_active() at every call.
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
+load_script("coop_mode")
+load_script("coop_hostplay_mode").on_game_start()
 
 local SPOT = "secondary_task_location" -- the stock spot that has a PDA map entry (see marker_spot_type_is_stock)
 local BS = string.char(92)
@@ -658,23 +660,6 @@ local function stash(id, with_item)
 	spawn("coop_death_stash", vec3(5, 0, 5), nil, { id = id, kind = "box" })
 	if with_item then spawn("wpn_pm", vec3(5, 0, 5), id) end
 end
-
-case("marker_on_a_map_server", function()
-	-- the bag of a player on a map server's level: the world server hears nothing of it, the map server marks it
-	fresh("client")
-	wolf_players()
-	coop.is_world_server = function() return false end
-	coop.is_map_server = function() return true end
-	stash(558, true)
-	fire("coop_death_marker", 7, 558, "drop")
-	check(SPOTS[558] ~= nil and SPOTS[558].typ == SPOT, "a map server marks the bag of a player of its level")
-	coop.is_world_server, coop.is_map_server = nil, nil
-	fresh("client")
-	wolf_players()
-	stash(559, true)
-	fire("coop_death_marker", 7, 559, "drop")
-	check(SPOTS[559] == nil, "a player's machine sets no mark")
-end)
 
 case("marker_spot_add_remove", function()
 	fresh("host")

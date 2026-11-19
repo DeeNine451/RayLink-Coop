@@ -17,6 +17,7 @@
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
 dofile("tests/lua/support/menu_stubs.lua") -- UI stand-ins (class, CUIScriptWnd, CScriptXmlInit, click); check() counts
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- menu_stubs.lua prints every log line; keep them quiet (VERBOSE=1 shows them)
 function printf(fmt, ...)
@@ -30,10 +31,12 @@ end
 local ROLES = {
 	hostplayer = { mode = "host", host = true, client = false, world = true, player = true, mirror = false },
 	client = { mode = "client", host = false, client = true, world = false, player = true, mirror = true },
-	names_world = { mode = "host", host = false, client = false, world = true, player = true, mirror = false },
+	names_world = { mode = "host", host = false, client = false, world = true, player = true, mirror = false, dedicated = true },
 	names_mirror = { mode = "client", host = false, client = false, world = false, player = true, mirror = true },
 	not_world = { mode = "host", host = true, client = false, world = false, player = true, mirror = false },
-	dedicated = { mode = "host", host = true, client = false, world = true, player = false, mirror = false },
+	dedicated = { mode = "host", host = true, client = false, world = true, player = false, mirror = false, dedicated = true },
+	map_server = { mode = "host", host = true, client = false, world = false, player = false, map_server = true, split = true },
+	server_player = { mode = "client", host = false, client = true, world = false, player = true, split = true },
 	old_host = { mode = "host", host = true, client = false },
 	old_client = { mode = "client", host = false, client = true },
 	sp = { mode = "sp", host = false, client = false },
@@ -55,6 +58,9 @@ local function set_role(name)
 	coop.is_player = answer(r.player)
 	coop.is_mirror = answer(r.mirror)
 	coop.is_map_authority = answer(r.world)
+	coop.is_dedicated = answer(r.dedicated == true)
+	coop.is_map_server = answer(r.map_server == true)
+	coop.levels = r.split and { split = answer(true) } or nil
 end
 
 -- ------------------------------------------------------------------ callbacks: what a script registers is kept by name
@@ -209,9 +215,21 @@ local function same_claims(a, b)
 end
 
 -- =================================================================== coop_checkpoints
+local function start_survival_mode(role)
+	load_script("coop_mode").on_game_start()
+	modes.live(coop_mode)
+	if role == "old_host" then
+		-- Preserve the pre-role engine's non-playing host answer for the two legacy consumer checks.
+		-- The live co-op host has a playing actor and is exercised by hostplayer above.
+		modes.install(coop_mode, "hostplay", { actor_is_player = answer(false) })
+	end
+end
+
 local function load_checkpoints(role)
 	world(role)
 	xr_effects = { scenario_autosave = function() ORIG_STORY = ORIG_STORY + 1 end }
+	load_script("coop_main")
+	start_survival_mode(role)
 	coop_checkpoints = nil
 	load_script("coop_checkpoints")
 	coop_checkpoints.on_game_start()
@@ -258,7 +276,7 @@ case("checkpoints: the host player's tent claim is the client's claim", function
 	check(ck.request("tent", 0) == false and #CLAIMS == 0, "outside a session: nothing")
 
 	ck = load_checkpoints("old_host")
-	check(ck.request("tent", 0) == false, "a build without the role functions: the host still takes the stock tent (old rule)")
+	check(ck.request("tent", 0) == false, "the legacy non-playing host answer refuses a co-op tent claim")
 	ck = load_checkpoints("old_client")
 	check(ck.request("tent", 0) == true, "... and the client claims as before")
 end)
@@ -271,9 +289,11 @@ case("checkpoints: story checkpoints are the world server's", function()
 	ck = load_checkpoints("hostplayer")
 	xr_effects.scenario_autosave(nil, nil, { "st_save_y" })
 	check(#STORIES == 1, "the host process as it is today: once")
-	ck = load_checkpoints("not_world")
+	ck = load_checkpoints("map_server")
 	xr_effects.scenario_autosave(nil, nil, { "st_save_z" })
-	check(#STORIES == 0 and ORIG_STORY == 0, "is_host yes but not the world server: no story checkpoint, no stock call")
+	check(#STORIES == 0 and ORIG_STORY == 0, "the map server sets no story checkpoint and makes no stock call")
+	check(#SENT == 1 and SENT[1].name == "coop_cp_story" and SENT[1].target == 0
+		and coop_main.decode(SENT[1].payload).r == "st_save_z", "the map server reports the story checkpoint to the world")
 	ck = load_checkpoints("client")
 	xr_effects.scenario_autosave(nil, nil, { "st_save_c" })
 	check(#STORIES == 0 and ORIG_STORY == 0, "a client does nothing")
@@ -344,6 +364,7 @@ end
 
 local function load_rest(role)
 	world(role)
+	start_survival_mode(role)
 	install_rest_api()
 	stock_sleep()
 	coop_rest, coop_checkpoints = nil, nil
@@ -391,7 +412,7 @@ case("rest: the host player lies down and folds the bag the client's way", funct
 
 	load_rest("old_host")
 	lie_down_at_bag(6)
-	check(rest_win() ~= nil and not rest_win().btn_fold:IsShown(), "a build without the role functions: the host folds with the stock bag")
+	check(rest_win() ~= nil and not rest_win().btn_fold:IsShown(), "the legacy non-playing host answer leaves Fold hidden")
 end)
 
 case("rest: the world block is fed by the world server", function()
@@ -404,10 +425,10 @@ case("rest: the world block is fed by the world server", function()
 	advance(2000, 500)
 	check(REST.worlds[#REST.worlds] == "emission", "... an emission holds the sleep")
 	surge_manager = nil
-	load_rest("not_world")
+	load_rest("map_server")
 	surge_manager = { is_started = function() return true end }
 	advance(3000, 500)
-	check(#REST.worlds == 0, "is_host yes but not the world server: the world is not reported")
+	check(#REST.worlds == 0, "the map server does not report the world's rest block")
 	surge_manager = nil
 	load_rest("client")
 	advance(3000, 500)
@@ -420,6 +441,7 @@ end)
 -- =================================================================== coop_death
 local function load_death(role)
 	world(role)
+	start_survival_mode(role)
 	coop_death = nil
 	load_script("coop_death")
 	coop_death.on_game_start()
@@ -428,7 +450,7 @@ end
 
 case("death: the marks are the world server's", function()
 	local by = {}
-	for _, role in ipairs({ "names_world", "hostplayer", "not_world", "client" }) do
+	for _, role in ipairs({ "names_world", "hostplayer", "server_player", "client" }) do
 		load_death(role)
 		spawn("coop_death_stash", vec3(1, 0, 1), nil, { id = 700 })
 		spawn("wpn_x", vec3(1, 0, 1), 700, { id = 701 })
@@ -437,10 +459,10 @@ case("death: the marks are the world server's", function()
 	end
 	check(by.names_world == true, "the world server sets the spot of a death mark (old name says no)")
 	check(by.hostplayer == true, "the host process as it is today: set")
-	check(by.not_world == false, "is_host yes but not the world server: no spot")
+	check(by.server_player == false, "a server player's machine sets no spot")
 	check(by.client == false, "a client gets the host's spots replicated, sets none")
 
-	for _, role in ipairs({ "names_world", "not_world", "client" }) do
+	for _, role in ipairs({ "names_world", "server_player", "client" }) do
 		load_death(role)
 		spawn("coop_death_stash", vec3(1, 0, 1), nil, { id = 702 })
 		spawn("wpn_x", vec3(1, 0, 1), 702, { id = 703 })
@@ -448,7 +470,7 @@ case("death: the marks are the world server's", function()
 		by[role] = SPOTS[702] ~= nil
 	end
 	check(by.names_world == true, "entering a world, the world server marks the stashes of the fallen again")
-	check(by.not_world == false and by.client == false, "... nobody else does")
+	check(by.server_player == false and by.client == false, "... neither kind of client restores the spots")
 end)
 
 case("death: the host player's own penalties are the client's", function()

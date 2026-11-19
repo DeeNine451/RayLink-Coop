@@ -4,13 +4,8 @@
 	host). Research: docs\research\2026-10-22-f3-saves-sleep-recon.md, B.3 and Z2 / Z6 / Z7 / Z8.
 	What the player sees and the claims themselves: coop_checkpoints.script (request, tips).
 
-	F3a task 7 (docs/plans/2026-10-24-f3a-split-levels.md 1.2): the roles of the process, not "host / client". The host's
-	process is the world server AND a player - the host player is a client of his own world server over the internal
-	channel. So everything below that says "a client" is now "a PLAYER" (coop.is_player(): a remote client and the host
-	player alike), and "the host" is "the WORLD SERVER" (coop.is_world_server()). The host player's tent goes up the way a
-	client's does (a claim; the engine puts it up for peer 0); the stock no longer puts it up and no report of a stock tent
-	exists any more (coop_checkpoints.report_placed is gone with this change: the host would have claimed twice). A build
-	without the role functions falls back to the old pair.
+	The co-op host and remote players use the same claim path. The process deciding the world registers tents
+	that the engine places for players.
 
 	Why. A client cannot create a world object: the engine returns nil for alife_create without a parent (the host does not
 	take such a request). The stock item_tent then reads se_obj.id of that nil:
@@ -88,20 +83,9 @@ local function in_session()
 	return ok and active == true
 end
 
--- F3a task 7: a player asks (a remote client, the host player); the world server keeps the stock lists. A build without the
--- role functions has the old pair.
+-- In a session only a playing actor makes claims.
 local function is_player()
-	if not in_session() then return false end
-	local f = type(api.is_player) == "function" and api.is_player or api.is_client
-	local ok, yes = pcall(f)
-	return ok and yes == true
-end
-
-local function is_world_server()
-	if not in_session() then return false end
-	local f = type(api.is_world_server) == "function" and api.is_world_server or api.is_host
-	local ok, yes = pcall(f)
-	return ok and yes == true
+	return in_session() and coop_mode.actor_is_player()
 end
 
 local function section_of(obj)
@@ -274,14 +258,14 @@ end
 
 -- coop_tent_placed(tent, character): the engine put a tent / sleeping bag up for a player (the host player's too).
 local function on_tent_placed(tent, character)
-	if not is_world_server() or type(tent) ~= "number" then return end
+	if not in_session() or not coop_mode.decides_world() or type(tent) ~= "number" then return end
 	if register_owned(tent) then stats.registered = stats.registered + 1 end
 end
 
 -- The callback queue is lossy: for every tent and sleeping bag of the world the engine knows an owner of, make sure the
 -- stock lists have it. Once per world, world server only.
 local function reconcile()
-	if not is_world_server() then return end
+	if not in_session() or not coop_mode.decides_world() then return end
 	local cp = api and api.checkpoint
 	local c = checkpoints()
 	if not (cp and cp.tent_owner and c) then return end
@@ -338,7 +322,7 @@ local function pick_tent(dist, result)
 	end
 	local cp = api and api.checkpoint
 	-- the host player's process holds the world's book of owners: his own tents of an older world are his too (tent_owner)
-	local world = player and is_world_server() and cp and cp.tent_owner
+	local world = player and coop_mode.decides_world() and cp and cp.tent_owner
 	local here = actor:position()
 	local seen = false
 	local best_id, best_rank, best_dist = nil, nil, nil

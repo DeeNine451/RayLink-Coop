@@ -1,5 +1,6 @@
 -- Anomaly Coop temp test (W4 economy): coop_economy_* on a host and two clients with stub engines. Not shipped.
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 PATROL = { tp_dest = { x = 100, y = 0, z = 100 }, tp_look = { x = 100, y = 0, z = 110 } }
 
@@ -104,8 +105,12 @@ local function setup(nclients, positions)
 			add_entity(W, lid, "coop_player_avatar", nil, POS[q])
 		end
 	end
-	for p, W in pairs(WORLDS) do start_world(W) end
-	for p, W in pairs(WORLDS) do -- the economy script does not touch the sleep dialog any more (F3 T14)
+	for _, W in pairs(WORLDS) do
+		load_script(W, "coop_mode").on_game_start()
+		modes.live(W.coop_mode, function(name) return load_script(W, name) end)
+		start_world(W)
+	end
+	for _, W in pairs(WORLDS) do -- the economy script does not touch the sleep dialog any more (F3 T14)
 		W.ECON_LEFT_SLEEP_ALONE = W.ui_sleep_dialog.UISleep.OnButtonSleep == W.STOCK_ONBUTTON
 		load_script(W, "coop_rest")
 		W.coop_rest.on_game_start()

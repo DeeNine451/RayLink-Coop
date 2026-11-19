@@ -112,23 +112,9 @@ local function in_session()
 	return ok and active == true
 end
 
--- F3a task 6 (docs/plans/2026-10-24-f3a-split-levels.md 1.1, 1.2): the roles of this process. The host process is the world
--- server AND a player (the host player, a client of its own server over the internal channel). The world's rest rules
--- (the emission block) are the world server's; what the player sees and asks for - the sleep, the doze window, Fold - is the
--- same for the host player and a remote client. A build without the role functions has the old pair, whose host folded its
--- bag with the stock compression bag.
-local function is_world_server()
-	if not in_session() then return false end
-	local f = type(api.is_world_server) == "function" and api.is_world_server or api.is_host
-	local ok, yes = pcall(f)
-	return ok and yes == true
-end
-
+-- Sleep and Fold run on each player's machine. The process deciding the world reports the emission blocker.
 local function is_player()
-	if not in_session() then return false end
-	local f = type(api.is_player) == "function" and api.is_player or api.is_client
-	local ok, yes = pcall(f)
-	return ok and yes == true
+	return in_session() and coop_mode.actor_is_player()
 end
 
 local function rest_api()
@@ -314,7 +300,7 @@ local function emission_running()
 end
 
 local function feed_world_block()
-	if not is_world_server() then return end
+	if not in_session() or not coop_mode.decides_world() then return end
 	rest_call("set_world_block", emission_running() and "emission" or "")
 end
 
@@ -668,7 +654,7 @@ end
 -- and level_weathers' hour tick (3 s) had chosen the weather without force (the sky stayed at night until the next hour). So
 -- the world's part is done now; the needs (thirst, sleepiness, limbs, psy) stay on every sleeper's actor_on_sleep.
 local function on_skipped(hours)
-	if not is_world_server() then return end
+	if not in_session() or not coop_mode.decides_world() then return end
 	try("surge time_forwarded", function()
 		local m = mod("surge_manager")
 		local s = m and type(m.get_surge_manager) == "function" and m.get_surge_manager() or nil

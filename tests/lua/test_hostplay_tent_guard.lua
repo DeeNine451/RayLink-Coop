@@ -1,15 +1,15 @@
 -- Anomaly Coop F3 test: the stock item_tent on a co-op client and on the host (scripts\coop_tent_guard.script; the claims and
--- the tips are scripts\coop_checkpoints.script, tested in test_checkpoints.lua). Not shipped.
+-- the tips are scripts\coop_checkpoints.script, tested in test_hostplay_checkpoints.lua). Not shipped.
 -- Stock facts (anomaly-ref item_tent.script): on a client alife_create without a parent returns nil, so itm_tent_func (a
 -- level.add_call functor, no pcall) indexes nil -> FATAL; the sleeping bag branch of the local actor_on_item_use fails the
 -- same way; func_use_tent / func_use_bag free the used item themselves (CreateTimeEvent 0) about 4 s BEFORE a tent would be put
 -- up. Since F3 T13 a client asks the host (coop.checkpoint.claim_tent) and never touches the item: the host takes it (and
 -- answers "no_item" when it is gone). The wrappers replace the entry points of the item_tent module table on a client and leave
--- host / single player alone. F3a task 7: "a client" is any PLAYER (coop.is_player(): the host player too, a client of his own
--- world server over the internal channel - the last section); the stub's host without the role functions is the world server
--- only, and the report of a stock tent (coop_checkpoints.report_placed) is gone.
+-- stock function outside a session. In a co-op session both the host and remote player make claims.
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
+load_script("coop_mode")
+load_script("coop_hostplay_mode").on_game_start()
 dofile("tests/lua/support/item_tent_stock.lua")
 
 local ENTRY = { "start_timer", "itm_tent_func", "itm_tent_bag_func", "use_compression_bag", "func_use_bag", "func_use_tent" }
@@ -182,8 +182,9 @@ for _, name in ipairs(ENTRY) do orig_of[name] = plain[name] end
 
 local function arg_obj(sec) local _, o = item(sec); return o end
 
-print("== host: stock behaviour untouched")
-for _, mode in ipairs({ "host", "sp" }) do
+print("== single player: stock behaviour untouched")
+do
+	local mode = "sp"
 	reset()
 	MODE = mode
 	CALLS = {}
@@ -369,11 +370,13 @@ check(#CALLS == 0 and #CLAIMS == 0, "client: blocked until the claim goes")
 run_time_events(100)
 check(#CALLS == 0 and #CLAIMS == 1, "client: a claim, the stock is not called")
 MODE = "host"
+coop_checkpoints = nil -- the other seat has its own pending claim state
 item_tent.func_use_tent(arg_obj("itm_tent"))
-check(#CALLS == 1, "the same wrapper passes through on the host")
+run_time_events(100)
+check(#CALLS == 0 and #CLAIMS == 2, "the co-op host makes a claim too")
 MODE = "sp"
 item_tent.func_use_tent(arg_obj("itm_tent"))
-check(#CALLS == 2, "and in single player")
+check(#CALLS == 1, "the wrapper passes through in single player")
 
 print("== a mod that overwrites an entry later")
 reset()
@@ -387,9 +390,9 @@ MODE = "client"
 item_tent.func_use_tent(arg_obj("itm_tent"))
 run_time_events(100)
 check(OTHER == 0 and #CLAIMS == 1, "client: the mod's function does not run, the host is asked")
-MODE = "host"
+MODE = "sp"
 item_tent.func_use_tent(arg_obj("itm_tent"))
-check(OTHER == 1, "host: the mod's function runs")
+check(OTHER == 1, "single player: the mod's function runs")
 local again = item_tent.func_use_tent
 coop_tent_guard.on_game_start()
 check(item_tent.func_use_tent == again, "an untouched wrapper is not wrapped a third time")
@@ -613,14 +616,14 @@ do
 	local ok3 = pcall(fire_use, o)
 	check(ok3 and HUD == nil and #CREATED == 0 and #CLAIMS == 0, "client: an unrelated item goes through the stock callback untouched")
 end
-for _, mode in ipairs({ "host", "sp" }) do
-	boot(mode)
+do
+	boot("sp")
 	start_all_scripts()
 	local _, o = item("itm_sleepbag")
 	engine_eat(o)
 	fire_use(o)
 	check(ALIFE_CREATE == 1 and count_sec("ph_sleepbag") == 1 and count_sec("compression_bag") == 1 and count_sec("itm_sleepbag") == 0 and HUD == nil,
-		mode .. ": the stock callback places the sleeping bag (" .. created_secs() .. ")")
+		"single player: the stock callback places the sleeping bag (" .. created_secs() .. ")")
 end
 
 print("== stock shape: the callback swap")
@@ -670,21 +673,20 @@ do
 	check(cb_count == 1 and ALIFE_CREATE == 1 and HUD == nil and #CLAIMS == 0, "callback_registered == false: the stock callback is left as it is")
 end
 
-print("== stock shape: host runs the stock logic")
-boot("host")
+print("== stock shape: single player runs the stock logic")
+boot("sp")
 start_all_scripts()
 do
 	local _, o = item("itm_tent")
 	item_tent.func_use_tent(o)
-	check(#ADD_CALLS == 1, "host: func_use_tent queues the stock timer functor")
+	check(#ADD_CALLS == 1, "single player: func_use_tent queues the stock timer functor")
 	run_add_calls()
 	run_time_events(300)
 	check(ALIFE_CREATE == 1 and created_secs():find("ph_tent<nil", 1, true) and created_secs():find("itm_tent_bag<0", 1, true),
-		"host: ph_tent is created and the bag is given (" .. created_secs() .. ")")
-	check(#RELEASED == 1 and RELEASED[1].sec == "itm_tent", "host: the used tent item is released like stock")
-	check(HUD == nil and #EV == 0, "host: no message")
-	-- F3a task 7: report_placed is gone; a build without the role functions (this stub) is the world server only
-	check(claims() == "", "host of a build without roles: the stock tent is not reported, nothing is claimed (" .. claims() .. ")")
+		"single player: ph_tent is created and the bag is given (" .. created_secs() .. ")")
+	check(#RELEASED == 1 and RELEASED[1].sec == "itm_tent", "single player: the used tent item is released like stock")
+	check(HUD == nil and #EV == 0, "single player: no message")
+	check(claims() == "", "single player puts up the stock tent without a claim")
 end
 boot("sp")
 start_all_scripts()
@@ -695,32 +697,19 @@ do
 	check(created_secs():find("ph_sleepbag", 1, true) and created_secs():find("compression_bag<0", 1, true), "single player: the sleeping bag is placed (" .. created_secs() .. ")")
 	check(HUD == nil and #CLAIMS == 0, "single player: no message, no claim")
 end
-boot("host")
+boot("sp")
 start_all_scripts()
 do
-	-- the host still packs a placed sleeping bag away with the compression bag
+	-- single player still packs a placed sleeping bag away with the compression bag
 	local _, bag = spawn("ph_sleepbag", vec3(1, 0, 0))
 	item_tent.get_spawned_sleepbags()[bag:id()] = true
 	local _, o = item("compression_bag")
 	fire_use(o)
-	check(#RELEASED == 2 and count_sec("itm_sleepbag") == 1, "host: the compression bag still packs the placed sleeping bag up")
-	check(#CLAIMS == 0, "host: packing up claims nothing")
+	check(#RELEASED == 2 and count_sec("itm_sleepbag") == 1, "single player: the compression bag still packs the placed sleeping bag up")
+	check(#CLAIMS == 0, "single player: packing up claims nothing")
 end
 
--- ------------------------------------------------------------------ F3a task 7: the host PLAYER claims like a client
--- The host's process is the world server AND a player (docs/plans/2026-10-24-f3a-split-levels.md 1.2): with the role
--- functions the host player's tent, sleeping bag and pack-up are claims to his world server, as a client's are; the stock
--- does not put his tent up any more, and nothing reports a stock tent.
-print("== F3a task 7: the host player (roles) claims like a client")
-local function host_player_roles(on)
-	if on then
-		coop.is_player = function() return MODE ~= "sp" end
-		coop.is_world_server = function() return MODE == "host" end
-	else
-		coop.is_player, coop.is_world_server = nil, nil
-	end
-end
-host_player_roles(true)
+print("== the co-op host claims like a remote player")
 boot("host")
 start_all_scripts()
 do
@@ -770,26 +759,6 @@ do
 	run_time_events(300)
 	check(claims() == "pack" and #RELEASED == 0, "the host player's compression bag: a pack-up claim, nothing released here (" .. claims() .. ")")
 end
-boot("client")
-start_all_scripts()
-do
-	local _, o = item("itm_tent")
-	item_tent.func_use_tent(o)
-	run_time_events(5000)
-	check(claims() == "tent" and ALIFE_CREATE == 0, "a client with the role functions: the same claim as before (" .. claims() .. ")")
-end
-boot("host")
-coop.is_player = function() return false end -- a world server that is no player (none ships yet)
-start_all_scripts()
-do
-	local _, o = item("itm_tent")
-	item_tent.func_use_tent(o)
-	run_add_calls()
-	run_time_events(300)
-	check(count_sec("ph_tent") == 1 and #CLAIMS == 0, "a world server that is no player: the stock as it is, nothing claimed")
-end
-host_player_roles(false)
-
 -- live 2026-10-25: a client's use of a world object goes to the host (coop_objects client_intercept_use), so F on his own
 -- tent never reached on_physic_use here. The engine keeps a tent's use on his machine and calls use_tent.
 boot("client")
