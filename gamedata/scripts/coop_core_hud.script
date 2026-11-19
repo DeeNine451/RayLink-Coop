@@ -199,12 +199,11 @@ local function far_avatar(p)
 	return record and record(id) and id or nil
 end
 
--- Split levels: "on another map: <name>", nil for one who stands here.
-local function elsewhere_of(p)
-	if p.elsewhere ~= true then return nil end
+-- "On another map: <name>" for a player the mode layer says is away.
+local function elsewhere_of(peer)
 	local qc = rawget(_G, "coop_quests_core")
 	local lv = qc and qc.part and qc.part("levels") -- a server's level names (coop_srv_levels)
-	local text = lv and lv.elsewhere_text and lv.elsewhere_text(p.id)
+	local text = lv and lv.elsewhere_text and lv.elsewhere_text(peer)
 	return text and text ~= "" and text or nil
 end
 
@@ -213,13 +212,16 @@ function views(tg)
 	local A = allies()
 	local list, by_avatar = {}, {}
 	local actor = db.actor
+	local mode = rawget(_G, "coop_mode")
 	for _, p in ipairs(players()) do
 		if not p.is_self and type(p.id) == "number" then
 			local st = status[p.id]
 			local state, bleed = A.state_of(p, st, tg)
 			local fresh = st and (tg - st.at) <= A.STATUS_STALE_MS
 			local obj, id = avatar_of(p)
-			local far_id = not obj and p.elsewhere == true and far_avatar(p) or nil
+			-- Older callers without the facade supplied the per-player location in their roster.
+			local away = (mode and mode.where(p.id) == "away") or (not mode and p.elsewhere == true)
+			local far_id = not obj and away and far_avatar(p) or nil
 			local icon = st and st.i ~= "" and st.i or nil
 			if not icon and obj then
 				local ok, ic = pcall(obj.character_icon, obj)
@@ -229,7 +231,7 @@ function views(tg)
 				peer = p.id, slot = A.slot(p.id), nick = tostring(p.nick or "?"), host = host_badge(p),
 				state = state, bleed = bleed, hp = fresh and st.h or nil, avatar = id, icon = icon,
 				dist = (obj and actor) and obj:position():distance_to(actor:position()) or nil,
-				elsewhere = elsewhere_of(p), far = far_id and true or nil, far_id = far_id,
+				elsewhere = away and elsewhere_of(p.id) or nil, far = far_id and true or nil, far_id = far_id,
 			}
 			if obj then
 				local okp, p = pcall(obj.position, obj)
