@@ -185,7 +185,8 @@ local function seconds_text(v) return v and string_format("%.0f", v) or "-" end
 
 -- The same rule as rules::is_machine_info.
 local function machine_info(s)
-	return s == "ui_pda" or s == "actor_is_sleeping" or s == "sleep_active" or s:sub(1, 7) == "ui_talk" or s:sub(-9) == "_wnd_open"
+	return s == "ui_pda" or s == "ui_pda_hide" or s == "actor_is_sleeping" or s == "sleep_active"
+		or s:sub(1, 7) == "ui_talk" or s:sub(-9) == "_wnd_open"
 end
 
 -------------------------------------------------------------------------------

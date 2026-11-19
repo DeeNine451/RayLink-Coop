@@ -1,0 +1,47 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- The co-op host or the player's map server sees the death and credits the player behind the killer proxy.
+-- The world relays a map server's credit to the player as peer 0. G9-1 (coop_reputation) suppresses the mirror's
+-- stock mutant counter while still running its binder and death callbacks.
+
+local VERB = "pda_stat"
+local KILL_STATS = {
+	killed_stalkers = true,
+	killed_stalkers_f = true,
+	killed_stalkers_e = true,
+	killed_stalkers_n = true,
+	killed_monsters = true,
+}
+local installed = false
+
+local function on_stat(t, from)
+	-- coop_credit already filters the transport origin. Only a player's mirror consumes these increments.
+	if from ~= 0 or not coop_mode.is_player_mirror() then return end
+	if type(t.k) == "string" and KILL_STATS[t.k] and db and db.actor then
+		game_statistics.increment_statistic(t.k)
+	end
+end
+
+function on_game_start()
+	if installed or not rawget(_G, "coop") then return end
+	local gs = coop_mods_core.mod("game_statistics")
+	if not (gs and gs.increment_statistic and gs.increment_npc_statistic) then return end
+
+	-- G9-1 also redirects proxy stats. Install it first so these five stats take just one route regardless
+	-- of startup order, while the other stats still reach the existing redirect.
+	coop_reputation.on_game_start()
+	if not coop_credit.on_owner(VERB, on_stat) then return end
+	installed = coop_mods_core.wrap(gs, "increment_npc_statistic", "pda_kills", function(original)
+		return function(npc, name, ...)
+			if KILL_STATS[name] then
+				local character, peer = coop_credit.who(npc)
+				if character and character ~= 0 then
+					if coop_mode.decider(peer) == "this" then
+						coop_credit.to_owner(character, VERB, { k = name })
+					end
+					return
+				end
+			end
+			return original(npc, name, ...)
+		end
+	end)
+end
