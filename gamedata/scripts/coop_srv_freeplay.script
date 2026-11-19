@@ -1,0 +1,105 @@
+-- Сервер: окно эвакуации у выбранного игрока, решение у сервера мира (docs/MODES.md)
+-- Dev 57 G15-2, s41:1. The map reports the scene and its user; the world has the roster and the story registry.
+local TAG = "srv_freeplay"
+local OFFER = "fp_offer"
+local CHOICE = "st_freeplay_text_yes_no"
+local ACK = "st_freeplay_text_ok"
+local STAY = "pri_a28_actor_in_zone_stay"
+local LEAVE = "pri_a28_actor_in_zone_leave"
+local installed = false
+
+local function level_number(n)
+	return type(n) == "number" and n >= 0 and n < 65535 and n % 1 == 0
+end
+
+local function player_peer(n)
+	return type(n) == "number" and n > 0 and n < 0x100 and n % 1 == 0
+end
+
+local function level_of(obj)
+	if not obj then return nil end
+	local ok, id = pcall(function() return game_graph():vertex(obj:game_vertex_id()):level_id() end)
+	if ok and level_number(id) then return id end
+end
+
+local function scene_context(actor, npc)
+	local C = coop_mods_core
+	local logic, players = C.mod("coop_npc_logic"), C.mod("coop_npc_players")
+	local user = logic and logic.user_of(npc)
+	local peer = players and (user and players.peer_of(user) or players.peer_of(actor)) or C.identity_peer()
+	local scene_level = level_of(npc)
+	if scene_level then return scene_level, peer end
+	-- The world has no loaded player map. Only the scene object or a known player's seat can identify its map.
+	for _, p in ipairs(C.players()) do
+		if level_number(p.level) and player_peer(p.id) and (p.id == peer or coop_mode.where(p.id) == "here") then
+			return p.level, peer
+		end
+	end
+end
+
+local function choose_player(scene_level, preferred)
+	local first
+	for _, p in ipairs(coop_mods_core.players()) do
+		if player_peer(p.id) and p.level == scene_level then
+			if p.id == preferred then return p.id end
+			first = first or p.id
+		end
+	end
+	return first
+end
+
+local function ask_on_world(id, scene_level, preferred)
+	if not (db.actor and level_number(scene_level)) then return end
+	if has_alife_info(STAY) or has_alife_info(LEAVE) then return end
+	local peer = choose_player(scene_level, preferred)
+	if not peer then return end
+	coop_quests_freeplay.ask(peer, id, function(answer)
+		-- Actor 0 is the world registry. The engine mirrors these story infos to the maps and players.
+		db.actor:give_info_portion(answer == "leave" and LEAVE or STAY)
+	end)
+end
+
+local function receive_offer(t, from)
+	-- Map bridges have reserved transport identities (coop_mapserver_rules.h).
+	local bridge = type(from) == "number" and from > 0x100 and from <= 0x107 and from % 1 == 0
+	local ok = bridge and (t.id == CHOICE or t.id == ACK) and level_number(t.level)
+		and (t.peer == nil or player_peer(t.peer))
+	if not coop_trust.pass(OFFER, ok, "invalid freeplay scene from peer %s", tostring(from)) or not ok then return end
+	ask_on_world(t.id, t.level, t.peer)
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		if installed then return end
+		local world = coop_mode.decides_world()
+		if not world and not coop_mode.leads_here() then return end
+		local C = coop_mods_core
+		if world then
+			local ok, err = pcall(function()
+				C.set_limit(OFFER, 6, 2)
+				C.on(OFFER, receive_offer, "world")
+			end)
+			if not ok then C.report(TAG, "register scene report", err) end
+		end
+		local ok, err = pcall(function()
+			local effects = C.mod("xr_effects")
+			if not effects then return end
+			installed = C.wrap(effects, "show_freeplay_dialog", TAG, function(original)
+				return function(actor, npc, p)
+					if not C.active() then return original(actor, npc, p) end
+					local id = p and p[1]
+					if (id ~= CHOICE or p[2] ~= "true") and (id ~= ACK or p[2] == "true") then
+						return original(actor, npc, p)
+					end
+					local scene_level, preferred = scene_context(actor, npc)
+					if not scene_level then return end
+					if world then
+						return ask_on_world(id, scene_level, preferred)
+					end
+					C.publish(OFFER, { id = id, level = scene_level, peer = player_peer(preferred) and preferred or nil })
+				end
+			end)
+		end)
+		if not ok then C.report(TAG, "wrap stock effect", err) end
+	end)
+end

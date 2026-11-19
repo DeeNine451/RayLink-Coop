@@ -1,0 +1,82 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G15-2. The player shows the stock window; its issuer consumes one answer.
+local TAG = "quests_freeplay"
+local ASK, ANSWER = "fp_ask", "fp_answer"
+local BOX = {
+	st_freeplay_text_yes_no = "message_box_yes_no",
+	st_freeplay_text_ok = "message_box_ok",
+}
+local pending, answered = {}, {}
+local windows = {}
+
+local function box_of(id)
+	return type(id) == "string" and BOX[id] or nil
+end
+
+local function accept(t, from)
+	local box = box_of(t.id)
+	local offer = box and pending[t.id]
+	local ok = offer ~= nil and offer.peer == from
+		and (t.answer == "stay" or (t.answer == "leave" and box == "message_box_yes_no"))
+	-- Ownership of the pending operation and its set of choices are always-on invariants.
+	if not coop_trust.pass(ANSWER, ok, "no matching freeplay choice from peer %s", tostring(from)) or not ok then return end
+	pending[t.id] = nil
+	answered[t.id] = true
+	offer.cb(t.answer)
+end
+
+local function show(t)
+	local id = t.id
+	local box = box_of(id)
+	if not box or windows[id] or not (db and db.actor) then return false end
+	local ui = coop_mods_core.mod("ui_freeplay_dialog")
+	if not (ui and ui.freeplay_dialog) then return false end
+	local wnd = ui.freeplay_dialog()
+	local function reply(answer)
+		if windows[id] ~= wnd then return end
+		local message = { id = id, answer = answer }
+		if coop_mods_core.self_peer() == 0 then
+			windows[id] = true
+			accept(message, 0)
+		elseif coop_mods_core.to_host(ANSWER, message) then
+			windows[id] = true
+		end
+	end
+	local function stay() reply("stay") end
+	local function leave() reply("leave") end
+	-- The engine replaces callbacks with the same control/event on this instance.
+	-- The stock singleton and its single-player callbacks are left alone.
+	wnd:AddCallback("freeplay_mb", ui_events.MESSAGE_BOX_OK_CLICKED, stay, wnd)
+	wnd:AddCallback("freeplay_mb", ui_events.MESSAGE_BOX_NO_CLICKED, stay, wnd)
+	wnd:AddCallback("freeplay_mb", ui_events.MESSAGE_BOX_YES_CLICKED, leave, wnd)
+	windows[id] = wnd
+	wnd:Show(box, id)
+	return true
+end
+
+function ask(peer, dialog_id, cb)
+	if not (coop_mods_core.active() and type(peer) == "number" and peer >= 0 and peer < 0x100 and peer % 1 == 0
+		and box_of(dialog_id) and type(cb) == "function") then return false end
+	if pending[dialog_id] or answered[dialog_id] then return false end
+	pending[dialog_id] = { peer = peer, cb = cb }
+	local message = { id = dialog_id }
+	if peer == 0 and coop_mods_core.self_peer() == peer then
+		local ok, shown = pcall(show, message)
+		if ok and shown then return true end
+		if not ok then coop_mods_core.report(TAG, "stock window", shown) end
+	elseif coop_mods_core.to_peer(peer, ASK, message) then
+		return true
+	end
+	pending[dialog_id] = nil
+	return false
+end
+
+function on_game_start()
+	local C = coop_mods_core
+	local ok, err = pcall(function()
+		C.set_limit(ANSWER, 6, 2)
+		C.on(ANSWER, accept, "world")
+		C.on(ASK, show, "player")
+	end)
+	if not ok then C.report(TAG, "start", err) end
+end
