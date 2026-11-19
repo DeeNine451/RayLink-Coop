@@ -160,6 +160,11 @@ constexpr Row kExpected[] = {
 	{Msg::Tunnel, kTrunk},
 	{Msg::MapServerState, kTrunk},
 	{Msg::MapServerOrder, kTrunk},
+	// F5 vehicles: a car of the sender's level (test_protocol_f5.cpp)
+	{Msg::VehicleReq, kMap},
+	{Msg::VehicleSeat, kMap},
+	{Msg::VehicleInput, kMap},
+	{Msg::VehicleState, kMap},
 };
 
 std::string verdict(const std::string& what, bool ok)

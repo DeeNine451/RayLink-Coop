@@ -1265,6 +1265,11 @@ constexpr Direction kDirections[] = {
 	{Msg::DebugState, kHost}, // protocol 29: the server's debug (test_debug_rules.cpp)
 	{Msg::StateDumpRequest, kClient},
 	{Msg::StateDump, kHost},
+	// F5 vehicles (test_protocol_f5.cpp): a player asks and drives, the decider of his level seats and tells
+	{Msg::VehicleReq, kClient},
+	{Msg::VehicleSeat, kHost},
+	{Msg::VehicleInput, kClient},
+	{Msg::VehicleState, kHost},
 };
 } // namespace
 
