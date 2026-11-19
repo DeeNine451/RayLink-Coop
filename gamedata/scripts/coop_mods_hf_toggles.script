@@ -1,0 +1,67 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Device intents go to the authority of the player's current map. The existing
+-- hf_data mirror carries the new state to the save and to the stock binders.
+
+local function object_id(id)
+	if type(id) == "number" and id > 0 and id < 65535 and id == math.floor(id) then
+		return id
+	end
+end
+
+local function install(module, method, verb)
+	local core = coop_mods_core
+	local binder = core.mod(module)
+	if not core.fn(binder, method) then return end
+	local manager = core.mod("hf_obj_manager")
+	local hf = core.mod("coop_mods_hf")
+	if not (core.fn(manager, "get_data") and core.fn(manager, "set_data")
+		and core.fn(hf, "publish") and core.fn(hf, "near_ok")) then return end
+
+	local binding = module .. ".init"
+	local function toggle(t, from)
+		local wire_id = object_id(t.o)
+		local id = wire_id and object_id(core.lid(wire_id))
+		local obj = id and level.object_by_id(id)
+		local device = obj and ini_sys:r_string_ex(obj:section(), "script_binding") == binding
+		if not coop_trust.pass(verb .. "_target", device, "player #%s, object %s: no matching device",
+			tostring(from), tostring(wire_id)) or not device then return end
+
+		local actor = coop_mode.where(from) == "here" and core.avatar(from)
+		if not coop_trust.pass(verb .. "_near", actor and hf.near_ok(obj, actor), "player #%s, object %d: out of reach",
+			tostring(from), id) or not actor then return end
+
+		local data = manager.get_data(id) or {}
+		data.is_on = not data.is_on
+		-- update_data already publishes through its HF wrapper. Use set_data
+		-- with the full record so this action can explicitly publish it once.
+		manager.set_data(id, data)
+		hf.publish(id)
+	end
+
+	core.set_limit(verb, 5, 2)
+	if not core.on(verb, toggle, "host") then return end
+	-- Dot Marks keeps the function by value when its markers are built.
+	core.wrap(binder, method, module .. "." .. method, function(orig)
+		return function(id, ...)
+			if not core.active() then return orig(id, ...) end
+			local wire_id = object_id(id) and object_id(core.hid(id))
+			if not wire_id then return end
+			local t = { o = wire_id }
+			if coop_mode.leads_here() and coop_mode.actor_is_player() then
+				return toggle(t, core.self_peer())
+			end
+			if coop_mode.is_player_mirror() then return core.to_host(verb, t) end
+		end
+	end)
+end
+
+local function start_step(module, method, verb)
+	local ok, err = pcall(install, module, method, verb)
+	if not ok then printf("! [coop_mods_hf_toggles] %s failed: %s", module, tostring(err)) end
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	start_step("bind_alarm_system", "toggle_alarm_system", "hft_alarm")
+	start_step("bind_table_fan", "toggle_fan", "hft_fan")
+end
