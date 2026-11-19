@@ -1,0 +1,289 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G9-2. The map owner supplies confirmed deaths, hits and loot rolls.
+-- coop_credit delivers to the character's player, who applies local tutorial and display settings.
+local NPE, SILENT = "credit_npe_kill", "credit_silent_kill"
+local ENEMY, HELI, ZCP = "credit_enemy_hit", "credit_heli_hit", "credit_zcp_loot"
+local BEFORE_HIT, SILENT_CALLBACK = "npc_on_before_hit", "npc_on_silent_kill_callback"
+local TAG = "credit_events"
+local MAX_ID, MAX_STAMP = 65534, 4294967295
+local sequence = 0
+local npe_original
+
+local function C() return coop_mods_core end
+
+local function uint(v, max)
+	return type(v) == "number" and v >= 0 and v <= max and v % 1 == 0
+end
+
+local function authority()
+	return C().active() and coop_mode.leads_here()
+end
+
+local function character_here(obj)
+	local character, peer = coop_credit.who(obj)
+	if character ~= nil and coop_mode.where(peer) == "here" then return character end
+end
+
+local function send(character, verb, data)
+	data.c = C().hid(character)
+	if not uint(data.c, MAX_ID) then return end
+	sequence = sequence % MAX_STAMP + 1
+	data.n = sequence
+	data.ts = time_global() % (MAX_STAMP + 1)
+	data.map = level.name()
+	coop_credit.to_owner(character, verb, data)
+end
+
+local function own_event(t)
+	local actor = db.actor
+	if C().active() and actor and coop_mode.actor_is_player()
+		and uint(t.c, MAX_ID) and t.c == C().hid(actor:id())
+		and uint(t.n, MAX_STAMP) and t.n > 0 and uint(t.ts, MAX_STAMP)
+		and type(t.map) == "string" and #t.map > 0 and #t.map <= 64 then
+		return actor
+	end
+end
+
+local function event_key(t)
+	return t.map .. ":" .. t.c .. ":" .. t.ts .. ":" .. t.n
+end
+
+local function first_delivery(t, verb)
+	return coop_credit.once(event_key(t), verb)
+end
+
+local function local_object(id)
+	if not uint(id, MAX_ID) then return end
+	local local_id = C().lid(id)
+	if uint(local_id, MAX_ID) then return level.object_by_id(local_id) end
+end
+
+-- NPE's stock death callbacks run on the map and disregard the killer. Only the addressed
+-- owner's local activation queue should see a player kill. NPC and environmental kills have no owner.
+local function tell_npe(victim, character, monster)
+	if not (victim and character ~= nil and npe_original) then return end
+	local id = C().hid(victim:id())
+	if uint(id, MAX_ID) and coop_credit.once(id, NPE) then
+		send(character, NPE, { i = id, m = monster })
+	end
+end
+
+local function install_npe()
+	local npe = C().mod("npe")
+	local director = C().mod("npe_director")
+	local events = npe and npe.EVENT
+	if not (events and events.NPC_KILLED and events.MUTANT_KILLED and director) then return end
+	local function matches(event, kind)
+		return event and event.name == kind.name and event.module == kind.module and event.handler
+			and event.handler.name == kind.handler.name and event.handler.module == kind.handler.module
+	end
+	C().wrap(director, "Activate_contexts_on", "npe_director.Activate_contexts_on (kill credit)", function(original)
+		npe_original = original
+		return function(event, ...)
+			if C().active() and (matches(event, events.NPC_KILLED) or matches(event, events.MUTANT_KILLED)) then return end
+			return original(event, ...)
+		end
+	end)
+	if not npe_original then return end
+	coop_credit.on_owner(NPE, function(t)
+		if own_event(t) and uint(t.i, MAX_ID) and type(t.m) == "boolean"
+			and first_delivery(t, NPE) and director.Settings and director.Settings.enable then
+			npe_original(t.m and events.MUTANT_KILLED or events.NPC_KILLED)
+		end
+	end)
+	RegisterScriptCallback("npc_on_death_callback", function(victim, killer)
+		if authority() then tell_npe(victim, character_here(killer), false) end
+	end)
+	RegisterScriptCallback("monster_on_death_callback", function(victim, killer)
+		if authority() then tell_npe(victim, character_here(killer), true) end
+	end)
+end
+
+-- Replace a private function through its existing upvalue, preserving the registered callback and its priority.
+local function wrap_private(fn, holder, index, label, make)
+	local slot = { fn = fn }
+	if C().wrap(slot, "fn", label, make) then
+		debug.setupvalue(holder, index, slot.fn)
+		return slot.fn
+	end
+end
+
+local function install_silent_judge()
+	local sk = C().mod("gameplay_silent_kills")
+	if not sk then return end
+	local _, state_holder, state_index = C().find_local(sk, "M")
+	if not state_holder then return end
+	for _, handler in ipairs(coop_route.handlers_from(BEFORE_HIT, "coop_npc_world")) do
+		local judge, holder, index = C().upvalue(handler, "silent_kill")
+		if holder then
+			wrap_private(judge, holder, index, "coop_npc_world silent kill (credit)", function(original)
+				return function(victim, shot, bone, flags)
+					if not (authority() and victim and shot and flags) then
+						return original(victim, shot, bone, flags)
+					end
+					local killer = shot.draftsman
+					local character = character_here(killer)
+					if not character or character == 0 then return original(victim, shot, bone, flags) end
+					local _, state = debug.getupvalue(state_holder, state_index)
+					local id = victim:id()
+					local prior = state and state.victims and state.victims[id]
+					if prior then return original(victim, shot, bone, flags) end
+					local weapon = killer:active_item()
+					local was_melee = shot.type == hit.wound
+					original(victim, shot, bone, flags)
+					-- The judge writes this only after the replacement hit and still owns the actual decision.
+					if state and state.victims and state.victims[id] and flags.ret_value == false then
+						tell_npe(victim, character, false)
+						local i = C().hid(id)
+						local w = weapon and C().hid(weapon:id())
+						if uint(i, MAX_ID) and uint(w, MAX_ID) then
+							send(character, SILENT, { i = i, w = w, m = was_melee })
+						end
+					end
+				end
+			end)
+			return
+		end
+	end
+	C().report(TAG, "install silent kill credit", "map judge callback not found")
+end
+
+local function install_silent()
+	local skd = C().mod("stealth_kill_detection")
+	if not skd then return end
+	coop_credit.on_owner(SILENT, function(t)
+		if not (own_event(t) and t.map == level.name() and type(t.m) == "boolean"
+			and uint(t.i, MAX_ID) and uint(t.w, MAX_ID) and first_delivery(t, SILENT) and skd.send_on_skill_cb) then return end
+		local received = time_global()
+		local function play()
+			local actor = own_event(t)
+			if not (actor and t.map == level.name() and skd.send_on_skill_cb) then return true end
+			local victim, weapon = local_object(t.i), local_object(t.w)
+			if not (victim and weapon) then return (time_global() - received) % (MAX_STAMP + 1) >= 1000 end
+			skd.last_s_killed = actor:id()
+			SendScriptCallback(SILENT_CALLBACK, victim, actor, weapon, t.m)
+			return true
+		end
+		-- Script events can arrive before the normal object update. Keep only a short retry on this map.
+		if not play() then CreateTimeEvent(SILENT, event_key(t), 0.1, play) end
+	end)
+	RegisterScriptCallback(SILENT_CALLBACK, function(victim, killer)
+		-- The local actor's stock Catspaw callback already reached its consumers.
+		if authority() then
+			local character = character_here(killer)
+			if character == 0 then tell_npe(victim, character, false) end
+		end
+	end)
+	local function first_update()
+		UnregisterScriptCallback("actor_on_first_update", first_update)
+		local ok, err = pcall(install_silent_judge)
+		if not ok then C().report(TAG, "install silent kill credit", err) end
+	end
+	RegisterScriptCallback("actor_on_first_update", first_update)
+end
+
+local function install_health()
+	local ui = C().mod("ui_enemy_health")
+	if not C().fn(ui, "on_hit") then return end
+	local function receiver(verb)
+		coop_credit.on_owner(verb, function(t)
+			local actor = own_event(t)
+			if not (actor and t.map == level.name() and type(t.a) == "number" and t.a > 0 and t.a < math.huge
+				and uint(t.b, 65535)) then return end
+			local target = local_object(t.i)
+			if not (target and db.storage and db.storage[target:id()]) then return end
+			if first_delivery(t, verb) then ui.on_hit(target, t.a, nil, actor, t.b) end
+		end)
+	end
+	local function relay(verb)
+		return function(target, amount, _, shooter, bone)
+			if not (authority() and target and type(amount) == "number" and amount > 0 and amount < math.huge) then return end
+			local character = character_here(shooter)
+			if character and character ~= 0 then -- stock already handles the authority's own actor
+				local i = C().hid(target:id())
+				if uint(i, MAX_ID) then
+					send(character, verb, { i = i, a = amount, b = uint(bone, 65535) and bone or 65535 })
+				end
+			end
+		end
+	end
+	receiver(ENEMY)
+	receiver(HELI)
+	local enemy_hit = relay(ENEMY)
+	RegisterScriptCallback("npc_on_hit_callback", enemy_hit)
+	RegisterScriptCallback("monster_on_hit_callback", enemy_hit)
+	RegisterScriptCallback("heli_on_hit_callback", relay(HELI))
+end
+
+local ZCP_TEXT = {
+	repair = "st_smr_loot_found_repair", ammo = "st_smr_loot_found_ammo",
+	meds = "st_smr_loot_found_meds", useful = "st_smr_loot_found_useful",
+	mags = "st_smr_loot_found_mags", lootbox = "st_smr_loot_found_lootbox",
+}
+
+local function install_zcp()
+	local smr, mcm = C().mod("smr_loot"), C().mod("smr_loot_mcm")
+	if not (C().fn(smr, "try_spawn") and C().fn(mcm, "get_config")) then return end
+	local message, holder, index = C().find_local(smr, "pda_message")
+	local use, use_holder, use_index = C().find_local(smr, "physic_object_on_use_callback")
+	if not (holder and use_holder) then return end
+	local roll
+	wrap_private(message, holder, index, "smr_loot PDA message (opener)", function(original)
+		return function(kind, ...)
+			if roll then
+				roll.notices[#roll.notices + 1] = kind
+				return
+			end
+			return original(kind, ...)
+		end
+	end)
+	local function finish(previous, current, ok, ...)
+		roll = previous
+		if not ok then error((...), 0) end
+		if current.character then
+			for _, kind in ipairs(current.notices) do
+				if ZCP_TEXT[kind] then send(current.character, ZCP, { k = kind, i = current.box }) end
+			end
+		end
+		return ...
+	end
+	C().wrap(smr, "try_spawn", "smr_loot.try_spawn (notice context)", function(original)
+		return function(box, ...)
+			if not (C().active() and box and IsInvbox(box)) then return original(box, ...) end
+			local opener = C().identity_obj()
+			if authority() and not opener and coop_mode.actor_is_player() then return original(box, ...) end
+			local previous = roll
+			local character = authority() and character_here(opener) or nil
+			roll = { character = character, box = C().hid(box:id()), notices = {} }
+			return finish(previous, roll, pcall(original, box, ...))
+		end
+	end)
+	local wrapped = wrap_private(use, use_holder, use_index, "smr_loot box use (local opener)", function(original)
+		return function(box, who, ...)
+			if C().active() and not (authority() and character_here(who) == 0) then return end
+			-- Remote openers are already handled by the confirmed container window in coop_mods_misc.
+			return original(box, who, ...)
+		end
+	end)
+	if wrapped then
+		coop_route.inherit_source(wrapped, use)
+		C().swap_callback("physic_object_on_use_callback", use, wrapped)
+	end
+	coop_credit.on_owner(ZCP, function(t)
+		local actor = own_event(t)
+		local text = ZCP_TEXT[t.k]
+		if actor and text and uint(t.i, MAX_ID) and first_delivery(t, ZCP) and mcm.get_config("send_message") then
+			actor:give_game_news(game.translate_string(text), "", "ui_inGame2_Polucheni_koordinaty_taynika", 0, 3000)
+			xr_sound.set_sound_play(actor:id(), "pda_tips")
+		end
+	end)
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	for _, step in ipairs({ { "NPE", install_npe }, { "stealth", install_silent },
+		{ "enemy health", install_health }, { "ZCP", install_zcp } }) do
+		local ok, err = pcall(step[2])
+		if not ok then C().report(TAG, step[1], err) end
+	end
+end
