@@ -10,7 +10,6 @@ online_at_server
 logic_may_update
 xfer_scheduled
 xfer_on_switched_offline
-leader_takes_ids
 leader_free_id
 levels::frame
 # the review of 2026-11-18: server code that runs in the co-op process
