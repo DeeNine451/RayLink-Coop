@@ -350,20 +350,60 @@ check(math.abs(aim_at(proxy) - 0.1) <= 0.001, "no clients: the stock aim")
 -- By the route rules grok runs on the host only. There a client's hit comes from his proxy, not from db.actor: grok returned at
 -- once, the hit went the engine's stock way and an NPC whose job logic says invulnerable took nothing. Now the machine that
 -- applies hits (the host) counts a player's hit; a client's machine, were grok given to it, leaves the hit to the host.
-print("== G.A.M.M.A.'s ballistics (grok_bo): a client's hit is counted on the host like the host's")
 local GBO, MOMO = "grok_bo", "momo_multihit_fix"
+local K0 = load_script(pair(), "coop_npc_compat")
+local grok_rewrites = {}
+local presence_guards = {
+	anomaly_restrictor_update = {
+		"if dist_to_cam_sqr < (max_dist_limit * max_dist_limit) then",
+		"if pos:distance_to_sqr(cache_cam_pos) < cache_cam_limit_sqr then",
+	},
+	spawn_defense = { "if (smart.dist_to_actor < smart.respawn_radius) then" },
+	spawn_mutants = { "if (smart.dist_to_actor < smart.respawn_radius) then" },
+}
+
+local function check_function_rewrite(r, src, path)
+	local label = r.module .. "." .. r.name
+	local text, line, out, why
+	if src then text, line = K0.method_text(src, r.header) end
+	if text then out, why = K0.rewrite_text(text, r) end
+	check(out ~= nil, label .. ": every pair is found in the real function (" .. tostring(why or line or path) .. ")")
+	check(out ~= nil and loadstring(out) ~= nil, label .. ": the rewritten function compiles")
+	check(out ~= nil and not out:find("~= db.actor:id()", 1, true), label .. ": no db.actor guard is left")
+	for _, guard in ipairs(presence_guards[r.name] or {}) do
+		check(out ~= nil and not out:find(guard, 1, true), label .. ": original single-observer guard is removed: " .. guard)
+	end
+	return text, out
+end
+
+print("== function rewrites fit their real module sources")
+local presence_count = {}
+for _, r in ipairs(K0._function_rewrites()) do
+	if r.module == GBO then
+		grok_rewrites[#grok_rewrites + 1] = r
+	else
+		local path = gamma(r.module)
+		local src = read_all(path)
+		if not src and r.archive then
+			-- The stand has no loose override. Use the stock script extracted from the Anomaly archives.
+			path = "../anomaly-ref/unpacked/scripts/" .. r.module .. ".script"
+			src = read_all(path)
+		end
+		check_function_rewrite(r, src, path)
+		presence_count[r.name] = (presence_count[r.name] or 0) + 1
+	end
+end
+for name in pairs(presence_guards) do
+	check(presence_count[name] == 1, name .. ": exactly one presence rewrite is checked")
+end
+check(#grok_rewrites == 2, "two function rewrites of grok_bo: the stalker and the mutant handler")
+
+print("== G.A.M.M.A.'s ballistics (grok_bo): a client's hit is counted on the host like the host's")
 if have_file(gamma(GBO)) and have_file(gamma(MOMO)) then
 	local gbo_src = read_all(gamma(GBO))
-	local K0 = load_script(pair(), "coop_npc_compat")
-	local frs = K0._function_rewrites and K0._function_rewrites() or {}
-	check(#frs == 2, "two function rewrites of grok_bo: the stalker and the mutant handler")
 	local rewritten_src = gbo_src
-	for _, r in ipairs(frs) do
-		local text, line = K0.method_text(gbo_src, r.header)
-		local out, why = text and K0.rewrite_text(text, r)
-		check(out ~= nil, r.name .. ": every pair is found in the real function (" .. tostring(why or line) .. ")")
-		check(out ~= nil and loadstring(out) ~= nil, r.name .. ": the rewritten function compiles")
-		check(out ~= nil and not out:find("~= db.actor:id()", 1, true), r.name .. ": no db.actor guard is left")
+	for _, r in ipairs(grok_rewrites) do
+		local text, out = check_function_rewrite(r, gbo_src, gamma(GBO))
 		local i, j = rewritten_src:find(text or "\0", 1, true)
 		if out and i then rewritten_src = rewritten_src:sub(1, i - 1) .. out .. rewritten_src:sub(j + 1) end
 	end

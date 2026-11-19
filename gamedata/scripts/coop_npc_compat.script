@@ -201,13 +201,22 @@ function rewrite_text(src, pairs_list)
 	return src
 end
 
-local function read_script(name)
+local function read_script(name, archive)
 	local fs = getFS and getFS()
 	if not fs then return nil end
 	local ok, path = pcall(fs.update_path, fs, "$game_scripts$", name .. ".script")
 	if not (ok and type(path) == "string") then return nil end
 	local fh = io.open(path, "rb")
-	if not fh then return nil end
+	if not fh then
+		-- Stock crow/Warfare scripts live in .db archives on the stand. This
+		-- existing engine reader uses VFS (including overrides); opt in per patch,
+		-- leaving the historical loose-only rewrites' installation unchanged.
+		if archive and type(r_file_as_string) == "function" then
+			local read_ok, src = pcall(r_file_as_string, path)
+			if read_ok and type(src) == "string" then return src, path end
+		end
+		return nil
+	end
 	local src = fh:read("*a")
 	fh:close()
 	return src, path
@@ -273,6 +282,12 @@ function _rewrites() return REWRITES end
 -- that would declare its luabind class anew and drop every other mod's patch of it. Like the rewrites above it applies
 -- in and outside a session (on_game_start of a RayLink exe); outside one the fixed line answers what the author meant.
 local METHOD_REWRITES = {
+	-- G8-3 s39:7: keep the chosen path, random draw and successful-point cooldown.
+	{ module = "sr_crow_spawner", class = "crowkiller", method = "check_for_spawn_new_crow", archive = true,
+		header = "function crowkiller:check_for_spawn_new_crow()",
+		{ "ptr:point(0):distance_to_sqr(db.actor:position())>10000",
+		"coop_npc_compat.crow_spawn_clear(ptr:point(0))" },
+	},
 	-- G.A.M.M.A. sim_squad_scripted.script:139: the branch for a numeric target indexes the global `obj` (nil) instead of
 	-- se_target. A numeric scripted_target (emission_guard_patch turns "123" into 123 at actor_on_first_update) ended
 	-- the game: client reports RL-PMQ3-QJ23, RL-XK6N-8U4U, RL-M68Z-RV5K, RL-PVY5-ERKS (b40, split levels, l05_bar).
@@ -334,7 +349,7 @@ local function apply_method_rewrite(r)
 	local m = mod(r.module)
 	local cls = m and m[r.class]
 	if not cls then return end -- mod absent
-	local src, path = read_script(r.module)
+	local src, path = read_script(r.module, r.archive)
 	if not src then
 		log("rewrite %s skipped: not a loose file", tag)
 		return
@@ -400,6 +415,28 @@ function _method_rewrites() return METHOD_REWRITES end
 -- it by the bullet's own number that comes with the hit (bullet_again). The host's own on-hit artefact perks are for the
 -- host's hits (its before-hit and death perks are skipped by coop_mods_perks).
 local FUNCTION_REWRITES = {
+	-- G8-3 u01:2: both camera filters count living players here; the independent
+	-- mutant/anomaly radius and the mod's registry/invalidation cadence stay intact.
+	{ module = "aaaa_script_fixes_mp", name = "anomaly_restrictor_update", header = "function anomaly_restrictor_update()",
+		{ "if dist_to_cam_sqr < (max_dist_limit * max_dist_limit) then",
+		"if coop_npc_compat.camera_player_near(new_pos, max_dist_limit * max_dist_limit, dist_to_cam_sqr) then" },
+		{ "if pos:distance_to_sqr(cache_cam_pos) < cache_cam_limit_sqr then",
+		"if coop_npc_compat.camera_player_near(pos, cache_cam_limit_sqr, pos:distance_to_sqr(cache_cam_pos)) then" },
+	},
+	-- G8-3 s39:2: replace only the proximity guard, AFTER the original timer
+	-- advancement, so an excluded attempt still consumes one respawn interval.
+	{ module = "smart_terrain_warfare", name = "spawn_defense", header = "function spawn_defense(smart)", archive = true,
+		{ "if (is_factions_enemies(smart.owning_faction, warfare.actor_faction) and smart.is_on_actor_level and smart.dist_to_actor) then",
+		"if coop_npc_compat.warfare_player_near(smart, is_factions_enemies, warfare.actor_faction) then" },
+		{ "\t\tif (smart.dist_to_actor < smart.respawn_radius) then\n\t\t\tprintd(1, smart:name())\n\t\t\treturn\n\t\tend",
+		"\t\tprintd(1, smart:name())\n\t\treturn" },
+	},
+	{ module = "smart_terrain_warfare", name = "spawn_mutants", header = "function spawn_mutants(smart)", archive = true,
+		{ "if (smart.is_on_actor_level and smart.dist_to_actor ~= nil) then",
+		"if coop_npc_compat.warfare_player_near(smart) then" },
+		{ "\t\tif (smart.dist_to_actor < smart.respawn_radius) then\n\t\t\tprintd(1, smart:name())\n\t\t\treturn\n\t\tend",
+		"\t\tprintd(1, smart:name())\n\t\treturn" },
+	},
 	{ module = "grok_bo", name = "npc_on_before_hit", header = "function npc_on_before_hit(npc,shit,bone_id)", past = "momo_multihit_fix",
 		{ "if shit.draftsman:id() ~= db.actor:id() then",
 		"if not (coop_npc_applies_hits() and coop_npc_is_player_id(shit.draftsman:id())) then" },
@@ -480,7 +517,7 @@ local function apply_function_rewrite(r)
 	local tag = r.module .. "." .. r.name
 	local m = mod(r.module)
 	if not m then return end -- mod absent
-	local src, path = read_script(r.module)
+	local src, path = read_script(r.module, r.archive)
 	if not src then
 		log("rewrite %s skipped: not a loose file", tag)
 		return
@@ -683,7 +720,7 @@ end
 -- Audit B4: a smart terrain does not respawn within its respawn_radius of the HOST's player only; any player counts. The world
 -- server alone respawns (a map server's try_respawn returns, coop_main): for a player on a map server's level it has no object, only
 -- the record of his body, and "the actor is on this level" holds for him too (respawn_only_level).
-local function player_near_record(self, r)
+local function player_near_record(self, r, accepts)
 	local gg = game_graph()
 	local lid = gg:vertex(self.m_game_vertex_id):level_id()
 	local on_level = false
@@ -691,10 +728,100 @@ local function player_near_record(self, r)
 		local se = not p.is_self and type(p.avatar_id) == "number" and alife_object(p.avatar_id) or nil
 		if se and gg:vertex(se.m_game_vertex_id):level_id() == lid then
 			on_level = true
-			if se.position:distance_to_sqr(self.position) <= r * r then return true, true end
+			local d = se.position:distance_to_sqr(self.position)
+			if d <= r * r and (not accepts or accepts(se, d)) then return true, true end
 		end
 	end
 	return false, on_level
+end
+
+-- G8-3: these answers concern presence, never the process's role. everyone()
+-- already excludes a server's actor and only returns live bodies on this map.
+function camera_player_near(pos, limit_sqr, original_distance_sqr)
+	if not P.active() then return original_distance_sqr < limit_sqr end
+	for _, o in ipairs(P.everyone()) do
+		if pos:distance_to_sqr(o:position()) < limit_sqr then return true end
+	end
+	return false
+end
+
+function crow_spawn_clear(pos)
+	if not P.active() then return pos:distance_to_sqr(db.actor:position()) > 10000 end
+	return not P.any_within(pos, 100)
+end
+
+local function same_presence_level(self, gvid)
+	local gg = game_graph()
+	return gg:vertex(self.m_game_vertex_id):level_id() == gg:vertex(gvid):level_id()
+end
+
+local function hostile_to_smart(self, community, is_enemy)
+	return type(community) == "string" and is_enemy(self.owning_faction, (community:gsub("^actor_", "")))
+end
+
+local function record_is_alive(se)
+	-- A downed player is still present. Use the body's life, not standing().
+	local ok, alive = pcall(se.alive, se)
+	return not ok or alive ~= false -- same record fallback as coop_quests_core's far body
+end
+
+function warfare_player_near(self, is_enemy, actor_faction)
+	if not P.active() then
+		if is_enemy and not is_enemy(self.owning_faction, actor_faction) then return false end
+		local distance = self.dist_to_actor
+		return self.is_on_actor_level and (not is_enemy or distance) and distance ~= nil and distance < self.respawn_radius
+	end
+	local radius_sqr = self.respawn_radius * self.respawn_radius
+	for _, o in ipairs(P.everyone()) do
+		-- Warfare uses the actor's true faction even when the actor wears a disguise.
+		if same_presence_level(self, o:game_vertex_id()) and
+			o:position():distance_to_sqr(self.position) < radius_sqr and
+			(not is_enemy or hostile_to_smart(self, o:id() == 0 and actor_faction or o:character_community(), is_enemy)) then return true end
+	end
+	-- No body here: the character's record is updated by the process leading its
+	-- map. Never use another map's coordinates or a stale record over a live body.
+	return player_near_record(self, self.respawn_radius, function(se, d)
+		return not level.object_by_id(se.id) and record_is_alive(se) and d < radius_sqr and
+			(not is_enemy or hostile_to_smart(self, se:community(), is_enemy))
+	end)
+end
+
+local function escort_distance_sqr(squad)
+	local companions = coop_mods_core.mod("coop_npc_companions")
+	local commander = squad.commander_id and alife_object(squad:commander_id())
+	local owner = commander and companions and companions.owner_character and companions.owner_character(commander)
+	-- The stock companion owner defaults to seat 0. A server has no player in that seat.
+	if owner == 0 and not coop_mode.seat_plays(0) then owner = nil end
+	local best = math.huge
+	for _, o in ipairs(P.everyone()) do
+		if (owner == nil or owner == o:id()) and same_presence_level(squad, o:game_vertex_id()) then
+			best = math.min(best, squad.position:distance_to_sqr(o:position()))
+		end
+	end
+	for _, p in ipairs(P.players()) do
+		local id = p.avatar_id
+		local se = not p.is_self and type(id) == "number" and not level.object_by_id(id) and alife_object(id)
+		if se and (owner == nil or owner == id) and record_is_alive(se) and same_presence_level(squad, se.m_game_vertex_id) then
+			best = math.min(best, squad.position:distance_to_sqr(se.position))
+		end
+	end
+	return best
+end
+
+local function wrap_faction_target()
+	if not coop_mods_core.mod("tasks_faction_control") then return end
+	coop_mods_core.wrap(task_functor, "simulation_task_target", "npc.faction_target", function(f)
+		return function(task_id, field, p, tsk, ...)
+			if not P.active() or not db.actor or not tsk or tsk.stage == 0 then return f(task_id, field, p, tsk, ...) end
+			local squad = get_story_squad("hostage_companion_task_1")
+			if not (squad and squad:clsid() == clsid.online_offline_group_s) then return f(task_id, field, p, tsk, ...) end
+			local target = f(task_id, field, p, tsk, ...)
+			if target ~= squad.id and target ~= tsk.task_giver_id then return target end
+			if escort_distance_sqr(squad) > 2500 then return squad.id end
+			if tsk.stage >= 1 or db.actor:has_info("hostage_companion_task_1_hostage_rescued") then return tsk.task_giver_id or squad.id end
+			return squad.id
+		end
+	end)
 end
 
 local function wrap_smart_respawn()
@@ -1004,6 +1131,7 @@ function on_game_start()
 		local phantoms = mod("coop_npc_phantoms") -- enemy audit F10
 		if phantoms then phantoms.install(P, function() return host_on and P.host_with_clients() end, applied) end
 		for _, s in ipairs({ { "ai_rework", wrap_ai_rework }, { "night_mutants", wrap_night_mutants },
+			{ "faction_target", wrap_faction_target },
 			{ "peace_zone", wrap_peace_zone }, { "loot", wrap_loot },
 			{ "squads", wrap_squads }, { "smart_respawn", wrap_smart_respawn }, { "helis", wrap_helis },
 			{ "body_release", wrap_body_release }, { "mounted_guns", wrap_mounted_guns } }) do
