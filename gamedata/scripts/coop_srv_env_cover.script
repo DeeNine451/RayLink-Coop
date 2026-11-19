@@ -1,0 +1,42 @@
+-- Server (srv): deliver the map's emission and psi-storm cover decisions to its players (F5-COV-3).
+
+local api = rawget(_G, "coop")
+
+function on_game_start()
+	if not api then return end
+	coop_mode.when_srv(function()
+		if coop_mode.decides_world() or not coop_mode.leads_here() then return end
+		local cover = coop_mods_core.mod("coop_env_cover")
+		if not cover then return end
+		local sent_at = {}
+
+		local function send_verdict(peer, body, covered)
+			local now = time_global()
+			local last = sent_at[peer]
+			if last and now >= last and now - last < 1000 then return end
+			if coop_mode.where(peer) ~= "here" then return end
+
+			local source = "report" -- without a body, a decision can only come from a fresh report
+			if body then
+				local _, _, body_source = cover.cover_of(body:id())
+				if not body_source then return end
+				source = body_source
+			end
+			sent_at[peer] = now
+			api.send_event("coop_env_verdict", coop_main.encode({ c = covered, s = source }), peer)
+		end
+
+		-- coop_main samples once a second during the phase mirrored by coop_srv_world. The stock kill
+		-- hook can also read the decision between samples, so limit delivery independently of those reads.
+		coop_mods_core.wrap(cover, "decide", "srv_env_cover.verdict", function(decide)
+			return function(peer, body, report, nick, active)
+				local covered = decide(peer, body, report, nick, active)
+				if active and type(covered) == "boolean" then
+					local ok, err = pcall(send_verdict, peer, body, covered)
+					if not ok then coop_mods_core.report("srv_env_cover", "send verdict", err) end
+				end
+				return covered
+			end
+		end)
+	end)
+end
