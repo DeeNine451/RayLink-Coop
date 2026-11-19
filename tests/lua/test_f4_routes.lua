@@ -121,8 +121,8 @@ for _, role in ipairs(roles) do
 	-- declaration to mirrors, not to the host, map server or single player.
 	local methods = binder_methods("kit_binder.bind")
 	check(methods.update == "host", role.name .. ": m32:2_kit_update_host_only declaration")
-	check(methods.net_spawn == nil and methods.load == nil and methods.save == nil,
-		role.name .. ": m32:2_kit_lifecycle_unchanged")
+	methods.update = nil
+	check(next(methods) == nil, role.name .. ": m32:2_kit_other_methods_unchanged")
 	check(next(binder_methods("absent_kit.bind")) == nil, role.name .. ": absent binder keeps the default")
 
 	check(domain("trader_on_restock", "exo_loot") == "level", role.name .. ": m08:8_exo_restock_stays_level")
