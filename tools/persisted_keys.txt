@@ -55,3 +55,5 @@ mdata coop_gamma_trading_choices
 mdata coop_npc_relations_v1
 mdata coop_weapon_camo
 mdata coop_weapon_jam
+mdata coop_idiots_templates
+mdata coop_srv_world_mines

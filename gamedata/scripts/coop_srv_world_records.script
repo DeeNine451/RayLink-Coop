@@ -1,0 +1,225 @@
+-- Server layer: map facts for mines and distance-based bribe cancellations (Dev 57 G16-4).
+-- Co-op already ticks and saves these records in the same host process. In Server,
+-- the map owns the live mine and distance checks, and the world owns the save.
+
+local TAG = "srv_world_records"
+local VERSION = 1
+local SAVE_KEY = "coop_srv_world_mines"
+local MINE_SHARE = "srv_world_mines_v1"
+local BRIBE_SHARE = "srv_world_bribe_cancel_v1"
+local POLL_MS = 1000
+local MINE_SECTIONS = { mine_new_blow = true, rpg_new_blow = true, ied_new_blow = true }
+
+local world_mines = {}
+local seeded_map, pending_mines
+local bribe_cancels = {}
+local read_bribes
+
+local function on_map()
+	return coop_mods_core.active() and coop_mode.leads_here() and not coop_mode.actor_is_player()
+end
+
+local function integer(n, lo, hi)
+	return type(n) == "number" and n >= lo and n <= hi and n % 1 == 0
+end
+
+local function valid_date(t)
+	return type(t) == "table" and integer(t.Y, 1, 9999) and integer(t.M, 1, 12) and integer(t.D, 1, 31)
+		and integer(t.h, 0, 23) and integer(t.m, 0, 59) and integer(t.s, 0, 59) and integer(t.ms, 0, 999)
+end
+
+local function valid_mine(id, row)
+	return integer(id, 1, 65534) and type(row) == "table" and MINE_SECTIONS[row.section] == true
+		and (row.mode == 0 or row.mode == 1) and integer(row.planter, 0, 65534) and valid_date(row.at)
+end
+
+local function deadline(start, offset)
+	-- The live Core table uses seconds relative to this process's level start.
+	-- Store a calendar deadline so a replacement process can use its own start.
+	local millis = math.floor(math.abs(offset) * 1000 + 0.5)
+	local duration = game.CTime()
+	duration:setHMSms(math.floor(millis / 3600000), 0, 0, millis % 3600000)
+	if offset < 0 then start:sub(duration) else start:add(duration) end
+	return utils_data.CTime_to_table(start)
+end
+
+local function section_of(id)
+	local se = alife_object(id)
+	return se and se:section_name()
+end
+
+local function restore_mines(mines)
+	for id, row in pairs(pending_mines) do
+		local local_id = coop_mods_core.lid(id)
+		local section = local_id and section_of(local_id)
+		if section then
+			if section == row.section and mines[local_id] == nil then
+				local at = utils_data.CTime_from_table(row.at)
+				mines[local_id] = { exp = at:diffSec(level.get_start_time()), mode = row.mode,
+					planter = coop_mods_core.lid(row.planter), active = true }
+			end
+			pending_mines[id] = nil
+		end
+	end
+end
+
+local function map_mines_get()
+	if not on_map() or seeded_map ~= level.name() then return nil end
+	local mines = coop_npc_world._mines()
+	restore_mines(mines)
+	local rows = {}
+	-- Entities may arrive after share.down. Keep those rows until they can be
+	-- bound to the entity, so startup cannot report them as removed.
+	for id, row in pairs(pending_mines) do rows[id] = row end
+	for id, mine in pairs(mines) do
+		local section = mine.active and section_of(id)
+		if MINE_SECTIONS[section] then
+			local hid = coop_mods_core.hid(id)
+			local row = { section = section, mode = mine.mode, planter = coop_mods_core.hid(mine.planter),
+				at = deadline(level.get_start_time(), mine.exp) }
+			if valid_mine(hid, row) then rows[hid] = row end
+		end
+	end
+	return { v = VERSION, mines = rows }
+end
+
+local function source_map(level_id)
+	-- The share transport resolves the level from its live sender bridge.
+	local name = integer(level_id, 0, 65534) and alife():level_name(level_id)
+	return type(name) == "string" and name ~= "" and name or nil
+end
+
+local function world_mines_set(payload, level_id)
+	local name = source_map(level_id)
+	local valid = name ~= nil and type(payload) == "table" and payload.v == VERSION and type(payload.mines) == "table"
+	if not coop_trust.pass("srv_world_mine_snapshot", valid, "mine snapshot from level %s", tostring(level_id))
+		or not valid then return end
+	local rows = {}
+	for id, row in pairs(payload.mines) do
+		valid = valid_mine(id, row)
+		if not coop_trust.pass("srv_world_mine_row", valid, "invalid mine row from level %d", level_id)
+			or not valid then return end -- do not interpret an invalid row as a deletion
+		local t = row.at
+		rows[id] = { section = row.section, mode = row.mode, planter = row.planter,
+			at = { Y = t.Y, M = t.M, D = t.D, h = t.h, m = t.m, s = t.s, ms = t.ms } }
+	end
+	-- A full snapshot replaces only the sending map's rows. Missing ids were
+	-- removed or detonated there, including when the snapshot is empty.
+	world_mines[name] = next(rows) and rows or nil
+end
+
+local function world_mines_get()
+	return { v = VERSION, maps = world_mines }
+end
+
+local function map_mines_set(payload)
+	if not on_map() or type(payload) ~= "table" or payload.v ~= VERSION or type(payload.maps) ~= "table" then return end
+	local name = level.name()
+	if seeded_map == name then return end -- subsequent broadcasts can contain an earlier copy of our own state
+	local rows = payload.maps[name]
+	pending_mines = {}
+	if type(rows) == "table" then
+		for id, row in pairs(rows) do
+			if valid_mine(id, row) then pending_mines[id] = row end
+		end
+	end
+	seeded_map = name
+	restore_mines(coop_npc_world._mines())
+end
+
+local function save_state(md)
+	local maps = {}
+	for name, rows in pairs(world_mines) do maps[name] = rows end
+	md[SAVE_KEY] = { v = VERSION, maps = maps }
+end
+
+local function load_state(md)
+	local saved = md[SAVE_KEY]
+	world_mines = {}
+	if type(saved) == "table" and saved.v == VERSION and type(saved.maps) == "table" then
+		for name, rows in pairs(saved.maps) do world_mines[name] = rows end
+	end
+end
+
+local function bribe_identity(row)
+	if type(row) ~= "table" or not valid_date(row.start)
+		or type(row.duration) ~= "number" or type(row.distance) ~= "number" then return nil end
+	-- Warnings mutate the row. The purchase's start, duration and distance
+	-- stay fixed. Serialize the fields in order across Lua processes.
+	local t = row.start
+	return string.format("%d/%d/%d/%d/%d/%d/%d/%.17g/%.17g",
+		t.Y, t.M, t.D, t.h, t.m, t.s, t.ms, row.duration, row.distance)
+end
+
+local function bribe_cancels_get()
+	if on_map() and next(bribe_cancels) then return { v = VERSION, cancels = bribe_cancels } end
+end
+
+local function bribe_cancels_set(payload, level_id)
+	local valid = source_map(level_id) ~= nil and type(payload) == "table" and payload.v == VERSION
+		and type(payload.cancels) == "table"
+	if not coop_trust.pass("srv_world_bribe_snapshot", valid, "bribe cancels from level %s", tostring(level_id))
+		or not valid or not read_bribes then return end
+	local data = read_bribes()
+	if type(data) ~= "table" then return end
+	local changed = false
+	for faction, identity in pairs(payload.cancels) do
+		valid = type(faction) == "string" and #faction <= 64 and faction:match("^[%w_]+$") ~= nil
+			and type(identity) == "string" and #identity <= 512
+		if coop_trust.pass("srv_world_bribe_row", valid, "invalid bribe cancel from level %d", level_id) and valid
+				and bribe_identity(data[faction]) == identity then
+			data[faction] = nil
+			changed = true
+		end
+	end
+	if changed then
+		local bribe = coop_mods_core.mod("xr_bribe")
+		if bribe and bribe.try_to_toggle then bribe.try_to_toggle(false) end
+	end
+end
+
+local function install_bribe()
+	local bribe = coop_mods_core.mod("xr_bribe")
+	if not bribe then return end
+	local _, holder, index = coop_mods_core.find_local(bribe, "M_DATA")
+	if not holder then return end
+	read_bribes = function()
+		local _, data = debug.getupvalue(holder, index)
+		return data
+	end
+	if not on_map() then return end
+	coop_mods_core.wrap(bribe, "at_peace", TAG .. ":xr_bribe.at_peace", function(orig)
+		return function(faction, ...)
+			if not on_map() then return orig(faction, ...) end
+			local data = read_bribes()
+			local before = data and data[faction]
+			local peace = orig(faction, ...)
+			if before and data[faction] == nil then bribe_cancels[faction] = bribe_identity(before) end
+			return peace
+		end
+	end)
+end
+
+local function step(what, fn)
+	local ok, err = pcall(fn)
+	if not ok then coop_mods_core.report(TAG, what, err) end
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		if not (coop_mode.decides_world() or on_map()) then return end
+		step("mine share", function()
+			local share = coop_quests_core.share()
+			share.up(MINE_SHARE, map_mines_get, world_mines_set, POLL_MS)
+			share.down(MINE_SHARE, world_mines_get, map_mines_set, POLL_MS)
+		end)
+		if coop_mode.decides_world() then
+			step("mine save", function() RegisterScriptCallback("save_state", save_state) end)
+			step("mine load", function() RegisterScriptCallback("load_state", load_state) end)
+		end
+		step("bribe wrapper", install_bribe)
+		step("bribe share", function()
+			coop_quests_core.share().up(BRIBE_SHARE, bribe_cancels_get, bribe_cancels_set, POLL_MS)
+		end)
+	end)
+end
