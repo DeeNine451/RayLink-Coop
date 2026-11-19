@@ -125,6 +125,8 @@ CInventoryItem* find_go(u16 id) { return find_item(id); }
 u16 quant(float value) { return u16(std::lround(value * 65535.f)); }
 float dequant(u16 value) { return value / 65535.f; }
 bool is_map_authority() { return false; }
+struct Mode { bool decides_world() const { return false; } bool leads_level() const { return false; } };
+Mode mode() { return {}; }
 // ITEM_DATA
 UpgradeList spawn_upgrade_list(const std::string&, const UpgradeList& list, bool) { return list; }
 struct Caps { u32 main_cap = 60, gl_cap = 3, main_types = 3, gl_types = 3; };
