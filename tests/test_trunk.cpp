@@ -6,6 +6,7 @@
 #include "test_util.h"
 
 #include "coop_mapserver_rules.h"
+#include "srv/coop_session_srv.h"
 
 #include <chrono>
 #include <functional>
@@ -18,6 +19,7 @@ using namespace coop;
 
 namespace
 {
+using srv::SessionSrv;
 using t::Node;
 using levels::wire::TunnelMsg;
 
@@ -51,7 +53,7 @@ struct Trunk
 			// coop_trunk.cpp server_on_tunnel
 			TunnelMsg m;
 			if (m.read(r))
-				map.virtual_receive(m.peer, mapserver::tunnel_lane(m.flags), m.packet.data(), m.packet.size());
+				SessionSrv(map).virtual_receive(m.peer, mapserver::tunnel_lane(m.flags), m.packet.data(), m.packet.size());
 		});
 		map.set_log([this](const char* line) { world.log.emplace_back(line); });
 		host_filter_self() = this;
@@ -72,7 +74,7 @@ struct Trunk
 	}
 	bool incoming(PeerId from, Msg type, Lane lane, const uint8_t* packet, size_t size)
 	{
-		const mapserver::Incoming go = mapserver::route_incoming(type, true, false, host.s.bridge_connected(mapserver::bridge_peer(kMs)));
+		const mapserver::Incoming go = mapserver::route_incoming(type, true, false, SessionSrv(host.s).bridge_connected(mapserver::bridge_peer(kMs)));
 		if (go.tunnel)
 		{
 			TunnelMsg m;
@@ -118,7 +120,7 @@ struct Trunk
 	// The map server connects with the token its command line would carry, then hosts its level.
 	bool connect_server()
 	{
-		host.s.issue_bridge(kMs, token_of(7));
+		SessionSrv(host.s).issue_bridge(kMs, token_of(7));
 		world.cfg.hello_role = kHelloRoleMapServer;
 		world.cfg.hello_token = token_of(7);
 		std::string err;
@@ -126,7 +128,7 @@ struct Trunk
 			return false;
 		if (!pump(5000, [this] { return world.s.is_active(); }))
 			return false;
-		return map.host_virtual(world.cfg, world.s, &err);
+		return SessionSrv(map).host_virtual(world.cfg, world.s, &err);
 	}
 
 	Node& add_client(const std::string& nick)
@@ -174,21 +176,21 @@ TEST(trunk_hello_only_loopback_token)
 		stranger.s.update(t::now_ms());
 		return stranger.rejected;
 	};
-	k.host.s.issue_bridge(kMs, token_of(7));
+	SessionSrv(k.host.s).issue_bridge(kMs, token_of(7));
 	const uint64_t start = t::now_ms();
 	while (!both() && t::now_ms() - start < 5000)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	CHECK(stranger.rejected);
-	CHECK(k.host.s.bridges().empty());
+	CHECK(SessionSrv(k.host.s).bridges().empty());
 	CHECK(k.host.s.peers().empty());
 
 	// the issued one: a bridge, not a player
 	REQUIRE(k.connect_server());
 	CHECK_EQ(k.world.s.self(), mapserver::bridge_peer(kMs));
 	CHECK_EQ(k.map.self(), mapserver::bridge_peer(kMs));
-	REQUIRE(k.host.s.bridges().size() == 1);
-	CHECK_EQ(k.host.s.bridges()[0], mapserver::bridge_peer(kMs));
-	CHECK(k.host.s.bridge_connected(mapserver::bridge_peer(kMs)));
+	REQUIRE(SessionSrv(k.host.s).bridges().size() == 1);
+	CHECK_EQ(SessionSrv(k.host.s).bridges()[0], mapserver::bridge_peer(kMs));
+	CHECK(SessionSrv(k.host.s).bridge_connected(mapserver::bridge_peer(kMs)));
 	CHECK(k.host.s.peers().empty());
 	CHECK(k.host.s.players().empty());
 }
@@ -207,15 +209,15 @@ TEST(trunk_a_token_is_good_once)
 		again.s.update(t::now_ms());
 		return again.rejected;
 	}));
-	CHECK_EQ(k.host.s.bridges().size(), size_t(1));
+	CHECK_EQ(SessionSrv(k.host.s).bridges().size(), size_t(1));
 }
 
 TEST(trunk_a_revoked_token_is_no_token)
 {
 	Trunk k(37203);
 	REQUIRE(k.start());
-	k.host.s.issue_bridge(kMs, token_of(7));
-	k.host.s.revoke_bridge(kMs);
+	SessionSrv(k.host.s).issue_bridge(kMs, token_of(7));
+	SessionSrv(k.host.s).revoke_bridge(kMs);
 	Node late("x", 37203);
 	late.cfg.hello_role = kHelloRoleMapServer;
 	late.cfg.hello_token = token_of(7);
@@ -225,7 +227,7 @@ TEST(trunk_a_revoked_token_is_no_token)
 		late.s.update(t::now_ms());
 		return late.rejected;
 	}));
-	CHECK(k.host.s.bridges().empty());
+	CHECK(SessionSrv(k.host.s).bridges().empty());
 }
 
 TEST(trunk_a_map_server_takes_no_player_slot)
@@ -250,16 +252,16 @@ TEST(trunk_a_lost_bridge_is_told_and_a_new_process_takes_its_number)
 {
 	Trunk k(37205);
 	std::vector<PeerId> came, went;
-	k.host.s.on_bridge_joined = [&](PeerId id) { came.push_back(id); };
-	k.host.s.on_bridge_left = [&](PeerId id, const std::string&) { went.push_back(id); };
+	SessionSrv(k.host.s).on_bridge_joined([&](PeerId id) { came.push_back(id); });
+	SessionSrv(k.host.s).on_bridge_left([&](PeerId id, const std::string&) { went.push_back(id); });
 	REQUIRE(k.start());
 	REQUIRE(k.connect_server());
 	CHECK(k.pump(5000, [&] { return came.size() == 1; }));
 	k.map.shutdown("over");
 	k.world.s.shutdown("over");
 	CHECK(k.pump(5000, [&] { return went.size() == 1; }));
-	CHECK(k.host.s.bridges().empty());
-	k.host.s.issue_bridge(kMs, token_of(40));
+	CHECK(SessionSrv(k.host.s).bridges().empty());
+	SessionSrv(k.host.s).issue_bridge(kMs, token_of(40));
 	Node next("ms", 37205);
 	next.cfg.hello_role = kHelloRoleMapServer;
 	next.cfg.hello_token = token_of(40);
@@ -283,7 +285,7 @@ TEST(trunk_seven_map_servers_stand_beside_a_full_session)
 	std::string err;
 	for (uint32_t n = 1; n <= mapserver::kMaxBridges; ++n)
 	{
-		k.host.s.issue_bridge(n, token_of(uint8_t(20 + n)));
+		SessionSrv(k.host.s).issue_bridge(n, token_of(uint8_t(20 + n)));
 		servers.push_back(std::make_unique<Node>("ms", uint16_t(37209)));
 		servers.back()->cfg.hello_role = kHelloRoleMapServer;
 		servers.back()->cfg.hello_token = token_of(uint8_t(20 + n));
@@ -292,7 +294,7 @@ TEST(trunk_seven_map_servers_stand_beside_a_full_session)
 	CHECK(k.pump(10000, [&] {
 		for (auto& s : servers)
 			s->s.update(t::now_ms());
-		return k.host.s.bridges().size() == mapserver::kMaxBridges;
+		return SessionSrv(k.host.s).bridges().size() == mapserver::kMaxBridges;
 	}));
 	CHECK_EQ(k.host.s.peers().size(), size_t(7));
 	for (uint32_t n = 1; n <= mapserver::kMaxBridges; ++n)
@@ -378,7 +380,7 @@ TEST(virtual_a_players_map_message_runs_on_the_map_server_as_his)
 	REQUIRE(k.start());
 	REQUIRE(k.connect_server());
 	Node& a = k.add_client("Al");
-	k.map.virtual_join(a.s.self(), "Al");
+	SessionSrv(k.map).virtual_join(a.s.self(), "Al");
 	k.pump_once();
 	a.s.send(kHostPeer, Lane::Reliable, Msg::PlayerShot, payload(4711));
 	REQUIRE(k.pump(5000, [&] { return !at_map.empty(); }));
@@ -399,7 +401,7 @@ TEST(virtual_what_the_map_server_sends_reaches_the_player_from_the_host)
 		from.push_back(f);
 		got.push_back(r.u32());
 	});
-	k.map.virtual_join(a.s.self(), "Al");
+	SessionSrv(k.map).virtual_join(a.s.self(), "Al");
 	k.map.send(a.s.self(), Lane::Reliable, Msg::ReqResult, payload(99));
 	REQUIRE(k.pump(5000, [&] { return !got.empty(); }));
 	CHECK_EQ(got[0], 99u);
@@ -422,8 +424,8 @@ TEST(virtual_two_clients_on_one_level_see_each_other_through_the_map_server)
 	std::vector<uint32_t> at_a, at_b;
 	a.s.on(Msg::PlayerShot, [&at_a](PeerId, Reader& r) { at_a.push_back(r.u32()); });
 	b.s.on(Msg::PlayerShot, [&at_b](PeerId, Reader& r) { at_b.push_back(r.u32()); });
-	k.map.virtual_join(a.s.self(), "Al");
-	k.map.virtual_join(b.s.self(), "Bo");
+	SessionSrv(k.map).virtual_join(a.s.self(), "Al");
+	SessionSrv(k.map).virtual_join(b.s.self(), "Bo");
 	k.pump_once();
 	CHECK_EQ(k.map.peers().size(), size_t(2));
 	a.s.send(kHostPeer, Lane::Reliable, Msg::PlayerShot, payload(5));
@@ -440,7 +442,7 @@ TEST(virtual_an_unreliable_stream_keeps_its_lane)
 	Node& a = k.add_client("Al");
 	std::vector<uint32_t> got;
 	a.s.on(Msg::EntitySnapshot, [&got](PeerId, Reader& r) { got.push_back(r.u32()); });
-	k.map.virtual_join(a.s.self(), "Al");
+	SessionSrv(k.map).virtual_join(a.s.self(), "Al");
 	k.map.send(a.s.self(), Lane::Unreliable, Msg::EntitySnapshot, payload(1));
 	CHECK(k.pump(5000, [&] { return !got.empty(); }));
 	CHECK_EQ(k.world.s.stats(uint16_t(Msg::Tunnel)).sent_count, 1ull);
@@ -468,18 +470,18 @@ TEST(virtual_a_player_who_left_is_nobody_here)
 	std::vector<PeerId> joined, left;
 	k.map.on_peer_joined = [&](const PeerInfo& p) { joined.push_back(p.id); };
 	k.map.on_peer_left = [&](PeerId id, const std::string&) { left.push_back(id); };
-	k.map.virtual_join(3, "Cy");
+	SessionSrv(k.map).virtual_join(3, "Cy");
 	k.pump_once();
 	REQUIRE(joined.size() == 1);
 	const uint8_t packet[6] = {uint8_t(uint16_t(Msg::PlayerShot) & 0xff), uint8_t(uint16_t(Msg::PlayerShot) >> 8), 1, 0, 0, 0};
-	k.map.virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
+	SessionSrv(k.map).virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
 	k.pump_once();
 	CHECK_EQ(ran, 1u);
-	k.map.virtual_leave(3, "he moved");
+	SessionSrv(k.map).virtual_leave(3, "he moved");
 	k.pump_once();
 	REQUIRE(left.size() == 1);
 	CHECK(k.map.peers().empty());
-	k.map.virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
+	SessionSrv(k.map).virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
 	k.pump_once();
 	CHECK_EQ(ran, 1u);
 }
@@ -491,10 +493,10 @@ TEST(virtual_a_message_only_the_host_sends_is_ignored_and_nobody_is_kicked)
 	k.map.on(Msg::ReqResult, [&ran](PeerId, Reader&) { ++ran; });
 	REQUIRE(k.start());
 	REQUIRE(k.connect_server());
-	k.map.virtual_join(3, "Cy");
+	SessionSrv(k.map).virtual_join(3, "Cy");
 	k.pump_once();
 	const uint8_t packet[2] = {uint8_t(uint16_t(Msg::SessionReset) & 0xff), uint8_t(uint16_t(Msg::SessionReset) >> 8)};
-	k.map.virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
+	SessionSrv(k.map).virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
 	k.pump_once();
 	CHECK_EQ(k.map.peers().size(), size_t(1));
 	CHECK(k.world.s.is_active());
@@ -511,13 +513,13 @@ TEST(virtual_the_epoch_is_the_worlds)
 	CHECK_EQ(k.map.world_epoch(), 4u);
 	uint32_t ran = 0;
 	k.map.on(Msg::PlayerShot, [&ran](PeerId, Reader&) { ++ran; });
-	k.map.virtual_join(3, "Cy");
+	SessionSrv(k.map).virtual_join(3, "Cy");
 	k.host.s.set_world_epoch(5);
 	k.map.set_world_epoch(5); // the game does it at the SessionReset: both of its sessions move
 	CHECK_EQ(k.world.s.world_epoch(), 5u);
 	k.pump_once();
 	const uint8_t packet[2] = {uint8_t(uint16_t(Msg::PlayerShot) & 0xff), uint8_t(uint16_t(Msg::PlayerShot) >> 8)};
-	k.map.virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
+	SessionSrv(k.map).virtual_receive(3, Lane::Reliable, packet, sizeof(packet));
 	k.pump_once();
 	CHECK_EQ(ran, 1u); // a virtual peer is in the world of its map server
 }

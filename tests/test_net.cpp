@@ -1,6 +1,7 @@
 // Anomaly Coop unit tests: real Sessions talking over 127.0.0.1 inside one process.
 // Each test uses its own UDP port (37000+n) so sockets never collide.
 #include "test_util.h"
+#include "srv/coop_session_srv.h"
 
 #include <enet/enet.h>
 
@@ -1514,16 +1515,16 @@ TEST(mode_map_server_gets_server_from_its_world_server)
 	world.cfg.mode = SessionMode::Server;
 	std::string err;
 	REQUIRE(world.host(&err));
-	world.s.issue_bridge(2, bridge_token());
+	srv::SessionSrv(world.s).issue_bridge(2, bridge_token());
 	ms.cfg.hello_role = kHelloRoleMapServer;
 	ms.cfg.hello_token = bridge_token();
 	REQUIRE(ms.connect(37953, &err));
 	REQUIRE(t::pump_until({&world.s, &ms.s}, 5000, [&] { return ms.welcomed && ms.s.is_active(); }));
 	CHECK(ms.welcome.mode == SessionMode::Server);
 	CHECK(ms.s.session_mode() == SessionMode::Server);
-	CHECK(world.s.bridges().size() == 1);
+	CHECK(srv::SessionSrv(world.s).bridges().size() == 1);
 	Session level;
-	REQUIRE(level.host_virtual(ms.cfg, ms.s, &err));
+	REQUIRE(srv::SessionSrv(level).host_virtual(ms.cfg, ms.s, &err));
 	CHECK(level.session_mode() == SessionMode::Server); // its world's, whatever its own config says (mode None here)
 	level.shutdown("done");
 	CHECK(level.session_mode() == SessionMode::None);
@@ -1667,4 +1668,130 @@ TEST(mode_is_forgotten_when_the_session_ends)
 	REQUIRE(cl.connect(37961, &err));
 	REQUIRE(t::pump_until({&server.s, &cl.s}, 5000, [&] { return cl.welcomed && cl.s.is_active(); }));
 	CHECK(cl.s.session_mode() == SessionMode::Server);
+}
+
+// ---------------------------------------------------------------- H10 (A-S4Sb): the session's part (SessionPart)
+
+namespace
+{
+// A part that admits nothing and holds no rights: what the Core does with whatever part it is given, and how often it asks.
+struct CountingPart final : SessionPart
+{
+	static const void* kind()
+	{
+		static const char tag = 0;
+		return &tag;
+	}
+	static int& made()
+	{
+		static int n = 0;
+		return n;
+	}
+	static std::unique_ptr<SessionPart> make()
+	{
+		++made();
+		return std::unique_ptr<SessionPart>(new CountingPart());
+	}
+	Owner* owner = nullptr;
+	int attached_times = 0, starts = 0, ends = 0;
+
+	void attached(Owner& o) override
+	{
+		owner = &o;
+		++attached_times;
+	}
+	Session* carrier() override { return nullptr; }
+	void host_starts(Session*) override { ++starts; }
+	void ended() override { ++ends; }
+	Admission admit(const std::string&, const HelloMsg&) override
+	{
+		Admission a;
+		a.text = "no";
+		return a;
+	}
+	void trunk_joined(PeerId, const std::string&) override {}
+	void trunk_left(PeerId, const std::string&) override {}
+	bool trunk_takes(Msg) const override { return false; }
+	bool holds_place(const std::string&, const HelloMsg&, bool) const override { return false; }
+	bool rights_of(const PeerInfo&, const HelloMsg&) override { return false; }
+	void console_line(const PeerInfo&, bool, const std::string&) override {}
+	size_t carry(PeerId, Lane, uint16_t, const uint8_t*, size_t, const uint8_t*, size_t) override { return 0; }
+};
+
+const void* other_kind()
+{
+	static const char tag = 0;
+	return &tag;
+}
+} // namespace
+
+TEST(part_is_made_once_kept_by_its_kind_and_asked_at_its_points)
+{
+	CountingPart::made() = 0;
+	Session s;
+	CHECK(s.part(CountingPart::kind(), nullptr) == nullptr); // asking makes none
+	SessionPart* p = s.part(CountingPart::kind(), &CountingPart::make);
+	REQUIRE(p != nullptr);
+	CHECK_EQ(CountingPart::made(), 1);
+	CHECK(s.part(CountingPart::kind(), &CountingPart::make) == p); // the same one, not made again
+	CHECK(s.part(CountingPart::kind(), nullptr) == p);
+	CHECK_EQ(CountingPart::made(), 1);
+	CHECK(s.part(other_kind(), &CountingPart::make) == nullptr); // one part per Session: another kind gets none
+	CHECK(s.part(other_kind(), nullptr) == nullptr);
+	CHECK_EQ(CountingPart::made(), 1);
+	CountingPart& part = *static_cast<CountingPart*>(p);
+	CHECK_EQ(part.attached_times, 1);
+	REQUIRE(part.owner != nullptr);
+	CHECK(&part.owner->session() == &s);
+
+	// a host() that goes ahead tells it once; one that is refused does not; the end of the session tells it once
+	Node host("A", 37962);
+	CHECK(host.s.part(CountingPart::kind(), &CountingPart::make) != nullptr);
+	CountingPart& hp = *static_cast<CountingPart*>(host.s.part(CountingPart::kind(), nullptr));
+	std::string err;
+	REQUIRE(host.host(&err));
+	CHECK_EQ(hp.starts, 1);
+	CHECK(!host.host(&err));
+	CHECK_EQ(hp.starts, 1);
+	host.s.shutdown("over");
+	CHECK_EQ(hp.ends, 1);
+	CHECK(host.s.part(CountingPart::kind(), nullptr) == &hp); // kept for the life of the Session
+	REQUIRE(host.host(&err));
+	CHECK_EQ(hp.starts, 2);
+	CHECK(host.logged("listening on 0.0.0.0:37962")); // a part with no carrier: a host with its own transport
+}
+
+// Co-op (a session without a part, what both modes have): a Hello of another role is refused, a token presented by a player gives no
+// rights, a console line is refused as from a player without them; nobody is kicked. The same answers and lines as before A-S4Sb.
+TEST(part_none_refuses_another_role_gives_no_rights_runs_no_line)
+{
+	Node host("Boss", 37963), pal("Pal", 37963), ms("ms", 37963);
+	std::string err;
+	for (uint8_t i = 0; i < kHelloTokenSize; ++i)
+		pal.cfg.hello_token[i] = uint8_t(i + 1);
+	start_and_join(host, {&pal}, 37963);
+	CHECK(!pal.s.self_host_rights());
+	REQUIRE(host.s.peer(pal.welcome.slot) != nullptr);
+	CHECK(!host.s.peer(pal.welcome.slot)->host_rights);
+	CHECK(host.s.joined(pal.welcome.slot));
+	CHECK(!host.s.joined(pal.welcome.slot + 1));
+	CHECK(pal.s.joined(kHostPeer));
+	CHECK(!pal.s.joined(pal.welcome.slot)); // a client reaches the host alone
+
+	ms.cfg.hello_role = kHelloRoleMapServer;
+	ms.cfg.hello_token = pal.cfg.hello_token;
+	REQUIRE(ms.connect(37963, &err));
+	REQUIRE(t::pump_until({&host.s, &pal.s, &ms.s}, 5000, [&] { return ms.rejected || ms.welcomed; }));
+	CHECK(ms.rejected);
+	CHECK(ms.reject.reason == RejectReason::Kicked);
+	CHECK_EQ(ms.reject.text, std::string("This token was not issued by this session."));
+	CHECK_EQ(host.s.peers().size(), size_t(1));
+
+	CHECK(pal.s.send_operator_command("coop_status"));
+	CHECK(pal.s.send_operator_command("coop_status\nquit"));
+	t::pump_for({&host.s, &pal.s}, 200);
+	CHECK(host.logged("host: operator command from peer " + std::to_string(pal.welcome.slot) + " 'Pal' refused (not_operator): 'coop_status'"));
+	CHECK(!host.logged("coop_status quit")); // the second refusal is counted, not logged (the first and every 100th are)
+	CHECK(pal.s.is_active());
+	CHECK(!pal.disconnected && !pal.rejected);
 }

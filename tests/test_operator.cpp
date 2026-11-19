@@ -6,6 +6,7 @@
 #include "coop_debug_rules.h"
 #include "coop_limits.h"
 #include "coop_operator.h"
+#include "srv/coop_session_srv.h"
 
 #include <cstring>
 #include <memory>
@@ -22,6 +23,7 @@ static_assert(std::is_same<op::Key, PlayerKey>::value, "the token is bound to a 
 
 namespace
 {
+using srv::SessionSrv;
 using t::Node;
 
 op::Token token_of(uint8_t seed)
@@ -54,7 +56,7 @@ struct Commands
 	std::vector<std::pair<PeerId, std::string>> got;
 	void attach(Node& host)
 	{
-		host.s.on_operator_command = [this](PeerId from, const std::string& line) { got.emplace_back(from, line); };
+		SessionSrv(host.s).on_operator_command([this](PeerId from, const std::string& line) { got.emplace_back(from, line); });
 	}
 };
 } // namespace
@@ -172,7 +174,7 @@ TEST(operator_loopback_token_makes_the_operator)
 	const op::Token tok = token_of(5);
 	Node host("server", 38201), creator("Creator", 38201), friend_("Friend", 38201);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	std::string err;
 	REQUIRE(host.host(&err));
@@ -208,7 +210,7 @@ TEST(operator_wrong_token_is_an_ordinary_player)
 {
 	Node host("server", 38202), c("Guess", 38202);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = token_of(5);
+	SessionSrv(host.s).arm_operator(token_of(5));
 	present(c, token_of(6));
 	std::string err;
 	REQUIRE(host.host(&err));
@@ -243,7 +245,7 @@ TEST(operator_token_binds_to_the_first_key)
 	const op::Token tok = token_of(7);
 	Node host("server", 38204), creator("Creator", 38204), thief("Thief", 38204);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	present(thief, tok); // the same token, another player key
 	std::string err;
@@ -265,7 +267,7 @@ TEST(operator_comes_back_with_his_key)
 	const op::Token tok = token_of(8);
 	Node host("server", 38205), creator("Creator", 38205), again("Creator", 38205);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	present(again, tok);
 	again.cfg.key = creator.cfg.key;
@@ -284,7 +286,7 @@ TEST(operator_command_reaches_the_hook)
 	const op::Token tok = token_of(4);
 	Node host("server", 38206), creator("Creator", 38206);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	Commands cmds;
 	cmds.attach(host);
@@ -301,7 +303,7 @@ TEST(operator_command_reaches_the_hook)
 	CHECK_EQ(cmds.got[0].first, creator.welcome.slot);
 	CHECK_EQ(cmds.got[0].second, std::string("coop_status"));
 	CHECK_EQ(cmds.got[1].second, std::string("/go"));
-	CHECK_EQ(host.s.operator_refused(), uint64_t(1));
+	CHECK_EQ(SessionSrv(host.s).operator_refused(), uint64_t(1));
 	CHECK(host.logged("not_allowed"));
 	CHECK(creator.s.is_active()); // a refusal is no kick
 }
@@ -311,7 +313,7 @@ TEST(operator_command_from_a_non_operator_is_refused)
 	const op::Token tok = token_of(4);
 	Node host("server", 38207), creator("Creator", 38207), other("Other", 38207);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	Commands cmds;
 	cmds.attach(host);
@@ -322,7 +324,7 @@ TEST(operator_command_from_a_non_operator_is_refused)
 	CHECK(other.s.send_operator_command("coop_kick 1"));
 	t::pump_for({&host.s, &creator.s, &other.s}, 300);
 	CHECK(cmds.got.empty());
-	CHECK_EQ(host.s.operator_refused(), uint64_t(1));
+	CHECK_EQ(SessionSrv(host.s).operator_refused(), uint64_t(1));
 	CHECK(host.logged("not_operator"));
 	CHECK(other.s.is_active());
 	CHECK(creator.s.is_active());
@@ -333,7 +335,7 @@ TEST(operator_command_rate_and_length)
 	const op::Token tok = token_of(2);
 	Node host("server", 38208), creator("Creator", 38208);
 	host.cfg.host_plays = false;
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	for (const limits::RateRule& rule : limits::kClientRateRules)
 		host.s.limit_rate(rule.type, rule.burst, rule.refill_ms);
@@ -348,7 +350,7 @@ TEST(operator_command_rate_and_length)
 	CHECK(creator.s.send_operator_command("say " + std::string(op::kMaxLine, 'a')));
 	t::pump_for({&host.s, &creator.s}, 200);
 	CHECK(cmds.got.empty());
-	CHECK_EQ(host.s.operator_refused(), uint64_t(1));
+	CHECK_EQ(SessionSrv(host.s).operator_refused(), uint64_t(1));
 	CHECK(host.logged("too_long"));
 
 	// the rate: 4 in a row, then one per second; three tokens are left, 7 more go at once
@@ -427,7 +429,7 @@ TEST(operator_keeps_his_place_in_a_full_session)
 	Node host("server", 38210), a("A", 38210), b("B", 38210), creator("Creator", 38210);
 	host.cfg.host_plays = false;
 	host.cfg.max_players = 2; // two seats that play, the server's own is not one of them
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	std::string err;
 	REQUIRE(host.host(&err));
@@ -450,7 +452,7 @@ TEST(operator_keeps_his_place_among_eight_clients)
 	const op::Token tok = token_of(12);
 	Node host("server", 38225);
 	host.cfg.host_plays = false; // max_players: the default kMaxPlayers
-	host.cfg.operator_token = tok;
+	SessionSrv(host.s).arm_operator(tok);
 	std::string err;
 	REQUIRE(host.host(&err));
 	std::vector<std::unique_ptr<Node>> others;
