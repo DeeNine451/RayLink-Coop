@@ -1,0 +1,77 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G3-2: carry armour exchange wear on the exact reward.
+
+local api = rawget(_G, "coop")
+
+local function transfer_reward(actor, npc, reward, se, condition)
+	local id, name = se.id, se:name()
+	local section = reward:section()
+	local owner = coop_mods_core.hid(actor:id())
+	local tick = api.event_tick and api.event_tick()
+	local deadline = time_global() + 10000
+	local function finish()
+		if not (coop_mods_core.active() and coop_mode.actor_is_player() and db.actor
+			and coop_mods_core.hid(db.actor:id()) == owner) then return true end
+		if tick and api.released_after and api.released_after(id, tick) then return true end
+		local current = alife_object(id)
+		if not current or current:name() ~= name then return true end
+		if current.parent_id == db.actor:id() then
+			local item = level.object_by_id(id)
+			local parent = item and item:parent()
+			if parent and parent:id() == db.actor:id() and item:section() == section then
+				item:set_condition(condition)
+				return true
+			end
+		end
+		return time_global() >= deadline
+	end
+	npc:transfer_item(reward, actor)
+	if not finish() then
+		CreateTimeEvent("coop_mods_armor_trade", tostring(id), 0, finish)
+	end
+end
+
+local function install()
+	local core = coop_mods_core
+	local mod = core.mod("grok_armor_trade")
+	local has_armor = core.fn(mod, "actor_has_armor")
+	if not has_armor then return end
+	core.wrap(mod, "exchange_armor", "Grok armour exchange", function(orig)
+		return function(first, second, recipe, ...)
+			if not core.active() then return orig(first, second, recipe, ...) end
+			if not (coop_mode.actor_is_player() and db.actor) then return end
+			local actor, reward, cost = db.actor, recipe.reward, recipe.cost
+			local worn_section = has_armor(recipe)
+			local worn = worn_section and actor:object(worn_section)
+			if not (worn and actor:money() >= cost and ini_sys:section_exist(reward)) then return end
+			local npc = dialogs.who_is_npc(first, second)
+			if not npc then return end
+			local condition = worn:condition()
+			local inventory = utils_item.collect_amount(npc, reward, 1)
+			local ready_id = next(inventory) and random_key_table(inventory)
+			local ready = ready_id and level.object_by_id(ready_id)
+			local reward_se = ready and alife_object(ready_id)
+			if ready_id and not (reward_se and reward_se.parent_id == npc:id()) then return end
+
+			-- Take the same suit we read the wear from, including when the player has duplicates.
+			actor:transfer_item(worn, npc)
+			news_manager.relocate_item(actor, "out", worn_section, 1)
+			dialogs.relocate_money_from_actor(first, second, cost)
+			if ready then
+				transfer_reward(actor, npc, ready, reward_se, condition)
+			elseif coop_mode.leads_here() then
+				core.give(core.self_peer(), reward, condition)
+			else
+				-- cond_create puts wear into the native spawn request even when no ID is leased.
+				alife_create_item(reward, actor, { cond = condition })
+			end
+			news_manager.relocate_item(actor, "in", reward, 1)
+		end
+	end)
+end
+
+function on_game_start()
+	if not api then return end
+	local ok, err = pcall(install)
+	if not ok then printf("! [coop_mods_armor_trade] install failed: %s", tostring(err)) end
+end

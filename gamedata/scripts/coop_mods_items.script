@@ -1198,9 +1198,11 @@ end
 -- Native detach keeps the addon mounted until the host creates the loose item.
 -- The original 3DSS wrapper returns before that answer, so its delayed condition
 -- search cannot run. Carry its condition in the native transaction instead.
+local SILENCER_KEY = "3dss_silencer_condition"
+
 function native_silencer_state(weapon, committed)
 	if committed then
-		se_save_var(weapon:id(), nil, "3dss_silencer_condition", nil)
+		se_save_var(weapon:id(), nil, SILENCER_KEY, nil)
 		return 1
 	end
 	local mod = C().mod("z_3dss_silencer_condition")
@@ -1208,6 +1210,119 @@ function native_silencer_state(weapon, committed)
 		return mod.get_attached_silencer_condition(weapon) or 1
 	end
 	return 1
+end
+
+local function install_silencer_snapshot()
+	local mod = C().mod("z_3dss_silencer_condition")
+	local start = C().fn(mod, "on_game_start")
+	local capture, capture_fn, capture_slot = C().upvalue(start, "capture_level_transition_state")
+	local restore, restore_fn, restore_slot = C().upvalue(start, "schedule_level_transition_restore")
+	if not (capture_fn and restore_fn and type(capture) == "function" and type(restore) == "function") then return end
+
+	local key = "3dss_silencer_condition_level_transition"
+	local instance_key = "coop_silencer_instance"
+	local callback = "on_before_level_changing"
+	local serial = 0
+	local function character()
+		if not (coop_mode.actor_is_player() and db.actor) then return nil end
+		local id = C().hid(db.actor:id())
+		if id == 0 and coop_mode.is_player_mirror() then return nil end
+		return id
+	end
+	local function instance(id)
+		local stamp = se_load_var(id, nil, instance_key) or se_load_var(id, nil, "_coop_instance")
+		if type(stamp) == "string" and stamp ~= "" then return stamp end
+	end
+	local hooks = { capture = capture, restore = restore }
+	C().wrap(hooks, "capture", "3DSS silencer transition capture", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			local storage = alife_storage_manager.get_state()
+			local owner = character()
+			if not owner then
+				storage[key] = nil
+				return
+			end
+
+			orig(...)
+			local snapshot = storage[key]
+			if not snapshot then return end
+			local records = {}
+			for _, record in ipairs(snapshot.records) do
+				local id = record.weapon_id
+				-- Loose silencers already carry their condition in native item state.
+				if not record.loose and id and alife_object(id) then
+					local stamp = instance(id)
+					if not stamp then
+						serial = serial + 1
+						stamp = string.format("%d:%d:%d:%d", owner, C().hid(id) or id, time_global(), serial)
+						se_save_var(id, nil, instance_key, stamp)
+					end
+					record.instance = stamp
+					records[#records + 1] = record
+				end
+			end
+			snapshot.records = records
+			snapshot.character_id = owner
+			storage[key] = #records > 0 and snapshot or nil
+		end
+	end)
+	C().wrap(hooks, "restore", "3DSS silencer transition restore", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			local storage = alife_storage_manager.get_state()
+			local snapshot = storage[key]
+			if not snapshot then return end
+			local owner = character()
+			if not (owner and type(snapshot) == "table" and snapshot.version == 1
+				and snapshot.character_id == owner and type(snapshot.records) == "table") then
+				storage[key] = nil
+				return
+			end
+
+			local pending = {}
+			for _, record in ipairs(snapshot.records) do
+				local stamp, cond = record.instance, record.condition
+				if type(stamp) == "string" and type(cond) == "number" and cond >= 0 and cond <= 1 then
+					pending[stamp] = record
+				end
+			end
+			local deadline = time_global() + 10000
+			RemoveTimeEvent(SILENCER_KEY, "level_transition_restore")
+			CreateTimeEvent(SILENCER_KEY, "level_transition_restore", 0, function()
+				if storage[key] ~= snapshot or alife_storage_manager.get_state() ~= storage then return true end
+				if C().active() and character() == owner then
+					db.actor:iterate_inventory(function(_, weapon)
+						if not IsWeapon(weapon) then return end
+						local id = weapon:id()
+						local stamp = instance(id)
+						local record = pending[stamp]
+						if not (record and weapon:section() == record.weapon_section
+							and utils_item.get_attached_silencer(weapon) == record.silencer_section) then return end
+						pending[stamp] = nil
+						if se_load_var(id, nil, SILENCER_KEY) ~= nil then return end
+						local value = { version = 1, section = record.silencer_section, condition = record.condition }
+						if coop_mode.is_player_mirror() then
+							-- A fallback on a mirror must never race the authority's copy back over the wire.
+							coop_economy_mdata.quietly(se_save_var, id, nil, SILENCER_KEY, value)
+						else
+							se_save_var(id, nil, SILENCER_KEY, value)
+						end
+					end, db.actor)
+					if next(pending) and time_global() < deadline then return false end
+				end
+				storage[key] = nil
+				return true
+			end)
+		end
+	end)
+	debug.setupvalue(capture_fn, capture_slot, hooks.capture)
+	debug.setupvalue(restore_fn, restore_slot, hooks.restore)
+	-- Capture is registered by value. The first-update callback reads the shared
+	-- restore upvalue when it runs, so it needs no re-registration.
+	if coop_main.callback_registered(callback, capture) then
+		C().swap_callback(callback, capture, hooks.capture)
+	end
 end
 
 local function detach_wrapper(orig)
@@ -1300,6 +1415,7 @@ function on_game_start()
 	start_step("install_campfire", install_campfire)
 	start_step("install_gun", install_gun)
 	start_step("install_box_rolls", install_box_rolls)
+	start_step("install_silencer_snapshot", install_silencer_snapshot)
 	start_step("install_take", install_take)
 	-- round 5 (S7 of the round 4 review): an owner booked for a stash or a workbench (here and by coop_mods_hf) goes with its object
 	-- however the object goes (a pickup by another's stock code, a script's release), so a reused id inherits none. The stock's own
