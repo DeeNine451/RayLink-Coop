@@ -1,0 +1,332 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - remote trade through a trading computer (gamedata\scripts\coop_mods_trade_computer.script), Dev 57 G6-3,
+	review m23:3.
+
+	Gadgets for Hideout Furniture (bind_trading_computer.script, ui_trading_computer.script): the computer lists traders up to
+	MAX_TRADER_DISTANCE (150 m) away and opens the stock trade with one (npc:start_trade). A player's deal goes to the decider of
+	his level (coop_trade.cpp host_apply): without a permit it needs a talk with the trader and his character by it, and his
+	window closes 3 m from the trader. Remote trade with any NPC stays impossible without a permit.
+
+	  mods.tcomp_permit    player -> decider of his level  { c computer, t trader }            (ids in host numbering)
+	  mods.tcomp_permit_r  decider -> the requester        { ok = true, c, t, ttl ms } | { ok = false, t, r reason }
+
+	Decider (co-op: the host's process; server: the map server of his level, the world server passes the request on, C().on
+	"host"): a real trading computer here (its section binds bind_trading_computer or opens ui_trading_computer), his character
+	at it (REACH), a trader the computer lists (alive, not an enemy of that player, not a player or companion, not on the mod's
+	black list, within the mod's range of the computer) and no emission or psi storm. Every check goes through coop_trust
+	and refuses in any mode: without a permit the stock rules stand, so a "log" pass would hand out remote trade. A granted request is kept
+	GRANT_MS for the engine: take_grant(peer, trader), called by coop_trade.cpp when that player's trade window with that trader
+	opens on the decider, takes it once; the engine then keeps the permit while the window is open (xrCoop/coop_trade_permit.h:
+	the same player and trader, not expired, his character still at the computer).
+
+	Player's machine (coop_mode.is_player_mirror): open_trade_by_id asks first and opens the window when the permit comes;
+	window_grant(trader), called by coop_trade.cpp as that window opens, hands the engine the computer and the time left (the
+	window stays open while he stands at the computer, not at the trader). Without the computer window of this machine at
+	hand (another script opens a trade, he walked away from the computer) the mod's own path runs: the stock rules.
+	The co-op host's own player and single player: unchanged (their trade is local, as in single player).
+	Saved nothing; events: mods.tcomp_permit, mods.tcomp_permit_r.
+--]]
+
+local tostring, tonumber, type, pcall, pairs, next = tostring, tonumber, type, pcall, pairs, next
+local math_floor, math_huge = math.floor, math.huge
+
+local function C() return coop_mods_core end
+local function log(fmt, ...) C().log("tcomp", fmt, ...) end
+
+local MODULE = "bind_trading_computer"
+local UI_MODULE = "ui_trading_computer"
+local BINDING = "bind_trading_computer.init"
+local UI_ENTRY = "ui_trading_computer.start_dialog"
+local REACH = 6 -- metres: his character by the computer on the decider (xrCoop/coop_trade_permit.h kMaxReach)
+local RANGE = 150 -- metres: the computer to the trader when the mod's MAX_TRADER_DISTANCE cannot be read
+local GRANT_MS = 15000 -- the decider keeps a grant this long for the trade window to open
+local PERMIT_MS = 600000 -- the permit and the window grant (kMaxTtlMs)
+local ASK_MS = 15000 -- the player's machine waits this long for the answer
+local REASONS = { ids = "ids", computer = "computer", near = "near", trader = "trader", range = "range", signal = "signal" }
+
+local st = { asked = 0, granted = 0, refused = 0, taken = 0, sent = 0, answers = 0, opened = 0, windows = 0 }
+local grants = {} -- decider: peer -> { c computer, t trader, at, avatar }
+local windows = {} -- player's machine: trader (local id) -> { c computer (local id), ttl, at }
+local pending = nil -- player's machine: { c, t, at, open } of the one request in flight
+local computer_open = nil -- player's machine: the computer whose window this machine opened last (local id)
+
+local function object_id(value)
+	local id = tonumber(value)
+	if id and id > 0 and id < 65535 and id == math_floor(id) then return id end
+end
+
+local function request_id(value)
+	local id = object_id(value)
+	return id and object_id(C().lid(id)) or nil
+end
+
+local function age(at)
+	local d = time_global() - at
+	return d >= 0 and d or math_huge -- a clock that went back (a new level) makes it old
+end
+
+local function trust(check, ok, fmt, ...)
+	local found, t = pcall(function() return _G.coop_trust end)
+	if not (found and type(t) == "table" and type(t.pass) == "function") then return true end
+	local good, res = pcall(t.pass, check, ok, fmt, ...)
+	return not good or res ~= false
+end
+
+-- Recorded by coop_trust, refused in every mode (see the header).
+local function checked(check, ok, from, id)
+	ok = ok and true or false
+	return trust(check, ok, "player #%s, object %s", tostring(from), tostring(id)) and ok
+end
+
+local function distance(a, b)
+	local ok, d = pcall(function() return a:position():distance_to(b:position()) end)
+	if ok and type(d) == "number" and d == d then return d end
+end
+
+local function section_of(obj)
+	local ok, s = pcall(function() return obj:section() end)
+	return ok and type(s) == "string" and s or nil
+end
+
+-- A trading computer of Gadgets: its section binds the mod's binder or opens the mod's window.
+local function is_computer(obj)
+	local sec = obj and section_of(obj)
+	if not sec then return false end
+	return ini_sys:r_string_ex(sec, "script_binding") == BINDING or ini_sys:r_string_ex(sec, "ui_on_interaction") == UI_ENTRY
+end
+
+-- The mod's range of the computer (its file local; nil there switches the mod's limit off, ours stays).
+local function range()
+	local m = C().mod(MODULE)
+	local v = m and tonumber((C().find_local(m, "MAX_TRADER_DISTANCE")))
+	if v and v > 0 and v < math_huge then return v end
+	return RANGE
+end
+
+-- The mod's faction check uses the requesting player's character on this map.
+local function enemies(player, npc)
+	local gr = C().mod("game_relations")
+	local f = gr and gr.is_factions_enemies
+	if type(f) ~= "function" then return true end
+	local pc = rawget(_G, "coop_npc_player_community")
+	local okm, mine = pcall(function()
+		if type(pc) == "function" then return pc(player) end
+		return ((player:character_community() or ""):gsub("^actor_", ""))
+	end)
+	local okh, his = pcall(function() return npc:character_community() end)
+	if not (okm and okh and type(mine) == "string" and mine ~= "" and mine ~= "none"
+		and type(his) == "string" and his ~= "" and his ~= "none") then return true end
+	local ok, res = pcall(function()
+		if type(gr.is_valid) == "function" and not (gr.is_valid(mine) and gr.is_valid(his)) then return true end
+		return f(mine, his)
+	end)
+	return not ok or res ~= false
+end
+
+-- A trader the computer lists and a character the engine prices (CAI_Trader, CAI_Stalker).
+local function listed(npc, id, player)
+	if C().peer_of(id) ~= nil then return false end -- a player's character
+	local ok, cls = pcall(function() return npc:clsid() end)
+	if not ok or cls == nil then return false end
+	local trades = IsTrader ~= nil and IsTrader(nil, cls) == true
+	if not trades then
+		if not (IsStalker ~= nil and IsStalker(nil, cls) == true) then return false end
+		local ok1, flag = pcall(function() return npc:is_trader() end)
+		trades = ok1 and flag == true
+		local u = not trades and C().mod("utils_obj")
+		local f = u and C().fn(u, "is_trader")
+		if f then
+			local ok2, flag2 = pcall(f, npc)
+			trades = ok2 and flag2 == true
+		end
+	end
+	if not trades then return false end
+	local okc, mate = pcall(function() return npc:has_info("npcx_is_companion") end)
+	if okc and mate then return false end
+	if enemies(player, npc) then return false end
+	local oka, alive = pcall(function() return npc:alive() end)
+	if not (oka and alive == true) then return false end -- the engine never trades with the dead
+	local m = C().mod(MODULE)
+	local black = m and rawget(m, "trader_to_blacklist")
+	return not (type(black) == "table" and black[section_of(npc)] == true)
+end
+
+-- The mod's own word: no connection in an emission or a psi storm (the decider's world).
+local function blocked()
+	local m = C().mod(MODULE)
+	local f = m and C().fn(m, "is_connection_blocked")
+	if not f then return false end
+	local ok, res = pcall(f)
+	return ok and res == true
+end
+
+-------------------------------------------------------------------------------
+-- Decider
+-------------------------------------------------------------------------------
+local function refuse(from, why, trader_id)
+	st.refused = st.refused + 1
+	log("permit for player #%s refused: %s", tostring(from), why)
+	return C().to_peer(from, "tcomp_permit_r", { ok = false, t = trader_id and C().hid(trader_id) or nil, r = why })
+end
+
+local function host_permit(t, from)
+	st.asked = st.asked + 1
+	local cid, tid = request_id(t.c), request_id(t.t)
+	if not checked("tcomp_permit_ids", cid ~= nil and tid ~= nil and cid ~= tid, from, tid) then
+		return refuse(from, "ids", tid)
+	end
+	local computer, trader, player = level.object_by_id(cid), level.object_by_id(tid), C().avatar(from)
+	if not checked("tcomp_permit_computer", computer ~= nil and is_computer(computer), from, cid) then
+		return refuse(from, "computer", tid)
+	end
+	local d = player and distance(computer, player)
+	if not checked("tcomp_permit_near", coop_mode.where(from) == "here" and d ~= nil and d <= REACH, from, cid) then
+		return refuse(from, "near", tid)
+	end
+	if not checked("tcomp_permit_trader", trader ~= nil and listed(trader, tid, player), from, tid) then
+		return refuse(from, "trader", tid)
+	end
+	local far = distance(computer, trader)
+	if not checked("tcomp_permit_range", far ~= nil and far <= range(), from, tid) then return refuse(from, "range", tid) end
+	if not checked("tcomp_permit_signal", not blocked(), from, cid) then return refuse(from, "signal", tid) end
+	grants[from] = { c = cid, t = tid, at = time_global(), avatar = player:id() }
+	st.granted = st.granted + 1
+	log("player #%s may trade with %s through computer %s", tostring(from), tostring(tid), tostring(cid))
+	return C().to_peer(from, "tcomp_permit_r", { ok = true, c = C().hid(cid), t = C().hid(tid), ttl = PERMIT_MS })
+end
+
+-- Leaving takes the avatar offline after removing its peer mapping. Match the grant's saved avatar id.
+local function on_npc_net_destroy(npc)
+	if not next(grants) then return end
+	local id = npc:id()
+	for peer, grant in pairs(grants) do
+		if grant.avatar == id then grants[peer] = nil end
+	end
+end
+
+-- coop_trade.cpp (the decider): player `peer`'s trade window with `trader` opened here. His grant for it, taken once:
+-- the computer's id, the permit's time in ms and its reach. Nothing when there is none, it names another trader or is older
+-- than GRANT_MS.
+function take_grant(peer, trader)
+	local g = type(peer) == "number" and grants[peer] or nil
+	if not g then return nil end
+	if age(g.at) > GRANT_MS then
+		grants[peer] = nil
+		return nil
+	end
+	if g.t ~= trader then return nil end
+	grants[peer] = nil
+	st.taken = st.taken + 1
+	return g.c, PERMIT_MS, REACH
+end
+
+-------------------------------------------------------------------------------
+-- Player's machine
+-------------------------------------------------------------------------------
+-- The computer whose window this machine opened, while the actor stands at it.
+local function computer_at_hand()
+	local id = computer_open
+	local obj = id and level.object_by_id(id)
+	local me = db.actor
+	local d = obj and me and distance(obj, me)
+	if d and d <= REACH then return id end
+end
+
+local function ask(trader_id, open)
+	local cid = computer_at_hand()
+	if not cid then return open(trader_id) end -- not through a computer at hand: the mod's own path, the stock rules
+	local p = pending
+	if p and p.t == trader_id and age(p.at) <= ASK_MS then return end -- a second click while waiting
+	pending = { c = cid, t = trader_id, at = time_global(), open = open }
+	st.sent = st.sent + 1
+	C().to_host("tcomp_permit", { c = C().hid(cid), t = C().hid(trader_id) })
+end
+
+local function on_answer(t)
+	st.answers = st.answers + 1
+	local p = pending
+	if not p then return end
+	if age(p.at) > ASK_MS then
+		pending = nil
+		return
+	end
+	local trader = request_id(t.t)
+	if trader ~= p.t then return end -- an answer about another trader
+	if t.ok ~= true then
+		pending = nil
+		log("trade with %s through a computer refused by the decider: %s", tostring(p.t), REASONS[t.r] or "?")
+		return C().hud("st_coop_trade_no_trader", "Trade failed: the trader does not trade now")
+	end
+	if request_id(t.c) ~= p.c then return end
+	pending = nil
+	local ttl = tonumber(t.ttl)
+	if not (ttl and ttl >= 1) then ttl = PERMIT_MS end
+	for id, w in pairs(windows) do
+		if age(w.at) > w.ttl then windows[id] = nil end
+	end
+	windows[p.t] = { c = p.c, ttl = ttl < PERMIT_MS and math_floor(ttl) or PERMIT_MS, at = time_global() }
+	st.opened = st.opened + 1
+	return p.open(p.t)
+end
+
+-- coop_trade.cpp (the player's machine): his trade window with `trader` (local id) opens. The grant this machine got for it,
+-- taken once: the computer's id (local) and the ms left.
+function window_grant(trader)
+	local w = type(trader) == "number" and windows[trader] or nil
+	if not w then return nil end
+	windows[trader] = nil
+	local left = w.ttl - age(w.at)
+	if not (left >= 1) then return nil end
+	st.windows = st.windows + 1
+	return w.c, math_floor(left)
+end
+
+-------------------------------------------------------------------------------
+-- Install
+-------------------------------------------------------------------------------
+local function install_open(m)
+	C().wrap(m, "open_trade_by_id", MODULE .. ".open_trade_by_id", function(orig)
+		return function(trader_id, ...)
+			if not (C().active() and coop_mode.is_player_mirror()) then return orig(trader_id, ...) end
+			local id = object_id(trader_id)
+			if not id then return orig(trader_id, ...) end
+			return ask(id, orig)
+		end
+	end)
+end
+
+local function install_ui()
+	local ui = C().mod(UI_MODULE)
+	C().wrap(ui, "start_dialog", UI_MODULE .. ".start_dialog", function(orig)
+		return function(obj_id, ...)
+			computer_open = object_id(obj_id)
+			return orig(obj_id, ...)
+		end
+	end)
+end
+
+local function start_step(what, f, ...)
+	local ok, err = pcall(f, ...)
+	if not ok then printf("! [coop_mods_trade_computer] %s failed: %s", what, tostring(err)) end
+end
+
+function on_game_start()
+	if not rawget(_G, "coop") then return end
+	local m = C().mod(MODULE)
+	if not m then return end
+	start_step("install_open", install_open, m)
+	start_step("install_ui", install_ui)
+	start_step("handlers", function()
+		C().on("tcomp_permit", host_permit, "host")
+		C().on("tcomp_permit_r", on_answer, "player")
+		C().set_limit("tcomp_permit", 4, 1)
+		RegisterScriptCallback("npc_on_net_destroy", on_npc_net_destroy)
+	end)
+	start_step("status", function()
+		C().status_line("tcomp", function()
+			return string.format("trade computer: asked %d, granted %d, refused %d, taken %d | sent %d, answers %d, opened %d, windows %d",
+				st.asked, st.granted, st.refused, st.taken, st.sent, st.answers, st.opened, st.windows)
+		end)
+	end)
+end
