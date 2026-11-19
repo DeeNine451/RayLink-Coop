@@ -1,0 +1,205 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - limits of mods on item moves into containers, asked by the process that applies the move
+	(gamedata\scripts\coop_mods_move_limits.script), F4 G6-1, finding m17:4.
+
+	A mod that limits what a container takes checks it only in the mover's window (a view callback: every player's machine
+	runs it on its own copy). Two players filling one stash at once each saw the old content, and the decider applied both
+	moves (Hideout Furniture: 50 kg of 60, two moves of 6 kg -> 62 kg). The engine (coop_requests.cpp admitted_move) now asks
+	admit() on the process that applies a move into a container - the co-op host, or in the Server mode the map server of
+	the player's level - before it moves the item: a client's ReqTake / ReqTransfer (host_move) and that process's own script
+	and window moves (host_transfer_item: G.A.M.M.A.'s ui_inventory moves items with transfer_item). The windows of the mods
+	stay a preview. A move into a player's character or onto the ground is not asked about. A refusal goes back to a client
+	as the existing ReqResult "not allowed" (its window shows the real content again).
+
+	add_rule(name, fn) -> bool   fn(container_id, item_id, pending_count, pending_weight, from_id) ->
+	                                 true          the rule judged the move and lets it in (the engine holds it until the
+	                                               container's game inventory shows it: xrCoop/coop_move_admission.h)
+	                                 false, why    the container takes no more (why: a short text for the decider's log)
+	                                 nil           not this rule's container
+	                             ids are this process's object ids (from_id: where the item comes from, 65535 = the ground);
+	                             pending_*: the moves into that container this process let in that its game inventory does
+	                             not show yet (they land with the next game event queue) - a rule that weighs the game
+	                             inventory adds them
+	remove_rule(name) -> bool    has_rule(name) -> bool
+	admit(container_id, item_id, pending_count, pending_weight, from_id) -> true | false, why | nil
+	                             the engine's question; every rule in the order added, the first refusal wins; a rule that
+	                             raises is logged and counts as nil; the numbers are checked (ids 0..65534, pending >= 0
+	                             and finite, else 0)
+
+	Rules installed here:
+	  hf_capacity  Hideout Furniture (stash_capacities.script, only when the mod exists): a stash section (inv_backpack,
+	               inventory_box, or placeable_type = stash) takes an item while the weight its game inventory shows + the
+	               held moves + the item <= its capacity (ltx `capacity`, 60 when absent), the arithmetic of the mod's window
+	               check (stash_capacities.script:100-111). The decider applies it only to moves from a player's character.
+	               Script transfers from that character into a backpack stash also count towards its capacity.
+
+	Nothing here runs by itself: no callback, no timer, no network verb. The engine asks only while it applies a move of a
+	session, on the process that decides for that container's map; single player is unchanged.
+--]]
+
+local tostring, tonumber, type, ipairs, pcall = tostring, tonumber, type, ipairs, pcall
+local math_floor, math_huge = math.floor, math.huge
+local string_format = string.format
+
+local function C() return coop_mods_core end
+
+local TAG = "move_limits"
+local NO_ID = 65535
+local MAX_RULES = 32
+local WHY_MAX = 160
+
+local order = {} -- rule names in the order they were added
+local by_name = {}
+local st = { asked = 0, admitted = 0, refused = 0, no_rule = 0, errors = 0, bad = 0 }
+local started = false
+
+-------------------------------------------------------------------------------
+-- Rules
+-------------------------------------------------------------------------------
+function add_rule(name, fn)
+	if type(name) ~= "string" or name == "" or #name > 64 or type(fn) ~= "function" then return false end
+	if by_name[name] == nil then
+		if #order >= MAX_RULES then return false end
+		order[#order + 1] = name
+	end
+	by_name[name] = fn
+	return true
+end
+
+function remove_rule(name)
+	if by_name[name] == nil then return false end
+	by_name[name] = nil
+	for i = #order, 1, -1 do
+		if order[i] == name then table.remove(order, i) end
+	end
+	return true
+end
+
+function has_rule(name)
+	return by_name[name] ~= nil
+end
+
+-- An object id of this process, or nil.
+local function id_of(v)
+	v = tonumber(v)
+	if not v or v ~= v or v < 0 or v >= NO_ID or v ~= math_floor(v) then return nil end
+	return v
+end
+
+-- A count or weight from the engine: a finite number >= 0, else 0.
+local function amount(v)
+	v = tonumber(v)
+	if not v or v ~= v or v <= 0 or v == math_huge then return 0 end
+	return v
+end
+
+-- The refusal text for the decider's log: one short line.
+local function short(why, name)
+	why = type(why) == "string" and why ~= "" and why or (name .. " refused")
+	why = why:gsub("%c", " ")
+	if #why > WHY_MAX then why = why:sub(1, WHY_MAX) end
+	return why
+end
+
+local function start()
+	if not started then on_game_start() end
+end
+
+function admit(container_id, item_id, pending_count, pending_weight, from_id)
+	start()
+	st.asked = st.asked + 1
+	local box, it = id_of(container_id), id_of(item_id)
+	if not box or not it then
+		st.bad = st.bad + 1
+		return nil
+	end
+	local n, w = math_floor(amount(pending_count)), amount(pending_weight)
+	local from = id_of(from_id) or NO_ID
+	local judged = false
+	local names = {}
+	for i, name in ipairs(order) do names[i] = name end
+	for _, name in ipairs(names) do
+		local fn = by_name[name]
+		if fn then
+			local ok, verdict, why = pcall(fn, box, it, n, w, from)
+			if not ok then
+				st.errors = st.errors + 1
+				C().report(TAG, "rule " .. name, verdict)
+			elseif verdict == false then
+				st.refused = st.refused + 1
+				return false, short(why, name)
+			elseif verdict == true then
+				judged = true
+			end
+		end
+	end
+	if judged then
+		st.admitted = st.admitted + 1
+		return true
+	end
+	st.no_rule = st.no_rule + 1
+	return nil
+end
+
+-------------------------------------------------------------------------------
+-- Hideout Furniture: stash capacity (stash_capacities.script)
+-------------------------------------------------------------------------------
+local hf_stash = {} -- section -> is a stash of the mod (its stash_sections, stash_capacities.script:8-16)
+
+local function is_hf_stash(section)
+	local v = hf_stash[section]
+	if v == nil then
+		v = section == "inv_backpack" or section == "inventory_box" or
+			(ini_sys:r_string_ex(section, "placeable_type") or "prop") == "stash"
+		hf_stash[section] = v
+	end
+	return v
+end
+
+-- What the container's game inventory weighs now (getInvWeight, stash_capacities.script:20-28).
+local function game_weight(box)
+	local w = 0
+	box:iterate_inventory_box(function(_, itm) w = w + (tonumber(itm:weight()) or 0) end)
+	return w
+end
+
+local function hf_capacity(box_id, item_id, pending_count, pending_weight, from_id)
+	if not C().is_player(from_id) then return nil end
+	local box = level.object_by_id(box_id)
+	if not box then return nil end -- not on the map this process leads: nothing here to weigh
+	local section = box:section()
+	if not is_hf_stash(section) then return nil end
+	local obj = level.object_by_id(item_id)
+	if not obj then return nil end
+	local capacity = ini_sys:r_float_ex(section, "capacity") or 60
+	local inside = game_weight(box)
+	local w = tonumber(obj:weight()) or 0
+	if inside + pending_weight + w > capacity then
+		return false, string_format("%s %d is full: %.2f kg + %.2f kg held (%d) + %.2f kg > %.2f kg", section, box_id, inside,
+			pending_weight, pending_count, w, capacity)
+	end
+	return true
+end
+
+local function install_hf()
+	if not C().mod("stash_capacities") then return end
+	add_rule("hf_capacity", hf_capacity)
+end
+
+-------------------------------------------------------------------------------
+local function start_step(what, f)
+	local ok, err = pcall(f)
+	if not ok then printf("! [coop_mods_move_limits] %s failed: %s", what, tostring(err)) end
+end
+
+local function status_text()
+	return string_format("%s | asked %d: let in %d, refused %d, no rule %d, rule errors %d, bad numbers %d",
+		#order > 0 and table.concat(order, ", ") or "no rules", st.asked, st.admitted, st.refused, st.no_rule, st.errors, st.bad)
+end
+
+function on_game_start()
+	started = true
+	start_step("install_hf", install_hf)
+	start_step("status", function() C().status_line(TAG, status_text) end)
+end
