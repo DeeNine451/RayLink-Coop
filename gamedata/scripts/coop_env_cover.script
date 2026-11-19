@@ -1,7 +1,7 @@
 -- Ядро: без проверок режима (docs/MODES.md)
 -- F5-COV-1. The caller supplies the level's body: the co-op host and the map's decider use identical rules.
 -- No personal underground/current_safe_cover events, actor immunities, patched pos_in_cover or local tent lists.
--- No callbacks, wrappers, saves or network handlers. F5-COV-2/3 own scheduling, trust and delivery.
+-- The decider compares local evidence with the player's report. The mirror can receive that decision separately.
 
 local peers = {}
 local ray_table
@@ -238,6 +238,78 @@ function verdict(peer, body)
     elseif m and dynamic_safe(p, option(m, "grace_period", 1)) then source = "dynamic" end
     p.source = source
     return source ~= "none", source, p.score
+end
+
+-- The caller supplies a fresh report, or nil. Each report can incur one discrepancy check, even if
+-- both phase publication and the stock kill hook read it. A new report gets its own check.
+function decide(peer, body, report, nick, active)
+    if not coop_mods_core.active() then return nil end
+    if not body then
+        reset(peer)
+        if not report then return nil end
+        if not report.unchecked then
+            coop_trust.pass("env_cover_unchecked", true)
+            report.unchecked = true
+        end
+        return report.c
+    end
+
+    local now = time_global()
+    local p = record(peer, body, level.name())
+    local d = p.decision
+    if d and d.sample_at == now and d.report == report and d.active == active then return d.covered end
+    if active and (not p.tick_at or now - p.tick_at >= 1000) then
+        tick(peer, body)
+        p.tick_at = now
+    end
+    local covered, source, score = verdict(peer, body)
+    if not covered and report and report.c then
+        if report.cover_allowed == nil then
+            report.cover_allowed = coop_trust.pass("env_cover", false,
+                "%s claims cover, the level sees none (%s, score %.2f)", tostring(nick), source, score or 0)
+        end
+        if report.cover_allowed then covered, source = true, "report" end
+    end
+    p.decision = { covered = covered, source = source, sample_at = now, report = report, active = active,
+        evidence_at = source == "report" and report.at or now }
+    return covered
+end
+
+-- character_id is the id on this level. Returns nil when there is no local decision for that body.
+function cover_of(character_id)
+    if not coop_mods_core.active() or not coop_mode.leads_here() then return nil end
+    if type(character_id) ~= "number" or not level.object_by_id(character_id) then return nil end
+    local peer = coop.peer_of_avatar(character_id)
+    local p = peers[peer]
+    if not p or p.id ~= character_id or p.map ~= level.name() or coop_mode.decider(peer) ~= "this" then return nil end
+    local d = p.decision
+    if d then return d.covered, time_global() - d.evidence_at, d.source end
+end
+
+local mirror_verdict
+
+function clear_client_verdict()
+    mirror_verdict = nil
+end
+
+function client_verdict()
+    if not mirror_verdict then return nil end
+    local age = time_global() - mirror_verdict.at
+    if age < 0 or age > 3000 or mirror_verdict.map ~= level.name() then
+        clear_client_verdict()
+        return nil
+    end
+    if coop_trust.mode_of("env_cover") == "refuse" then return mirror_verdict.c end
+end
+
+function on_game_start()
+    if not coop then return end
+    coop_main.add_event_handler("coop_env_verdict", function(payload, from)
+        if from ~= 0 or not coop_mods_core.active() or not coop_mode.is_player_mirror() then return end
+        local t = coop_main.decode(payload)
+        if type(t.c) ~= "boolean" then return end
+        mirror_verdict = { c = t.c, at = time_global(), map = level.name() }
+    end)
 end
 
 function status()

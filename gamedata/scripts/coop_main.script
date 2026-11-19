@@ -353,31 +353,54 @@ local function env_phase(m)
 	return true, (ok and gs) or 0
 end
 
--- Audit 2026-10-24 (E1): a remote player's shelter is his own. His machine knows it (the stock covers, its underground
--- flag, G.A.M.M.A.'s ray-cast cover and coordinate safe zones) and reports it with coop_env_cover; a fresh report
--- decides. Without one, the surge script's static covers (misc\surge_manager.ltx) at his character. The host's own
--- underground flag never decides for him (it spared every client while the host sat in a cellar).
+-- Reports are compared with the shelter at this player's body on the level that leads him.
 local COVER_FRESH_MS = 3000
-local function player_in_cover(peer, obj)
+local function reported_cover(peer)
 	local rep = env_host.cover_rep[peer]
-	if rep and time_global() - rep.at <= COVER_FRESH_MS then return rep.c end
+	if not rep then return nil end
+	local age = time_global() - rep.at
+	if age >= 0 and age <= COVER_FRESH_MS then return rep end
+	env_host.cover_rep[peer] = nil
+end
+
+local function player_in_cover(player, obj, active)
+	local rep = reported_cover(player.id)
+	if coop_env_cover then return coop_env_cover.decide(player.id, obj, rep, player.nick, active) end
+	-- Standalone loaders without the cover module still use the stock shelter check.
+	if rep then return rep.c end
+	if not obj then return nil end
 	local sm = surge_mgr()
 	if not sm then return true end
 	if sm.init_surge_covers then sm:init_surge_covers() end
 	return sm:pos_in_cover(obj:position()) == true
 end
 
--- A player on a map server's level has no object here: what his own machine last reported, nil when that is old or there is none.
-local function reported_cover(peer)
-	local rep = env_host.cover_rep[peer]
-	if rep and time_global() - rep.at <= COVER_FRESH_MS then return rep.c end
-	return nil
-end
-
 local function players()
 	if not api then return {} end
 	local ok, list = pcall(api.players)
 	return ok and list or {}
+end
+
+function env_host.player_here(p)
+	if p.is_self then return actor_plays() end
+	return not coop_mode or coop_mode.where(p.id) ~= "away"
+end
+
+function env_host.body(p)
+	if p.is_self then return db.actor end
+	return p.avatar_id and level.object_by_id(p.avatar_id)
+end
+
+function env_host.sample_cover(active)
+	if not coop_env_cover or not coop_mode or not coop_mode.leads_here() then return end
+	if active then
+		for _, p in ipairs(players()) do
+			if env_host.player_here(p) then player_in_cover(p, env_host.body(p), true) end
+		end
+	elseif env_host.cover_active then
+		coop_env_cover.reset()
+	end
+	env_host.cover_active = active
 end
 
 -- Host: the stock surge decided to kill unsheltered people now (2nd wave or the end). Same verdict for
@@ -392,17 +415,17 @@ local function anabiotic(peer)
 end
 
 local function host_surge_kill_check()
-	if not api.is_active() then return end
+	if not api.is_active() or env_policy.publish then return end
+	local active = env_phase(surge_mgr()) or env_phase(psi_mgr())
 	-- audit E3: the host's story immunity (surge_immuned) is his own; a client's is checked on his machine (coop_env_kill)
 	for _, p in ipairs(players()) do
 		if not p.is_self and env_host.kill_sent[p.id] ~= env_host.serial and anabiotic(p.id) then
 			-- spared at this kill moment only: one who wakes before the next one is judged then
 			log("emission: %s (#%d) sleeps on an anabiotic, spared", tostring(p.nick), p.id)
-		elseif not p.is_self and env_host.kill_sent[p.id] ~= env_host.serial then
-			local obj = p.avatar_id and level.object_by_id(p.avatar_id)
-			local exposed
-			if obj then exposed = obj:alive() and not player_in_cover(p.id, obj)
-			else exposed = reported_cover(p.id) == false end -- his machine checks that he is alive
+		elseif not p.is_self and env_host.kill_sent[p.id] ~= env_host.serial and env_host.player_here(p) then
+			local obj = env_host.body(p)
+			-- Without a body, a fresh negative report still exposes him; his machine checks he is alive.
+			local exposed = (not obj or obj:alive()) and player_in_cover(p, obj, active) == false
 			if exposed then
 				env_host.kill_sent[p.id] = env_host.serial
 				api.send_event("coop_env_kill", encode({ kind = "surge" }), p.id)
@@ -452,16 +475,18 @@ local function host_env_tick()
 	env_host.next_send = tg + (active and 1000 or 10000)
 	local phase = { s = s_on, sg = s_gs, p = p_on, pg = p_gs, tf = level.get_time_factor(), c = true }
 	if env_policy.publish then return env_policy.publish(phase) end
+	if not active and env_host.cover_active then coop_env_cover.reset() end
+	env_host.cover_active = active and coop_env_cover ~= nil
 	for _, p in ipairs(players()) do
 		if not p.is_self then
 			local cover = true
-			if active then
-				local obj = p.avatar_id and level.object_by_id(p.avatar_id)
-				if obj then cover = player_in_cover(p.id, obj)
-				else cover = reported_cover(p.id) ~= false end
+			if active and env_host.player_here(p) then
+				cover = player_in_cover(p, env_host.body(p), true) ~= false
 			end
 			phase.c = cover
 			api.send_event("coop_env", encode(phase), p.id)
+		elseif active and coop_env_cover and env_host.player_here(p) then
+			player_in_cover(p, env_host.body(p), true)
 		end
 	end
 end
@@ -733,12 +758,18 @@ local function client_env_tick()
 		-- under ground the emission of the world is not felt: nothing of it stays on here either
 		env_off_here(surge_mgr(), "surge", "this level is not reached by the world's emission")
 		env_off_here(psi_mgr(), "psi_storm", "this level is not reached by the world's emission")
+		env_host.sample_cover(false)
+		if coop_env_cover then coop_env_cover.clear_client_verdict() end
 		return
 	end
 	local dt = (tg - env_cl.at) / 1000 * (env_cl.tf or level.get_time_factor())
 	if env_cl.own then
-		local ok, c = pcall(env_own_cover)
-		env_cl.cover = ok and c == true
+		local cover = coop_env_cover and coop_env_cover.client_verdict()
+		if cover == nil then
+			local ok, c = pcall(env_own_cover)
+			cover = ok and c == true
+		end
+		env_cl.cover = cover
 	end
 	local ghost = not actor_plays()
 
@@ -749,6 +780,7 @@ local function client_env_tick()
 				mirror_start_surge(sm)
 				skip_stages_over(sm, SURGE_STAGES_OVER, env_cl.sg + dt)
 			end
+			env_host.sample_cover(true)
 			mirror_update(sm, env_cl.sg + dt, "emission mirror", "surge_time")
 			if not ghost then quake_step((env_cl.sg + dt) / (env_cl.tf or level.get_time_factor())) end
 		else
@@ -762,11 +794,13 @@ local function client_env_tick()
 				mirror_start_psi(pm)
 				skip_stages_over(pm, PSI_STAGES_OVER, env_cl.pg + dt)
 			end
+			if not (env_cl.s and sm) then env_host.sample_cover(true) end
 			mirror_update(pm, env_cl.pg + dt, "psi-storm mirror", "psi_storm_duration")
 		else
 			env_off_here(pm, "psi_storm")
 		end
 	end
+	if not (env_cl.s or env_cl.p) then env_host.sample_cover(false) end
 
 	-- After start/stop (they remember the factor to restore), follow the host's time factor.
 	local tf = env_cl.tf
@@ -786,7 +820,8 @@ add_event_handler("coop_env", function(payload, from)
 	env_cl.p, env_cl.pg = p, tonumber(t.pg) or 0
 	env_cl.tf = tonumber(t.tf)
 	env_cl.cover = t.c ~= false
-	env_cl.own = t.own == true -- split levels: he stands where the world server has no object of him
+	env_cl.own = t.own == true -- phase carries no decision for this player; his level can send one separately
+	if not (s or p) and coop_env_cover then coop_env_cover.clear_client_verdict() end
 	env_cl.at = time_global()
 	env_cl.have = true
 end)
