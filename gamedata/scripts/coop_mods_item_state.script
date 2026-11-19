@@ -1,0 +1,491 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G3-1. Item riders own the concrete weapon's selections and Lua jam type.
+-- economy.se also carries changes (including NPC loot) to the world and its maps;
+-- economy.imd carries the same riders with inventory/clone snapshots. No new wire verbs.
+-- Every value includes the economy item_instance identity. A clear is a stamped value,
+-- not a missing entry, so an old owner's Lua table cannot resurrect a cleared jam.
+
+local function C() return coop_mods_core end
+local specs = {
+	{ key = "coop_weapon_camo", module = "z_3dss_gamma_camo_system", field = "selected_by_weapon" },
+	{ key = "coop_weapon_jam", module = "arti_jamming", field = "jammed_guns" },
+}
+local specs_by_key = {}
+for _, s in ipairs(specs) do specs_by_key[s.key] = s end
+local seen, pending, retired = {}, {}, {}
+local applying, installed, storage = false, false, nil
+local receive_item, flush_se
+
+local function data()
+	local asm = C().mod("alife_storage_manager")
+	return asm and asm.get_state and asm.get_state() or nil
+end
+
+local function live(s)
+	local mod = C().mod(s.module)
+	if not mod then return nil end
+	if s.field == "jammed_guns" then return mod.jammed_guns end
+	-- The mod's public snapshot exposes the live selections reference, including
+	-- after load_state replaces it. Avoid an upvalue scan for each inventory item.
+	if mod.save_state then
+		local snapshot = {}
+		mod.save_state(snapshot)
+		local state = snapshot.z_3dss_gamma_camo_system
+		return state and state.selections
+	end
+end
+
+-- Same precedence as coop_economy_mdata.item_instance, with the saved name available
+-- while a clone target has metadata but no online game object yet.
+local function instance(id)
+	local m = data()
+	local se = m and m.se_object and m.se_object[id]
+	if se and se._coop_instance then return se._coop_instance end
+	local obj = alife_object(id)
+	return obj and obj:name() or se and se.name
+end
+
+local function copy_state(s, value)
+	if s.field == "jammed_guns" then
+		if value == nil or value == 0 then return 0 end
+		if type(value) == "number" and value >= 1 and value <= 4 and value == math.floor(value) then return value end
+		return nil
+	end
+	if value == nil or value == false then return false end
+	if type(value) ~= "table" then return nil end
+	local out = {}
+	for k, v in pairs(value) do
+		if (k ~= "file" and k ~= "section" and k ~= "sp34_variant") or type(v) ~= "string" or #v > 256 or #v == 0 then return nil end
+		out[k] = v
+	end
+	if (out.file == nil) ~= (out.section == nil) then return nil end
+	if out.sp34_variant and out.sp34_variant ~= "fde" and out.sp34_variant ~= "black" then return nil end
+	return out
+end
+
+local function store(s, id, value)
+	local m = data()
+	if not m then return end
+	if m[s.key] then
+		m[s.key][id] = value
+	elseif value ~= nil then
+		m[s.key] = { [id] = value }
+	end
+end
+
+local function refresh(id)
+	local mod = C().mod(specs[1].module)
+	local obj = level.object_by_id(id)
+	if obj and mod and mod.refresh_camo then
+		if not mod.refresh_camo(obj) then
+			local apply_default = C().find_local(mod, "apply_selected")
+			if apply_default then apply_default(obj) end
+		end
+		return true
+	end
+	return false
+end
+
+local function checked_state(s, id, record)
+	local valid = type(id) == "number" and id > 0 and id < 65535 and id == math.floor(id)
+		and type(record) == "table" and type(record.instance) == "string" and #record.instance > 0 and #record.instance <= 256
+	local state = valid and record.state ~= nil and copy_state(s, record.state)
+	valid = valid and record.state ~= nil and state ~= nil
+	if valid then
+		for field in pairs(record) do
+			if field ~= "instance" and field ~= "state" then valid = false break end
+		end
+	end
+	if coop_trust.pass("item_state_value", valid, "item %s: invalid weapon rider", tostring(id)) and valid then return state end
+end
+
+local function matches_instance(id, current, record, wire_stamp)
+	local matches = (not current or current == record.instance)
+		and (wire_stamp == nil or wire_stamp == "" or wire_stamp == record.instance)
+	return coop_trust.pass("item_state_instance", matches, "item %s: weapon instance changed", tostring(id)) and matches
+end
+
+local function apply(s, id, record)
+	if not C().active() then return end
+	local state = checked_state(s, id, record)
+	if state == nil then return false end
+	local current = instance(id)
+	local em = C().mod("coop_economy_mdata")
+	-- The clone transaction deliberately replaces the source's stamp. Its rider has
+	-- already passed clone_stage; bind it to the target before the object appears.
+	if em and em.clone_pending and em.clone_pending(id) and current then
+		record = { instance = current, state = state }
+		store(s, id, record)
+		local m = data()
+		if m.se_object and m.se_object[id] then m.se_object[id][s.key] = record end
+	end
+	pending[id] = pending[id] or {}
+	pending[id][s.key] = record
+	if not current then return true end
+	if not matches_instance(id, current, record) then
+		-- An obsolete pending apply is a replay, never permission to paint a reused id.
+		pending[id][s.key] = nil
+		if not next(pending[id]) then pending[id] = nil end
+		return false
+	end
+	local tbl = live(s)
+	if type(tbl) ~= "table" then return true end
+	applying = true
+	tbl[id] = state
+	if state == false or state == 0 then tbl[id] = nil end
+	applying = false
+	seen[id] = current
+	if s ~= specs[1] or refresh(id) then
+		pending[id][s.key] = nil
+		if not next(pending[id]) then pending[id] = nil end
+	end
+	return true
+end
+
+local function receive_se(s, id, hid, record, packed, from, world)
+	local em = C().mod("coop_economy_mdata")
+	-- The economy holds a player's update when it has no ALife entity to check.
+	-- Its SE listener will run if ownership is established when the entity appears.
+	if (world and from < 0x100 and not alife_object(id)) or em.clone_pending(id) then return end
+	if not apply(s, id, record) then return end
+	if world then
+		store(s, id, record)
+	elseif receive_item then
+		-- The economy receiver seeds item_poll's baseline. A received rider of
+		-- the local player's own weapon must not be echoed back to the world.
+		receive_item({ n = 1, i1 = hid, k1 = s.key, d1 = packed, x1 = record.instance }, 0)
+	end
+end
+
+-- Filter only these two keys before the economy stores, queues or relays them.
+-- Other riders and SE vars in the same batch keep their ordinary handler.
+local function dispatch_riders(orig, event, payload, from, ...)
+	if not C().active() or (event ~= "economy.se" and event ~= "economy.imd") then
+		return orig(event, payload, from, ...)
+	end
+	local world = coop_mode.decides_world()
+	local source = type(from) == "number" and from == math.floor(from) and from >= 0 and from <= 65535
+		and ((world and from > 0) or (not world and from == 0))
+	local allowed = coop_trust.pass("item_state_sender", source, "weapon rider: unexpected transport sender %s", tostring(from)) and source
+	local ec = C().mod("coop_economy_core")
+	local cm = C().mod("coop_main")
+	local t = cm.decode(payload)
+	local n = ec.int(t.n, 0, 2000)
+	if not coop_trust.pass("item_state_batch", n ~= nil, "weapon rider: invalid batch size") or not n then
+		return orig(event, payload, from, ...)
+	end
+	local changed, received = false, {}
+	for i = 1, n do
+		local key = "k" .. i
+		local s = specs_by_key[t[key]]
+		if s then
+			local hid, packed, stamp = ec.int(t["i" .. i], 1, 65534), t["d" .. i], t["x" .. i]
+			local valid = false
+			-- item_poll can report an absent entry. An actual clear carries an instance.
+			if allowed and not (event == "economy.imd" and packed == "_") then
+				local wire_ok = hid ~= nil and type(packed) == "string" and #packed <= 2048
+				if coop_trust.pass("item_state_wire", wire_ok, "weapon rider: invalid id or payload") and wire_ok then
+					local id = C().lid(hid)
+					local record, err = ec.unpack(packed)
+					local decoded = err == nil
+					valid = coop_trust.pass("item_state_wire", decoded, "item %s: invalid rider encoding", tostring(hid))
+						and decoded and checked_state(s, id, record) ~= nil and matches_instance(id, instance(id), record, stamp)
+					if valid and world and from < 0x100 and alife_object(id) then
+						local player = ec.player(from)
+						local owner = player and player.avatar_id and ec.root_of(hid) == player.avatar_id
+						valid = coop_trust.pass("item_state_owner", owner,
+							"item %s: sender %s is not its carrier", tostring(hid), tostring(from)) and owner
+					end
+					if valid and event == "economy.se" then
+						received[#received + 1] = { spec = s, id = id, hid = hid, record = record, packed = packed }
+					end
+				end
+			end
+			if not valid then
+				t[key], t["i" .. i], t["d" .. i], t["x" .. i], changed = nil, nil, nil, nil, true
+			end
+		end
+	end
+	orig(event, changed and cm.encode(t) or payload, from, ...)
+	-- Keep admitted SE deliveries until the weapon appears, including on maps
+	-- where the shared economy's 30-second wait would expire.
+	for _, e in ipairs(received) do receive_se(e.spec, e.id, e.hid, e.record, e.packed, from, world) end
+end
+
+local function restore_se(s, id, m)
+	local se = m.se_object and m.se_object[id]
+	local record = se and se[s.key]
+	store(s, id, record)
+	if record and not apply(s, id, record) then store(s, id, nil) end
+end
+
+local function restore(id)
+	local m = data()
+	if not m then return end
+	for _, s in ipairs(specs) do
+		local record = m[s.key] and m[s.key][id]
+		if not (record and apply(s, id, record)) then restore_se(s, id, m) end
+	end
+end
+
+local function observe(id)
+	local current = instance(id)
+	if not current then return end
+	local m = data()
+	local changed = seen[id] and seen[id] ~= current
+	for _, s in ipairs(specs) do
+		local record = m and m[s.key] and m[s.key][id]
+		if changed or (record and (type(record) ~= "table" or record.instance ~= current)) then
+			local tbl = live(s)
+			if tbl then tbl[id] = nil end
+		end
+	end
+	if seen[id] ~= current then restore(id) end
+	seen[id] = current
+end
+
+local function owns(id)
+	return coop_mode.actor_is_player() and db.actor and C().root_of(id) == db.actor:id()
+end
+
+local function capture(s, id, npc)
+	if applying or not C().active() or not id or not (owns(id) or (npc and coop_mode.leads_here())) then return end
+	local em = C().mod("coop_economy_mdata")
+	if em and em.clone_pending and em.clone_pending(id) then return end
+	local stamp, tbl, m = instance(id), live(s), data()
+	if not stamp or type(tbl) ~= "table" or not m then return end
+	local state = copy_state(s, tbl[id])
+	if state == nil then return end
+	local previous = m[s.key] and m[s.key][id]
+	if not previous and (state == false or state == 0) then return end
+	local record = { instance = stamp, state = state }
+	if previous and C().ser(previous) == C().ser(record) then return end
+	store(s, id, record)
+	seen[id] = stamp
+	-- The existing channel checks sender/ownership/instance, bounds its payload and
+	-- relays map facts through the world. A receiver never calls this writer.
+	se_save_var(id, nil, s.key, record)
+	-- Queue the rider for transport in the action's frame. Waiting for the
+	-- economy poll can leave it behind an immediate inventory transfer.
+	if flush_se and coop_economy_core.live() then flush_se() end
+end
+
+local function sync_item(obj)
+	if not C().active() or not obj or not obj.id then return end
+	local id = obj:id()
+	observe(id)
+	restore(id)
+	refresh(id)
+end
+
+local function unregister_item(se)
+	if not C().active() or not se or not se.id then return end
+	local id = se.id
+	if coop_economy_mdata.clone_pending(id) then return end
+	local m = data()
+	if not m then return end
+	local stamp = instance(id) or seen[id] or se:name()
+	retired[id] = nil
+	for _, s in ipairs(specs) do
+		local records = m[s.key]
+		local record = records and records[id]
+		if type(record) == "table" and record.instance == stamp then
+			-- Stock alife_clone_weapon unregisters before after_clone. Keep
+			-- its source through that call without exposing it under the old ID.
+			retired[id] = retired[id] or {}
+			retired[id][s.key] = record
+		end
+		if records then records[id] = nil end
+		local tbl = live(s)
+		if tbl then tbl[id] = nil end
+	end
+	seen[id], pending[id] = nil, nil
+end
+
+local function capture_inventory()
+	if not C().active() or not coop_mode.actor_is_player() or not db.actor then return end
+	db.actor:iterate_inventory(function(_, obj)
+		local id = obj:id()
+		observe(id)
+		for _, s in ipairs(specs) do capture(s, id) end
+	end, db.actor)
+end
+
+local function restore_all()
+	if not C().active() then return end
+	seen, pending, retired, storage = {}, {}, {}, data()
+	local ids = {}
+	for _, s in ipairs(specs) do
+		for id in pairs(storage and storage[s.key] or {}) do ids[id] = true end
+	end
+	for id in pairs(ids) do observe(id) restore(id) end
+end
+
+local function update()
+	if not C().active() then return end
+	if storage ~= data() then restore_all() end
+	if next(retired) then retired = {} end
+	for id, records in pairs(pending) do
+		for _, s in ipairs(specs) do
+			if records[s.key] then apply(s, id, records[s.key]) end
+		end
+	end
+	capture_inventory()
+end
+
+local function wrap_change(s, name, active_weapon)
+	local mod = C().mod(s.module)
+	local wrapped, original = C().wrap(mod, name, "item_state." .. s.module .. "." .. name, function(orig)
+		return function(obj, ...)
+			if not C().active() then return orig(obj, ...) end
+			local target = not active_weapon and obj or nil
+			if not target and db.actor and db.actor.active_item then target = db.actor:active_item() end
+			local id = type(target) == "number" and target or target and target:id()
+			if id then observe(id) end
+			local result = orig(obj, ...)
+			capture(s, id)
+			return result
+		end
+	end)
+	if wrapped and active_weapon then C().swap_callback(name, original, mod[name]) end
+end
+
+local function install_mods()
+	local camo = C().mod(specs[1].module)
+	if camo then
+		wrap_change(specs[1], "select_camo")
+		C().wrap(camo, "assign_drop_camo", "item_state.npc_camo", function(orig)
+			return function(obj, ...)
+				if not C().active() then return orig(obj, ...) end
+				if not coop_mode.leads_here() then return false end
+				if obj then observe(obj:id()) end
+				local result = orig(obj, ...)
+				if obj then capture(specs[1], obj:id(), true) end
+				return result
+			end
+		end)
+	end
+	if C().mod(specs[2].module) then
+		for _, name in ipairs({ "set_jam_status", "unset", "timed_unjam" }) do wrap_change(specs[2], name) end
+		for _, name in ipairs({ "unjam", "unjam_replace" }) do wrap_change(specs[2], name) end
+		wrap_change(specs[2], "actor_on_weapon_jammed", true)
+	end
+end
+
+local function install_riders()
+	local em = C().mod("coop_economy_mdata")
+	if not em then return end
+	receive_item = assert(C().find_local(em, "on_imd"), "economy item receiver missing")
+	flush_se = assert(C().find_local(em, "se_flush"), "economy SE flush missing")
+	local se_signatures = assert(C().upvalue(em.apply_se, "se_sig"), "economy SE signatures missing")
+	C().wrap(C().mod("coop_main"), "on_event", "item_state.rider_admission", function(orig)
+		return function(...) return dispatch_riders(orig, ...) end
+	end)
+	for _, s in ipairs(specs) do
+		em.declare_item_key(s.key, { apply = function(id, value)
+			if not C().active() then return end
+			if apply(s, id, value) then
+				-- A newer admitted item rider also supersedes an already queued SE value.
+				if coop_mode.decides_world() and not em.clone_pending(id) then em.apply_se(id, s.key, value) end
+				return
+			end
+			-- item_store has already replaced the saved rider. Recover the
+			-- SE copy so a bad update can't erase the jam on the next load.
+			local m = data()
+			if m then restore_se(s, id, m) end
+		end })
+	end
+	em.on_se_value(function(id, key)
+		if not coop_mode.decides_world() then return end
+		local s = specs_by_key[key]
+		if not s then return end
+		local m = data()
+		local value = m and m.se_object and m.se_object[id] and m.se_object[id][key]
+		local ec = C().mod("coop_economy_core")
+		-- SE retries write their queued value without updating the signature.
+		-- Keep the last admitted value of this instance in both save tables.
+		local packed = se_signatures[tostring(C().hid(id)) .. "\0" .. key]
+		if packed and type(value) == "table" and packed ~= ec.pack(value) then
+			local latest = ec.unpack(packed)
+			if type(latest) == "table" and latest.instance == value.instance and apply(s, id, latest) then
+				em.quietly(se_save_var, id, nil, key, latest)
+				store(s, id, latest)
+				return
+			end
+		end
+		if apply(s, id, value) then store(s, id, value) end
+	end)
+	C().wrap(em, "clone_export", "item_state.clone_export", function(orig)
+		return function(id, ...)
+			if not C().active() then return orig(id, ...) end
+			if not em.clone_pending(id) then observe(id) end
+			for _, s in ipairs(specs) do capture(s, id) end
+			local before = instance(id)
+			local packed = orig(id, ...)
+			local stamp = instance(id)
+			if C().active() and packed and stamp and stamp ~= before then
+				-- clone_export(id, stamp) has just given the SAME source an instance.
+				-- Rebase before exporting again, including a later rejected transaction.
+				local m = data()
+				for _, s in ipairs(specs) do
+					local record = m and m[s.key] and m[s.key][id]
+					if type(record) == "table" and record.instance == before then
+						local rebound = { instance = stamp, state = record.state }
+						store(s, id, rebound)
+						se_save_var(id, nil, s.key, rebound)
+					end
+				end
+				seen[id] = stamp
+				packed = orig(id)
+			end
+			return packed
+		end
+	end)
+	C().wrap(em, "after_clone", "item_state.after_clone", function(orig)
+		return function(old_id, new_id, ...)
+			if C().active() and new_id and not em.clone_pending(new_id) then
+				local m, stamp = data(), instance(new_id)
+				local source_stamp = old_id and (instance(old_id) or seen[old_id])
+				local released = old_id and not alife_object(old_id) and retired[old_id]
+				if released then retired[old_id] = nil end
+				for _, s in ipairs(specs) do
+					local records = m and m[s.key]
+					local record = records and records[new_id]
+					if type(record) ~= "table" or record.instance ~= stamp then
+						local source = records and records[old_id]
+						record = type(source) == "table" and source.instance == source_stamp and source
+							or released and released[s.key]
+					end
+					if record and stamp then
+						record = { instance = stamp, state = record.state }
+						store(s, new_id, record) apply(s, new_id, record)
+						se_save_var(new_id, nil, s.key, record)
+					end
+				end
+			end
+			return orig(old_id, new_id, ...)
+		end
+	end)
+end
+
+local function step(name, f)
+	local ok, err = pcall(f)
+	if not ok then C().report("item_state", name, err) end
+end
+
+function on_game_start()
+	if installed then return end
+	installed = true
+	step("mods", install_mods)
+	step("riders", install_riders)
+	step("callbacks", function()
+		RegisterScriptCallback("actor_on_update", function() step("update", update) end)
+		RegisterScriptCallback("actor_on_first_update", function() step("restore", restore_all) end)
+		RegisterScriptCallback("load_state", function() step("load", restore_all) end)
+		RegisterScriptCallback("save_state", function() step("save", capture_inventory) end)
+		RegisterScriptCallback("game_object_on_net_spawn", sync_item)
+		RegisterScriptCallback("server_entity_on_unregister", unregister_item)
+		RegisterScriptCallback("actor_on_item_take", sync_item)
+		RegisterScriptCallback("actor_on_weapon_jammed_wpo", function(obj) if obj then capture(specs[2], obj:id()) end end)
+	end)
+end
