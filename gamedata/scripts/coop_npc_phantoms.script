@@ -1,6 +1,6 @@
 --[[
 	Anomaly Coop - NPC group (W4 "npc"): phantoms for every player (enemy audit F10, 2026-10-31). Independently derived from
-	the original scripts, which stay as they are: no module is reexecuted, no rule of theirs is replaced.
+	the original scripts, which stay as they are: no module is reexecuted.
 
 	Native hooks (host, with clients; otherwise every wrapped function is the original):
 	  - phantom_manager: a monster spawns dynamic phantoms while it fights "the actor" within 30 m of db.actor, the host.
@@ -10,6 +10,8 @@
 	    now answers for that player (what his machine reports, coop_economy_mdata), not with the host's psy health. A
 	    phantom's contact is measured to the nearest player; the psy hit lands on him in the phantom's name, because a hit
 	    a character deals itself never reaches its owner (hits::to_owner).
+	  - xcv_phantoms_fix: its replacement callback uses the original script's private settings and squad table
+	    as if they were exports. Supply them to the replacement and its deferred cleanup during a session.
 	  xcv's squad runs to "actor". sim_squad_scripted resolves that to id 0, and a player's character has none of a squad
 	  target's methods, so the target stays and only the place changes: the engine asks get_current_task, and near a client
 	  that is his place.
@@ -55,7 +57,7 @@ local function psy(C, P, active)
 	local _, holder, index = C.find_local(m, "psy_table")
 	if not holder then return false end
 	m.get_ppe_intensity = function(...)
-		local who = active() and P.in_identity() and db.actor
+		local who = P.in_identity() and (active() or (C.active() and coop_mode and coop_mode.leads_here())) and db.actor
 		if not (who and P.is_proxy(who)) then return get(...) end
 		local _, t = debug.getupvalue(holder, index) -- arszi replaces the table at load_state
 		if type(t) ~= "table" then return get(...) end
@@ -122,13 +124,83 @@ local function squad_place(C, P, active)
 	return true
 end
 
+-- The replacement overwrites the only closure that captures these two numeric locals.
+-- Read their declarations from the effective base script without running it again.
+local function xcv_settings()
+	local fs = getFS()
+	local path = fs:update_path("$game_scripts$", "xcv_phantoms.script")
+	local src
+	local file = io.open(path, "rb")
+	if file then
+		src = file:read("*a")
+		file:close()
+	elseif type(r_file_as_string) == "function" then
+		src = r_file_as_string(path)
+	end
+	if type(src) ~= "string" then return end
+	local function setting(key)
+		local line = ("\n" .. src):match("\n[ \t]*local[ \t]+" .. key .. "[ \t]*=[ \t]*([^\r\n]*)")
+		return line and tonumber((line:gsub("%-%-.*$", "")))
+	end
+	return setting("phantom_frequency"), setting("phantoms_appear_at")
+end
+
+local function xcv_fix(C, P)
+	local m = C.mod("xcv_phantoms")
+	local original = m and m.actor_on_update
+	if type(original) ~= "function" or coop_route.script_of(original) ~= "xcv_phantoms_fix" then return false end
+	local _, holder, index = C.find_local(m, "spawned_phantoms")
+	local ok, frequency, threshold = pcall(xcv_settings)
+	local environment = getfenv(original)
+	local scoped
+	if ok and frequency and frequency > 0 and frequency < math.huge
+		and threshold and threshold >= 0 and threshold < math.huge and threshold % 1 == 0 and holder then
+		local exports = setmetatable({}, {
+			__index = function(_, key)
+				if key == "phantom_frequency" then return frequency end
+				if key == "phantoms_appear_at" then return threshold end
+				if key == "spawned_phantoms" then
+					local _, squads = debug.getupvalue(holder, index)
+					return squads
+				end
+				return m[key]
+			end,
+			__newindex = m, -- the mod's shared throttle still lives at xcv_phantoms.tmr
+		})
+		scoped = setmetatable({ xcv_phantoms = exports }, { __index = environment })
+	else
+		P.report("compat", "native phantom_xcv_fix", "cannot resolve private XCV spawn settings")
+	end
+	C.wrap(m, "actor_on_update", "xcv_phantoms_fix.actor_on_update", function(update)
+		return function(...)
+			if not C.active() then return update(...) end
+			if not scoped then return end
+			-- Any timer created here keeps the scoped environment and reads the live squad table.
+			local previous = getfenv(update)
+			setfenv(update, scoped)
+			local ran, err = pcall(update, ...)
+			setfenv(update, previous)
+			if not ran then error(err, 0) end
+		end
+	end)
+	coop_route.inherit_source(m.actor_on_update, original)
+	C.swap_callback("actor_on_update", original, m.actor_on_update)
+	C.wrap(m, "psi_health_hit", "xcv_phantoms_fix.psi_health_hit", function(psi_hit)
+		return function(enable, ...)
+			if C.active() and m.enable_psi_hit == false then enable = false end
+			return psi_hit(enable, ...)
+		end
+	end)
+	return true
+end
+
 function install(P, active, applied)
 	if installed then return end
 	local C = coop_mods_core
 	if not (C and type(C.find_local) == "function") then return end
 	installed = true
 	for _, spec in ipairs({ { "phantoms", dynamic }, { "phantom_psy", psy }, { "phantom_contact", contact },
-		{ "phantom_squad", squad_place } }) do
+		{ "phantom_squad", squad_place }, { "phantom_xcv_fix", xcv_fix } }) do
 		local ok, result = pcall(spec[2], C, P, active)
 		if not ok then
 			P.report("compat", "native " .. spec[1], result)

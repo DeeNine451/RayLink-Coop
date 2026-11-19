@@ -34,9 +34,8 @@
 	Campfires (bind_campfire, owner domain on clients): a client lighting or putting out a fire asks the
 	  host (npc.fire); the engine then shows the host's flame to everybody.
 	Instruments: guitar / harmonica music is heard at the player's character on the other machines (npc.isnd).
-	Silent kills (gameplay_silent_kills): the host judges a client's stealth stab / silenced headshot with the
-	  stock rules applied to the client's proxy, and NPCs that later find such a corpse with a player nearby
-	  are alerted (stock: only for db.actor).
+	Silent kills (gameplay_silent_kills): the map authority judges stealth hits and records local and proxy kills
+	  in the stock fresh-victim table. It alerts witnesses once, using visible players on that map.
 
 	Events (ids in host numbering):
 	  npc.mine   client -> host  { s = item section, m = mode, d = delay, x, y, z, lv, gv, i = mine item (build 57) }
@@ -621,16 +620,19 @@ local function on_isnd(t)
 end
 
 -------------------------------------------------------------------------------
--- Silent kills by clients (stock rules, the proxy in place of db.actor)
+-- Silent kills (one stock victim table for both the authority's player and proxies)
 -------------------------------------------------------------------------------
-local victims = {} -- host: npc id -> { until = tss(), by = proxy id }
+local fresh_victims
 
 local function silent_kill(npc, shit, bone_id, flags)
-	local sk = _G["gameplay_silent_kills"]
-	if not (sk and sk.feature_enabled and sk.feature_enabled()) then return end
+	if not (fresh_victims and P.active() and coop_mode.leads_here()) then return end
+	local sk = gameplay_silent_kills
+	if not sk.feature_enabled() then return end
 	if not (sk.melee_enabled() or sk.gun_enabled()) then return end
 	local who = shit and shit.draftsman
-	if not (who and P.is_proxy(who)) then return end
+	if not (who and shit.power ~= 0 and P.is_proxy(who) and coop_mode.where(P.peer_of(who)) == "here") then return end
+	local victims = fresh_victims()
+	if not victims or victims[npc:id()] then return end
 	local weapon = who:active_item()
 	if not weapon then return end
 	local be = npc:best_enemy()
@@ -643,7 +645,7 @@ local function silent_kill(npc, shit, bone_id, flags)
 		h.draftsman = weapon
 		h.power = 100
 		npc:hit(h)
-		victims[npc:id()] = { till = tss() + sk.get_fresh_time(), by = who:id() }
+		victims[npc:id()] = sk.tss() + sk.get_fresh_time()
 		flags.ret_value = false
 		stats.silent = stats.silent + 1
 		local compat = _G["coop_npc_compat"]
@@ -660,33 +662,67 @@ local function silent_kill(npc, shit, bone_id, flags)
 	end
 end
 
--- An NPC that sees a fresh victim with a player near it turns on that player (stock: db.actor only).
-local function corpse_alert(npc)
-	if next(victims) == nil then return end
-	local sk = _G["gameplay_silent_kills"]
-	local now = tss()
-	local suspect = sk and sk.get_suspect_dist and sk.get_suspect_dist() or 10
-	for id, v in pairs(victims) do
+local function corpse_alert(sk, npc)
+	if not (npc and npc:alive() and sk.feature_enabled()) then return end
+	local victims = fresh_victims()
+	if not victims or next(victims) == nil then return end
+	local now = sk.tss()
+	local suspect = sk.get_suspect_dist()
+	for id, expires in pairs(victims) do
 		local dead = level.object_by_id(id)
-		if not dead or now > v.till then
+		if not dead or now >= expires then
 			victims[id] = nil
-		elseif npc:see(dead) and not game_relations.is_factions_enemies(npc:character_community(), dead:character_community()) then
+		elseif npc:see(dead) and not sk.are_enemies(npc, dead) then
 			for _, p in ipairs(P.everyone()) do
-				if npc:see(p) and p:position():distance_to(dead:position()) < suspect then
+				if coop_mode.where(P.peer_of(p)) == "here" and npc:see(p)
+					and p:position():distance_to(dead:position()) < suspect then
 					local h = hit()
 					h.type = hit.fire_wound
 					h.power = 0
 					h.impulse = 0
 					h.direction = VEC_Y
 					h.draftsman = p
-					npc:hit(h)
 					victims[id] = nil
+					npc:hit(h)
 					stats.alerts = stats.alerts + 1
 					break
 				end
 			end
 		end
 	end
+end
+
+local function install_silent_kills()
+	local C = coop_mods_core
+	local sk = C.mod("gameplay_silent_kills")
+	if not sk then return end
+	local _, holder, index = C.find_local(sk, "M")
+	if not holder then return end
+	fresh_victims = function()
+		local _, state = debug.getupvalue(holder, index) -- stock replaces M when it loads a save
+		return state and state.victims
+	end
+	local function wrap_callback(name, make)
+		local wrapped, original = C.wrap(sk, name, "silent_kills." .. name, make)
+		if not wrapped then return end
+		coop_route.inherit_source(sk[name], original)
+		C.swap_callback(name, original, sk[name])
+	end
+	wrap_callback("npc_on_before_hit", function(original)
+		return function(...)
+			if not P.active() or (coop_mode.leads_here() and coop_mode.actor_is_player()) then
+				return original(...)
+			end
+		end
+	end)
+	wrap_callback("npc_on_update", function(original)
+		return function(npc, ...)
+			if not P.active() then return original(npc, ...) end
+			if not coop_mode.leads_here() then return end
+			local ok, err = pcall(corpse_alert, sk, npc)
+			if not ok then report("corpse alert", err) end
+		end
+	end)
 end
 
 -------------------------------------------------------------------------------
@@ -803,6 +839,8 @@ function on_game_start()
 	if not installed then
 		local ok, err = pcall(install)
 		if not ok then report("install", err) end
+		ok, err = pcall(install_silent_kills)
+		if not ok then report("install silent kills", err) end
 		installed = true
 	end
 	P.on(EV_MINE, host_on_mine, "host", TAG)
@@ -812,11 +850,11 @@ function on_game_start()
 	P.on(EV_ISND, on_isnd, nil, TAG)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("npc_on_before_hit", guard("mine blame", mine_blame))
-	RegisterScriptCallback("npc_on_before_hit", guard("silent kill", silent_kill))
-	RegisterScriptCallback("npc_on_update", guard("npc update", function(npc)
-		near_mine(npc)
-		corpse_alert(npc)
-	end))
+	RegisterScriptCallback("npc_on_before_hit", function(...)
+		local ok, err = pcall(silent_kill, ...)
+		if not ok then report("silent kill", err) end
+	end)
+	RegisterScriptCallback("npc_on_update", guard("npc update", near_mine))
 	RegisterScriptCallback("monster_on_update", guard("monster update", near_mine))
 	RegisterScriptCallback("save_state", save_state)
 	RegisterScriptCallback("load_state", load_state)

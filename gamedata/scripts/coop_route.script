@@ -38,6 +38,7 @@
 		coop_route.wrapper_of(callback, fn) -> wrapper | nil
 		coop_route.intercepts() -> axr_main's callback table | nil
 		coop_route.script_of(fn) -> script key ("?" without the router)
+		coop_route.inherit_source(wrapper, fn)         route a compatibility wrapper as the handler it replaces
 		coop_route.handler_domain(fn) -> domain of a function registered as a handler, nil for any other function
 		coop_route.print_status()
 --]]
@@ -117,23 +118,25 @@ end
 -- Audit C1 / M3 (2026-10-24): a host script that makes things happen around "the player" (G.A.M.M.A.'s phantoms and
 -- psy hits around db.actor) runs its actor_on_update as each player in turn - one call per tick, the identity rotating
 -- (coop_npc_players.with_identity), so its own timers stay as they are and the clients get it too.
-local ROTATE = { xcv_phantoms = true, more_dangerous_phantoms = true }
+local ROTATE = { xcv_phantoms = true, xcv_phantoms_fix = true, more_dangerous_phantoms = true }
 local turn = {}
 
 local function as_player_in_turn(script, f, ...)
+	if not api.is_active() then return f(...) end
+	if not coop_mode.leads_here() then return end
 	local P = rawget(_G, "coop_npc_players")
-	if not (P and P.everyone and P.with_identity) then return f(...) end
+	if not (P and P.everyone and P.with_identity) then return end
 	local list = P.everyone()
 	local n = #list
-	if n == 0 then
-		if P.is_map_server and P.is_map_server() then return end -- its actor is a ghost, nobody is on the level
-		return f(...)
+	local i = turn[script] or 0
+	for _ = 1, n do
+		i = i % n + 1
+		local who = list[i]
+		if coop_mode.where(P.peer_of(who)) == "here" then
+			turn[script] = i
+			return P.with_identity(who, f, ...)
+		end
 	end
-	local i = (turn[script] or 0) % n + 1
-	turn[script] = i
-	local who = list[i]
-	if db.actor and who:id() == db.actor:id() then return f(...) end -- by id: game_object has no == in luabind
-	return P.with_identity(who, f, ...)
 end
 
 function _rotate_turn(script) return turn[script] end
@@ -169,9 +172,15 @@ local function guard(f, d, script, what, skip_ret, err_ret)
 	return w
 end
 
+local source = setmetatable({}, { __mode = "k" })
+
+function inherit_source(wrapper, original)
+	source[wrapper] = source[original] or original
+end
+
 -- domain, script of f for a callback; nil when the engine does not answer (the handler then stays as it is)
 local function route_of(callback, f)
-	local ok, d, script = pcall(route.of, callback, f)
+	local ok, d, script = pcall(route.of, callback, source[f] or f)
 	if ok and type(d) == "string" and counts[d] then return d, script or "?" end
 	stats.unrouted = stats.unrouted + 1
 	return nil
@@ -475,7 +484,7 @@ end
 
 function script_of(fn)
 	if not route then return "?" end
-	local ok, _, script = pcall(route.of, "", fn)
+	local ok, _, script = pcall(route.of, "", source[fn] or fn)
 	return ok and script or "?"
 end
 
