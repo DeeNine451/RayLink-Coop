@@ -18,8 +18,10 @@
 	- The Living Fire: a client's hit on Prometheus is judged for that player (his revenge burns and kills that
 	  player, not the host; the Gauss finale works for him); the revenge of stage 25 goes to the player nearest to
 	  Prometheus; the earthquake of the finale is shown on every machine.
-	- Mirage: the gravity blasts and the copies follow the player nearest to the centre of the fight.
-	- Skyfall: the Army's standing is any player's; a group that left the level sends the task back (coop_encounters).
+	- Mirage: the wave uses the triggering player's name and rank. The map's authority samples one nearby player for each
+	  mirage's appearance, weapon issue and selection. The gravity blasts follow the player nearest the fight's centre.
+	- Skyfall: the map's authority records the shooters. The world owner changes their Army standing, and each shooter loses
+	  cover on his machine. A group that left the level sends the task back (coop_encounters).
 	- Mystery of the Swamps: the ghost's blow lands on the player nearest to it.
 	- Urgent Orders, Hidden Threat, the ISG storyline of Lost to the Zone start for a player of the faction, not only for
 	  a host of it; a client joins after the stock checks of the first update, so they run again when somebody joins.
@@ -67,12 +69,13 @@ local function standing(obj)
 	return not (ok and type(life) == "string") or life == "alive"
 end
 
-local function nearest_standing(pos)
+local function nearest_standing(pos, here_only)
 	local best, best_d
 	local far_view = qc().far_seen and qc().far_seen()
 	for _, p in ipairs(C().player_objects()) do
 		-- in a far view the world server's own actor stands on another level: his coordinates mean nothing there
-		if standing(p.obj) and not (far_view and p.obj:id() == 0) then
+		if standing(p.obj) and not (far_view and p.obj:id() == 0)
+			and (not here_only or (coop_mode.where(p.peer) == "here" and coop_mode.seat_plays(p.peer))) then
 			local d = p.obj:position():distance_to_sqr(pos)
 			if not best_d or d < best_d then best, best_d = p.obj, d end
 		end
@@ -186,7 +189,8 @@ local function party_functor(name, orig)
 		local pre = tsk.stage
 		local held, failed = false, false
 		pass_stage = pre
-		if standing(db.actor) then
+		local actor_pass = name ~= "mirage_task_status_functor" or not coop_mode or coop_mode.actor_is_player()
+		if actor_pass and standing(db.actor) then
 			local r = qc().at_home(orig, tsk, task_id, ...)
 			if tsk.stage ~= pre or (r ~= nil and r ~= "fail") then
 				pass_stage = nil
@@ -344,13 +348,66 @@ end
 -- Mirage
 -------------------------------------------------------------------------------
 -- The player the fight is about: on his feet, in the fight's circle.
-local function mirage_player()
+local function mirage_player(here_only)
 	local cfg = C().mod("mirage_configs")
 	local pos = cfg and cfg.teleport_activator_center_point
 	if not pos then return nil end
-	local who, d = nearest_standing(pos)
+	local who, d = nearest_standing(pos, here_only)
 	local r = cfg.teleport_activation_distance
 	return d <= r * r and who or nil
+end
+
+-- The world task pass has already picked the player who reached this wave. Only this stock function's ALife actor
+-- lookup needs replacing: the spawn, logic setup and saved enemy list remain in the world task's context.
+local function spawn_mirages_for_player(orig)
+	return function(...)
+		if not C().active() then return orig(...) end
+		if not coop_mode.decides_world() then return end
+		local who = C().identity_obj() or (coop_mode.actor_is_player() and db.actor)
+		if not who then return end
+		local se = alife_object(who:id())
+		if not se then error("Mirage wave has no server object for its player", 0) end
+		local env = getfenv(orig)
+		setfenv(orig, setmetatable({ alife = function() return { actor = function() return se end } end }, { __index = env }))
+		local ok, err = pcall(orig, ...)
+		setfenv(orig, env)
+		if not ok then error(err, 0) end
+	end
+end
+
+local mirage_weapons = {} -- online mirage id -> the sample's weapon section and any pending issue
+
+local function mirage_gun(npc, sec)
+	local gun
+	npc:iterate_inventory(function(_, held)
+		if held:section() == sec then gun = held:id() end
+	end)
+	return gun
+end
+
+-- A map can identify its online mirages by section even while the world task's local enemy list lives elsewhere.
+-- Appearance and inventory use one read of the player. Selection uses that applied sample until the next update.
+local function sample_mirage(mi, npc)
+	if not (coop_mode.leads_here() and mi.is_mirage(npc) and npc:alive()) then return end
+	local nu = C().mod("nta_utils")
+	if not (nu and nu.actor_on_level(nu.levels.zaton)) then return end
+	local id = npc:id()
+	local who = mirage_player(true)
+	if not who then mirage_weapons[id] = nil; return end
+	local item = who:active_item()
+	local sec = item and IsWeapon(item) and not nu.is_melee(item) and item:section() or "wpn_pkp"
+	local visual = str_explode(who:get_visual_name(), "%.")[1]
+	if visual ~= str_explode(npc:get_visual_name(), "%.")[1] then npc:set_visual_name(visual) end
+	local sample = mirage_weapons[id]
+	if not sample or sample.section ~= sec then
+		sample = { section = sec }
+		mirage_weapons[id] = sample
+	end
+	local issued = sample.issued and alife_object(sample.issued)
+	if not (issued and issued.parent_id == id) and not mirage_gun(npc, sec) then
+		local created = alife_create_item(sec, npc)
+		sample.issued = created and created.id
+	end
 end
 
 local function install_mirage()
@@ -373,15 +430,30 @@ local function install_mirage()
 			end)
 		end
 	end)
-	-- The copies wear what the player at the fight wears, in one pass: the group's passes would change them in turns.
+	C().wrap(mi, "spawn_mirages", "tasks_mirage.spawn_mirages", spawn_mirages_for_player)
+	-- Copying is done with the online NPC and player on their map, outside the world task's status passes.
 	for _, name in ipairs({ "update_mirages_visual", "give_mirages_weapon" }) do
 		C().wrap(mi, name, "tasks_mirage." .. name, function(orig)
 			return function(...)
-				if not C().is_world_server() then return orig(...) end
-				local who = mirage_player()
-				if who and who:id() == db.actor:id() then return orig(...) end
+				if not C().active() then return orig(...) end
 			end
 		end)
+	end
+	local wrapped, old = C().wrap(mi, "npc_on_choose_weapon", "tasks_mirage.npc_on_choose_weapon", function(orig)
+		return function(npc, curr_wpn, flags, ...)
+			if not C().active() then return orig(npc, curr_wpn, flags, ...) end
+			if not (flags and coop_mode.leads_here() and mi.is_mirage(npc)) then return end
+			local sample = mirage_weapons[npc:id()]
+			local gun = sample and mirage_gun(npc, sample.section)
+			if gun then flags.gun_id = gun end
+		end
+	end)
+	if wrapped then
+		C().swap_callback("npc_on_choose_weapon", old, mi.npc_on_choose_weapon)
+		RegisterScriptCallback("npc_on_update", function(npc)
+			if C().active() then sample_mirage(mi, npc) end
+		end)
+		RegisterScriptCallback("npc_on_net_destroy", function(npc) mirage_weapons[npc:id()] = nil end)
 	end
 end
 
@@ -504,9 +576,123 @@ end
 -- Skyfall, Mystery of the Swamps (coop_npc_compat runs their files a second time in its on_game_start: wrapped at the first
 -- update, after it)
 -------------------------------------------------------------------------------
+local SKY_HIT, SKY_COVER = "nta_sky_hit", "nta_sky_cover"
+local SKY_HELI = "new_tasks_addon_heli_strong_static"
+local sky_hits = {} -- heli id -> one 0.1 s window; values contain character ids, never game objects
+
+local function object_id(id, minimum)
+	return type(id) == "number" and id >= minimum and id < 65535 and id % 1 == 0
+end
+
+local function skyfall_current(sky, hid)
+	local state = C().upvalue(sky.save_state, "state") or C().find_local(sky, "state")
+	return state and state.static_heli_id ~= nil and C().hid(state.static_heli_id) == hid
+end
+
+local function skyfall_lose_cover(t)
+	if not (object_id(t.c, 0) and coop_mode.actor_is_player() and db.actor and C().hid(db.actor:id()) == t.c) then return end
+	local disguise = C().mod("gameplay_disguise")
+	if disguise then disguise.set_comm(disguise.get_default_comm()) end
+	local news = C().mod("dynamic_news_helper")
+	if news then
+		news.send_tip(game.translate_string("skyfall_cover_blow_message"), game.translate_string("army"),
+			nil, nil, "ui_icon_news_trx_army", nil, "npc")
+	end
+end
+
+local function skyfall_penalize(cid)
+	local id = C().lid(cid)
+	if id == nil then return end
+	local who = coop_mode.leads_here() and level.object_by_id(id)
+	local se = alife_object(id)
+	local faction = who and who:character_community() or (se and se:community())
+	if not faction then return end
+	local reputation = C().mod("coop_reputation")
+	local goodwill = reputation.goodwill_of("army", id)
+	if goodwill == -3000 or relation_registry.community_relation(faction, "army") + goodwill <= game_relations.ENEMIES then return end
+	relation_registry.set_community_goodwill("army", id, -3000)
+	if cid == 0 and coop_mode.actor_is_player() then
+		skyfall_lose_cover({ c = cid })
+	else
+		coop_credit.to_owner(cid, SKY_COVER, { c = cid })
+	end
+end
+
+local function skyfall_apply(sky, t)
+	if t.b then sky.blow_static_heli() else skyfall_penalize(t.c) end
+end
+
+local function skyfall_fact(t, from)
+	-- The transport reserves 0x101..0x107 for map peers (coop_mapserver_rules.h). A player cannot report physics.
+	local map_peer = type(from) == "number" and from >= 0x101 and from <= 0x107 and from % 1 == 0
+	local sky = C().mod("tasks_skyfall")
+	local valid = coop_mode.decides_world() and map_peer and sky and object_id(t.o, 1) and skyfall_current(sky, t.o)
+	if valid then
+		if t.b == true then
+			valid = t.c == nil
+		else
+			local id = t.b == nil and object_id(t.c, 1) and C().lid(t.c)
+			local se = id and alife_object(id)
+			valid = se and se:section_name() == "coop_player_avatar"
+		end
+	end
+	if not coop_trust.pass("nta_sky_hit", valid, "invalid Skyfall map fact from peer %s", tostring(from)) or not valid then return end
+	skyfall_apply(sky, t)
+end
+
+local function skyfall_finish(sky, hid, batch, explode)
+	sky_hits[hid] = nil
+	if not (C().active() and coop_mode.leads_here()) then return end
+	local owns_world = coop_mode.decides_world()
+	if owns_world and not skyfall_current(sky, hid) then return end
+	local function report(t)
+		if owns_world then skyfall_apply(sky, t) else C().publish(SKY_HIT, t) end
+	end
+	for cid in pairs(batch and batch.shooters or {}) do report({ o = hid, c = cid }) end
+	if explode or (batch and batch.count > 15) then report({ o = hid, b = true }) end
+end
+
+local function skyfall_hit(sky, obj, who)
+	local hid = C().hid(obj:id())
+	if not hid or (coop_mode.decides_world() and not skyfall_current(sky, hid)) then return end
+	local batch = sky_hits[hid]
+	local timer = "skyfall_hits_" .. hid
+	local section = who:section()
+	if section == "rpg_new_blow" or section == "ied_new_blow" then
+		if batch then RemoveTimeEvent("coop_mods_nta", timer) end
+		skyfall_finish(sky, hid, batch, true)
+		return
+	end
+	local id = who:id()
+	local peer = C().peer_of(id)
+	if not (peer and coop_mode.seat_plays(peer) and coop_mode.decider(peer) == "this") then return end
+	local cid = C().hid(id)
+	if cid == nil then return end
+	if not batch then
+		batch = { count = 0, shooters = {} }
+		sky_hits[hid] = batch
+		CreateTimeEvent("coop_mods_nta", timer, 0.1, function()
+			if sky_hits[hid] == batch then skyfall_finish(sky, hid, batch, false) end
+			return true
+		end)
+	end
+	batch.count = batch.count + 1
+	batch.shooters[cid] = true
+end
+
 local function install_skyfall()
 	local sky = C().mod("tasks_skyfall")
 	if not sky then return end
+	local event = "physic_object_on_hit_callback"
+	local wrapped, old = C().wrap(sky, event, "tasks_skyfall.physic_object_on_hit_callback", function(orig)
+		return function(obj, damage, dir, who, ...)
+			if not C().active() then return orig(obj, damage, dir, who, ...) end
+			if not (coop_mode.leads_here() and obj and who) then return end
+			if obj:section() ~= SKY_HELI then return orig(obj, damage, dir, who, ...) end
+			skyfall_hit(sky, obj, who)
+		end
+	end)
+	if wrapped then C().swap_callback(event, old, sky[event]) end
 	C().wrap(sky, "is_enemies_with_military", "tasks_skyfall.is_enemies_with_military", function(orig)
 		return function(...)
 			if orig(...) then return true end
@@ -733,7 +919,8 @@ local function late_install()
 	if not ok then C().report("nta", "functors", n) else log("%d task functor(s) evaluated for the group", n) end
 	ok, n = pcall(rebind_living_fire)
 	if not ok then C().report("nta", "living fire", n) end
-	for _, s in ipairs({ { "skyfall", install_skyfall }, { "mystery", install_mystery }, { "factions", install_factions } }) do
+	for _, s in ipairs({ { "skyfall", install_skyfall }, { "mirage", install_mirage }, { "mystery", install_mystery },
+		{ "factions", install_factions } }) do
 		ok, n = pcall(s[2])
 		if not ok then C().report("nta", s[1], n) end
 	end
@@ -759,13 +946,18 @@ function on_game_start()
 	if not api then return end
 	local nu = C().mod("nta_utils")
 	if nu then
-		install_helpers(nu)
+		start_step("install_helpers", function() install_helpers(nu) end)
 		start_step("install_teleports", install_teleports)
 		start_step("install_living_fire", install_living_fire)
-		start_step("install_mirage", install_mirage)
 	end
 	start_step("install_monolith", install_monolith) -- the storyline pack comes without NTA as well
 	C().on("nta_kill", on_kill_order, "client")
+	start_step("skyfall events", function()
+		if not C().mod("tasks_skyfall") then return end
+		C().set_limit(SKY_HIT, 64, 32)
+		C().on(SKY_HIT, skyfall_fact, "world")
+		C().on(SKY_COVER, skyfall_lose_cover, "player")
+	end)
 	RegisterScriptCallback("actor_on_first_update", late_install)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	C().status_line("nta", function()
