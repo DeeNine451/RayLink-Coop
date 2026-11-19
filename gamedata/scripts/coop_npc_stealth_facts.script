@@ -1,0 +1,179 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- The player's machine sees its own movement, weapon firing and manual WCT.
+-- The level decider stamps reports on receipt with its own clock and binds
+-- them to the sender's current body. The decider reads outfit data directly.
+
+local MOTION, SHOT, WCT = "sf_motion", "sf_shot", "sf_wct"
+local POLL_MS, HEARTBEAT_MS, FRESH_MS = 100, 500, 1500
+local SHOT_MS, SHOT_BONUS = 160, 7 -- GAMMA's visual_memory_manager
+local MAX_MOVEMENT_STATE = 32767 -- actor_defs.h: bits 0 through 14
+
+local installed, report_motion, tilt_enabled, tilt_key
+local records = {}
+local next_poll = 0
+local last_motion, last_tilt, motion_due, tilt_due
+
+local function clear()
+	records = {}
+	next_poll = 0
+	last_motion, last_tilt, motion_due, tilt_due = nil, nil, nil, nil
+end
+
+local function body_here(peer)
+	if coop_mode.where(peer) ~= "here" or coop_mode.decider(peer) ~= "this" then return nil end
+	local who = coop_npc_players.object_of_peer(peer)
+	return who and who:alive() and who or nil
+end
+
+local function sender_record(from)
+	local who = body_here(from)
+	if not coop_trust.pass("sf_player", who ~= nil, "peer %s has no live character on this map", from) then return nil end
+	if not who then return nil end -- No body to attach facts to, including in log mode.
+	local id = who:id()
+	local record = records[from]
+	if not record or record.id ~= id then
+		record = { id = id }
+		records[from] = record
+	end
+	return record
+end
+
+local function valid_motion(state)
+	return type(state) == "number" and state >= 0 and state <= MAX_MOVEMENT_STATE and state % 1 == 0
+end
+
+local function on_motion(t, from)
+	local valid = valid_motion(t.state)
+	if not coop_trust.pass("sf_motion", valid, "peer %s sent an invalid movement state", from) then return end
+	local record = sender_record(from)
+	if record then
+		record.motion = valid and t.state or 0
+		record.motion_at = time_global()
+	end
+end
+
+local function on_shot(_, from)
+	local record = sender_record(from)
+	if record then record.shot_at = time_global() end
+end
+
+local function on_wct(t, from)
+	local valid = type(t.manual) == "boolean"
+	if not coop_trust.pass("sf_wct", valid, "peer %s sent an invalid manual tilt state", from) then return end
+	local record = sender_record(from)
+	if record then
+		record.manual = t.manual == true
+		record.manual_at = time_global()
+	end
+end
+
+local function fresh(at, now, duration)
+	return at ~= nil and now >= at and now - at < duration
+end
+
+function get(who)
+	if who and who:alive() then
+		local id = who:id()
+		local peer = coop_npc_players.peer_of(id)
+		local record = records[peer]
+		if record and record.id == id and coop_mode.where(peer) == "here" then
+			local now = time_global()
+			return fresh(record.motion_at, now, FRESH_MS) and record.motion or 0,
+				fresh(record.shot_at, now, SHOT_MS) and SHOT_BONUS or 0,
+				fresh(record.manual_at, now, FRESH_MS) and record.manual
+		end
+	end
+	return 0, 0, false
+end
+
+local function send(verb, t, receive)
+	if coop_mode.leads_here() then
+		receive(t, coop_mods_core.self_peer())
+		return true
+	end
+	return coop_mods_core.to_host(verb, t)
+end
+
+local function own_player()
+	if not coop_mode.actor_is_player() then return nil end
+	local who = coop_npc_players.own_actor()
+	return who and who:alive() and who or nil
+end
+
+local function update()
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + POLL_MS
+	if not coop_mods_core.active() then
+		if last_motion ~= nil or last_tilt ~= nil or next(records) ~= nil then clear() end
+		return
+	end
+	for peer, record in pairs(records) do
+		local body = body_here(peer)
+		if not body or body:id() ~= record.id then records[peer] = nil end
+	end
+	if not own_player() then return end
+	if report_motion then
+		local state = level.actor_moving_state()
+		if valid_motion(state) and (state ~= last_motion or now >= motion_due) then
+			if send(MOTION, { state = state }, on_motion) then
+				last_motion, motion_due = state, now + HEARTBEAT_MS
+			end
+		end
+	end
+	if tilt_enabled and tilt_key then
+		local manual = tilt_enabled() == true and tilt_key() == true
+		if manual ~= last_tilt or now >= tilt_due then
+			if send(WCT, { manual = manual }, on_wct) then
+				last_tilt, tilt_due = manual, now + HEARTBEAT_MS
+			end
+		end
+	end
+end
+
+local function weapon_fired(actor, weapon)
+	if not coop_mods_core.active() then return end
+	local who = own_player()
+	if not who or (actor and actor:id() ~= who:id()) then return end
+	local w = weapon or who:active_item()
+	if w and IsWeapon(w) and not IsMelee(w) and not w:weapon_is_silencer() then
+		send(SHOT, {}, on_shot)
+	end
+end
+
+local function avatar_removed(obj)
+	local id = obj:id()
+	for peer, record in pairs(records) do
+		if record.id == id then
+			records[peer] = nil
+			return
+		end
+	end
+end
+
+function install(visual, wct)
+	if installed then return end
+	report_motion = visual
+	local C = coop_mods_core
+	tilt_enabled, tilt_key = C.fn(wct, "is_tilt_enabled"), C.fn(wct, "is_tilt_key_pressed")
+	if not (report_motion or (tilt_enabled and tilt_key)) then return end
+	installed = true
+	if report_motion then
+		C.set_limit(MOTION, 12, 10)
+		C.set_limit(SHOT, 24, 24)
+		C.on(MOTION, on_motion, "host")
+		C.on(SHOT, on_shot, "host")
+		RegisterScriptCallback("actor_on_weapon_fired", weapon_fired)
+	end
+	if tilt_enabled and tilt_key then
+		C.set_limit(WCT, 12, 10)
+		C.on(WCT, on_wct, "host")
+	end
+	RegisterScriptCallback("actor_on_update", update)
+	RegisterScriptCallback("load_state", clear)
+	RegisterScriptCallback("coop_on_world_leaving", clear)
+	RegisterScriptCallback("coop_world_back", clear)
+	RegisterScriptCallback("on_level_changing", clear)
+	RegisterScriptCallback("actor_on_net_destroy", clear)
+	RegisterScriptCallback("npc_on_net_destroy", avatar_removed)
+end

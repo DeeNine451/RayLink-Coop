@@ -11,8 +11,9 @@
 	  - schemes_ai_gamma.scheme_camper / scheme_cover (G.A.M.M.A. AI Rework): asked about a proxy, they run
 	    with "the actor" = that proxy (they only recognise db.actor as the player).
 	  - night_mutants.se_obj_outside_spawn_radius: a spawn point must be outside the radius of every player.
-	  - visual_memory_manager.get_visible_value (Stealth Overhaul, only with stealth_mcm): a proxy is judged
-	    like the player.
+	  - visual_memory_manager.get_visible_value (Stealth Overhaul, only with stealth_mcm): the level decider
+	    uses the observed player's outfit, movement and shot.
+	  - Weapon Cover Tilt: the level decider also counts a proxy's manual tilt in the meeting safemode condition.
 	  - gameplay_peace_zone (Rostok Duty peace zone): crimes are tracked per player (by proxy), so a client
 	    shooting Duty does not set the host's crime bit and a client without crimes is not attacked.
 	  - Stealth Kill Detection (Catspaw): a client's silent kill judged by the host (coop_npc_world) is
@@ -1045,12 +1046,113 @@ local function client_on_stat(t)
 	pcall(game_statistics.increment_statistic, "silent_kills")
 end
 
+local jacket_multiplier = { o_medium = 2, o_sci = 2, o_light = 1.35, o_heavy = 4.5 }
+local outfit_coefficients = {} -- outfit section -> GAMMA coefficients from the local system ini
+
+local function outfit_of(who)
+	local outfit = who and who:item_in_slot(7)
+	if not outfit then return 1, 0 end
+	local section = outfit:section()
+	local coeff = outfit_coefficients[section]
+	if not coeff then
+		local kind = ini_sys:r_string_ex(section, "kind")
+		local camo = ini_sys:line_exist(section, "npc_blindness_koeff") and ini_sys:r_float(section, "npc_blindness_koeff")
+		coeff = { jacket_multiplier[kind] or 1, camo or 0 }
+		outfit_coefficients[section] = coeff
+	end
+	return coeff[1], coeff[2]
+end
+
+local function wrap_stealth_visibility(C, visual, facts)
+	local slots, env = {}, nil
+	for _, key in ipairs({ "jacketmult", "get_camo_k", "pewpewmult" }) do
+		local value, holder, index = C.find_local(visual, key)
+		if type(value) ~= "number" or not holder then return end
+		env = env or getfenv(holder)
+		if env ~= getfenv(holder) then return end
+		slots[#slots + 1] = { holder, index }
+	end
+	if type(env.IsMoveState) ~= "function" then return end
+
+	local function restore(move, saved, ok, ...)
+		rawset(env, "IsMoveState", move)
+		for i, slot in ipairs(slots) do debug.setupvalue(slot[1], slot[2], saved[i]) end
+		if not ok then error((...), 0) end
+		return ...
+	end
+
+	C.wrap(visual, "get_visible_value", "npc.stealth_facts", function(old)
+		return function(npc, who, ...)
+			if not (who and C.active() and coop_mode.leads_here()) then return old(npc, who, ...) end
+			local id = who:id()
+			local peer = P.peer_of(id)
+			local player = peer ~= nil and (id ~= 0 or coop_mode.actor_is_player()) and coop_mode.where(peer) == "here"
+			local jacket, camo = outfit_of(player and who)
+			local move, shot = facts.get(player and who)
+			local values, saved = { jacket, camo, shot }, {}
+			for i, slot in ipairs(slots) do
+				local _, value = debug.getupvalue(slot[1], slot[2])
+				saved[i] = value
+				debug.setupvalue(slot[1], slot[2], values[i])
+			end
+			-- Keep only the original formula in this scope. Its IsMoveState calls
+			-- take an explicit compare_state even after the native identity swap.
+			local move_query, previous = env.IsMoveState, rawget(env, "IsMoveState")
+			rawset(env, "IsMoveState", function(state, compare_state)
+				if compare_state == nil then compare_state = move end
+				return move_query(state, compare_state)
+			end)
+			if player then return restore(previous, saved, pcall(P.with_identity, who, old, npc, who, ...)) end
+			return restore(previous, saved, pcall(old, npc, who, ...))
+		end
+	end)
+end
+
+local pending_wct_facts
+
+local function wrap_weapon_cover_tilt(facts)
+	local C = coop_mods_core
+	-- Run after every script's startup so the existing meet proxy condition is
+	-- inside this wrapper, including its stock safemode and active-item fallback.
+	C.wrap(C.mod("xr_conditions"), "actor_is_safemode", "npc.wct_safemode", function(old)
+		return function(actor, npc, ...)
+			local safe = old(actor, npc, ...)
+			if not safe and actor and actor:id() ~= 0 and C.active() and coop_mode.leads_here() then
+				local _, _, manual = facts.get(actor)
+				if manual then return true end
+			end
+			return safe
+		end
+	end)
+end
+
+local function install_stealth_facts()
+	local C = coop_mods_core
+	local facts = C and C.mod("coop_npc_stealth_facts")
+	if not facts then return end
+	local visual = C.mod("stealth_mcm") and C.mod("visual_memory_manager")
+	local wct = C.mod("weapon_cover_tilt")
+	local ok, err = pcall(facts.install, visual ~= nil, wct)
+	if not ok then report("install stealth facts", err) end
+	if wct then pending_wct_facts = facts end
+	if visual then
+		ok, err = pcall(wrap_stealth_visibility, C, visual, facts)
+		if not ok then report("install stealth visibility", err) end
+	end
+end
+
 -------------------------------------------------------------------------------
 -- Install
 -------------------------------------------------------------------------------
 local next_tick = 0
 
 local function actor_on_update()
+	if pending_wct_facts then
+		local facts = pending_wct_facts
+		pending_wct_facts = nil
+		local ok, err = pcall(wrap_weapon_cover_tilt, facts)
+		if not ok then report("install WCT safemode", err) end
+	end
 	local now = time_global()
 	if now < next_tick then return end
 	next_tick = now + 250
@@ -1086,6 +1188,8 @@ function on_game_start()
 			local ok, err = pcall(apply_function_rewrite, r)
 			if not ok then report("rewrite " .. r.module .. "." .. r.name, err) end
 		end
+		local ok, err = pcall(install_stealth_facts)
+		if not ok then report("install stealth facts", err) end
 		local adapters = mod("coop_npc_adapters")
 		if adapters then adapters.install(P, function() return host_on and P.host_with_clients() end, applied) end
 		local phantoms = mod("coop_npc_phantoms") -- enemy audit F10
