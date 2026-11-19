@@ -17,8 +17,9 @@
 	                          - DIALOG_TAKES: a stock dialog takes it and no task line names it. Only while the info that opens the
 	                            dialog is held, and at most its number for each player (his character); the count is in the save.
 	                        "Still lacks": what this check let the group give up for that task before (round 5: kept per task
-	                        id and its taker's character; a new give of the id starts at zero only after a run that was turned
-	                        in, a cancelled or failed run's count carries over). Only what the check itself let through is
+	                        id and its taker's character; a new give of the id starts at zero after a run that was turned in,
+	                        a cancelled or failed run's count carries over for 10 minutes, round 6; round 7: until the task's
+	                        repeat_timeout passed, when it has one). Only what the check let through is
 	                        counted, so a "log" build writes exactly the lines a "refuse" build would refuse.
 	  quest_give_npc        quests.act "give_npc" (coop_quests_party.host_give_npc): a dialog hands the group's items to an NPC
 	                        because its speaker lacks them (patch_client_relocate, the Agroprom documents). The verdict and the
@@ -109,6 +110,7 @@ local EFFECT_ONCE = {
 }
 
 local ENDED_MS = 10000 -- a task that ended this long ago still counts: the dialog that ends it may take the item a moment later
+local CARRY_MS = 600000 -- round 6: a failed or cancelled run's take count carries over to the next run this long after its end
 local LOOK_MS = 1000
 
 -- task id -> taker key -> { run = weak set of the task object counted for, done = { [section] = items given up }, completed }
@@ -159,6 +161,9 @@ end
 local own = {} -- fact key -> the value this process wrote last
 local own_saved = nil -- the keys of the save's list (nil: no list)
 local own_ready = false
+-- round 6: fact key -> true: the host wrote nil there itself, or it holds a client's value the host did not take (note_own
+-- foreign); recorded() then knows there is no fact. A key the host writes again leaves the set.
+local no_fact = {}
 
 local function fact_key(k, v)
 	if type(k) ~= "string" then return false end
@@ -173,7 +178,13 @@ local function own_init()
 	if not st then return end
 	own_ready = true
 	for k, v in pairs(st.pstor or {}) do
-		if own[k] == nil and fact_key(k, v) and (own_saved == nil or own_saved[k]) then own[k] = v end
+		if own[k] == nil and fact_key(k, v) then
+			if own_saved == nil or own_saved[k] then
+				own[k] = v
+			else
+				no_fact[k] = true -- round 6: the save says this value is not the host's (a client's coop_tvd write)
+			end
+		end
 	end
 end
 
@@ -191,8 +202,10 @@ function note_own(k, v, old, from_give, foreign)
 	own_init()
 	if v == nil or foreign then
 		own[k] = nil
+		no_fact[k] = true
 	elseif from_give or not (type(v) == "table" and rawequal(v, old)) then
 		own[k] = v
+		no_fact[k] = nil
 	end
 end
 
@@ -200,6 +213,30 @@ end
 -- these vars of a client's give against the host's offer (check task_give_offer).
 function is_fact(k, v)
 	return fact_key(k, v)
+end
+
+-- Round 6 (blocker 3 of the round 5 review): what the host recorded for task fact `key`, whatever a client's coop_tvd write left in
+-- the live pstor since. Returns the value and known: known = the host has a record of the key (the value it wrote itself last; nil:
+-- it wrote nil, or the key holds a client's value it did not take as its own); not known = no record at all (a key no fact names, a
+-- save from before round 4).
+function record_of(key)
+	if type(key) ~= "string" then return nil, false end
+	own_init()
+	if own[key] ~= nil then return own[key], true end
+	if no_fact[key] then return nil, true end
+	return nil, false
+end
+
+-- Round 7 (the review of round 6: a turn-in judged by the record refused in every mode, "log" too, with no line): the record a
+-- judgement of a turn-in uses (coop_tasks host.fact_of: the fetch item, its count, a money task's price; coop_quests_fetch: the
+-- readiness, the hand-over). Only where coop_trust's check "task_var_write" (may a client's write of a running task's fact count)
+-- is "refuse": then record_of. "log" / "off": not known, so the caller reads the live pstor exactly as build 56 did, a write "log"
+-- let through included (coop_tasks writes the line at the turn-in, host.fact_line).
+function recorded(key)
+	if type(key) ~= "string" then return nil, false end
+	local okm, mode = pcall(function() return coop_trust.mode_of("task_var_write") end)
+	if not (okm and mode == "refuse") then return nil, false end
+	return record_of(key)
 end
 
 -- The value of fact `key` in the host's pstor, when the host wrote it itself; nil otherwise.
@@ -309,9 +346,17 @@ local function on_task_end(tsk, state)
 	ended[id] = { tsk = obj, till = now_ms() + ENDED_MS }
 	seen[id] = nil
 	-- round 5 (A6): a run turned in took what it asked for; the next run of the task starts its take anew
-	if state == task.completed then
-		for _, e in pairs(ledger[id] or {}) do
-			if e.run[obj] then e.completed = true end
+	for _, e in pairs(ledger[id] or {}) do
+		if e.run[obj] then
+			if state == task.completed then
+				e.completed = true
+			else
+				e.ended = now_ms() -- round 6: when it failed
+				-- round 7: and its repeat timeout, from its end in game time (ledger_of)
+				local okr, rep = pcall(function() return obj.repeat_timeout end)
+				local okg, at = pcall(function() return game.get_game_time() end)
+				e.repeat_s, e.ended_game = okr and tonumber(rep) or nil, okg and at or nil
+			end
 		end
 	end
 end
@@ -377,15 +422,35 @@ local function taker_key(id)
 	return (ok and c ~= nil) and ("c" .. tostring(c)) or "?"
 end
 
+-- Round 7 (the review of round 6): has the repeat timeout of a run that ended (ledger entry e, noted by on_task_end) passed? The stock
+-- offers a task with a repeat_timeout again only after it (task_manager: the object waits at stage 255, CRandomTask:update drops it):
+-- an honest next run comes after it, a give / cancel loop before it. nil: the run had none, or its game time cannot be read here.
+local function repeat_over(e)
+	local rep, at = tonumber(e.repeat_s), e.ended_game
+	if not (rep and rep > 0 and at ~= nil) then return nil end
+	local ok, d = pcall(function() return game.get_game_time():diffSec(at) end)
+	if not (ok and type(d) == "number") then return nil end
+	return d > rep
+end
+
 -- The ledger entry of task `id` (object tsk) for its taker `who`, moved to this run; nil when there is none (and not `create`).
+-- Round 6 (S1 of the round 5 review): a failed or cancelled run's count carries over to the next run for CARRY_MS after that run's
+-- end (its last take when the end was not seen), then the next run starts anew. The loop the carry-over stops (give, take,
+-- cancel, give again) takes seconds; an honest run after a fail comes later, and the items of the first run were used up.
+-- Round 7: a run of a task with a repeat_timeout carries over until that timeout passed (game time), not CARRY_MS: no honest run
+-- comes before it, and every run after it starts anew.
 local function ledger_of(id, who, tsk, create)
 	local per = ledger[id]
 	local e = per and per[who]
 	if e and not e.run[tsk] then
-		if e.completed then
-			e = nil -- the run before was turned in: this one starts anew
+		local over = repeat_over(e)
+		if over == nil then over = now_ms() - (e.ended or e.last or 0) > CARRY_MS end
+		if e.completed or over then
+			e = nil -- the run before was turned in, or ended long ago: this one starts anew
+			per[who] = nil
 		else
-			e.run = setmetatable({ [tsk] = true }, { __mode = "k" }) -- cancelled or failed: its count carries over
+			e.run = setmetatable({ [tsk] = true }, { __mode = "k" }) -- cancelled or failed a moment ago: its count carries over
+			e.ended, e.repeat_s, e.ended_game = nil, nil, nil
 		end
 	end
 	if not e and create then
@@ -503,6 +568,7 @@ function note_take(ticket, sec, got)
 	if not (keyable(ticket.tsk) and type(ticket.id) == "string") then return end
 	local e = ledger_of(ticket.id, ticket.who or "?", ticket.tsk, true)
 	e.done[sec] = (e.done[sec] or 0) + got
+	e.last = now_ms()
 end
 
 -------------------------------------------------------------------------------
@@ -643,7 +709,7 @@ end
 
 local function load_state(m)
 	made, made_n, free_n = {}, 0, 0
-	own, own_saved, own_ready = {}, nil, false
+	own, own_saved, own_ready, no_fact = {}, nil, false, {}
 	local facts = type(m) == "table" and m.coop_task_facts
 	if type(facts) == "table" then
 		own_saved = {}

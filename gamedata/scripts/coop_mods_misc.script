@@ -126,9 +126,9 @@ local function install_helmet_prefs()
 	end
 	personal_state("lastHelmetId", function() return chosen end, function(v, m)
 		local valid = type(v) == "number" and v >= 0 and v < 65535 and v == math.floor(v)
-		local accepted = coop_trust.pass("mods_misc_helmet_id", v == nil or valid, "invalid saved helmet id (%s)", type(v))
-		-- Ids are identities, not magnitudes: even in log mode an invalid id
-		-- must not be clamped/rounded to the id of a different inventory item.
+		-- Ids are identities, not magnitudes: an invalid id is dropped in every mode, never clamped or rounded to the id of a
+		-- different inventory item (an always-on guard, coop_trust.guard: its line says "dropped", round 6)
+		local accepted = coop_trust.guard("mods_misc_helmet_id", v == nil or valid, "invalid saved helmet id (%s)", type(v))
 		chosen = accepted and valid and v or 0
 		if v ~= nil then m.lastHelmetId = chosen end
 		setter(nil)

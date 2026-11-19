@@ -1264,7 +1264,13 @@ do
 	H.env.coop.levels.talking = function() return false end
 	C2.tm:set_task_failed("story_2")
 	pump()
-	check(story.forced_status == nil and failed("task_fail") == 1, "Server: the same while in no dialog: refused")
+	check(story.forced_status == "fail" and failed("task_fail") == 0,
+		"Server, round 6: a dialog he was in a moment ago (the host's 15 s window, as the co-op's talk_recent): goes through")
+	story.forced_status = nil
+	NOW = NOW + 16000
+	C2.tm:set_task_failed("story_2")
+	pump()
+	check(story.forced_status == nil and failed("task_fail") == 1, "Server: the same 16 s after his last dialog: refused")
 	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_recent = nil, nil, nil
 	C2.talking = false
 	trust.reset_for_test({ default = "log" })
@@ -1497,8 +1503,13 @@ do
 	req(C, "complete", "cord_2", ";sp=n779")
 	check(turned(cord) and failed("task_complete_talk") == 3, "Server: in some dialog (the partner is not reported there): ok")
 	in_dialog = false
+	NOW = NOW + 1000
 	req(C, "complete", "cord_2", ";sp=n779")
-	check(not turned(cord) and failed("task_complete_talk") == 4, "Server: in no dialog: refused")
+	check(turned(cord) and failed("task_complete_talk") == 3,
+		"Server, round 6 (S2): a turn-in 1 s after the dialog closed (z_gavrilenko_tasks_fix): the host's 15 s window, ok")
+	NOW = NOW + 16000
+	req(C, "complete", "cord_2", ";sp=n779")
+	check(not turned(cord) and failed("task_complete_talk") == 4, "Server: 16 s after his last dialog: refused")
 	H.env.coop_quests_core, H.env.coop.levels = nil, nil
 	-- the client's turn-in in a dialog names his partner
 	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and npc == 777 end
@@ -1522,7 +1533,8 @@ do
 	-- stage); the host's own check found it done; a dialog completes one named task directly (its own precondition).
 	print("== R5 B2: the Lua turn-in asks the host's own state of the task")
 	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and (npc == 777 or npc == 780) end
-	cord.status_functor, cord.stage, cord.last_check_task, cord.forced_status = "bounty_task", 0, nil, nil
+	-- (round 6: a bounty also asks its target dead, test_trust_r6_tasks; here a task of another functor)
+	cord.status_functor, cord.stage, cord.last_check_task, cord.forced_status = "fate_task", 0, nil, nil
 	trust.reset_for_test({ default = "log", task_complete = "refuse", task_complete_state = "refuse" })
 	check(H.mod.host_state_verdict("cord_2", 2, 1, false, false, true) == false, "(the engine path refuses a bounty still running)")
 	req(C, "complete", "cord_2", ";sp=n777")
@@ -1559,15 +1571,26 @@ do
 	pump()
 	local cf = H.tm.task_info.lttz_hb_task_4_1_crossfire
 	cf.status_functor = nil
+	-- round 6 (blocker 6 of the round 5 review): such a task asks its own dialog's condition, not any stage (host.DIALOG_TURN_INS;
+	-- every entry: test_trust_r6_tasks). Crossfire: at the ISG leader, the group holds Strelok's pendrive.
 	req(C, "complete", "lttz_hb_task_4_1_crossfire", ";sp=n780")
-	check(turned(cf) and failed("task_complete_state") == 2, "a task its dialog completes directly (dialogs_lostzone): ok at any stage")
+	check(not turned(cf) and failed("task_complete_state") == 3,
+		"round 6: crossfire at an NPC who is not the ISG leader, no pendrive: refused")
+	H.env.get_story_object_id = function(sid) return sid == "jup_depo_isg_leader" and 780 or nil end
+	req(C, "complete", "lttz_hb_task_4_1_crossfire", ";sp=n780")
+	check(not turned(cf) and failed("task_complete_state") == 4, "round 6: at the ISG leader, nobody holds the pendrive: refused")
+	local pendrive = H.give_item(proxy_on_host, "strelok_pendrive")
+	req(C, "complete", "lttz_hb_task_4_1_crossfire", ";sp=n780")
+	check(turned(cf) and failed("task_complete_state") == 4, "round 6: at the ISG leader, the pendrive with the group: ok")
+	H.env.alife_release_id(pendrive._id)
+	H.env.get_story_object_id = nil
 	-- an item task is the money and item checks' (a DRX money task: the taker's ledger pays it)
 	cord.status_functor = "drx_sl_money_task_status"
 	req(C, "complete", "cord_2", ";sp=n777")
-	check(turned(cord) and failed("task_complete_state") == 2 and trust.status().task_complete_state.checked == 6,
+	check(turned(cord) and failed("task_complete_state") == 4 and trust.status().task_complete_state.checked == 8,
 		"a money task: not judged by its state (" .. trust.status().task_complete_state.checked .. " checked)")
 	-- log mode: through as before, a line
-	cord.status_functor = "bounty_task"
+	cord.status_functor = "fate_task"
 	trust.reset_for_test({ default = "log" })
 	req(C, "complete", "cord_2", ";sp=n777")
 	check(turned(cord) and lines("task_complete_state") >= 3, "log mode: a turn-in of a task still running goes through, logged")

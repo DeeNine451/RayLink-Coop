@@ -52,7 +52,7 @@ local SIM_OVERRIDES = {
 
 local stats = {
 	req_out = 0, req_in = 0, refused = 0, offers_in = 0, used = 0, local_gen = 0, shown = 0,
-	after_give = 0, pinned = 0, rerun = 0, far_empty = 0,
+	after_give = 0, pinned = 0, rerun = 0, far_empty = 0, made = 0, made_in = 0,
 }
 
 local function now() return time_global() end
@@ -249,7 +249,7 @@ local function character_of(peer)
 	return ok and c or nil
 end
 
-local function note_offer(peer, npc_id, tid, vars)
+local function note_offer(peer, npc_id, tid, vars, bounty)
 	local s = qc.ser(vars or {})
 	if not (type(peer) == "number" and type(tid) == "string" and s) then return end
 	local mine = made_offers[peer]
@@ -263,7 +263,8 @@ local function note_offer(peer, npc_id, tid, vars)
 		mine.tasks[tid] = per
 	end
 	if per[npc_id] == nil then mine.n = mine.n + 1 end
-	per[npc_id] = { s = s, at = now(), char = character_of(peer) }
+	-- round 6 (blocker 2 of the round 5 review): the bounty target the offer named is kept too (coop_tasks judges a give's t.bt)
+	per[npc_id] = { s = s, at = now(), char = character_of(peer), bt = type(bounty) == "number" and bounty or nil }
 	while mine.n > OFFERS_MAX do
 		local old_t, old_n, old_at = nil, nil, nil
 		for t, list in pairs(mine.tasks) do
@@ -278,22 +279,43 @@ local function note_offer(peer, npc_id, tid, vars)
 	end
 end
 
--- Host: copies of the vars of the offers of task `tid` this process made player `peer` (newest first); nil: none.
+-- Host: copies of the vars of the offers of task `tid` this process made player `peer` (newest first); nil: none. Second value
+-- (round 6): per offer, in the same order, { npc = the NPC that made it, bt = the bounty target it named or nil }.
 function offers_of(peer, tid)
 	local mine = made_offers[peer]
 	local per = mine and mine.tasks[tid]
 	if not per then return nil end
 	local char, t, list = character_of(peer), now(), {}
-	for _, o in pairs(per) do
-		if t - o.at <= OFFER_KEEP_MS and (o.char == nil or char == nil or o.char == char) then list[#list + 1] = o end
+	for npc_id, o in pairs(per) do
+		if t - o.at <= OFFER_KEEP_MS and (o.char == nil or char == nil or o.char == char) then
+			list[#list + 1] = { o = o, npc = npc_id }
+		end
 	end
-	table.sort(list, function(a, b) return a.at > b.at end)
-	local out = {}
-	for _, o in ipairs(list) do
-		local v = qc.des(o.s)
-		if type(v) == "table" then out[#out + 1] = v end
+	table.sort(list, function(a, b) return a.o.at > b.o.at end)
+	local out, meta = {}, {}
+	for _, e in ipairs(list) do
+		local v = qc.des(e.o.s)
+		if type(v) == "table" then
+			out[#out + 1] = v
+			meta[#meta + 1] = { npc = e.npc, bt = e.o.bt }
+		end
 	end
-	return #out > 0 and out or nil
+	if #out == 0 then return nil end
+	return out, meta
+end
+
+-- Round 6: the host refused player `peer`'s request for the offers of NPC `npc_id` (his machine makes them itself now): the
+-- offers of that NPC kept for him go.
+function forget_offers(peer, npc_id)
+	local mine = made_offers[peer]
+	if not (mine and npc_id) then return end
+	for tid, per in pairs(mine.tasks) do
+		if per[npc_id] ~= nil then
+			per[npc_id] = nil
+			mine.n = mine.n - 1
+			if next(per) == nil then mine.tasks[tid] = nil end
+		end
+	end
 end
 
 -- Host: task `tid` was given to player `peer`: his offers of it are spent.
@@ -317,10 +339,17 @@ end
 local function offer_here(t, from)
 	stats.req_in = stats.req_in + 1
 	local npc_id, seq = tonumber(t.n), tonumber(t.q) or 0
+	-- round 7 (the review of round 6: bounds on every number from a client): the NPC is a whole object id 1..65534, else none; the
+	-- sequence number his answer carries back is a whole number too
+	if not (npc_id and npc_id >= 1 and npc_id <= 65534 and npc_id == math.floor(npc_id)) then npc_id = nil end
+	if not (seq >= 0 and seq <= 1e9 and seq == math.floor(seq)) then seq = 0 end
 	local kind = t.k == "sim" and "sim" or "dyn"
 	local npc = npc_id and level.object_by_id(npc_id)
 	local function refuse(why)
 		stats.refused = stats.refused + 1
+		-- round 6 (S3 of the round 5 review): his machine now makes this NPC's offers itself; an older offer of the host kept for
+		-- him is no longer what his dialog shows
+		forget_offers(from, npc_id)
 		qc.send("offer", { n = npc_id or 0, q = seq, k = kind, e = why, l = "" }, from)
 	end
 	if not (npc and talker(npc) and npc:alive()) then return refuse("npc") end
@@ -333,20 +362,25 @@ local function offer_here(t, from)
 
 	local list, data = host_generate(npc, kind == "sim")
 	if not list then return refuse("error") end
+	local far = over_far_view()
+	-- round 7 (P-S3b of the round 6 review): an empty list made over the far view is no answer to his machine, which makes this
+	-- NPC's offers itself (client_on_offer): as after a refusal, an older offer of the NPC kept for him is no longer what his dialog
+	-- shows
+	if #list == 0 and far then forget_offers(from, npc_id) end
 	for _, tid in ipairs(list) do
 		local d = data[tid] or {}
 		local msg = { n = npc_id, q = seq, i = tid }
 		local v = qc.ser(d.vars or {})
 		if v and #v <= qc.MAX_BLOB then
 			msg.v = v
-			note_offer(from, npc_id, tid, d.vars) -- round 5: what he was offered (coop_tasks task_give_offer)
+			note_offer(from, npc_id, tid, d.vars, d.bounty) -- round 5: what he was offered (coop_tasks task_give_offer)
 		end
 		local m = qc.ser(d.msgs or {})
 		if m and #m <= 4000 then msg.m = m end
 		if d.bounty then msg.bt = d.bounty end
 		qc.send("offer_t", msg, from)
 	end
-	qc.send("offer", { n = npc_id, q = seq, k = kind, l = table_concat(list, ","), c = #list, f = over_far_view() and 1 or nil }, from)
+	qc.send("offer", { n = npc_id, q = seq, k = kind, l = table_concat(list, ","), c = #list, f = far and 1 or nil }, from)
 end
 
 -------------------------------------------------------------------------------
@@ -737,9 +771,10 @@ local function pin_squad(squad_id, stay)
 	return true
 end
 
--- The giver as a talking NPC for on_job_descr effects (a squad gives through its commander).
+-- The giver as a talking NPC for on_job_descr effects (a squad gives through its commander). Round 7 (P-SEC of the round 6 review):
+-- a giver that is no whole object id 1..65534 is none (coop_tasks bounds the request too).
 local function giver_npc(giver)
-	if type(giver) ~= "number" then return nil end
+	if type(giver) ~= "number" or not (giver >= 1 and giver <= 65534 and giver == math.floor(giver)) then return nil end
 	local o = level.object_by_id(giver)
 	if o and talker(o) then return o end
 	local se = alife_object(giver)
@@ -777,14 +812,303 @@ function host_after_give(id, from, giver, got_vars)
 end
 
 -------------------------------------------------------------------------------
+-- Host: a give with no offer of its giver (round 6, blockers 2, 4 and 5 of the round 5 review)
+-------------------------------------------------------------------------------
+-- His machine made the task's vars itself: DRX's storyline, mechanic and change-faction dialogs (the host never offers them:
+-- generate_available_tasks lists only "<task_section>_task_*"), an offer the host refused or that expired, an empty list over the far
+-- view (Server). The stock generators pick at random, so the host cannot make the same pick; it can tell a pick the generator can
+-- make from one it cannot. The three fetch generators of the build (tasks_fetch, every fetch_func of the stock and G.A.M.M.A. task
+-- files) and the bounty setup (tasks_bounty.setup_bounty_task) are known here; coop_tasks judges with this (check task_give_offer)
+-- and, in "refuse", has the host make its own (host_make) where his pick is none the generator makes.
+
+local fetch_cats = nil -- category of items\settings\fetch_list.ltx -> { [section] = true }; false: not readable here
+
+-- The fetch list tasks_fetch reads (its on_game_start): [fetch_list] names the categories, each category lists its sections.
+local function categories()
+	if fetch_cats ~= nil then return fetch_cats or nil end
+	fetch_cats = false
+	local ok, cats = pcall(function()
+		local f = rawget(_G, "ini_file")
+		local ini = type(f) == "function" and f("items\\settings\\fetch_list.ltx") or nil
+		if not ini then return nil end
+		local out = {}
+		for i = 0, ini:line_count("fetch_list") - 1 do
+			local _, cat = ini:r_line_ex("fetch_list", i, "", "")
+			if type(cat) == "string" and cat ~= "" and ini:section_exist(cat) then
+				local set = {}
+				for j = 0, ini:line_count(cat) - 1 do
+					local _, sec = ini:r_line_ex(cat, j, "", "")
+					if type(sec) == "string" then set[sec] = true end
+				end
+				out[cat] = set
+			end
+		end
+		return out
+	end)
+	if ok and type(cats) == "table" then fetch_cats = cats end
+	return fetch_cats or nil
+end
+
+-- Can tasks_fetch.setup_fetch_task pick section `sec` for items type `kind`? Its lists, by kind: the category of that name;
+-- supplies adds drink; weapons takes weapons or a weapons_<rank / faction> list; repair the two stock kits or its list; patch_general
+-- a faction's patch. Membership only: the rank tiers narrow a list, they add nothing. nil: the list cannot be read here.
+local function fetch_kind_has(kind, sec)
+	if kind == "patch_general" then return sec:sub(-6) == "_patch" end
+	local cats = categories()
+	if not cats then return nil end
+	local function in_cat(name) return type(cats[name]) == "table" and cats[name][sec] == true end
+	if kind == "supplies" then return in_cat("supplies") or in_cat("drink") end
+	if kind == "repair" then return sec == "sharpening_stones" or sec == "sewing_kit_b" or in_cat("repair") end
+	if kind == "weapons" then
+		if in_cat("weapons") then return true end
+		for name, set in pairs(cats) do
+			if name:sub(1, 8) == "weapons_" and set[sec] == true then return true end
+		end
+		return false
+	end
+	return in_cat(kind)
+end
+
+local function params_of(line, fname)
+	local args = type(line) == "string" and line:match("=" .. fname .. "%(([^%)]*)%)")
+	if not args then return nil end
+	local p = {}
+	for x in (args .. ":"):gmatch("([^:]*):") do p[#p + 1] = x end
+	return p
+end
+
+local function count_in(n, lo, hi)
+	n = tonumber(n) or 1
+	return n == math.floor(n) and n >= (tonumber(lo) or 1) and n <= (tonumber(hi) or tonumber(lo) or 1)
+end
+
+-- The fetch part: ok (true / false / nil = no known generator), why, the keys it judged.
+local function fetch_pick(tid, vars)
+	local line = r_str(tid, "fetch_func")
+	if not line then return true, nil, {} end
+	for _, fname in ipairs({ "setup_fetch_task", "setup_generic_fetch_task", "setup_supplies_fetch_task_lostzone_patch" }) do
+		local p = params_of(line, fname)
+		if p and p[1] and p[1] ~= "" then
+			local var = p[1]
+			local keys = { var, var .. "_count" }
+			local sec, cnt = vars[var], vars[var .. "_count"]
+			if type(sec) ~= "string" then
+				return false, string.format("his %s is %s, no section", var, tostring(sec)), keys
+			end
+			local fits, why
+			if fname == "setup_fetch_task" then
+				fits = fetch_kind_has(p[2] or "", sec)
+				if fits == nil then return nil, "the fetch list is not readable here", keys end
+				fits = fits and count_in(cnt, p[3], p[4] or p[3])
+				why = string.format("%s x %s is no pick of setup_fetch_task(%s: %s, %s..%s)", sec, tostring(cnt or 1), var,
+					tostring(p[2]), tostring(p[3] or 1), tostring(p[4] or p[3] or 1))
+			elseif fname == "setup_generic_fetch_task" then
+				fits = false
+				for i = 3, #p do if p[i] == sec then fits = true end end
+				fits = fits and (tonumber(cnt) or 1) == (tonumber(p[2]) or 1)
+				why = string.format("%s x %s is no pick of setup_generic_fetch_task(%s)", sec, tostring(cnt or 1), var)
+			else
+				fits = sec:sub(-6) == "_patch" and count_in(cnt, p[2], p[3])
+				why = string.format("%s x %s is no patch of setup_supplies_fetch_task_lostzone_patch(%s)", sec, tostring(cnt or 1), var)
+			end
+			return fits == true, not fits and why or nil, keys
+		end
+	end
+	return nil, "its fetch_func is no generator known here", {}
+end
+
+-- Could tasks_bounty.setup_bounty_task (params p: id, all factions but p[4] or only p[4..], near) have picked `target`? A living
+-- simulation stalker of those factions, no player's character. The world server's ALife records answer it in a server too.
+local function bounty_target_ok(p, target)
+	local se = type(target) == "number" and target > 0 and target < 65535 and alife_object(target) or nil
+	if not se then return false, string.format("target %s is no object", tostring(target)) end
+	local okl, alive = pcall(function() return se:alive() end)
+	if okl and alive == false then return false, string.format("target %d is dead", target) end
+	if qc.is_character_id and qc.is_character_id(target) then return false, string.format("target %d is a player", target) end
+	local oks, sec = pcall(function() return se:section_name() end)
+	if oks and type(sec) == "string" and not sec:find("sim_default", 1, true) then
+		return false, string.format("target %d (%s) is no simulation stalker", target, sec)
+	end
+	local f = rawget(_G, "alife_character_community")
+	local okc, comm = pcall(function() return type(f) == "function" and f(se) or nil end)
+	if okc and type(comm) == "string" then
+		local listed = false
+		if p[2] == "true" then
+			listed = comm == p[4] -- every faction but p[4]
+		else
+			for i = 4, #p do if p[i] == comm then listed = true end end
+		end
+		if (p[2] == "true" and listed) or (p[2] ~= "true" and not listed) then
+			return false, string.format("target %d is of %s, no faction the task names", target, comm)
+		end
+	end
+	return true, nil
+end
+
+-- The bounty part: ok (true / false / nil = not a target this checks), why, the keys it judged (the task's table var and "bt"),
+-- job (the task's on_job_descr would make them: a bounty setup, a delivery). Other tables with a target (a stash, a measure, a
+-- fate task) are read by their own functors on the host and by no check: not judged.
+local function bounty_pick(tid, vars, bt)
+	local tv = vars[tid]
+	local named = type(tv) == "table" and rawget(tv, "target_id") or nil
+	local p = params_of(r_str(tid, "on_job_descr"), "setup_bounty_task")
+	if not p then
+		if type(tv) == "table" and rawget(tv, "item_1_sec") ~= nil then
+			return nil, "a delivery his machine made (the host has no such parcel)", { tid }, true
+		end
+		if bt ~= nil then return false, "the task is no bounty, he names a target", { "bt" }, false end
+		return true, nil, {}, false
+	end
+	-- round 7 (P-STALE of the round 6 review): a bounty give that names no target is no pick of its setup (setup_bounty_task names
+	-- one, or finds none and the task is not offered: TaskBlacklist). The host would keep the last run's target (bounties_by_id and
+	-- the task's table survive its end; a dead one turns the new run in at once): "refuse" has the host run the setup itself
+	if bt == nil and named == nil then
+		return false, "a bounty give that names no target (the host keeps the last run's)", { tid, "bt" }, true
+	end
+	local target = bt
+	if target == nil then target = named end
+	if named ~= nil and bt ~= nil and named ~= bt then
+		return false, string.format("his target %s and the task's var %s differ", tostring(bt), tostring(named)), { tid, "bt" }, true
+	end
+	local ok, why = bounty_target_ok(p, tonumber(target))
+	return ok, why, { tid, "bt" }, true
+end
+
+-- Host: may the fact vars `vars` and the bounty target `bt` of a give of task `tid` with no offer of its giver be his machine's own
+-- stock pick? -> ok (true / false; nil: no generator known here), why, judged (key -> "fetch" | "job": the part of the generation
+-- that makes it; "bt" for the target), want (what host_make would make: { fetch, job }; no_bt: drop his target).
+function own_pick(tid, vars, bt)
+	vars = type(vars) == "table" and vars or {}
+	local judged, want = {}, {}
+	local okf, whyf, kf = fetch_pick(tid, vars)
+	local okb, whyb, kb, job = bounty_pick(tid, vars, bt)
+	for _, k in ipairs(kf) do judged[k] = "fetch" end -- the part of the generation that makes the key (want)
+	for _, k in ipairs(kb) do judged[k] = "job" end
+	if okf ~= true then want.fetch = true end
+	if okb ~= true and job then want.job = true end
+	if okb == false and not job then want.no_bt = true end -- a target named for a task that is no bounty: dropped
+	-- a fetch or target key the task's generators do not make (no fetch_func, another var name): his word alone ("none": the host
+	-- has nothing to make for it, "refuse" does not write it). Round 7 (the review of round 6): a key the task's on_init writes itself
+	-- (pstor_set: a DRX money task's price, which his pstor may keep from the last run) is out of the judgement ("init": no line,
+	-- written as his word, never as the host's fact; the on_init writes the host's own right after). The var of a fetch_func that is
+	-- no generator known here is neither: that generator makes it (not judged, no knowledge).
+	local fvar = r_str(tid, "fetch_func") and fetch_var_of(tid) or nil
+	local inits = {}
+	for k in tostring(r_str(tid, "on_init") or ""):gmatch("pstor_set%(%s*([^:%)%s]+)") do inits[k] = true end
+	local whyn = nil
+	for k in pairs(vars) do
+		if judged[k] == nil and type(k) == "string" and k ~= tid and k ~= fvar and k ~= (fvar and fvar .. "_count")
+			and (k:sub(-6) == "_fetch" or k:sub(-12) == "_fetch_count" or k:sub(-10) == "_target_id") then
+			if inits[k] then
+				judged[k] = "init"
+			else
+				judged[k] = "none"
+				whyn = whyn or string.format("no generator of the task makes his %s", k)
+			end
+		end
+	end
+	if okf == false or okb == false or whyn then return false, whyf or whyb or whyn, judged, want end
+	if okf == nil or okb == nil then return nil, whyf or whyb, judged, want end
+	return true, nil, judged, want
+end
+
+-- Host: the task's own generation, run here as its dialog would: the fetch item (trigger_fetch_func) and / or on_job_descr (a
+-- bounty target), with NPC `npc_id` of his talk (checked by the caller) or the giver (a squad gives through its commander) as the
+-- speaker. Writes the host's pstor (its own facts) and the bounty table; the task's state sent to the players carries them back.
+-- -> { vars = the task's vars now, bounty } or nil, why.
+-- Round 7: and the lines its dialog would have drawn (msgs: the bounty's target, captured as the offers capture them; fetch: the
+-- "needs: X" line, which the player's machine draws in his language), for tell_made.
+function host_make(tid, npc_id, giver, want)
+	local npc = type(npc_id) == "number" and level.object_by_id(npc_id) or nil
+	npc = npc or giver_npc(tonumber(giver))
+	if not npc then return nil, "no NPC of the give is here to make it" end
+	local msgs = {}
+	local ok, err = with_talk(npc, function()
+		if want and want.job then
+			local on_jd = r_str(tid, "on_job_descr")
+			local cond = on_jd and xr_logic.parse_condlist(db.actor, "task_manager", "condlist", on_jd)
+			cap.on, cap.msgs = true, msgs
+			local okc, errc = pcall(function()
+				if cond then xr_logic.pick_section_from_condlist(db.actor, db.actor, cond) end
+			end)
+			cap.on, cap.msgs = false, nil
+			if not okc then error(errc, 0) end
+		end
+		local a = atm()
+		if want and want.fetch and r_str(tid, "fetch_func") and a and a.trigger_fetch_func then a.trigger_fetch_func(tid) end
+	end)
+	if not ok then return nil, tostring(err) end
+	stats.made = stats.made + 1
+	local a = atm()
+	local b = a and a.bounties_by_id
+	local vars = task_vars(tid)
+	local fetch = nil
+	if want and want.fetch and r_str(tid, "fetch_func") then
+		local var = fetch_var_of(tid)
+		if type(vars[var]) == "string" then fetch = { var = var, sec = vars[var], cnt = tonumber(vars[var .. "_count"]) or 1 } end
+	end
+	return { vars = vars, bounty = type(b) == "table" and tonumber(b[tid]) or nil, msgs = msgs, fetch = fetch }
+end
+
+-- Round 7 (the review of round 6): in "refuse" the host made its own pick of task `tid` in place of what player `peer`'s dialog
+-- said (coop_tasks host.give_own). His journal gets the host's vars with the task's state; this sends him the lines his dialog would
+-- have drawn for it (made: host_make's answer), so the dialog and the journal agree. Event quests.made: i = task, m = the captured
+-- talk lines, fv / fs / fc = the fetch var, its section and count.
+function tell_made(peer, tid, made)
+	if not (type(peer) == "number" and peer > 0 and peer < 0x100 and type(tid) == "string" and type(made) == "table") then return end
+	local msg = { i = tid }
+	local m = qc.ser(made.msgs or {})
+	if m and #m <= 4000 then msg.m = m end
+	local f = made.fetch
+	if type(f) == "table" and type(f.var) == "string" and type(f.sec) == "string" then
+		msg.fv, msg.fs, msg.fc = f.var, f.sec, tonumber(f.cnt) or 1
+	end
+	if not (msg.m or msg.fs) then return end
+	qc.send("made", msg, peer)
+end
+
+-- Client: the host's own pick of a task he just took (tell_made): the lines, in the dialog when it is open, else as news.
+local function client_on_made(t, from)
+	-- only the deciding process (peer 0) sends it, and only to the player whose give it was (no question of the mode here)
+	if from ~= 0 or not db.actor or type(t.i) ~= "string" or t.i == "" then return end
+	local d = { msgs = {} }
+	local m = type(t.m) == "string" and qc.des(t.m) or nil
+	for i = 1, math.min(type(m) == "table" and #m or 0, MAX_MSGS) do
+		local x = m[i]
+		if type(x) == "table" then
+			d.msgs[#d.msgs + 1] = { c = tostring(x.c or ""), t = tostring(x.t or ""), i = tostring(x.i or ""),
+				p = type(x.p) == "string" and x.p ~= "" and x.p or "iconed_answer_item" }
+		end
+	end
+	local fetch = nil
+	if type(t.fv) == "string" and type(t.fs) == "string" and t.fs ~= "" then
+		local cnt = tonumber(t.fc) or 1
+		if not (cnt >= 1 and cnt <= 1000 and cnt == math.floor(cnt)) then cnt = 1 end
+		fetch = { var = t.fv, sec = t.fs, cnt = cnt }
+	end
+	stats.made_in = stats.made_in + 1
+	local okt, talking = pcall(function() return db.actor:is_talking() end)
+	if okt and talking then
+		show_lines(t.i, d, fetch)
+		return
+	end
+	for _, x in ipairs(d.msgs) do pcall(db.actor.give_game_news, db.actor, x.c, x.t, x.i, 0, 5000) end
+	if fetch then
+		local okn, name = pcall(function() return ui_item.get_sec_name(fetch.sec) end)
+		local text = (okn and type(name) == "string" and name or fetch.sec) .. " (x" .. tostring(fetch.cnt) .. ")"
+		pcall(db.actor.give_game_news, db.actor, game.translate_string("ui_inv_needs") .. ":", text, "ui_inGame2_D_Sisshik", 0, 5000)
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Status, start
 -------------------------------------------------------------------------------
 function print_status()
 	local n = 0
 	for _ in pairs(offers) do n = n + 1 end
-	qc.log(TAG, "requests out %d in %d refused %d | offers in %d (%d empty over the far view) used %d, local lists %d, shown %d | %d NPC offers kept | after give %d, squads pinned %d, host on_job_descr %d",
+	qc.log(TAG, "requests out %d in %d refused %d | offers in %d (%d empty over the far view) used %d, local lists %d, shown %d | %d NPC offers kept | after give %d, squads pinned %d, host on_job_descr %d | gives the host made itself %d, its picks shown here %d",
 		stats.req_out, stats.req_in, stats.refused, stats.offers_in, stats.far_empty, stats.used, stats.local_gen, stats.shown, n,
-		stats.after_give, stats.pinned, stats.rerun)
+		stats.after_give, stats.pinned, stats.rerun, stats.made, stats.made_in)
 end
 
 local installed = false
@@ -804,6 +1128,7 @@ function on_game_start()
 	qc.on("offer_req", host_on_offer_req, TAG)
 	qc.on("offer_t", client_on_offer_t, TAG)
 	qc.on("offer", client_on_offer, TAG)
+	qc.on("made", client_on_made, TAG) -- round 7: the host's own pick of a task he took (tell_made)
 	RegisterScriptCallback("GUI_on_show", on_gui_show)
 	-- after every script's on_game_start: these wrappers are the last link of any mod's chain
 	RegisterScriptCallback("actor_on_first_update", install)

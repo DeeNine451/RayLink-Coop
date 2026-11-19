@@ -397,7 +397,10 @@ local function host_fx(from, t)
 		qc.log(TAG, "! host effect '%s' from #%s refused", tostring(t.f), tostring(from))
 		return
 	end
-	local npc = tonumber(t.n) and level.object_by_id(tonumber(t.n)) or nil
+	-- round 7 (the review of round 6: bounds on every number from a client): the NPC is a whole object id 1..65534, else none
+	local nid = tonumber(t.n)
+	if not (nid and nid >= 1 and nid <= 65534 and nid == math_floor(nid)) then nid = nil end
+	local npc = nid and level.object_by_id(nid) or nil
 	-- TZ v2 6.4 row 3: a quest item of the white list is made once per world, the other things it makes once per world or per run
 	-- of their task (coop_quests_trust; the host's save keeps the list). Noted after the effect returned without an error.
 	local qt = qc.mod("coop_quests_trust")

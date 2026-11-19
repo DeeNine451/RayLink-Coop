@@ -976,17 +976,25 @@ do
 	ask("take", { s = "bread", n = 1 })
 	check(Hm.count(Hm.actor, "bread") == 0, "quest_take refuse: the bread of the host's offer is a fact, taken")
 	drop_task("offer_f")
-	-- the PDA board shows the offers of several NPCs; his pstor has the last one it drew, whoever he takes it from
+	-- the PDA board shows the offers of several NPCs; the row he takes is drawn from its own NPC's offer (prepare_task), and a
+	-- dialog shows its NPC's offer
 	offered_at(npc_c)
 	offered_at(npc2_c)
 	check(cps().offer_f_fetch == "salt", "(two NPCs offer it: the trader's salt is in his pstor)")
-	give_it("offer_f", 750)
+	give_it("offer_f", 751)
 	check(hps().offer_f_fetch == "salt" and trust_lines(Hm, "task_give_offer") == 0,
-		"the vars of any offer the host made him: held")
+		"the vars of the offer of the NPC who gives it: held")
+	drop_task("offer_f")
+	-- round 6 (S3 of the round 5 review): only the offers of the giver t.g count
+	offered_at(npc_c)
+	offered_at(npc2_c)
+	give_it("offer_f", 750)
+	check(hps().offer_f_fetch == "bread" and trust_lines(Hm, "task_give_offer") == 1,
+		"round 6: the trader's offer is no offer of the barman, who gives it: refuse writes the barman's own (bread)")
 	drop_task("offer_f")
 	-- the offer is spent by the give: the same vars given again need a new offer
 	give_it("offer_f", 750)
-	check(trust_lines(Hm, "task_give_offer") == 1 and last_trust(Hm, "task_give_offer"):find("no offer", 1, true) ~= nil,
+	check(trust_lines(Hm, "task_give_offer") == 2 and last_trust(Hm, "task_give_offer"):find("no offer", 1, true) ~= nil,
 		"an offer is spent by its give: a second give of it is no offer's")
 	drop_task("offer_f")
 	Hm.env.coop_trust.reset_for_test(nil)
@@ -1013,13 +1021,14 @@ do
 	for _ = 1, 5 do Hm.give_item(Hm.actor, "wpn_gauss") end
 	ask("take", { s = "wpn_gauss", n = 5 })
 	check(Hm.count(Hm.actor, "wpn_gauss") == 5, "refuse: no task asks the group for its rifles (5 left)")
-	-- a fact var the offer never made (a count added to a generic fetch) is not written at all
+	-- a fact var the offer never made (a leftover of an older offer in his pstor: put_vars never deletes) is not written at all;
+	-- round 6 (S4 of the round 5 review): and out of the judgement, no line
 	drop_task("offer_f")
 	offered_at(npc_c)
 	cps().offer_f_target_id = 760
 	give_it("offer_f", 750)
-	check(hps().offer_f_target_id == nil and trust_lines(Hm, "task_give_offer") == 3,
-		"refuse: a fact var the host's offer has not is not written")
+	check(hps().offer_f_target_id == nil and trust_lines(Hm, "task_give_offer") == 2,
+		"refuse: a fact var the giver's offer has not is not written, and writes no line")
 	cps().offer_f_target_id = nil
 	drop_task("offer_f")
 	Hm.env.coop_trust.reset_for_test(nil)
@@ -1047,8 +1056,8 @@ do
 	drop_task("drx_sl_forge_t")
 	Hm.env.coop_trust.reset_for_test({ default = "log", quest_give_npc = "refuse", quest_take = "refuse", task_give_offer = "refuse" })
 	give_it("drx_sl_forge_t", 750)
-	check(Hm.tm.task_info.drx_sl_forge_t ~= nil and hps().drx_sl_forge_t_fetch == "wpn_gauss",
-		"refuse: given, his vars written (his task runs as his dialog showed it)")
+	check(Hm.tm.task_info.drx_sl_forge_t ~= nil and hps().drx_sl_forge_t_fetch == nil,
+		"refuse, round 6: given; a fetch no generator of the task makes (it has no fetch_func) is not written")
 	for _ = 1, 3 do Hm.give_item(Hm.actor, "wpn_gauss") end
 	before = Hm.count(npc_h, "wpn_gauss")
 	give_npc("wpn_gauss", 3)
@@ -1132,6 +1141,30 @@ do
 	check(Hm.spawned[#Hm.spawned] == "drx_x18_documents", "that one is not noted: a client's ask makes it")
 	fire(Hm, "load_state", {})
 	Hm.env.coop_trust.reset_for_test(nil)
+end
+
+-------------------------------------------------------------------------------
+-- Round 7 (the review of round 6: bounds on every number from a client): the NPC of an fx ask and of an offer request is a whole
+-- object id 1..65534 before any engine lookup.
+-------------------------------------------------------------------------------
+print("== R7: the NPC id of an fx ask and of an offer request is bounded")
+do
+	fresh()
+	fire(Hm, "load_state", {})
+	local seen = {}
+	local obi = Hm.env.level.object_by_id
+	Hm.env.level.object_by_id = function(x)
+		if type(x) == "number" and not (x >= 0 and x < 65535 and x == math.floor(x)) then seen[#seen + 1] = tostring(x) end
+		return obi(x)
+	end
+	for _, n in ipairs({ 1e309, -1e309, 70000.5, -3, 0.5 }) do
+		ask("fx", { f = "spawn_item_at_pos", p1 = "drx_x8_documents", n = n })
+		Cm.env.coop.send_event("quests.offer_req", "k=sdyn;n=n" .. tostring(n) .. ";q=n1e309", 0)
+		pump()
+	end
+	Hm.env.level.object_by_id = obi
+	check(#seen == 0, "no engine lookup gets an id that is not 0..65534: " .. table.concat(seen, ", "))
+	fire(Hm, "load_state", {})
 end
 
 print(string.format("== %d passed, %d failed", PASSES, FAILS))

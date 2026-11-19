@@ -73,6 +73,27 @@ function pass(name, ok, fmt, ...)
 	return not refuse
 end
 
+-- Round 6 (S5 of the round 5 review): an always-on guard of data, not a check of a client's request. What fails is dropped in
+-- every mode, so its line says "dropped", never "would be refused: let through" (that would mislead the look at the [coop-trust]
+-- lines before a switch to "refuse"). Returns `ok`. Counted under `name` (status, coop_status: "[guard]"); "off" counts nothing.
+-- Without `fmt` a failure is only counted, with no line: a guard that fails in honest play (an object id the engine gave to
+-- another object) would write one line a second.
+function guard(name, ok, fmt, ...)
+	name = tostring(name)
+	ok = ok == true
+	if mode_of(name) == "off" then return ok end
+	local c = counter(name)
+	c.guard = true
+	c.checked = c.checked + 1
+	if ok then return true end
+	c.failed = c.failed + 1
+	if fmt ~= nil and (c.failed <= LOG_FIRST or c.failed % 64 == 0) then
+		local good, text = pcall(string.format, tostring(fmt), ...)
+		log("! %s: %s (dropped, %d of %d failed)", name, good and text or tostring(fmt), c.failed, c.checked)
+	end
+	return false
+end
+
 function status()
 	return counters
 end
@@ -87,7 +108,11 @@ function print_status()
 	end
 	for _, name in ipairs(names) do
 		local c = counters[name]
-		log("%s [%s]: checked %d, failed %d, refused %d", name, mode_of(name), c.checked, c.failed, c.refused)
+		if c.guard then
+			log("%s [guard]: checked %d, dropped %d", name, c.checked, c.failed)
+		else
+			log("%s [%s]: checked %d, failed %d, refused %d", name, mode_of(name), c.checked, c.failed, c.refused)
+		end
 	end
 end
 

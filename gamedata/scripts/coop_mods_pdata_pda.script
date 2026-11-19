@@ -21,8 +21,8 @@ local function P() return coop_mods_pdata end
 -- These are representation/instance guards, not decisions about a player's object action.
 local function object_id(id)
 	local ok = type(id) == "number" and id == id and id >= 0 and id < 65535 and id == math.floor(id)
-	local allowed = coop_trust.pass("pda_id", ok, "invalid object id in personal PDA state")
-	return ok and allowed and id or nil
+	-- round 6: an always-on guard (coop_trust.guard): dropped in every mode, its line says so
+	return coop_trust.guard("pda_id", ok, "invalid object id in personal PDA state") and id or nil
 end
 
 local function copy(v, depth)
@@ -30,18 +30,16 @@ local function copy(v, depth)
 	if typ == "boolean" or v == nil then return v end
 	if typ == "number" then
 		local ok = v == v and math.abs(v) <= 1e12
-		local allowed = coop_trust.pass("pda_number", ok, "invalid number in personal PDA state")
-		if ok and allowed then return v end
+		if coop_trust.guard("pda_number", ok, "invalid number in personal PDA state") then return v end
 	elseif typ == "string" then
 		local ok = #v <= 4096
-		local allowed = coop_trust.pass("pda_text", ok, "oversized text in personal PDA state")
-		if ok and allowed then return v end
+		if coop_trust.guard("pda_text", ok, "oversized text in personal PDA state") then return v end
 	elseif typ == "table" and (depth or 0) < 6 then
 		local out, count = {}, 0
 		for k, value in pairs(v) do
 			count = count + 1
 			if count > 4096 then
-				coop_trust.pass("pda_table", false, "too many entries in personal PDA state")
+				coop_trust.guard("pda_table", false, "too many entries in personal PDA state")
 				break
 			end
 			if type(k) == "string" or type(k) == "number" then
@@ -56,8 +54,7 @@ end
 local function as_table(value)
 	if value == nil then return nil end
 	local ok = type(value) == "table"
-	local allowed = coop_trust.pass("pda_table", ok, "invalid table in personal PDA state")
-	return ok and allowed and value or nil
+	return coop_trust.guard("pda_table", ok, "invalid table in personal PDA state") and value or nil
 end
 
 local function online(id)
@@ -76,8 +73,9 @@ end
 local function same_object(id, name)
 	local current = object_name(id)
 	local ok = current == nil or (type(name) == "string" and current == name)
-	local allowed = coop_trust.pass("pda_identity", ok, "object instance changed in personal PDA state")
-	return ok and allowed -- identity is an always-on guard against recycled object ids
+	-- identity is an always-on guard against recycled object ids; the engine gives a freed id to a new object in honest play
+	-- (validate_current looks once a second): counted with no line (round 6, S5 of the round 5 review)
+	return coop_trust.guard("pda_identity", ok)
 end
 
 local function translate(id, to_world)

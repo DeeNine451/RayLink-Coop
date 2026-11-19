@@ -71,6 +71,35 @@ do
 	check(#lines == 3, "print_status: one line per check that ran")
 end
 
+-- round 6 (S5 of the round 5 review): an always-on guard of data drops what fails in every mode; its line says "dropped", never
+-- "would be refused: let through", and a guard without a text only counts
+do
+	lines = {}
+	local t = load_module(fake_ini({ { "default", "log" }, { "g_off", "off" }, { "g_ref", "refuse" } }))
+	check(t.guard("pda_id", true, "bad id") == true and #lines == 0, "guard: what holds passes, no line")
+	check(t.guard("pda_id", false, "bad id %s", "x") == false, "guard, log mode: what fails is dropped")
+	check(#lines == 1 and lines[1]:find("dropped", 1, true) ~= nil and lines[1]:find("would be refused", 1, true) == nil,
+		"guard: the line says dropped: " .. tostring(lines[1]))
+	check(t.guard("g_ref", false, "bad") == false, "guard, refuse mode: dropped the same")
+	check(t.guard("g_off", false, "bad") == false and t.status().g_off == nil, "guard, off: not counted, still dropped")
+	lines = {}
+	for _ = 1, 50 do t.guard("pda_identity", false) end
+	check(#lines == 0 and t.status().pda_identity.failed == 50, "guard without a text (an id reused in honest play): counted, no line")
+	lines = {}
+	t.print_status()
+	local found = false
+	for _, l in ipairs(lines) do if l:find("pda_identity [guard]", 1, true) and l:find("dropped 50", 1, true) then found = true end end
+	check(found, "coop_status names a guard as one")
+	-- the data guards of the personal PDA state and the helmet id use it, not pass
+	for _, f in ipairs({ "coop_mods_pdata_pda", "coop_mods_misc" }) do
+		local fh = assert(io.open("gamedata/scripts/" .. f .. ".script", "r"))
+		local text = fh:read("*a")
+		fh:close()
+		check(not text:find('coop_trust.pass("pda_', 1, true) and not text:find('coop_trust.pass("mods_misc_helmet_id"', 1, true)
+			and text:find("coop_trust.guard(", 1, true) ~= nil, f .. ": its data guards are coop_trust.guard")
+	end
+end
+
 -- the shipped settings: a new check starts in "log"
 do
 	local fh = io.open("gamedata/configs/mod_system_coop_trust.ltx", "r")
