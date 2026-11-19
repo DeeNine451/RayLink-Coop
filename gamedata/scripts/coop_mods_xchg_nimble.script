@@ -1,0 +1,760 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - Darkasleif's Nimble Upgrades Guns: an upgrade is one exchange, its money held by the keeper of the
+	world's money, its guns swapped by the decider of the player's map, the money given back on any refusal
+	(gamedata\scripts\coop_mods_xchg_nimble.script), F4 G4-5, finding m20:1 (TZ R19, build 57).
+
+	The mod: Nimble's dialog (dialogs_zaton.xml) runs NimbleTrade.<kind>_requested(first_speaker, second_speaker)
+	(NimbleTrade.script :2360-2990). It checks the money (player_has_<kind>_money: db.actor:money() >= <Cost>), takes the
+	first source gun of the upgrade the actor carries, checks its parts (good_gun: item_parts, part_val) and then calls
+	three independent relocations (:2369-2371): the gun to the trader, the price to the trader, the upgraded gun to the
+	actor. The dialog runs on the speaker's machine; in a session each relocation is a request of its own (an ownership
+	move, a ReqMoney, a create) that the decider may refuse alone: a refused gun move still pays and still gives the
+	upgrade (the old gun kept), a refused create leaves the money and the old gun gone.
+
+	Here, in a session, on a process with a player of its own, every <kind>_requested runs the mod dry (its three
+	relocations recorded, none done: the mod's own money, gun and parts conditions decide whether there is an upgrade)
+	and turns what it would do into one operation in two steps, one code path for both modes:
+	  1. the money: mods.nim_hold to the keeper of the world's money (coop_mods_core.on "world": the co-op host, the world
+	     server). It checks the balance and takes the price at once (the hold).
+	  2. the guns: coop_mods_xchg kind "nimble" to the decider of his map ("host": the co-op host, the map server of his
+	     level). It checks the concrete gun (his, a source gun of that upgrade, the mod's good_gun on it), the hold and the
+	     price, makes the upgraded gun in his character, removes the old one and tells the keeper of the money the result:
+	     commit (the hold is spent) or refund (the price goes back).
+	  Co-op: both steps run in the host's process (its own player calls them directly with its own peer, a client's
+	  come over the wire). Server: step 1 on the world server, step 2 on the map server of his level; the world server
+	  tells the map servers the hold (mods.nim_held, only when it leads no map), the map server tells the world server
+	  the result (mods.nim_done, only when it keeps no money). The Core asks coop_mode only: decides_world() (the money
+	  is here), leads_here() (the map step is here), actor_is_player(), seat_plays(peer) (a sender that plays nobody is
+	  a map server).
+
+	A hold on the keeper of the money ("<peer>|<op>", op = the player's "<peer>:<world epoch>:<n>"):
+	  (none) --nim_hold, a known upgrade, balance >= price, the price taken--> HELD
+	  (none) --nim_hold refused (kind, busy: 3 open, nochar, poor, money)--> REFUSED
+	  HELD --commit from the map step--> DONE
+	  HELD --refund from the map step, or no word in 60 s--> REFUNDED (the price given back once)
+	  REFUNDED --a commit after all--> DONE, the price taken again (logged; the map step applies a hold within 20 s only)
+	  DONE / REFUSED / REFUNDED: a refund or a repeated word changes nothing. A repeated nim_hold of the same op gets the
+	  stored answer (5 minutes): never a second charge.
+	A hold on the decider of the map (learned from nim_held, or noted directly when this process keeps the money too):
+	  KNOWN --an op of the gun step claims it--> CLAIMED --commit--> USED (commit reported)
+	                                             CLAIMED --refused, failed or rolled back--> CLOSED (refund reported)
+	  (none) --claimed--> CLOSED at once, refund reported (a hold that comes later is never applied)
+	  KNOWN older than 20 s is refused ("late") and refunded; USED / CLOSED / CLAIMED: another op is refused and reports
+	  nothing (the gun step's own op ids make a repeated request get its stored answer, coop_mods_xchg).
+	On the player's machine: one upgrade at a time (a press while one is pending is ignored); the hold's answer is waited
+	10 s, the gun step coop_mods_xchg's 10 s; a refusal or no answer is told (st_coop_trade_* lines), a success shows the
+	news the mod's relocations would (item out, money out, item in).
+
+	Checks on the decider of the map: coop_trust.pass ("log" in build 57): nimble_parts (the mod's good_gun on the named
+	gun), nimble_trader (the dialog's NPC alive within 15 m of his character). Always on (coop_trust.guard): the op ids,
+	the kind (an upgrade of this file whose price this process's copy of the mod has), the gun (online here, in his
+	inventory, a source section of that upgrade: it is what the exchange spends), the hold (known, fresh, applied once,
+	its price), the sender of nim_hold (a seat that plays), of nim_held (peer 0: coop_mods_core side "client") and of
+	nim_done (a seat that plays nobody: a map server). The keeper of the money: the balance, the hold.
+	Wire (host numbering): mods.nim_hold { o, g } player -> keeper (limit 6 at once, 1 a second); mods.nim_hold_r
+	{ o, ok, why | m } keeper -> player; mods.nim_held { p, h, g, m } keeper -> map servers; mods.nim_done { p, h, c }
+	map server -> keeper (c = 1 commit, 0 refund; limit 60, 30 a second); the gun step is coop_mods_xchg's mods.xchg
+	{ k = "nimble", o, h, g, w, n } / mods.xchg_r { r.s, r.m }. Nothing is saved: holds live in this Lua state.
+	Outside a session (single player) and on a process whose actor plays nobody every wrapper calls the mod unchanged;
+	installed only when NimbleTrade is there. An action that does something this file does not know (another version of
+	the mod) is left to the mod (logged).
+	Differences from the mod in a session: the upgraded gun is always made new (the mod hands over the trader's own copy
+	when he has one), and the old gun is removed, not given to the trader (a move to him can be refused: his weight,
+	Inventory.cpp :1321, the cause of the finding).
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, pairs, ipairs, pcall, tostring, tonumber, next, rawget, rawset, error =
+	type, pairs, ipairs, pcall, tostring, tonumber, next, rawget, rawset, error
+local math_floor, string_sub = math.floor, string.sub
+
+local MOD = "NimbleTrade"
+local KIND = "nimble" -- the exchange of coop_mods_xchg (the gun step)
+local V_HOLD, V_HOLD_R, V_HELD, V_DONE = "nim_hold", "nim_hold_r", "nim_held", "nim_done"
+local WAIT_MS = 10000    -- the player waits for the hold's answer
+local APPLY_MS = 20000   -- the decider of the map applies a hold this young at most
+local REFUND_MS = 60000  -- the keeper gives a hold back when the map step said nothing in this time
+local KEEP_MS = 300000   -- answers and settled holds kept for repeats
+local SWEEP_MS = 1000
+local OP_MAX, WHY_MAX = 40, 32
+local MAX_PRICE = 10000000
+local MAX_OPEN = 3       -- holds of one player waiting for their map step
+local MAX_KNOWN = 512
+local REACH_M = 15
+local PART_VAL = 60      -- the mod's part_val (NimbleTrade.script :24) when its local cannot be read
+
+-- The mod's upgrades (NimbleTrade.script :8-21, :62-130, :2360-2990): <kind>_requested takes the first gun of `from` the
+-- actor carries (in this order), the price is the mod's global `cost`, the actor gets `to`.
+-- tests\lua\test_mods_xchg_nimble.lua compares this list with the mod's file.
+UPGRADES = {
+	{ kind = "coonan", cost = "CoonanCost", to = "wpn_colt1911_camo", from = { "wpn_colt1911", "wpn_colt1911_alt",
+		"wpn_colt1911_duty", "wpn_colt1911_merc", "wpn_colt1911_modern", "wpn_colt1911_n", "wpn_colt1911_new",
+		"wpn_colt1911_kimber" } },
+	{ kind = "voigt", cost = "StrayerVoigtCost", to = "wpn_colt1911_custom", from = { "wpn_colt1911", "wpn_colt1911_alt",
+		"wpn_colt1911_duty", "wpn_colt1911_merc", "wpn_colt1911_modern", "wpn_colt1911_n", "wpn_colt1911_new",
+		"wpn_colt1911_kimber" } },
+	{ kind = "deagle", cost = "DeagleCost", to = "wpn_desert_eagle_nimble", from = { "wpn_desert_eagle",
+		"wpn_desert_eagle_custom", "wpn_desert_eagle_modern" } },
+	{ kind = "usp", cost = "USPCost", to = "wpn_usp_nimble", from = { "wpn_usp", "wpn_usp_custom", "wpn_usp_match" } },
+	{ kind = "protecta", cost = "ProtectaCost", to = "wpn_protecta_nimble", from = { "wpn_protecta", "wpn_protecta_aim",
+		"wpn_protecta_camo", "wpn_protecta_custom" } },
+	{ kind = "spas12", cost = "SPAS12Cost", to = "wpn_spas12_nimble", from = { "wpn_spas12", "wpn_spas12_custom" } },
+	{ kind = "toz34", cost = "TOZ34Cost", to = "wpn_toz34_mark4_23", from = { "wpn_toz34", "wpn_toz34_custom",
+		"wpn_toz34_decor", "wpn_toz34_mark4" } },
+	{ kind = "mp5", cost = "MP5Cost", to = "wpn_mp5_nimble", from = { "wpn_mp5", "wpn_mp5_alt", "wpn_mp5_custom" } },
+	{ kind = "g36", cost = "G36Cost", to = "wpn_g36nimble_rwap", from = { "wpn_g36", "wpn_g36_camo", "wpn_g36k",
+		"wpn_g36ka4_rwap", "wpn_g36v_rwap" } },
+	{ kind = "groza", cost = "GrozaCost", to = "wpn_groza_nimble", from = { "wpn_groza" } },
+	{ kind = "pkm", cost = "PKMCost", to = "wpn_pkm_zenit_siber", from = { "wpn_pkm_siber" } },
+	{ kind = "dvl10u", cost = "UrbanaCost", to = "wpn_dvl10_m1", from = { "wpn_dvl10" } },
+	{ kind = "dvl10s", cost = "SaboteurCost", to = "wpn_dvl10", from = { "wpn_dvl10_m1" } },
+	{ kind = "svu", cost = "SVUCost", to = "wpn_svu_nimble", from = { "wpn_svu", "wpn_svu_alt" } },
+}
+
+local BY_KIND = {} -- kind -> { cost, to, from = { section = true } }
+for _, u in ipairs(UPGRADES) do
+	local set = {}
+	for _, s in ipairs(u.from) do set[s] = true end
+	BY_KIND[u.kind] = { cost = u.cost, to = u.to, from = set }
+end
+
+stats = { asked = 0, done = 0, told = 0, timeouts = 0, ignored = 0, foreign = 0, late = 0, -- the player's machine
+	held = 0, refused = 0, repeats = 0, poor = 0, committed = 0, refunded = 0, expired = 0, late_commits = 0, -- the keeper
+	unknown = 0, dropped = 0,
+	applied = 0, apply_refused = 0, unpaid = 0 } -- the decider of the map
+
+local function C() return coop_mods_core end
+local function X() return coop_mods_xchg end
+local function log(fmt, ...) C().log("xchg_nimble", fmt, ...) end
+
+local function trust_pass(name, ok, fmt, ...)
+	local found, t = pcall(function() return coop_trust end)
+	if not (found and type(t) == "table" and type(t.pass) == "function") then return true end
+	local good, res = pcall(t.pass, name, ok, fmt, ...)
+	return not good or res ~= false
+end
+
+local function trust_guard(name, ok, fmt, ...)
+	local found, t = pcall(function() return coop_trust end)
+	if not (found and type(t) == "table" and type(t.guard) == "function") then return ok == true end
+	local good, res = pcall(t.guard, name, ok, fmt, ...)
+	if not good then return ok == true end
+	return res == true
+end
+
+local function whole(v, lo, hi)
+	return type(v) == "number" and v == v and v >= lo and v <= hi and v == math_floor(v)
+end
+
+local function valid_op(op)
+	return type(op) == "string" and #op <= OP_MAX and op:match("^%d+:%d+:%d+$") ~= nil
+end
+
+local function upgrade(kind)
+	return type(kind) == "string" and BY_KIND[kind] or nil
+end
+
+-- a short word for a reason: letters, digits and _ only, at most WHY_MAX characters
+local function word(v, default)
+	if type(v) ~= "string" or v == "" then return default end
+	v = string_sub(v, 1, WHY_MAX)
+	if not v:match("^[%w_]+$") then return default end
+	return v
+end
+
+local function mod() return C().mod(MOD) end
+
+-- The price of an upgrade in this process's copy of the mod: a whole number 1..MAX_PRICE, else nil.
+local function price_of(kind)
+	local u, m = upgrade(kind), mod()
+	if not (u and m) then return nil end
+	local ok, v = pcall(function() return m[u.cost] end)
+	if ok and whole(v, 1, MAX_PRICE) then return v end
+	return nil
+end
+
+-- A player's balance in the ledger of the world's money (coop.money_of), nil when it does not answer.
+local function balance(peer)
+	local f = api and api.money_of
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, peer)
+	v = ok and tonumber(v) or nil
+	if v and v == v and v >= 0 then return v end
+	return nil
+end
+
+-- Money to (delta > 0) or from (delta < 0) a player's character through the ledger (coop.money_grant): true when done.
+local function grant(peer, delta)
+	local f = api and api.money_grant
+	if type(f) ~= "function" then return false end
+	local ok, done = pcall(f, peer, delta)
+	return ok and done == true
+end
+
+-------------------------------------------------------------------------------
+-- The keeper of the world's money: the holds
+-------------------------------------------------------------------------------
+local holds = {} -- "<peer>|<op>" -> { peer, op, kind, price, at, state = held | done | refunded | refused, ans }
+
+local function open_holds(peer)
+	local n = 0
+	for _, h in pairs(holds) do
+		if h.peer == peer and h.state == "held" then n = n + 1 end
+	end
+	return n
+end
+
+local function refund(h)
+	h.state = "refunded"
+	stats.refunded = stats.refunded + 1
+	if not grant(h.peer, h.price) then log("! the refund of %d RU to player #%d failed", h.price, h.peer) end
+end
+
+-- The map step's word about a hold: commit (spent) or refund (the price back). Once; a later word changes nothing.
+local function settle(peer, op, commit)
+	local h = holds[tostring(peer) .. "|" .. op]
+	if not h then
+		stats.unknown = stats.unknown + 1
+		return
+	end
+	if h.state == "held" then
+		if commit then
+			h.state = "done"
+			stats.committed = stats.committed + 1
+		else
+			refund(h)
+		end
+	elseif h.state == "refunded" and commit then
+		-- the commit came after the hold went back (no word in REFUND_MS): the upgrade is his, so is the price
+		h.state = "done"
+		stats.late_commits = stats.late_commits + 1
+		local taken = grant(h.peer, -h.price)
+		log("! the upgrade of player #%d was committed after its hold went back: %d RU %s", h.peer, h.price,
+			taken and "taken again" or "could not be taken again")
+	end
+end
+
+-------------------------------------------------------------------------------
+-- The decider of the map: the holds it may apply
+-------------------------------------------------------------------------------
+local known = {} -- "<peer>|<op>" -> { kind, price, at, state = known | claimed | used | closed }
+local known_n = 0
+
+local function note(key, k)
+	if known[key] then return false end
+	if not trust_guard("nimble_known_full", known_n < MAX_KNOWN, "%d holds wait for their map step: one dropped", known_n) then
+		return false
+	end
+	known[key] = k
+	known_n = known_n + 1
+	return true
+end
+
+local function note_held(peer, op, kind, price)
+	note(tostring(peer) .. "|" .. op, { kind = kind, price = price, at = time_global(), state = "known" })
+end
+
+-- The result of the map step, to the keeper of the money: here when this process keeps it (the co-op host).
+local function report(peer, op, commit)
+	if coop_mode.decides_world() then return settle(peer, op, commit) end
+	if not C().publish(V_DONE, { p = peer, h = op, c = commit and 1 or 0 }) then
+		log("! the result of an upgrade of player #%d did not go to the keeper of the money", peer)
+	end
+end
+
+local function close(token, commit)
+	if token.closed then return end
+	token.closed = true
+	local k = known[token.hold]
+	if k then k.state = commit and "used" or "closed" end
+	if commit then
+		stats.applied = stats.applied + 1
+	else
+		stats.apply_refused = stats.apply_refused + 1
+	end
+	report(token.peer, token.h, commit)
+end
+
+-- Removes an object (alife_release_id, _g.script): true when the release was made (it returns true) or the server
+-- object is gone. An online object goes a moment later (alife():release sends GE_DESTROY, alife_simulator_script.cpp
+-- :425-437): coop_mods_xchg keeps a spent gun reserved until it is gone.
+local function remove(id)
+	local f = rawget(_G, "alife_release_id")
+	local r = nil
+	if type(f) == "function" then
+		r = f(id)
+	else
+		local se = alife_object(id)
+		if se then
+			alife():release(se, true)
+			r = true
+		end
+	end
+	return r == true or alife_object(id) == nil
+end
+
+local orig = {} -- kind -> the mod's <kind>_requested
+
+-- The mod's good_gun on that gun (its locals good_gun, gun_val, part_val read from its action); without them its
+-- global has_bad_part with part_val 60.
+local function parts_ok(kind, gun)
+	local f = orig[kind]
+	local good = f and C().upvalue(f, "good_gun")
+	if type(good) == "function" then
+		local gv = C().upvalue(f, "gun_val")
+		local pv = C().upvalue(f, "part_val")
+		local ok, r = pcall(good, gv, tonumber(pv) or PART_VAL, gun)
+		return ok and r == true
+	end
+	local m = mod()
+	local bad = m and C().fn(m, "has_bad_part")
+	if bad then
+		local ok, r = pcall(bad, PART_VAL, gun)
+		return ok and not r
+	end
+	return true
+end
+
+local function near(who, npc)
+	if not (who and npc) then return false end
+	local ok, d = pcall(function()
+		if npc.alive and not npc:alive() then return nil end
+		return who:position():distance_to(npc:position())
+	end)
+	return ok and type(d) == "number" and d <= REACH_M
+end
+
+-- coop_mods_xchg "nimble": t = { h = hold op, g = kind, w = gun, n = NPC } from the player `from`, `who` his character here.
+local function reserve(t, from, who)
+	local op, kind = t.h, t.g
+	local u = upgrade(kind)
+	if not trust_guard("nimble_apply_shape", valid_op(op) and u ~= nil, "player #%d: an upgrade without a hold or a kind", from) then
+		return nil, "bad"
+	end
+	local key = tostring(from) .. "|" .. op
+	local k = known[key]
+	if not k then
+		-- no hold here (it never came, or not yet): closed for good, and the keeper gives it back if it has it
+		stats.unpaid = stats.unpaid + 1
+		note(key, { kind = kind, price = 0, at = time_global(), state = "closed" })
+		report(from, op, false)
+		return nil, "unpaid"
+	end
+	if k.state ~= "known" then
+		stats.unpaid = stats.unpaid + 1
+		return nil, "unpaid" -- applied, refused or being applied: its op settles it
+	end
+	k.state = "claimed"
+	local token = { peer = from, h = op, hold = key, price = k.price, to = u.to }
+	local function refuse(why)
+		close(token, false)
+		return nil, why
+	end
+	if time_global() - k.at > APPLY_MS then return refuse("late") end
+	if k.kind ~= kind or price_of(kind) ~= k.price then return refuse("price") end
+	if not trust_guard("nimble_result", ini_sys:section_exist(u.to) == true, "the upgrade %s has no section here", kind) then
+		return refuse("make")
+	end
+	if not who then return refuse("away") end
+	local wid = X().wire_id(t.w)
+	local gun = wid and level.object_by_id(wid) or nil
+	local section = gun and gun:section()
+	local his = gun ~= nil and C().root_of(wid) == who:id() and u.from[section] == true
+	if not trust_guard("nimble_weapon", his, "player #%d, op %s: the gun is not his or not one this upgrade takes", from, op) then
+		return refuse("weapon")
+	end
+	if not trust_pass("nimble_parts", parts_ok(kind, gun), "player #%d, op %s: the parts of the gun are worn", from, op) then
+		return refuse("parts")
+	end
+	local nid = t.n ~= nil and X().wire_id(t.n) or nil
+	local npc = nid and level.object_by_id(nid) or nil
+	if not trust_pass("nimble_trader", near(who, npc), "player #%d, op %s: no trader near him", from, op) then
+		return refuse("far")
+	end
+	token.w, token.ids, token.spent = wid, { wid }, { wid }
+	return token
+end
+
+local function commit(t, from, who, token)
+	local made_ok, se = pcall(alife_create_item, token.to, who)
+	local made = made_ok and se and tonumber(se.id) or nil
+	if not made then return false, "make" end
+	token.made = made
+	local gone_ok, gone = pcall(remove, token.w)
+	if not (gone_ok and gone) then
+		pcall(remove, made)
+		token.made = nil
+		return false, "take"
+	end
+	token.made = nil -- the upgraded gun is his
+	close(token, true)
+	return true, { s = token.to, m = token.price }
+end
+
+local function rollback(t, from, who, token)
+	if type(token) ~= "table" or not token.hold then return end
+	if token.made then
+		pcall(remove, token.made)
+		token.made = nil
+	end
+	close(token, false)
+end
+
+local SPEC = { reserve = reserve, commit = commit, rollback = rollback }
+
+-------------------------------------------------------------------------------
+-- The keeper of the money: step 1, its wire
+-------------------------------------------------------------------------------
+local function answer(op, ok, why, price)
+	if ok then return { o = op, ok = true, m = price } end
+	return { o = op, ok = false, why = why }
+end
+
+-- One hold request t = { o, g } from the player `from`; reply(answer) delivers the answer. The same function for a
+-- request from the wire and for the co-op host's own player.
+local function hold(t, from, reply)
+	if type(t) ~= "table" or not whole(from, 0, 65535) then return end
+	local op = t.o
+	if not trust_guard("nimble_hold_op", valid_op(op), "player #%d: a hold without a valid operation id", from) then
+		stats.dropped = stats.dropped + 1
+		return
+	end
+	local key = tostring(from) .. "|" .. op
+	local h = holds[key]
+	if h then
+		stats.repeats = stats.repeats + 1
+		return reply(h.ans)
+	end
+	local kind = upgrade(t.g) and t.g or nil
+	local price = kind and price_of(kind) or nil
+	local ans
+	if not trust_guard("nimble_kind", price ~= nil, "player #%d, op %s: no such upgrade here", from, op) then
+		ans = answer(op, false, "kind")
+	elseif open_holds(from) >= MAX_OPEN then
+		ans = answer(op, false, "busy")
+	else
+		local have = balance(from)
+		if have == nil then
+			ans = answer(op, false, "nochar")
+		elseif have < price then
+			stats.poor = stats.poor + 1
+			ans = answer(op, false, "poor")
+		elseif not grant(from, -price) then
+			ans = answer(op, false, "money")
+		else
+			ans = answer(op, true, nil, price)
+		end
+	end
+	holds[key] = { peer = from, op = op, kind = kind, price = price, at = time_global(), state = ans.ok and "held" or "refused",
+		ans = ans }
+	if ans.ok then
+		stats.held = stats.held + 1
+		if coop_mode.leads_here() then
+			note_held(from, op, kind, price) -- the map step runs in this process too (the co-op host)
+		elseif not C().publish(V_HELD, { p = from, h = op, g = kind, m = price }) then
+			log("! the hold of player #%d did not go to the map servers", from)
+		end
+	else
+		stats.refused = stats.refused + 1
+	end
+	return reply(ans)
+end
+
+local function hold_from_wire(t, from)
+	if not trust_guard("nimble_hold_sender", coop_mode.seat_plays(from), "peer %s asked for a hold, it plays nobody",
+		tostring(from)) then
+		stats.dropped = stats.dropped + 1
+		return
+	end
+	hold(t, from, function(ans) C().to_peer(from, V_HOLD_R, ans) end)
+end
+
+-- mods.nim_done, side "world": the result of a map step. The sender is the transport's peer: a seat that plays a
+-- character cannot have run a map step (the delivery boundary, always on).
+local function done_from_wire(t, from)
+	local leader = whole(from, 1, 65535) and not coop_mode.seat_plays(from)
+	if not trust_guard("nimble_done_sender", leader, "peer %s sent the result of an upgrade, it leads no map", tostring(from)) then
+		stats.dropped = stats.dropped + 1
+		return
+	end
+	if not coop_mode.decides_world() then return end
+	local ok = whole(t.p, 0, 65535) and valid_op(t.h) and (t.c == 0 or t.c == 1)
+	if not trust_guard("nimble_done_shape", ok, "peer %s sent the result of an upgrade with bad fields", tostring(from)) then
+		return
+	end
+	settle(t.p, t.h, t.c == 1)
+end
+
+-- mods.nim_held, side "client" (from the keeper of the money, peer 0): a hold the map step may apply.
+local function held_from_wire(t, from)
+	if not coop_mode.leads_here() then return end -- a player's machine: the map step is not its
+	local ok = whole(t.p, 0, 65535) and valid_op(t.h) and upgrade(t.g) ~= nil and whole(t.m, 1, MAX_PRICE)
+	if not trust_guard("nimble_held_shape", ok, "a hold from the keeper of the money with bad fields") then return end
+	note_held(t.p, t.h, t.g, t.m)
+end
+
+-------------------------------------------------------------------------------
+-- The player's machine
+-------------------------------------------------------------------------------
+local pend = {} -- op -> { op, kind, from, to, price, w, n, deadline }
+local seq, base = 0, nil
+
+local function new_op()
+	if not base then
+		local ok, now = pcall(function() return os.time() end)
+		base = (ok and type(now) == "number") and (now % 100000) * 10000 or 0 -- a restarted Lua state starts elsewhere
+	end
+	seq = seq + 1
+	local e = 0
+	if api and api.world_epoch then
+		local ok, v = pcall(api.world_epoch)
+		v = ok and tonumber(v) or nil
+		if whole(v, 0, 2147483647) then e = v end
+	end
+	return tostring(C().self_peer()) .. ":" .. tostring(e) .. ":" .. tostring(base + seq)
+end
+
+local TEXT = {
+	poor = { "st_coop_trade_no_money", "Trade failed: not enough money" },
+	far = { "st_coop_trade_too_far", "Trade failed: you are too far from the trader" },
+}
+local FAILED = { "st_coop_trade_failed", "Trade failed: the goods are no longer available" }
+
+local function tell(why)
+	local t = TEXT[why] or FAILED
+	stats.told = stats.told + 1
+	log("an upgrade was not made: %s", word(why, "refused"))
+	C().hud(t[1], t[2])
+end
+
+-- What the mod's relocations would have told (itms_manager.relocate_item_*, dialogs.relocate_money_from_actor).
+local function news(p)
+	local nm = C().mod("news_manager")
+	if not (nm and db.actor) then return end
+	pcall(nm.relocate_item, db.actor, "out", p.from, 1)
+	pcall(nm.relocate_money, db.actor, "out", p.price)
+	pcall(nm.relocate_item, db.actor, "in", p.to, 1)
+end
+
+local function applied(p, ok, r, why)
+	if ok then
+		stats.done = stats.done + 1
+		return news(p)
+	end
+	tell(why)
+end
+
+-- The hold's answer (from the wire, or from hold() directly): on ok, the gun step.
+local function on_hold_answer(t)
+	if type(t) ~= "table" or type(t.o) ~= "string" then return end
+	local p = pend[t.o]
+	if not p then
+		stats.late = stats.late + 1 -- after its timeout: the keeper gives the hold back by itself
+		return
+	end
+	pend[t.o] = nil
+	if t.ok ~= true then return tell(word(t.why, "refused")) end
+	if whole(t.m, 1, MAX_PRICE) then p.price = t.m end
+	local req = { h = p.op, g = p.kind, w = C().hid(p.w) }
+	if p.n then req.n = C().hid(p.n) end
+	if not X().ask(KIND, req, function(ok, r, why) applied(p, ok, r, why) end) then
+		tell("failed") -- the keeper gives the hold back by itself
+	end
+end
+
+local RELOCATIONS = { "relocate_item_section_from_actor", "relocate_money_from_actor", "relocate_item_section_to_actor" }
+
+-- Runs the mod's action with its three relocations recorded instead of done: ok, error, the calls { { n, arg } }.
+local function dry_run(f, first, second)
+	local d = C().mod("dialogs")
+	if not d then return false, "no dialogs.script", {} end
+	local calls, saved = {}, {}
+	for i, name in ipairs(RELOCATIONS) do
+		saved[i] = rawget(d, name)
+		rawset(d, name, function(_, _, arg) calls[#calls + 1] = { i, arg } end)
+	end
+	local ok, e = pcall(f, first, second)
+	for i, name in ipairs(RELOCATIONS) do rawset(d, name, saved[i]) end
+	return ok, e, calls
+end
+
+-- The upgrade the dry run describes, when it is exactly the one this file knows: { from, to, price }.
+local function plan_of(kind, calls)
+	local u = upgrade(kind)
+	if not (u and #calls == 3 and calls[1][1] == 1 and calls[2][1] == 2 and calls[3][1] == 3) then return nil end
+	local from, price, to = calls[1][2], calls[2][2], calls[3][2]
+	if type(from) ~= "string" or not u.from[from] or to ~= u.to or price ~= price_of(kind) then return nil end
+	return { from = from, to = to, price = price }
+end
+
+-- The gun the mod checked (its global obj, input_function), else the first of that section the actor carries.
+local function gun_of(section)
+	local m = mod()
+	local ok, mine = pcall(function()
+		local o = m and m.obj
+		if not (o and o:section() == section) then return nil end
+		local parent = o:parent()
+		return parent and parent:id() == db.actor:id() and o or nil
+	end)
+	if ok and mine then return mine end
+	local ok2, o = pcall(function() return db.actor:object(section) end)
+	return ok2 and o or nil
+end
+
+local function npc_of(first, second)
+	local me = db.actor and db.actor:id()
+	local ok1, id1 = pcall(function() return first:id() end)
+	if ok1 and type(id1) == "number" and id1 ~= me then return first end
+	local ok2, id2 = pcall(function() return second:id() end)
+	if ok2 and type(id2) == "number" and id2 ~= me then return second end
+	return nil
+end
+
+local function busy()
+	return next(pend) ~= nil or X().busy(KIND)
+end
+
+local function start(kind, f, first, second)
+	if busy() then
+		stats.ignored = stats.ignored + 1
+		if stats.ignored <= 3 or stats.ignored % 50 == 0 then
+			log("an upgrade while another one is on its way: ignored (#%d)", stats.ignored)
+		end
+		return
+	end
+	local ok, e, calls = dry_run(f, first, second)
+	if not ok then error(e, 0) end
+	if #calls == 0 then return end -- the mod would do nothing: no money, no gun of the kind, worn parts
+	local plan = plan_of(kind, calls)
+	if not plan then
+		stats.foreign = stats.foreign + 1
+		log("! NimbleTrade.%s_requested does what this file does not know: left to the mod", kind)
+		return f(first, second)
+	end
+	local gun = gun_of(plan.from)
+	if not gun then return end
+	local npc = npc_of(first, second)
+	local op = new_op()
+	pend[op] = { op = op, kind = kind, from = plan.from, to = plan.to, price = plan.price, w = gun:id(),
+		n = npc and npc:id() or nil, deadline = time_global() + WAIT_MS }
+	stats.asked = stats.asked + 1
+	if coop_mode.decides_world() and coop_mode.actor_is_player() then
+		-- the co-op host's own player: this process keeps the money and decides his map, the same functions, no wire
+		return hold({ o = op, g = kind }, C().self_peer(), on_hold_answer)
+	end
+	if not C().to_host(V_HOLD, { o = op, g = kind }) then
+		pend[op] = nil
+		tell("failed")
+	end
+end
+
+local function guard_action(kind, f)
+	return function(first, second, ...)
+		if not (C().active() and coop_mode.actor_is_player()) then return f(first, second, ...) end
+		local ok, e = pcall(start, kind, f, first, second)
+		if not ok then C().report("xchg_nimble", kind .. "_requested", e) end
+	end
+end
+
+local installed = 0
+
+local function install()
+	local m = mod()
+	if not m then return end
+	for _, u in ipairs(UPGRADES) do
+		local key = u.kind .. "_requested"
+		if not orig[u.kind] then
+			local ok, f = C().wrap(m, key, MOD .. "." .. key, function(fn) return guard_action(u.kind, fn) end)
+			if ok then
+				orig[u.kind] = f
+				installed = installed + 1
+			end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Time, status, start
+-------------------------------------------------------------------------------
+local next_sweep = 0
+
+local function sweep(now)
+	for key, h in pairs(holds) do
+		if h.state == "held" then
+			if now - h.at > REFUND_MS then
+				stats.expired = stats.expired + 1
+				log("a hold of player #%d had no word from its map step in %d s: given back", h.peer, REFUND_MS / 1000)
+				refund(h)
+			end
+		elseif now - h.at > KEEP_MS then
+			holds[key] = nil
+		end
+	end
+	for key, k in pairs(known) do
+		if now - k.at > KEEP_MS then
+			known[key] = nil
+			known_n = known_n - 1
+		end
+	end
+end
+
+local function actor_on_update()
+	local now = time_global()
+	if next(pend) ~= nil then
+		local late = {}
+		for op, p in pairs(pend) do
+			if now >= p.deadline then late[#late + 1] = op end
+		end
+		for _, op in ipairs(late) do
+			pend[op] = nil
+			stats.timeouts = stats.timeouts + 1
+			tell("timeout")
+		end
+	end
+	if now < next_sweep then return end
+	next_sweep = now + SWEEP_MS
+	sweep(now)
+end
+
+local function status()
+	local p, held, k = 0, 0, 0
+	for _ in pairs(pend) do p = p + 1 end
+	for _, h in pairs(holds) do
+		if h.state == "held" then held = held + 1 end
+	end
+	for _, v in pairs(known) do
+		if v.state == "known" then k = k + 1 end
+	end
+	return string.format("upgrades asked %d (done %d, told a refusal %d, no answer %d, presses ignored %d, left to the mod %d, "
+		.. "late answers %d, pending %d) | holds %d (repeats %d, refused %d, poor %d, committed %d, refunded %d, expired %d, "
+		.. "late commits %d, unknown results %d, dropped %d, open %d) | map step: applied %d, refused %d, without a hold %d, "
+		.. "waiting %d | actions wrapped %d", stats.asked, stats.done, stats.told, stats.timeouts, stats.ignored,
+		stats.foreign, stats.late, p, stats.held, stats.repeats, stats.refused, stats.poor, stats.committed, stats.refunded,
+		stats.expired, stats.late_commits, stats.unknown, stats.dropped, held, stats.applied, stats.apply_refused,
+		stats.unpaid, k, installed)
+end
+
+-- on_game_start must not throw (axr_main runs every script's on_game_start in one unprotected loop, W5)
+function on_game_start()
+	if not api then return end
+	local ok_mod, has = pcall(function() return mod() ~= nil end)
+	if not (ok_mod and has) then return end -- the mod is not installed: nothing to do
+	local steps = {
+		function() C().on(V_HOLD, hold_from_wire, "world") end,
+		function() C().on(V_HOLD_R, function(t) on_hold_answer(t) end, "player") end,
+		function() C().on(V_HELD, held_from_wire, "client") end,
+		function() C().on(V_DONE, done_from_wire, "world") end,
+		function() C().set_limit(V_HOLD, 6, 1) end,
+		function() C().set_limit(V_DONE, 60, 30) end,
+		function() X().serve(KIND, SPEC) end,
+		function() install() end,
+		function() RegisterScriptCallback("actor_on_update", actor_on_update) end,
+		function() C().status_line("xchg_nimble", status) end,
+	}
+	for i, step in ipairs(steps) do
+		local ok, e = pcall(step)
+		if not ok then printf("! [coop_mods_xchg_nimble] start step %d failed: %s", i, tostring(e)) end
+	end
+end
