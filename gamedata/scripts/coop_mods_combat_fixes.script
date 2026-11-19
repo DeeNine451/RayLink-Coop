@@ -1,0 +1,416 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- G7-4, Dev 57. Object actions use the level request door; personal hits stay with the player.
+-- Co-op: the playing host has the NPC and the inventory. Server: the level request door passes the
+-- player's request to his map; no object lookup is done on the world server. Both call npc.heal's body.
+-- mods.combat_heal {q=operation,n=NPC host id}; mods.combat_heal_r {q,n,ok,i?,u?} to the requester only.
+-- i/u confirm the consumed item and its remaining uses in host numbering.
+-- No saved state. Operation guards and bullet retention are session-local.
+
+local function C() return coop_mods_core end
+local function log(fmt, ...) C().log("combat", fmt, ...) end
+local installed, rebind, started = {}, {}, false
+local pending, served = {}, {}
+local healing = {} -- [local NPC id] = transaction waiting for its medkit_script to attach
+local seq, next_install = 0, 0
+local HEAL, REPLY = "combat_heal", "combat_heal_r"
+local MEDICAL = { "medkit", "medkit_army", "medkit_scientic", "stimpack", "stimpack_army", "stimpack_scientic" }
+local animation_npc, in_animation
+
+local function integer(n, lo, hi)
+	return type(n) == "number" and n == n and n >= lo and n <= hi and n == math.floor(n)
+end
+
+-- Structural safety remains necessary in log mode: malformed ids cannot be passed to object_by_id.
+local function check(name, ok)
+	return coop_trust.pass("combat_heal_" .. name, ok, "invalid %s in wounded help", name)
+end
+
+local function dose(who)
+	local by_section = {}
+	who:iterate_inventory(function(_, item)
+		local section, uses = item:section(), item:get_remaining_uses()
+		if integer(uses, 1, 255) and not by_section[section] then by_section[section] = item end
+	end, nil)
+	for _, section in ipairs(MEDICAL) do
+		if by_section[section] then return by_section[section] end
+	end
+end
+
+local function credited(t)
+	local p = pending[t.n]
+	if not (p and p.q == t.q) then return end
+	pending[t.n] = nil -- consume BEFORE calling a third-party callback
+	if t.ok ~= true then return end
+	-- The native inventory sync treats the player as the owner of uses. Reconcile its copy
+	-- with the map authority receipt so the old owner state cannot restore a spent dose.
+	if coop_mode.is_player_mirror() and integer(t.i, 1, 65534) and integer(t.u, 0, 254) then
+		local id = C().lid(t.i)
+		local item = id and level.object_by_id(id)
+		local owner = item and item:parent()
+		if owner and owner:id() == db.actor:id() and item:get_remaining_uses() > t.u then
+			item:set_remaining_uses(t.u)
+		end
+	end
+	game_statistics.increment_npc_statistic(db.actor, "wounded_helped")
+end
+
+local function reply(from, t)
+	if from == C().self_peer() and coop_mode.actor_is_player() then return credited(t) end
+	return C().to_peer(from, REPLY, t)
+end
+
+local function finish_heal(tx, success)
+	healing[tx.target] = nil
+	if not success and tx.created then
+		local ok, err = pcall(alife_release_id, tx.created)
+		if not ok then log("! wounded help cleanup failed: %s", tostring(err)) end
+	end
+	tx.answer.ok = success
+	return reply(tx.from, tx.answer)
+end
+
+local function complete_heal(tx, item)
+	local uses, item_id = item:get_remaining_uses(), item:id()
+	local ok, err = pcall(function()
+		-- GAMMA relocate_item_from_actor queues a partial debit for ItemProcessor:update.
+		-- The game object setter is synchronous, including zero for the last dose.
+		item:set_remaining_uses(uses - 1)
+		if item:get_remaining_uses() == uses - 1 then
+			tx.npc_heal({ i = tx.target, k = "medkit" }, tx.from)
+		end
+	end)
+	if not ok then log("! wounded help failed: %s", tostring(err)) end
+	local spent = item:get_remaining_uses() == uses - 1
+	local success = spent and tx.wm.can_use_medkit == true
+	if success then
+		tx.answer.i, tx.answer.u = C().hid(item_id), uses - 1
+		if uses == 1 then
+			local released, release_err = pcall(alife_release_id, item_id)
+			if not released then log("! empty medkit cleanup failed: %s", tostring(release_err)) end
+		end
+	elseif spent then
+		item:set_remaining_uses(uses)
+	end
+	return finish_heal(tx, success)
+end
+
+local function heal(t, from)
+	local valid = type(t) == "table" and integer(t.q, 1, 2147483647) and integer(t.n, 1, 65534)
+	if not check("shape", valid) or not valid then return end
+	-- There is no level to act on when the world server has no bridge for this player yet.
+	if not coop_mode.leads_here() then return end
+	local last = served[from]
+	if last and t.q <= last.q then
+		if t.q == last.q and t.n == last.n and last.ok ~= nil then reply(from, last) end
+		return -- one-shot guard: always on, including log mode
+	end
+	local answer = { q = t.q, n = t.n }
+	served[from] = answer -- reserve before any callback or inventory change
+	local function refuse() answer.ok = false return reply(from, answer) end
+	local target = C().lid(t.n)
+	local who, npc = C().avatar(from), target and level.object_by_id(target)
+	local exists = who and npc and npc:alive() and IsStalker(npc) and not C().is_player(target)
+	if not check("objects", exists) or not exists then return refuse() end
+	if not check("near", who:position():distance_to_sqr(npc:position()) <= 100) then return refuse() end
+	local storage = db.storage[target]
+	local wm = storage and storage.wounded and storage.wounded.wound_manager
+	local wounded = wm and xr_wounded.is_wounded(npc)
+	if not check("wounded", wounded) or not wounded then return refuse() end
+	if healing[target] or wm.can_use_medkit == true then return refuse() end
+	local item = dose(who)
+	if not check("dose", item ~= nil) or not item then return refuse() end
+	local meet = C().mod("coop_npc_meet")
+	local npc_heal = meet and C().find_local(meet, "host_on_heal")
+	if type(npc_heal) ~= "function" then
+		log("! npc.heal unavailable; wounded help skipped")
+		return refuse()
+	end
+	local tx = { from = from, target = target, who = who:id(), item = item:id(),
+		answer = answer, wm = wm, npc_heal = npc_heal, expires = time_global() + 5000 }
+	healing[target] = tx
+	if npc:object("medkit_script") then return complete_heal(tx, item) end
+	local ok, created = pcall(alife_create_item, "medkit_script", npc)
+	if not ok then log("! wounded help item creation failed: %s", tostring(created)) end
+	if not (ok and created) then return finish_heal(tx, false) end
+	tx.created = created.id
+	if npc:object("medkit_script") then return complete_heal(tx, item) end
+	-- A returned server entity is not yet in the NPC inventory. Wait without debiting anyone.
+end
+
+local function advance_heal(tx, now)
+	local npc = level.object_by_id(tx.target)
+	local storage = db.storage[tx.target]
+	local wm = storage and storage.wounded and storage.wounded.wound_manager
+	local who = C().avatar(tx.from)
+	local item = level.object_by_id(tx.item)
+	local owner = item and item:parent()
+	if now >= tx.expires or not (npc and npc:alive() and wm == tx.wm and xr_wounded.is_wounded(npc)
+		and who and who:id() == tx.who and owner and owner:id() == tx.who and item:get_remaining_uses() > 0)
+		or wm.can_use_medkit == true then
+		return finish_heal(tx, false)
+	end
+	if npc:object("medkit_script") then return complete_heal(tx, item) end
+end
+
+local function request_help(npc)
+	if not (npc and coop_mode.actor_is_player()) then return end
+	local id = C().hid(npc:id())
+	if not integer(id, 1, 65534) then return end
+	local now, p = time_global(), pending[id]
+	if p and now - p.at < 10000 then return true end
+	seq = seq + 1
+	pending[id] = { q = seq, at = now }
+	local t = { q = seq, n = id }
+	if coop_mode.leads_here() then
+		heal(t, C().self_peer())
+	elseif not C().to_host(HEAL, t) then
+		pending[id] = nil
+	end
+	return true
+end
+
+local function install_help()
+	local u = C().mod("ui_hud_dotmarks")
+	if u and not installed.help then
+		local private_cfg = C().find_local(u, "cfg")
+		installed.help = C().wrap(u, "help_wounded_stalker", "ui_hud_dotmarks.help_wounded_stalker", function(orig)
+			return function(id, mark, skip, ...)
+				if not C().active() then return orig(id, mark, skip, ...) end
+				local npc = get_game_object(id)
+				if not (npc and mark) then return end
+				local cfg = u.cfg or private_cfg
+				if not skip and u.try_init_heal_anim(id, mark, u.help_wounded_stalker)
+					and cfg and cfg.healing_stalker == id then
+					animation_npc = npc
+					return true
+				end
+				if cfg then mark.hidden = cfg.hidden_before_anim cfg.hidden_before_anim = nil end
+				-- DotMarks' UI flag is private; update the same upvalue the original used.
+				local _, holder, index = C().upvalue(orig, "anim_playing")
+				if holder then debug.setupvalue(holder, index, false) end
+				return request_help(npc)
+			end
+		end)
+	end
+	local a, d = C().mod("zzz_wounded_heal_anim"), C().mod("dialogs")
+	if not (u and a and d) or installed.animation then return end
+	C().wrap(d, "transfer_medkit", "dialogs.transfer_medkit:combat_animation", function(orig)
+		return function(first, second, ...)
+			if C().active() and in_animation then return request_help(in_animation) end
+			return orig(first, second, ...)
+		end
+	end)
+	installed.animation = C().wrap(a, "on_hud_animation_end", "zzz_wounded_heal_anim.on_hud_animation_end", function(orig)
+		return function(...)
+			if not (C().active() and animation_npc) then return orig(...) end
+			local prev = in_animation
+			in_animation = animation_npc
+			local ok2, result = pcall(orig, ...)
+			in_animation, animation_npc = prev, nil
+			if not ok2 then error(result) end
+			return result
+		end
+	end)
+end
+
+local function install_psy()
+	local m = C().mod("drx_da_main")
+	if not m or installed.psy then return end
+	installed.psy = C().wrap(m, "change_psy_health", "drx_da_main.change_psy_health", function(orig)
+		return function(amount, ...)
+			if not (C().active() and coop_mode.is_player_mirror()) then return orig(amount, ...) end
+			local psy = C().mod("arszi_psy")
+			if psy and type(psy.change_psy_health) == "function" then return psy.change_psy_health(amount) end
+			log("! DAO psy impact skipped: arszi_psy.change_psy_health unavailable")
+		end
+	end)
+end
+
+-- ReqHit already carries the bounded per-impact power after the owner's half_damage callback.
+-- Grok's mutant formula uses it directly. Feed the same base into the stalker formula for
+-- forwarded axe wounds so it keeps the swing, splash and detector scaling before armor.
+function axe_base_power(h, section, configured)
+	if h.type ~= hit.wound or not coop_mode.leads_here() then return configured end
+	local axes = C().mod("half_damage")
+	if axes and axes.new_axes and axes.new_axes[section] and C().is_remote_player(h.draftsman:id()) then
+		return h.power
+	end
+	return configured
+end
+
+local function register_grok_axe_rewrite()
+	if not C().mod("half_damage") then return end
+	local compat = C().mod("coop_npc_compat")
+	if not compat then return end
+	local read_power = 'local wpn_hit_power = ui_wpn_params.read_float(sec, "", "hit_power")'
+	for _, rewrite in ipairs(compat._function_rewrites()) do
+		if rewrite.module == "grok_bo" and rewrite.name == "npc_on_before_hit" then
+			for _, pair in ipairs(rewrite) do
+				if pair[1] == read_power then return end
+			end
+			rewrite[#rewrite + 1] = { read_power, read_power ..
+				"\n\tif surrender_bonus == 0 then wpn_hit_power = coop_mods_combat_fixes.axe_base_power(shit, sec, wpn_hit_power) end" }
+			return
+		end
+	end
+end
+
+-- Locate a named upvalue through wrapper chains; never rewrite the mod's source or other callbacks.
+local function find(f, name, seen, depth)
+	if type(f) ~= "function" or seen[f] or depth > 8 then return end
+	seen[f] = true
+	local v, holder, idx = C().upvalue(f, name)
+	if holder then return v, holder, idx end
+	for i = 1, 255 do
+		local n, child = debug.getupvalue(f, i)
+		if not n then break end
+		if type(child) == "function" then
+			v, holder, idx = find(child, name, seen, depth + 1)
+			if holder then return v, holder, idx end
+		end
+	end
+end
+
+local function install_pulse()
+	local mod = C().mod("pulse_vortex_consistency_fix")
+	local baf = C().mod("bind_anomaly_field")
+	if not (mod and baf and type(baf.pulse_anomaly_hit) == "function") or installed.pulse then return end
+	local original, holder, index = find(baf.pulse_anomaly_update, "pa_hit", {}, 0)
+	if not holder then return end -- coop_npc_world installs after this module: retry on first update
+	local pa = C().upvalue(original, "pa")
+	local defaults = C().upvalue(original, "PA")
+	if not (pa and defaults) then return end
+	local slot = { hit = original }
+	C().wrap(slot, "hit", "coop_npc_world.pulse_hit:mod", function(orig)
+		return function(pos)
+			if not C().active() then return orig(pos) end
+			if not (coop_mode.actor_is_player() and db.actor) then return true end
+			local light, article = baf.pAno_light, baf.pAno_article_distance
+			-- The active stock binder keeps these fields private; the mod reads public fields.
+			baf.pAno_light, baf.pAno_article_distance = pa.light, article or defaults.article
+			local ok, result = pcall(baf.pulse_anomaly_hit, pos)
+			baf.pAno_light, baf.pAno_article_distance = light, article
+			if not ok then log("! mod pulse hit failed: %s", tostring(result)) end
+			return true
+		end
+	end)
+	debug.setupvalue(holder, index, slot.hit)
+	installed.pulse = true
+end
+
+local bullets = {} -- [shooter:receiver:bullet] = first hit time; at most 1024 entries, at most 1 second
+local function bullet_again(h, flags)
+	if h.type ~= hit.fire_wound or not integer(h.bullet_id, 0, 4294967294) or not h.draftsman then return false end
+	local now, n = time_global(), 0
+	for k, at in pairs(bullets) do
+		if now < at or now - at > 1000 then bullets[k] = nil else n = n + 1 end
+	end
+	local key = tostring(h.draftsman:id()) .. ":" .. tostring(db.actor:id()) .. ":" .. tostring(h.bullet_id)
+	if bullets[key] then
+		if type(flags) == "table" then flags.ret_value = false end
+		h.power = 0
+		return true
+	end
+	if n >= 1024 then bullets = {} end
+	bullets[key] = now
+	return false
+end
+
+local function install_momo()
+	local m = C().mod("grok_actor_damage_balancer")
+	if not (m and C().mod("momo_multihit_fix")) or installed.momo then return end
+	local current = m.actor_on_before_hit
+	local base, holder = find(current, "gbo_adb", {}, 0)
+	if type(base) ~= "function" then return end
+	-- holder is momo's wrapper. Preserve wrappers above and below it and the mod's original ADB.
+	local slot = { actor = holder }
+	C().wrap(slot, "actor", "momo_multihit_fix.actor_on_before_hit:bullet_id", function(orig)
+		return function(h, bone, flags, ...)
+			if not C().active() then return orig(h, bone, flags, ...) end
+			if not coop_mode.actor_is_player() then return end
+			if bullet_again(h, flags) then return end
+			return base(h, bone, flags, ...)
+		end
+	end)
+	if current == holder then
+		m.actor_on_before_hit = slot.actor
+	else
+		local function replace(f, seen, depth)
+			if seen[f] or depth > 8 then return end seen[f] = true
+			for i = 1, 255 do
+				local name, v = debug.getupvalue(f, i) if not name then break end
+				if v == holder then debug.setupvalue(f, i, slot.actor)
+				elseif type(v) == "function" then replace(v, seen, depth + 1) end
+			end
+		end
+		replace(current, {}, 0)
+	end
+	rebind[#rebind + 1] = { "actor_on_before_hit", holder, slot.actor }
+	installed.momo = true
+end
+
+local function rebind_callback(name, old, new)
+	local route = C().mod("coop_route")
+	local intercepts = route and route.intercepts() or C().upvalue(axr_main.make_callback, "intercepts")
+	local list = intercepts and intercepts[name]
+	local old_key = route and route.wrapper_of(name, old) or old
+	local priority = list and list[old_key]
+	C().swap_callback(name, old, new)
+	local new_key = route and route.wrapper_of(name, new) or new
+	if priority and list[new_key] then list[new_key] = priority end
+end
+
+local function install()
+	for _, step in ipairs({ install_help, install_psy, install_pulse, install_momo }) do
+		local ok, err = pcall(step)
+		if not ok then log("! install step failed: %s", tostring(err)) end
+	end
+	for _, r in ipairs(rebind) do
+		local ok, err = pcall(rebind_callback, r[1], r[2], r[3])
+		if not ok then log("! callback rebind failed: %s", tostring(err)) end
+	end
+end
+
+local function update()
+	local now = time_global()
+	if coop_mode.leads_here() then
+		for _, tx in pairs(healing) do
+			local ok, err = pcall(advance_heal, tx, now)
+			if not ok then
+				log("! wounded help update failed: %s", tostring(err))
+				finish_heal(tx, false)
+			end
+		end
+	end
+	if now < next_install then return end
+	next_install = now + 1000
+	install()
+	-- A connected peer keeps its sequence guard. A disconnected peer's transport slot can be reused.
+	if next(served) then
+		local present = { [C().self_peer()] = C().active() }
+		for _, player in ipairs(C().players()) do present[player.id] = true end
+		for peer in pairs(served) do if not present[peer] then served[peer] = nil end end
+	end
+	for id, p in pairs(pending) do if now - p.at > 30000 then pending[id] = nil end end
+end
+
+function on_game_start()
+	if started then return end
+	started = true
+	local ok, err = pcall(function()
+		C().set_limit(HEAL, 4, 1)
+		C().on(HEAL, heal, "host")
+		C().on(REPLY, credited, "player")
+		RegisterScriptCallback("actor_on_first_update", install)
+		RegisterScriptCallback("actor_on_update", update)
+	end)
+	if not ok then log("! registration failed: %s", tostring(err)) end
+	install()
+end
+
+-- axr_main loads all modules before calling on_game_start. Add the substitution before
+-- NPC compat compiles the handler and Grok registers it, regardless of callback start order.
+do
+	local ok, err = pcall(register_grok_axe_rewrite)
+	if not ok then log("! Grok axe rewrite registration failed: %s", tostring(err)) end
+end

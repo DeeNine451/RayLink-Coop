@@ -1,0 +1,5 @@
+; G7-4, Dev 57: run the axe's detector penalty on the attacker's machine, before client_hit_perks
+; forwards the hit. grok_bo remains authoritative; its remote draftsman is not the local AC_ID,
+; so the original half_damage callback does not reduce the forwarded hit a second time.
+[route_scripts]
+half_damage = owner
