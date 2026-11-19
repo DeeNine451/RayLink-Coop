@@ -48,28 +48,58 @@ HARV = {}
 HARV_DATA = {} -- harvester id -> the mod's data
 HARV_MOVES = {}
 EDDListType = { iActorBag = 1 }
+INI.placeable_artifact_harvester = { integrated_storage = "harvester_box" }
 hf_obj_manager = hf_obj_manager or {}
 hf_obj_manager.get_data = hf_obj_manager.get_data or function(id) return HARV_DATA[id] end
 do -- file locals of the mod, reachable only through ensure_callbacks_registered
+	local function set_stash_mapping(id, box_id) HARV[id] = box_id end
+	local function get_or_create_harvester_stash(obj, allow_create)
+		local id = obj:id()
+		if not HARV[id] and allow_create then
+			local box = spawn("harvester_box", vec3(21, -50, 0), nil, { kind = "box" })
+			set_stash_mapping(id, box.id)
+		end
+		return HARV[id]
+	end
 	local function harvester_of(box_id)
 		for hid, sid in pairs(HARV) do
 			if sid == box_id then return hid end
 		end
 	end
+	local valid_actor_bags = { [EDDListType.iActorBag] = true }
+	local function is_valid_artifact_section(section) return section == "af_ok" end
+	local function get_item_condition_and_setter(id) return OBJ[id]:condition() end
+	local function can_reach_first_spawn(_, id) return get_item_condition_and_setter(id) > 0 end
+	local function clear_active(id) HARV_DATA[id].artifact_item_id = 0 end
+	local function remove_display() end
 	local function on_item_before_move(flags, case_id, item, mode, bag_from)
-		if item:section() ~= "af_ok" then
+		if mode ~= "loot" or not valid_actor_bags[bag_from] then return end
+		if not is_valid_artifact_section(item:section()) or not can_reach_first_spawn(item:section(), item:id())
+			or get_item_condition_and_setter(item:id()) <= 0 then
 			flags.ret_value = false
 			actor_menu.set_msg(1, "Only configured artifacts can be inserted.", 3)
 		end
 	end
 	local function on_item_after_move(case_id, item, mode, bag_from)
-		local d = HARV_DATA[harvester_of(case_id)]
+		local id = harvester_of(case_id)
 		HARV_MOVES[#HARV_MOVES + 1] = { item = item:id(), bag = bag_from }
-		if bag_from then d.artifact_item_id = item:id() else d.artifact_item_id = 0 end
+		if bag_from then
+			HARV_DATA[id].artifact_item_id = item:id()
+		else
+			clear_active(id)
+			remove_display(id)
+		end
 	end
 	local function ensure_callbacks_registered() return on_item_before_move, on_item_after_move end
 	bind_artifact_harvester = {
-		open_harvester_stash = function(id) HARV[id] = HARV[id] or spawn("inv_box", vec3(21, 0, 3)).id end,
+		artifact_harvester_wrapper = {},
+		open_harvester_stash = function(id)
+			local box_id = get_or_create_harvester_stash(OBJ[id], true)
+			CreateTimeEvent("hf_artifact_harvester_stash", "open_" .. id, 0.1, function()
+				OBJ[box_id]:use(db.actor)
+				return true
+			end)
+		end,
 		harvester_save_state = function(m) m.harvester_stashes = HARV end,
 		on_game_start = function() ensure_callbacks_registered() end,
 	}
@@ -125,38 +155,44 @@ if which == "host" then
 	check(a and a.b == alife_storage_manager.get_state().stove_stashes[stove:id()], "stove: box id answered")
 	run_time_events(500)
 	check(HOST_OPENED_STOVE == nil, "stove: the host does not open the box itself")
-	local _, harv = spawn("harvester", vec3(21, 0, 0))
+	local _, harv = spawn("placeable_artifact_harvester", vec3(21, 0, 0))
+	HARV_DATA[harv:id()] = {}
+	SENT = {}
 	from("hf_box", { k = "harvester", o = harv:id() }, 1)
-	check(sent("mods.hf_box_r").b == HARV[harv:id()], "harvester: box id answered")
-	-- A client's moves are his own window's: the host watches the box and runs the mod's two halves
-	do
-		local box_id = HARV[harv:id()]
-		local box_obj = OBJ[box_id]
-		box_obj._kind = "box"
-		HARV_DATA[harv:id()] = {}
+	local answer, reply = sent("mods.hf_box_r")
+	local box_id = HARV[harv:id()]
+	local box_obj = OBJ[box_id]
+	check(box_obj and answer and answer.k == "harvester" and answer.o == harv:id() and answer.b == box_id
+		and reply.target == 1 and sent_count("mods.hf_box_r") == 1, "harvester: box id answered once to the requester")
+	run_time_events(500)
+	check(box_obj and box_obj._used_by == nil, "harvester: the host does not open the box itself")
+	-- Arrivals alone never start production. An explicit insert runs the mod's callback on the host.
+	if box_obj then
 		local kept = spawn("af_ok", vec3(21, 0, 3), box_id)
 		local function watch() NOW = NOW + 1100; SendScriptCallback("actor_on_update") end
-		box_obj.iterate_inventory_box = function(self, f)
-			for id, se in pairs(SE) do
-				if se.parent_id == box_id then f(self, OBJ[id]) end
-			end
-		end
 		watch()
 		check(#HARV_MOVES == 0, "harvester: what lay in the box at the first look starts nothing")
-		local wrong = spawn("af_wrong", vec3(21, 0, 3), box_id)
 		HUD = nil
+		local wrong = spawn("af_wrong", other:position(), other:id())
+		from("hf_harv_insert", { o = harv:id(), i = wrong.id }, 1)
+		local refused, refusal = sent("mods.hf_harv_r")
+		check(wrong.parent_id == other:id() and refused and refused.r == "section" and refusal.target == 1
+			and #HARV_MOVES == 0 and HUD == nil, "harvester: refused insert stays with the requester and shows no HUD line on the host")
+		local put = spawn("af_ok", other:position(), box_id)
 		watch()
-		check(#HARV_MOVES == 0 and HUD == nil, "harvester: an item the mod refuses starts nothing, and no line on the host's screen")
-		local put = spawn("af_ok", vec3(21, 0, 3), box_id)
-		watch()
-		check(HARV_MOVES[1] and HARV_MOVES[1].item == put.id and HARV_MOVES[1].bag == EDDListType.iActorBag,
+		check(#HARV_MOVES == 0, "harvester: a new arrival without an insert request starts nothing")
+		box_obj:transfer_item(OBJ[put.id], other)
+		from("hf_harv_insert", { o = harv:id(), i = put.id }, 1)
+		check(put.parent_id == box_id and HARV_MOVES[1] and HARV_MOVES[1].item == put.id and HARV_MOVES[1].bag == EDDListType.iActorBag,
 			"harvester: a client's artefact starts production through the mod's own code")
 		check(HARV_DATA[harv:id()].artifact_item_id == put.id, "harvester: the mod's data has it")
+		from("hf_harv_insert", { o = harv:id(), i = put.id }, 1)
 		watch()
-		check(#HARV_MOVES == 1, "harvester: once")
-		SE[put.id].parent_id = 500
+		check(#HARV_MOVES == 1, "harvester: retry and polling do not start production again")
+		box_obj:transfer_item(OBJ[put.id], other)
 		watch()
-		check(HARV_MOVES[2] and HARV_MOVES[2].item == put.id and HARV_MOVES[2].bag == nil, "harvester: taken out, the mod stops")
+		check(#HARV_MOVES == 2 and HARV_MOVES[2].item == put.id and HARV_MOVES[2].bag == nil
+			and HARV_DATA[harv:id()].artifact_item_id == 0, "harvester: taken out, the mod stops")
 		alife_release_id(kept.id)
 		alife_release_id(wrong.id)
 	end

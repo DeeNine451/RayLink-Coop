@@ -152,9 +152,16 @@ configure_display()
 
 if name == "srv_world" then
 	local obj, box = make_harvester(player:position())
+	local device_id = obj:id() + 1000 -- device on the player's map, absent here
+	local created = #CREATED
+	request("hf_box", { k = "harvester", o = device_id })
+	local forwarded, raw = sent("mods.hf_box")
+	check(forwarded and forwarded._peer == 1 and forwarded.o == device_id and forwarded.k == "harvester"
+		and raw.target == bridge and sent_count("mods.hf_box") == 1 and sent_count("mods.hf_box_r") == 0
+		and #CREATED == created, "world server forwards the box request once to the map server")
 	local item = alife_create_item("af_gravi", player)
 	request("hf_harv_insert", { o = obj:id(), i = item.id, _peer = 9 })
-	local forwarded, raw = sent("mods.hf_harv_insert")
+	forwarded, raw = sent("mods.hf_harv_insert")
 	check(forwarded and forwarded._peer == 1 and raw.target == bridge and item.parent_id == player:id(),
 		"world server forwards insert under the transport sender and never uses its ghost's inventory")
 	request("hf_harv_demount", { o = obj:id() })
@@ -177,6 +184,21 @@ elseif name == "none" then
 	wrapper:net_destroy()
 	check(item.parent_id == actor:id() and not alife_object(box:id()), "single player unload stays stock")
 else
+	local _, unopened = spawn("placeable_artifact_harvester", player:position())
+	local created = #CREATED
+	request("hf_box", { k = "harvester", o = unopened:id() })
+	local reply, box_packet = sent("mods.hf_box_r")
+	local state = {}
+	bh.harvester_save_state(state)
+	local opened_box_id = state.harvester_stashes[unopened:id()]
+	local unopened_box = OBJ[opened_box_id]
+	check(unopened_box and unopened_box:section() == "harvester_box" and #CREATED == created + 1
+		and reply and reply.k == "harvester" and reply.o == unopened:id() and reply.b == opened_box_id
+		and box_packet.target == 1 and sent_count("mods.hf_box_r") == 1,
+		"map decider creates the stock stash and answers once to the requester")
+	run_time_events(1000)
+	check(unopened_box and unopened_box._used_by == nil, "map decider never opens the requester's stash window")
+
 	local obj, box = make_harvester(player:position())
 	local foreign = alife_create_item("af_gravi", stranger)
 	request("hf_harv_insert", { o = obj:id(), i = foreign.id })
