@@ -1,0 +1,232 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 G9-6. Map owners see bodies and story objects; the world owner records visits and parcel ownership.
+-- In co-op these authorities are on the same process. A player's machine displays only its own notices.
+
+local api = rawget(_G, "coop")
+local PDA_VISITS = "coop_credit_pda_visits" -- personal pdata, for the discovery feedback
+local PDA_AWARDS = "coop_credit_pda_awards" -- world book: character -> story spot -> awarded
+local PDA_FACT = "g96_pda_fact"
+local PDA_SEEN = "g96_pda_seen"
+local MEDKIT = "g96_medkit"
+local CORPSE_REACH_SQ = 5 * 5 -- same remote interaction allowance as coop_loot_claim
+local installed = false
+
+local function C() return coop_mods_core end
+
+local function object_id(value)
+	local n = tonumber(value)
+	return n and n >= 0 and n < 65535 and n % 1 == 0 and n or nil
+end
+
+local function here(peer)
+	return coop_mode.seat_plays(peer) and coop_mode.where(peer) == "here" and coop_mode.decider(peer) == "this"
+end
+
+local function play_pda_visit(t, points)
+	if not (C().active() and coop_mode.actor_is_player() and db.actor and object_id(t.c) == C().hid(0)) then return end
+	local hint = points[t.s]
+	if not hint then return end
+	local state = alife_storage_manager.get_state()
+	if type(state[PDA_VISITS]) ~= "table" then state[PDA_VISITS] = {} end
+	if state[PDA_VISITS][t.s] then return end
+	state[PDA_VISITS][t.s] = true
+	actor_menu.set_fade_msg(game.translate_string(hint), 5, nil, "device\\pda\\spot_discovered")
+end
+
+local function award_pda_visit(character, peer, target, points)
+	if not has_alife_info(target) then give_info(target) end
+	local state = alife_storage_manager.get_state()
+	if type(state[PDA_AWARDS]) ~= "table" then state[PDA_AWARDS] = {} end
+	local key = tostring(character)
+	local book = state[PDA_AWARDS][key] or {}
+	state[PDA_AWARDS][key] = book
+	if book[target] then return end
+	book[target] = true
+	local ok, err = pcall(coop_tasks.with_character, character, game_statistics.increment_rank, 10)
+	if not ok then
+		book[target] = nil
+		error(err, 0)
+	end
+	local notice = { c = character, s = target }
+	if peer == C().self_peer() then
+		play_pda_visit(notice, points)
+	else
+		coop_credit.to_owner(character, PDA_SEEN, notice)
+	end
+end
+
+local function install_pda()
+	local mod = C().mod("pda")
+	local discover = C().fn(mod, "discover_spots")
+	if not discover then return end
+	local primary = C().upvalue(discover, "primary_objects_tbl")
+	local distances = C().upvalue(discover, "distance_tbl")
+	if type(primary) ~= "table" or type(distances) ~= "table" then return end
+	local points, announced, reported = {}, {}, {}
+	for _, point in ipairs(primary) do points[point.target] = points[point.target] or point.hint end
+	coop_mods_pdata.register(PDA_VISITS)
+	RegisterScriptCallback("load_state", function() announced, reported = {}, {} end)
+	C().set_limit(PDA_FACT, 128, 32)
+	C().on(PDA_FACT, function(t, from)
+		if not coop_mode.decides_world() then return end
+		-- Reserved map process seats in coop_mapserver_rules.h. Playing peers have no attestation path.
+		local reporter = type(from) == "number" and from > 0x100 and from <= 0x107 and not coop_mode.seat_plays(from)
+		if not coop_trust.pass("g96_pda_reporter", reporter, "peer %s cannot attest a PDA visit", tostring(from)) or not reporter then return end
+		local character = object_id(t.c)
+		local target = type(t.s) == "string" and #t.s <= 128 and t.s or nil
+		local peer = character and character ~= 0 and C().peer_of(C().lid(character))
+		local valid = target and points[target] and peer and coop_mode.seat_plays(peer)
+		if not coop_trust.pass("g96_pda_fact", valid ~= nil and valid ~= false, "peer %s sent an invalid PDA visit", tostring(from)) or not valid then return end
+		award_pda_visit(character, peer, target, points)
+	end, "world")
+	C().on(PDA_SEEN, function(t) play_pda_visit(t, points) end, "player")
+	C().wrap(mod, "discover_spots", "g96.pda.discover_spots", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			ResetTimeEvent(0, "ScanForSpots", 3)
+			local refresh = false
+			if coop_mode.leads_here() then
+				local radius = distances[level.name()] or 40
+				local players = C().player_objects()
+				local world = coop_mode.decides_world()
+				for target in pairs(points) do
+					local id = get_story_object_id(target)
+					local row = id and db.storage[id]
+					local obj = row and row.object
+					if obj then
+						local pos = obj:position()
+						for _, p in ipairs(players) do
+							local cid = C().hid(p.obj:id())
+							if cid and here(p.peer) and p.obj:alive() and p.obj:position():distance_to_sqr(pos) <= radius * radius then
+								local seen = reported[cid] or {}
+								reported[cid] = seen
+								if not seen[target] then
+									if world then award_pda_visit(cid, p.peer, target, points); seen[target] = true
+									elseif C().publish(PDA_FACT, { c = cid, s = target }) then seen[target] = true end
+								end
+							end
+						end
+					end
+				end
+			end
+			if coop_mode.actor_is_player() then
+				for target in pairs(points) do
+					if not announced[target] and has_alife_info(target) and get_story_object_id(target) then
+						announced[target], refresh = true, true
+					end
+				end
+				if refresh then mod.fill_primary_objects() end
+			end
+		end
+	end)
+end
+
+local function install_alq()
+	local mod = C().mod("alq_player")
+	local update = C().find_local(mod, "actor_on_update")
+	local holders = C().upvalue(update, "check_holders")
+	local notice, holder, index = C().upvalue(holders, "notice_package")
+	if type(notice) ~= "function" then return end
+	-- Both stock pickup and holder polling close over this same local function.
+	local adapter = { notice_package = notice }
+	C().wrap(adapter, "notice_package", "g96.alq.notice_package", function(orig)
+		return function(cid, info)
+			if not C().active() then return orig(cid, info) end
+			if not coop_mode.decides_world() or object_id(cid) == nil then return end
+			local peer = C().peer_of(C().lid(cid))
+			if not (peer and coop_mode.seat_plays(peer)) then return end
+			if type(info.coop_notified_cids) ~= "table" then
+				info.coop_notified_cids = {}
+				if info.noticed and object_id(info.holder) then info.coop_notified_cids[tostring(info.holder)] = true end
+			end
+			local key, legacy = tostring(cid), info.noticed
+			info.noticed = info.coop_notified_cids[key] == true
+			local ok, err = pcall(orig, cid, info)
+			if ok and info.noticed then info.coop_notified_cids[key] = true end
+			info.noticed = legacy or info.noticed
+			if not ok then error(err, 0) end
+		end
+	end)
+	debug.setupvalue(holder, index, adapter.notice_package)
+end
+
+local function bounded_text(v, maximum)
+	return type(v) == "string" and #v > 0 and #v <= maximum
+end
+
+local function show_medkit(t)
+	if not (C().active() and coop_mode.actor_is_player() and db.actor and object_id(t.c) == C().hid(0)
+		and t.l == level.name() and bounded_text(t.s, 64) and t.s:match("^st_eat_medkit_cry_%d+$")
+		and bounded_text(t.f, 64) and bounded_text(t.n, 256) and bounded_text(t.i, 256)) then return end
+	local headline = string.format("%s, %s", t.n, game.translate_string(t.f))
+	-- Keep this frame on the stack: the existing news router treats an addressed display from a coop script as local.
+	dynamic_news_helper.send_tip(t.s, headline, nil, nil, t.i, nil, "npc")
+end
+
+local function install_medkit()
+	local mod = C().mod("xr_eat_medkit")
+	local broadcast = C().fn(mod, "broadcast")
+	local _, holder, index = C().upvalue(broadcast, "_max_strings")
+	if not holder then return end
+	C().on(MEDKIT, show_medkit, "player")
+	C().wrap(mod, "broadcast", "g96.medkit.broadcast", function(orig)
+		return function(npc, ...)
+			if not C().active() then return orig(npc, ...) end
+			if not (npc and coop_mode.leads_here()) then return end
+			local faction = npc:character_community()
+			if faction:find("greh", 1, true) or faction:find("monolith", 1, true) then return end
+			local _, count = debug.getupvalue(holder, index)
+			if type(count) ~= "number" or count < 1 then return end
+			local pos, map = npc:position(), level.name()
+			local msg = "st_eat_medkit_cry_" .. math.random(count)
+			for _, p in ipairs(C().player_objects()) do
+				if here(p.peer) and p.obj:alive() and p.obj:position():distance_to_sqr(pos) <= 25 * 25 then
+					local t = { c = C().hid(p.obj:id()), l = map, s = msg, f = faction,
+						n = npc:character_name(), i = npc:character_icon() }
+					if p.peer == C().self_peer() then show_medkit(t) else C().to_peer(p.peer, MEDKIT, t) end
+				end
+			end
+		end
+	end)
+end
+
+local function install_nimble()
+	local mod = C().mod("nimbleclearinventory") or C().mod("NimbleClearInventory")
+	if not (mod and type(mod.npc_whitelist) == "table") then return end
+	local function clear(peer, id)
+		if not (C().active() and coop_mode.leads_here()) then return end
+		id = object_id(id)
+		local body = id and level.object_by_id(id)
+		local who = here(peer) and C().avatar(peer)
+		local ok = body and who and IsStalker(body) and not body:alive() and mod.npc_whitelist[body:section()] == true
+			and who:alive() and who:position():distance_to_sqr(body:position()) <= CORPSE_REACH_SQ
+		if not coop_trust.pass("g96_nimble_open", ok == true, "peer %s has no eligible Nimble corpse in reach", tostring(peer)) or not ok then return end
+		local items = {}
+		local function collect(_, item) items[item:id()] = true end
+		body:iterate_inventory(collect, body)
+		body:iterate_ruck(collect, body)
+		for item in pairs(items) do alife_release_id(item) end
+	end
+	C().listen("container_opened", clear)
+	C().wrap(mod, "release_itms", "g96.nimble.release_itms", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			if coop_mode.leads_here() and coop_mode.actor_is_player() then
+				local gui = ui_inventory and ui_inventory.GUI
+				local body = gui and gui.mode == "loot" and gui:GetPartner()
+				if body then clear(C().self_peer(), body:id()) end
+			end
+			return true
+		end
+	end)
+end
+
+function on_game_start()
+	if not api or installed then return end
+	installed = true
+	for _, step in ipairs({ { "pda", install_pda }, { "alq", install_alq },
+		{ "medkit", install_medkit }, { "nimble", install_nimble } }) do
+		local ok, err = pcall(step[2])
+		if not ok then printf("! [coop_credit_misc] %s failed: %s", step[1], tostring(err)) end
+	end
+end

@@ -19,6 +19,8 @@
 	  station ident the host sends its file name (mods.fm { ch, k kind, n name }) and clients switch to the same
 	  file; every 30 s the host repeats the current state for late joiners.
 	RF Receiver Hidden Packages (tb_rf_receiver_packages)
+	  The world owner checks each character's goodwill and adds that character and map to the shared queue.
+	  Goodwill thresholds live in coop_rf_package_goodwill. mods.g96_rf_package addresses the spawn/intro news.
 	  The package, its ambush and the reminders are the host's. A client never spawns them; it follows the
 	  host's package through the RF targets and runs only the hunting half (scanner, pickup, reward into its
 	  own inventory). When a client picks the package up the host closes its own package state.
@@ -637,7 +639,9 @@ end
 -- RF Receiver Hidden Packages
 -------------------------------------------------------------------------------
 local PKG_PREFIX = "quest_tb_package_"
-local pkg = { TB = nil, tracked = nil, examined = {}, next_tick = 0, orig_take = nil }
+local PKG_GOODWILL = "coop_rf_package_goodwill"
+local PKG_NEWS = "g96_rf_package"
+local pkg = { TB = nil, tracked = nil, examined = {}, next_tick = 0, next_goodwill = 0, baseline = {}, orig_take = nil }
 
 -- The package mod's state with no package (its own start values), and its receiver's.
 local PKG_IDLE = { tb_package_active = false, tb_target_item = 0, tb_package_in_level = "empty", tb_reminder = "empty",
@@ -726,10 +730,106 @@ local function pkg_host_check()
 	st.pkg_closed = st.pkg_closed + 1
 end
 
+local function pkg_show_news(t)
+	if not (C().active() and coop_mode.actor_is_player() and db.actor and type(t.m) == "string" and #t.m <= 2000
+		and type(t.i) == "string" and #t.i <= 128 and rf_number(t.c, 0, 65534) == C().hid(0)) then return end
+	db.actor:give_game_news(game.translate_string("tb_anon_sender"), t.m, t.i, 0, 20000, 0)
+	utils_obj.play_sound("device\\pda\\pda_sos")
+	if t.note == true then pkg.TB.give_note() end
+end
+
+local function pkg_news(character, message, icon, note)
+	local t = { c = character, m = message, i = icon, note = note }
+	if character == 0 and coop_mode.actor_is_player() then
+		pkg_show_news(t)
+	else
+		coop_credit.to_owner(character, PKG_NEWS, t)
+	end
+end
+
+-- The stock spawner already consumes the map and icon at slots 1 and 2. Give its actor-only reads the
+-- initiator's inventory and faction, and route its message to that character. The spawner still owns
+-- coordinate selection, surge checks, RF target creation and its timers.
+local function pkg_spawn_from_queue(orig, ...)
+	local tb = pkg.TB
+	local queue = tb.tb_package_queue
+	local row = queue and queue[1]
+	if not row then return orig(...) end
+	local character = row.character
+	if character == nil and coop_mode.actor_is_player() then return orig(...) end -- legacy queue in a host's save
+	local source = getfenv(orig)
+	local body = character == 0 and db.actor or (character ~= nil and coop_tasks.recipient_body(C().lid(character)))
+	local actor = {
+		object = function(_, section) return body and body:object(section) end,
+		give_game_news = function(_, _, message, icon)
+			if character ~= nil then pkg_news(character, message, icon) end
+		end,
+	}
+	local env = setmetatable({ db = setmetatable({ actor = actor }, { __index = source.db }),
+		get_actor_true_community = function() return body and body:character_community() or row.community end,
+		utils_obj = setmetatable({ play_sound = function() end }, { __index = source.utils_obj }),
+		-- The queued outdoor map is the context. The spawner's own actor can now be in a lab or on a console's map.
+		GetEvent = function(name, ...)
+			if name == "underground" then return false end
+			return source.GetEvent(name, ...)
+		end,
+	}, { __index = source, __newindex = source })
+	setfenv(orig, env)
+	local ok, spawned = pcall(orig, ...)
+	setfenv(orig, source)
+	if not spawned or not ok then
+		if not tb.tb_package_active and queue[1] ~= row then table.insert(queue, 1, row) end
+		tb.tb_making_package = false
+	end
+	if not ok then error(spawned, 0) end
+	return spawned
+end
+
+local function pkg_goodwill()
+	local tb = pkg.TB
+	if not (tb.tb_package_queue and tb.tb_factions and tb.tb_relations and tb.tb_relation_diff and not tb.tb_making_package) then return end
+	local state = alife_storage_manager.get_state()
+	if type(state[PKG_GOODWILL]) ~= "table" then state[PKG_GOODWILL] = {} end
+	local records = state[PKG_GOODWILL]
+	for _, p in ipairs(C().players()) do
+		local id = p.avatar_id
+		if rf_number(id, 0, 65534) and coop_mode.seat_plays(p.id) and coop_mode.where(p.id) ~= "joining" then
+			local se = alife_object(id)
+			-- The world owner gets each player's map from the roster, including players with no online object here.
+			local map = p.level and alife():level_name(p.level)
+			if not map and coop_mode.where(p.id) == "here" then map = level.name() end
+			if map and (id == 0 or se) then
+				local key = tostring(C().hid(id))
+				local record = records[key] or {}
+				records[key] = record
+				for _, faction in ipairs(tb.tb_factions) do
+					local rel = tb.tb_relations[faction]
+					local previous = record[faction] or (id == 0 and rel[1]) or pkg.baseline[faction]
+					local goodwill = coop_reputation.goodwill_of(faction, id)
+					if previous and goodwill >= previous + tb.tb_relation_diff then
+						tb.tb_package_queue[#tb.tb_package_queue + 1] = { map, rel[2], character = C().hid(id),
+							community = se and se.community and se:community() or "stalker" }
+						record[faction] = goodwill
+					end
+					if previous and not record.intro and goodwill >= previous + 50 then
+						record.intro = true
+						if id ~= 0 or not tb.tb_sufficient_passed then
+							if id == 0 then tb.tb_sufficient_passed = true end
+							pkg_news(C().hid(id), game.translate_string("tb_sooner_rf"), rel[2], true)
+						end
+					end
+				end
+			end
+		end
+	end
+	if not tb.tb_package_active and tb.tb_package_queue[1] then tb.tb_radio_thing() end
+end
+
 local function install_packages()
 	local tb = C().mod("tb_rf_receiver_packages")
 	if not (tb and rf.IR) then return end
 	pkg.TB = tb
+	for faction, info in pairs(tb.tb_relations or {}) do pkg.baseline[faction] = info[1] end
 	installed[#installed + 1] = "rf_packages"
 	local function client_only(name, ret)
 		C().wrap(tb, name, "tb_rf_receiver_packages." .. name, function(orig)
@@ -740,18 +840,31 @@ local function install_packages()
 		end)
 	end
 	-- The spawning half is the host's.
-	client_only("tb_radio_thing", false)
+	C().wrap(tb, "tb_radio_thing", "tb_rf_receiver_packages.tb_radio_thing", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			if not coop_mode.decides_world() then return false end
+			return pkg_spawn_from_queue(orig, ...)
+		end
+	end)
 	client_only("failsafepackagespawn", false)
 	client_only("spawn_some_badguys", nil)
-	client_only("checkrelationchange", true) -- true ends the mod's time event
+	C().wrap(tb, "checkrelationchange", "g96.rf.checkrelationchange", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			return true -- pkg_tick schedules the world-owner scan, also where the stock timer has no player
+		end
+	end)
 	client_only("remindaboutpackage", true) -- the host's reminders reach everybody as news
 	pkg.orig_take = tb.actor_on_item_take
+	C().on(PKG_NEWS, pkg_show_news, "player")
+	RegisterScriptCallback("load_state", function() pkg.next_goodwill = 0 end)
 end
 
 local pkg_rebound = false
 local function pkg_tick()
 	if not pkg.TB then return end
-	if C().is_client() and not pkg_rebound then
+	if coop_mode.is_player_mirror() and not pkg_rebound then
 		pkg_rebound = true
 		C().swap_callback("actor_on_item_take", pkg.orig_take, pkg_client_take)
 		if custom_functor_autoinject and custom_functor_autoinject.remove_functor then
@@ -762,9 +875,14 @@ local function pkg_tick()
 	if tg < pkg.next_tick then return end
 	pkg.next_tick = tg + 2000
 	local ok, e
-	if C().is_world_server() then
+	if coop_mode.decides_world() then
 		ok, e = pcall(pkg_host_check)
-	elseif C().is_client() then
+		if tg >= pkg.next_goodwill then
+			pkg.next_goodwill = tg + 30000
+			local scanned, err = pcall(pkg_goodwill)
+			if not scanned then C().report("radio", "package goodwill", err) end
+		end
+	elseif coop_mode.is_player_mirror() then
 		ok, e = pcall(pkg_client_follow)
 	else
 		return
