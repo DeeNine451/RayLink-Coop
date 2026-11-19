@@ -1,7 +1,7 @@
 -- Ядро: без проверок режима (docs/MODES.md)
--- F5-PRG-1. Only the record keeper calls check; only authoritative observations call note.
+-- Only the record keeper calls check; only authoritative observations call note.
 -- Co-op: the host supplies observations. Server: the world record keeper receives
--- observations from the player's map (F5-PRG-4). This module installs no handlers.
+-- observations from the player's map (F5-PRG-4).
 -- Windows are per character AND record key: saving skills must not spend kills or
 -- rank awaiting a different report. Only a validated report closes its window.
 -- rank_budget(character) is a read; rank_budget(character, true) reads and commits
@@ -9,7 +9,7 @@
 -- Persist snapshot(character) alongside raw pdata in the keeper's save. Restore
 -- only that keeper-owned snapshot after clear() on load, before handling reports.
 -- Raw pdata (including legacy saves without a snapshot) never seeds the budget
--- or skill_of. This module installs no save hooks and does not persist windows.
+-- or skill_of. Observation windows are not persisted.
 
 constants = { step_length = 0.7, jump_seconds = 1.5, slack = 0.25,
 	skill_allowance = 25, rank_allowance = 25, rank_per_minute = 100,
@@ -474,3 +474,211 @@ end
 function clear(character)
 	if character == nil then ledger = {} else ledger[character] = nil end
 end
+
+-------------------------------------------------------------------------------
+-- F5-PRG-3: keeper records and observations from the process that leads the map
+-------------------------------------------------------------------------------
+function filter(character, peer, clean, previous)
+	local fixes = {}
+	local old = type(previous) == "table" and type(previous.d) == "table" and previous.d or {}
+	for key, value in pairs(clean) do
+		if RECORD_KEYS[key] then
+			-- The PDA adapter carries faction data and ID mappings in this same key.
+			-- The progress rule owns only its kill tracker envelope.
+			local report = value
+			if key == "milpda" and type(value) == "table" then
+				report = { tracked_bodies = value.tracked_bodies }
+			end
+			local accepted = check(character, peer, key, old[key], report)
+			if accepted ~= report then
+				if key == "milpda" and type(value) == "table" then
+					local merged = {}
+					for k, v in pairs(value) do merged[k] = v end
+					merged.tracked_bodies = accepted and accepted.tracked_bodies or {}
+					accepted = merged
+				end
+				clean[key] = accepted
+				fixes[#fixes + 1] = { k = key, v = accepted }
+			end
+		end
+	end
+	return clean, fixes
+end
+
+local api = rawget(_G, "coop")
+local function C() return coop_mods_core end
+local next_sample, positions = 0, {}
+local listeners_installed, corpse_wrapped, task_rank_wrapped = false, false, false
+
+local function leads_here()
+	return C().active() and coop_mode.leads_here()
+end
+
+local function who(obj)
+	if not obj then return end
+	local credit = C().fn(C().mod("coop_credit"), "who")
+	if credit then return credit(obj) end
+	local id = obj:id()
+	if id == 0 and not coop_mode.actor_is_player() then return end
+	local peer = C().peer_of(id)
+	if peer ~= nil then return id, peer end
+end
+
+-- The native Progress check reads rank_budget from this same ledger. F5-PRG-4
+-- can chain observe to forward map observations without forwarding pdata.
+function observe(character, kind, amount, meta)
+	return note(character, kind, amount, meta)
+end
+
+local function on_hit(victim, hit)
+	if not (leads_here() and victim and hit and nonnegative(hit.power)) then return end
+	local draftsman = hit.draftsman
+	if draftsman and C().is_remote_player(draftsman:id()) then
+		local shooter = who(draftsman)
+		local weapon = integer(hit.weapon_id, 65534) and level.object_by_id(hit.weapon_id)
+		if shooter and weapon and IsItem("fake_ammo_wpn", weapon:section()) then
+			observe(shooter, "melee_hit", hit.power, { alive = victim:alive() })
+		end
+	end
+	if integer(hit.type, 8) and hit.type >= 5 then
+		local character = who(victim)
+		if character then observe(character, "hit_taken", hit.power, { type = hit.type }) end
+	end
+end
+
+local function actor_on_hit(hit)
+	if coop_mode.actor_is_player() then on_hit(db.actor, hit) end
+end
+
+local function rank_name(obj)
+	return ranks and ranks.get_obj_rank_name and ranks.get_obj_rank_name(obj) or nil
+end
+
+local function on_death(victim, killer, kind)
+	if not (leads_here() and victim) then return end
+	local character = who(killer)
+	if character then observe(character, "kill", 1, { kind = kind, rank = rank_name(victim) }) end
+end
+
+local function sample()
+	if not leads_here() then
+		next_sample, positions = 0, {}
+		return
+	end
+	local at = time_global()
+	if at < next_sample then return end
+	next_sample = at + 1000
+	local states, current = {}, {}
+	for _, player in ipairs(C().players()) do
+		if integer(player.mstate, 0xffffffff) then states[player.id] = player.mstate end
+	end
+	for _, player in ipairs(C().player_objects()) do
+		local obj, flags = player.obj, states[player.peer]
+		if obj:alive() and coop_mode.decider(player.peer) == "this" then
+			local id, pos = obj:id(), obj:position()
+			book(id)
+			-- mcJump is bit 7, followed by fall and the two landing flags (actor_defs.h).
+			local jumping = flags and math.floor(flags / 128) % 2 == 1
+			local airborne = flags and math.floor(flags / 128) % 16 ~= 0
+			local old = positions[id]
+			if old and old.peer == player.peer then
+				local dt = at - old.at
+				local dx, dz = pos.x - old.x, pos.z - old.z
+				local distance = math.sqrt(dx * dx + dz * dz)
+				-- Do not turn a seat/map transfer, teleport or a stale sample into footsteps.
+				if dt <= 2000 and not (airborne or old.airborne) and distance > 0
+					and distance <= 25 * dt / 1000 and math.abs(pos.y - old.y) <= distance then
+					observe(id, "step_m", distance)
+				end
+				if dt <= 2000 and jumping and old.jumping == false then observe(id, "jump", 1) end
+			end
+			current[id] = { peer = player.peer, x = pos.x, y = pos.y, z = pos.z, at = at,
+				jumping = jumping, airborne = airborne }
+		end
+	end
+	positions = current
+end
+
+local function corpse_result(character, rank, ...)
+	observe(character, "corpse_search", 1, { rank = rank })
+	return ...
+end
+
+local function wrap_corpse()
+	if corpse_wrapped then return end
+	corpse_wrapped = C().wrap(C().mod("death_manager"), "create_release_item",
+		"progress.death_manager.create_release_item", function(orig)
+			return function(npc, ...)
+				local peer = C().identity_peer()
+				if peer and leads_here() and npc and not npc:alive() then
+					local character = who(C().identity_obj())
+					if character then return corpse_result(character, rank_name(npc), orig(npc, ...)) end
+				end
+				return orig(npc, ...)
+			end
+		end)
+end
+
+local function wrap_task_rank()
+	if task_rank_wrapped then return end
+	task_rank_wrapped = C().wrap(C().mod("game_statistics"), "increment_rank",
+		"progress.game_statistics.increment_rank", function(orig)
+			return function(value, ...)
+				if leads_here() and nonnegative(value) and value > 0 then
+					local reward_peer = C().fn(C().mod("coop_tasks"), "reward_peer")
+					local peer = reward_peer and reward_peer()
+					local character = peer and who(C().avatar(peer))
+					-- GAMMA game_statistics.increment_rank divides the reward by four.
+					if character then observe(character, "task_rank", value / 4) end
+				end
+				return orig(value, ...)
+			end
+		end)
+end
+
+local function load_records(m)
+	clear()
+	next_sample, positions = 0, {}
+	if not (coop_mode.decides_world() and type(m) == "table" and type(m.coop_mods_pdata) == "table") then return end
+	for key, record in pairs(m.coop_mods_pdata) do
+		local character = tonumber(key)
+		if integer(character, 65534) and type(record) == "table" and record.progress_checked then
+			restore(character, record.progress_checked)
+		end
+	end
+end
+
+local function start_step(what, f)
+	local ok, err = pcall(f)
+	if not ok then printf("! [coop_progress_check] %s failed: %s", what, tostring(err)) end
+end
+
+local function install_listeners()
+	if not listeners_installed then
+		RegisterScriptCallback("npc_on_before_hit", on_hit)
+		RegisterScriptCallback("monster_on_before_hit", on_hit)
+		RegisterScriptCallback("actor_on_before_hit", actor_on_hit)
+		RegisterScriptCallback("npc_on_death_callback", function(npc, killer) on_death(npc, killer, "stalker") end)
+		RegisterScriptCallback("monster_on_death_callback", function(monster, killer) on_death(monster, killer, "monster") end)
+		RegisterScriptCallback("actor_on_update", sample)
+		listeners_installed = true
+	end
+end
+
+local function first_update()
+	if not leads_here() then return end
+	start_step("body listeners", install_listeners)
+	start_step("corpse search", wrap_corpse)
+	start_step("task rank", wrap_task_rank)
+end
+
+local function start()
+	-- The game can start a session after the scripts have loaded. Until the map
+	-- answers, these lifecycle callbacks install no hooks into gameplay or mods.
+	start_step("first update", function() RegisterScriptCallback("actor_on_first_update", first_update) end)
+	start_step("load records", function() RegisterScriptCallback("load_state", function(m)
+		if C().active() then load_records(m) end
+	end) end)
+end
+
+if api then on_game_start = start end

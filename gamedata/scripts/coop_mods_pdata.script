@@ -6,8 +6,10 @@
 	every client and forget the client's own. For the keys registered here:
 
 	  Host:   keeps every player's values in its own save, m_data.coop_mods_pdata["<character id>"] =
-	          { t = token, d = { [key] = value } }, written when that player reports (event mods.pd, chunked),
-	          answered with mods.pd_ack { t = token }. The host's own values stay where the mod keeps them.
+	          { t = token, d = { [key] = value }, progress_checked = keeper snapshot }, written on mods.pd (chunked).
+	          The host answers with mods.pd_ack { t = token }. For each clamped key it first sends
+	          mods.pd_fix { k = key, v = serialized value }, or mods.prg_pd_fix_big for a chunked correction.
+	          The host's own values stay where the mod keeps them.
 	  Client: right after the save is read (alife_storage_manager.on_before_load_state, before any load_state
 	          callback) the registered keys are replaced with this player's values: the session stash
 	          (coop.stash, newer, survives level changes) when it builds on the host's record, otherwise the
@@ -259,13 +261,125 @@ local function on_ack(t, from)
 	if st.last then pcall(api.stash_set, STASH, t.t .. "|" .. st.last) end
 end
 
+local function patch_report(s, key, value)
+	local data = s and C().deser(s)
+	if type(data) ~= "table" then return nil end
+	data[key] = value
+	return C().ser(data)
+end
+
+local function tracker_local_id(id, names)
+	if type(id) ~= "number" or id < 0 or id >= 65535 or id ~= math.floor(id) then return nil end
+	local lid = C().lid(id)
+	local obj = lid and level.object_by_id(lid)
+	if obj and (type(names) ~= "table" or names[id] ~= obj:name()) then return nil end
+	return lid
+end
+
+local function fix_tracker(value)
+	local tracker = C().mod("ish_kill_tracker")
+	local load = C().fn(tracker, "load_state")
+	if not load then return end
+	local data = type(value) == "table" and value or {}
+	local meta = type(data._coop_pda_ids) == "table" and data._coop_pda_ids or {}
+	local bodies = {}
+	if type(data.tracked_bodies) == "table" then
+		for id, row in pairs(data.tracked_bodies) do
+			local lid = tracker_local_id(id, meta.body)
+			if lid and type(row) == "table" then
+				local local_row = {}
+				for k, v in pairs(row) do local_row[k] = v end
+				local_row.id = lid
+				local_row.killer_id = tracker_local_id(row.killer_id, meta.killer)
+				bodies[lid] = local_row
+			end
+		end
+	end
+	-- The tracker loader merges rows. A correction replaces the history,
+	-- including when it clears every row. Leave the PDA's other live keys alone.
+	local previous = tracker.tracked_bodies
+	tracker.tracked_bodies = {}
+	if not pcall(load, { milpda = { tracked_bodies = bodies } }) then
+		tracker.tracked_bodies = previous
+		log("! progress correction could not load the kill tracker")
+	end
+end
+
+local function apply_fix(t, from)
+	if from ~= 0 or st.foreign or not coop_mode.is_player_mirror() then return end
+	local key = t.k
+	local spec = type(key) == "string" and keys[key]
+	if not spec or type(t.v) ~= "string" then return end
+	local value, why = C().deser(t.v)
+	if why then return end
+
+	local m = alife_storage_manager.get_state()
+	if spec.subs then
+		local live = type(m[key]) == "table" and m[key] or {}
+		local corrected = type(value) == "table" and value or {}
+		for _, sub in ipairs(spec.subs) do live[sub] = corrected[sub] end
+		m[key] = live
+	else
+		m[key] = value
+	end
+	if key == "milpda" then
+		fix_tracker(value)
+	else
+		for _, name in ipairs(spec.prime or {}) do
+			local mod = C().mod(name)
+			local load = C().fn(mod, "load_state")
+			if load and not pcall(load, m) then log("! progress correction could not load the mod") end
+			if name == "haru_skills" then
+				-- The load path sets skills_levels; on_game_load also rebuilds the live bonuses and defaults.
+				local rebuild = C().fn(mod, "on_game_load")
+				if rebuild and not pcall(rebuild) then log("! progress correction could not rebuild Haru bonuses") end
+			end
+		end
+	end
+
+	-- Patch the sent snapshot and also the stash, which may hold a newer
+	-- snapshot kept for an imminent load. Keep that snapshot's own token.
+	st.last = patch_report(st.last, key, value) or st.last
+	local ok, saved = pcall(api.stash_get, STASH)
+	local token, body
+	if ok and type(saved) == "string" then token, body = saved:match("^([^|]*)|(.*)$") end
+	local corrected = patch_report(body, key, value)
+	if corrected then
+		pcall(api.stash_set, STASH, token .. "|" .. corrected)
+	elseif not st.kept then
+		local encoded = st.last or C().ser({ [key] = value })
+		if encoded then pcall(api.stash_set, STASH, (st.token or "") .. "|" .. encoded) end
+	end
+end
+
+local function apply_big_fix(s, from)
+	if from ~= 0 then return end
+	local t = C().deser(s)
+	if type(t) == "table" then apply_fix(t, from) end
+end
+
 -------------------------------------------------------------------------------
 -- Host: store reports in the save
 -------------------------------------------------------------------------------
+local function send_fix(peer, fix)
+	local encoded = C().ser(fix.v)
+	if not encoded then return end
+	local t = { k = fix.k, v = encoded }
+	-- A flat event codec may triple the bytes; send bigger values in chunks.
+	if #encoded <= 4800 then
+		C().to_peer(peer, "pd_fix", t)
+	else
+		local big = C().ser(t)
+		if big then C().send_big("prg_pd_fix_big", big, peer) end
+	end
+end
+
 local function host_store(s, from)
 	local pid = api.avatar_of(from)
 	local d = C().deser(s)
-	if type(pid) ~= "number" or type(d) ~= "table" then
+	local valid = type(pid) == "number" and pid > 0 and pid < 65535 and pid == math.floor(pid)
+		and type(d) == "table"
+	if not coop_trust.pass("progress_pdata", valid, "invalid pdata envelope or character") or not valid then
 		st.refused = st.refused + 1
 		return
 	end
@@ -275,9 +389,14 @@ local function host_store(s, from)
 	end
 	local m = alife_storage_manager.get_state()
 	if type(m[STORE]) ~= "table" then m[STORE] = {} end
+	local previous = m[STORE][tostring(pid)]
+	local progress = coop_progress_check
+	local fixes
+	clean, fixes = progress.filter(pid, from, clean, type(previous) == "table" and previous or nil)
 	local tok = string.format("%x%x", math.random(1, 0x7fffffff), time_global() % 0x10000)
-	m[STORE][tostring(pid)] = { t = tok, d = clean }
+	m[STORE][tostring(pid)] = { t = tok, d = clean, progress_checked = progress.snapshot(pid) }
 	st.stored = st.stored + 1
+	for _, fix in ipairs(fixes) do send_fix(from, fix) end
 	C().to_peer(from, "pd_ack", { t = tok })
 end
 
@@ -329,6 +448,8 @@ function on_game_start()
 	start_step("install_load_hook", install_load_hook)
 	C().on_big("pd", host_store, "world")
 	C().on("pd_ack", on_ack, "client")
+	start_step("pd_fix", function() C().on("pd_fix", apply_fix, "player") end)
+	start_step("prg_pd_fix_big", function() C().on_big("prg_pd_fix_big", apply_big_fix, "player") end)
 	C().set_limit("pd", 70, 8)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("save_state", host_save_state)
