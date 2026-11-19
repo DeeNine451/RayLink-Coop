@@ -3,6 +3,7 @@
 -- Run: tools\test_lua.cmd companion_levels
 dofile("tests/lua/support/harness_npc.lua")
 dofile("tests/lua/support/luabind_like.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local BRIDGE, CORDON = 0x101, 0x102
 local PROXY = { [1] = 500, [2] = 501 }
@@ -109,8 +110,8 @@ end
 local function stand(opts)
 	assert(opts.dedicated == true or opts.split == false)
 	reset_world()
-	local W = { bodies = {}, squads = {}, tables = {}, level_of = { [1] = 1, [2] = 2 }, split = opts.split ~= false, online = {},
-		not_yet = {} }
+	local W = { bodies = {}, squads = {}, tables = {}, level_of = { [1] = 1, [2] = opts.dedicated and 2 or 1 },
+		split = opts.split ~= false, online = {}, not_yet = {} }
 	local host_avatars = { [1] = 500, [2] = 501 }
 	if not opts.dedicated then W.level_of[0], host_avatars[0] = 1, 0 end
 	local H = machine("host", 0, host_avatars)
@@ -119,7 +120,7 @@ local function stand(opts)
 		H.env.level.name = function() return "fake_start" end
 	end
 	local mk_avatars = opts.mk_knows_all and { [1] = 500, [2] = 501 } or { [2] = 501 }
-	local Mk = machine("client", BRIDGE, mk_avatars)
+	local Mk = opts.dedicated and machine("client", BRIDGE, mk_avatars) or nil
 	local cordon_avatars = { [1] = 500 }
 	local K = opts.dedicated and machine("client", CORDON, cordon_avatars) or nil
 	W.K = K
@@ -131,11 +132,11 @@ local function stand(opts)
 	B.to_host, B.to_local = swap(0, 501), swap(0, 501)
 	W.H, W.Mk, W.A, W.B = H, Mk, A, B
 	W.mk_avatars = mk_avatars
-	Mk.env.coop.is_map_server = function() return true end
-	Mk.env.coop.is_mirror = function() return false end
-	Mk.env.level.name = function() return NAMES[2] end
 	-- The tunnel delivers map-server replies to players with the world server as sender.
-	local function relay_outputs(M)
+	local function map_server(M, level_id)
+		M.env.coop.is_map_server = function() return true end
+		M.env.coop.is_mirror = function() return false end
+		M.env.level.name = function() return NAMES[level_id] end
 		local send = M.env.coop.send_event
 		M.env.coop.send_event = function(name, payload, target)
 			if type(target) == "number" and target > 0 and target < 0x100 then
@@ -146,12 +147,9 @@ local function stand(opts)
 			return send(name, payload, target)
 		end
 	end
-	relay_outputs(Mk)
 	if K then
-		K.env.coop.is_map_server = function() return true end
-		K.env.coop.is_mirror = function() return false end
-		K.env.level.name = function() return NAMES[1] end
-		relay_outputs(K)
+		map_server(K, 1)
+		map_server(Mk, 2)
 	end
 	local function levels_for(M)
 		return {
@@ -182,12 +180,21 @@ local function stand(opts)
 			end,
 		}
 	end
-	local machines = { H, Mk, A, B }
-	if K then machines[#machines + 1] = K end
+	local machines = { H, A, B }
+	if K then
+		machines[#machines + 1] = K
+		machines[#machines + 1] = Mk
+	end
 	for _, M in ipairs(machines) do
 		M.env.coop_npc_players = load_script(M, "coop_npc_players")
 		stock(M, W)
 		M.env.coop.levels = levels_for(M)
+		-- Capture the registrations so the save/share cases can drive the up and down messages.
+		M.share = { up = {}, down = {} }
+		M.env.coop_quests_core = { share = function() return {
+			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
+			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
+		} end }
 		local players = M.env.coop.players
 		M.env.coop.players = function()
 			local list = players()
@@ -208,7 +215,8 @@ local function stand(opts)
 	else
 		H.add(W.proxy_a)
 	end
-	W.proxy_b = Mk.add(make_obj(501, 6, 0, 0, { _name = "proxy_b" }))
+	local garbage = Mk or H
+	W.proxy_b = garbage.add(make_obj(501, 6, 0, 0, { _name = "proxy_b" }))
 	A.add(make_obj(500, 0, 0, 0, { _name = "host_avatar" }))
 	B.add(make_obj(501, 0, 0, 0, { _name = "ms_avatar" }))
 	-- squad 300 (member 201) next to the host and A; squad 400 (member 301) next to B
@@ -228,21 +236,25 @@ local function stand(opts)
 	local cordon = K or H
 	W.comp = cordon.add(make_obj(201, 7, 0, 0, { _name = "comp" }))
 	W.comp_a = A.add(make_obj(201, 7, 0, 0, { _name = "comp" }))
-	W.comp2 = Mk.add(make_obj(301, 7, 0, 0, { _name = "comp2" }))
+	if Mk then W.comp2 = Mk.add(make_obj(301, 7, 0, 0, { _name = "comp2" })) end
 	W.comp2_b = B.add(make_obj(301, 7, 0, 0, { _name = "comp2" }))
-	W.CH = load_script(H, "coop_npc_companions")
-	W.CM = load_script(Mk, "coop_npc_companions")
-	W.CA = load_script(A, "coop_npc_companions")
-	W.CB = load_script(B, "coop_npc_companions")
-	if K then W.CK = load_script(K, "coop_npc_companions"); W.CK.on_game_start() end
-	W.CH.on_game_start()
-	W.CM.on_game_start()
-	W.CA.on_game_start()
-	W.CB.on_game_start()
+	for _, M in ipairs(machines) do
+		load_script(M, "coop_trust")
+		local mode = load_script(M, "coop_mode")
+		mode.on_game_start()
+		load_script(M, "coop_npc_companions").on_game_start()
+		load_script(M, "coop_srv_companions").on_game_start()
+		modes.live(mode, function(name) return load_script(M, name) end)
+	end
+	W.CH = H.env.coop_npc_companions
+	W.CA, W.CB = A.env.coop_npc_companions, B.env.coop_npc_companions
+	if K then W.CK, W.CM = K.env.coop_npc_companions, Mk.env.coop_npc_companions end
 	W.comp:give_info_portion("npcx_is_companion")
-	W.comp2:give_info_portion("npcx_is_companion")
 	cordon.env.axr_companions.companion_squads[300] = W.squads[300]
-	Mk.env.axr_companions.companion_squads[400] = W.squads[400]
+	if Mk then
+		W.comp2:give_info_portion("npcx_is_companion")
+		Mk.env.axr_companions.companion_squads[400] = W.squads[400]
+	end
 	function W.refresh()
 		NOW = NOW + 3000
 		for _, M in ipairs(machines) do
@@ -254,12 +266,13 @@ local function stand(opts)
 	-- a player moves: the engine's table says so, the character leaves one process and comes to the other, the session of the map server
 	-- loses him or gets him (coop_trunk server_on_map: virtual_leave, virtual_join)
 	function W.move(peer, level)
+		assert(K and Mk, "only a Server player can move between independent maps")
 		W.level_of[peer] = level
 		local id = PROXY[peer]
 		W.mk_avatars[peer] = level == 2 and id or nil
 		local obj = cordon.objects[id] or Mk.objects[id]
 		cordon.objects[id], Mk.objects[id] = nil, nil
-		if K then cordon_avatars[peer] = level == 1 and id or nil end
+		cordon_avatars[peer] = level == 1 and id or nil
 		local M = level == 1 and cordon or Mk
 		if obj then M.objects[id] = obj end
 		W.bodies[id] = { position = vec(1, 0, 0), m_level_vertex_id = 7, m_game_vertex_id = level == 1 and 10 or 20, id = id }
@@ -447,22 +460,20 @@ end
 
 print("== a story NPC of a task: the same rule")
 do
-	local W = stand({ dedicated = true })
+	local taker = 1
+	local W
+	W = stand({ dedicated = true, env = function(M)
+		if M.peer ~= CORDON then return end
+		M.env.coop_tasks = { reward_peer = function() return taker end, giving_npc = function() return nil end }
+		M.env.xr_effects = {
+			setup_companion_task = function(actor, npc, p)
+				W.squad(310, 10, 211)
+				M.env.axr_companions.companion_squads[310] = W.squads[310]
+			end,
+		}
+	end })
 	local H, A = W.K, W.A
 	local L = W.CK._leaders
-	local taker = 1
-	H.env.coop_tasks = { reward_peer = function() return taker end, giving_npc = function() return nil end }
-	W.CK = load_script(H, "coop_npc_companions") -- the wrappers are put once: the module again, on its stock
-	H.env.xr_effects = {
-		setup_companion_task = function(actor, npc, p)
-			W.squad(310, 10, 211)
-			H.env.axr_companions.companion_squads[310] = W.squads[310]
-		end,
-	}
-	H.callbacks = {}
-	H.handlers = {}
-	W.CK.on_game_start()
-	L = W.CK._leaders
 	W.story = H.add(make_obj(211, 7, 0, 0, { _name = "story" }))
 	W.story_a = A.add(make_obj(211, 7, 0, 0, { _name = "story" }))
 	H.env.xr_effects.setup_companion_task(H.env.db.actor, nil, { "310", "esc_smart" })
@@ -479,7 +490,6 @@ do
 	local H, A = W.H, W.A
 	local L = W.CH._leaders
 	L()[300] = 500
-	W.move(2, 1)
 	W.level_of[2] = 2 -- what it says is not read: there is one level for everybody
 	W.proxy_b._pos = vec(6, 0, 0)
 	W.refresh()
@@ -528,12 +538,28 @@ do
 	W.stale_place = true
 	W.refresh() -- Cordon reports the departure.
 	W.refresh() -- The world server tries the move on its next update.
-	check(H.teleported and H.teleported.id == 300 and H.teleported.gvid == 20, "the world server teleports it to his body")
+	local body = W.bodies[500]
+	check(H.teleported and H.teleported.id == 300 and H.teleported.pos == body.position
+		and H.teleported.lvid == body.m_level_vertex_id and H.teleported.gvid == 20,
+		"his squad is teleported to where he stands")
 	check(L()[300] == nil and W.K.env.axr_companions.companion_squads[300] == nil, "it is no companion of this level any more")
+	local adopts = sent_named(H, "npc.comp_adopt")
+	local adopt = adopts[#adopts]
+	local adopted = adopt and H.env.coop_npc_players.decode(adopt.payload)
+	check(adopt and adopt.target == BRIDGE and adopted.s == 300 and adopted.l == 500 and adopted.p == 1,
+		"the authority of his level takes it")
 	check(W.CM._leaders()[300] == 500 and Mk.env.axr_companions.companion_squads[300] == W.squads[300], "the map server takes it")
 	check(Mk.env.axr_companions.logic[201] ~= nil, "with the logic of a companion")
 	W.refresh()
 	check(W.CM._leaders()[300] == 500, "its copy of the squad's place comes later: the map server does not take it for a stranger meanwhile")
+
+	local before = #sent_named(H, "npc.comp_req")
+	W.A.env.coop_npc_players.send("npc.comp_req", {}, 0)
+	pump()
+	local requests = sent_named(H, "npc.comp_req")
+	local passed = requests[before + 1]
+	check(#requests == before + 1 and passed.target == BRIDGE and H.env.coop_npc_players.decode(passed.payload)._peer == 1,
+		"the world server passes a request on with his peer")
 end
 
 print("== a squad that may not follow stays where it is, and keeps its leader")
@@ -782,15 +808,7 @@ end
 
 print("== the leaders of a map server's level: into the save, onto a new map server")
 do
-	local function share_env(M)
-		M.share = { up = {}, down = {} }
-		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
-		M.env.coop_quests_core = { share = function() return {
-			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
-			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		} end }
-	end
-	local W = stand({ dedicated = true, env = share_env })
+	local W = stand({ dedicated = true })
 	local H, Mk = W.H, W.Mk
 	local up, down = "comp_leaders", "comp_leaders"
 	check(Mk.share.up[up] ~= nil and H.share.down[down] ~= nil, "both tables are declared")
@@ -914,15 +932,7 @@ end
 
 print("== a new map server says nothing of its leaders before it sorted the save's out: the word goes on its own timer")
 do
-	local function share_env(M)
-		M.share = { up = {}, down = {} }
-		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
-		M.env.coop_quests_core = { share = function() return {
-			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
-			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		} end }
-	end
-	local W = stand({ dedicated = true, env = share_env })
+	local W = stand({ dedicated = true })
 	local H, Mk = W.H, W.Mk
 	local saved = { coop_npc_leaders = { [300] = 500, [400] = 501 } }
 	H.fire("load_state", saved)
@@ -940,15 +950,7 @@ end
 
 print("== a map server just loaded: its squad's leader stands elsewhere and was never on it, the world server's word says who he is")
 do
-	local function share_env(M)
-		M.share = { up = {}, down = {} }
-		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
-		M.env.coop_quests_core = { share = function() return {
-			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
-			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		} end }
-	end
-	local W = stand({ dedicated = true, env = share_env })
+	local W = stand({ dedicated = true })
 	local H, Mk = W.H, W.Mk
 	W.move(1, 1)
 	local saved = { coop_npc_leaders = { [400] = 500 } }
@@ -1123,7 +1125,6 @@ do
 	local W = stand({ split = false })
 	local H, A, B = W.H, W.A, W.B
 	H.env.coop.talk_recent = function() return true end
-	W.move(2, 1)
 	W.proxy_b._pos = vec(6, 0, 0)
 	W.comp_b = B.add(make_obj(201, 7, 0, 0, { _name = "comp" }))
 	local L, cs = W.CH._leaders, H.env.axr_companions.companion_squads
@@ -1166,7 +1167,6 @@ do
 
 	print("-- the host's own talk")
 	local dh = H.env.dialogs_axr_companion
-	W.move(2, 1)
 	W.refresh()
 	H.msgs = nil
 	dh.remove_companions_from_squad(H.env.db.actor, W.comp, "dm_companion_leave", "2")
@@ -1214,7 +1214,6 @@ do
 	local H, A, B = W.H, W.A, W.B
 	local talked = false
 	H.env.coop.talk_recent = function(peer, npc_id) return talked and peer == 2 and npc_id == 201 end
-	W.move(2, 1)
 	W.proxy_b._pos = vec(6, 0, 0)
 	W.comp_b = B.add(make_obj(201, 7, 0, 0, { _name = "comp" }))
 	local L, cs = W.CH._leaders, H.env.axr_companions.companion_squads
@@ -1244,15 +1243,7 @@ end
 
 print("== last leaders of a map server's level reach the save")
 do
-	local function share_env(M)
-		M.share = { up = {}, down = {} }
-		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
-		M.env.coop_quests_core = { share = function() return {
-			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
-			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		} end }
-	end
-	local W = stand({ dedicated = true, env = share_env })
+	local W = stand({ dedicated = true })
 	local H, Mk, B = W.H, W.Mk, W.B
 	W.CM._leaders()[400] = 501
 	W.refresh()

@@ -4,6 +4,7 @@
 -- Run: tools\test_lua.cmd companion_lead
 dofile("tests/lua/support/harness_npc.lua")
 dofile("tests/lua/support/luabind_like.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local PROXY = { [1] = 500, [2] = 501 }
 
@@ -124,9 +125,13 @@ local function stand(opts)
 	W.CH = load_script(H, "coop_npc_companions")
 	W.CA = load_script(A, "coop_npc_companions")
 	W.CB = load_script(B, "coop_npc_companions")
-	W.CH.on_game_start()
-	W.CA.on_game_start()
-	W.CB.on_game_start()
+	for _, M in ipairs({ H, A, B }) do
+		local mode = load_script(M, "coop_mode")
+		mode.on_game_start()
+		modes.live(mode, function(name) return load_script(M, name) end)
+		M.env.coop_npc_companions.on_game_start()
+		load_script(M, "coop_srv_companions").on_game_start()
+	end
 	W.comp:give_info_portion("npcx_is_companion")
 	W.comp2:give_info_portion("npcx_is_companion")
 	H.env.axr_companions.companion_squads[300] = W.squads[300]
@@ -712,54 +717,6 @@ H.env.coop.talk_recent = function() return true end
 A.env.dialogs_axr_companion.become_actor_companion(A.env.db.actor, rec_a)
 pump()
 check(H.became and L()[320] == 500 and L()[321] == 500, "both split squads")
-
-print("== split levels: an order to a companion on a map server's level, a leader who left it")
-do
-	local W = stand()
-	local H, A = W.H, W.A
-	local sent = {}
-	local real = H.env.coop.send_event
-	H.env.coop.send_event = function(name, payload, target)
-		if type(target) == "number" and target >= 0x100 then
-			sent[#sent + 1] = { name = name, t = H.env.coop_npc_players.decode(payload), to = target }
-			return true
-		end
-		return real(name, payload, target)
-	end
-	local level_of = { [1] = 1, [2] = 1 }
-	H.env.level.name = function() return "l01_escape" end
-	H.env.coop.levels = {
-		split = function() return true end,
-		bridge_of_player = function(peer) return level_of[peer] == 2 and 0x101 or nil end,
-		level_of_player = function(peer) return level_of[peer] end,
-		level_name = function(id) return id == 2 and "l02_garbage" or "l01_escape" end,
-		online_at_server = function(id) return false end,
-		map_servers = function() return { { bridge = 0x101, level = 2 } } end,
-	}
-	W.CH._leaders()[300] = 500
-	W.refresh()
-	local bodies = { [500] = { position = "there", m_level_vertex_id = 7, m_game_vertex_id = 9 } }
-	local plain = H.env.alife_object
-	H.env.alife_object = function(id) return bodies[id] or plain(id) end
-
-	level_of[1] = 2
-	H.env.coop_npc_players.send("npc.comp_go", { x = 1 }, 0)
-	H.env.coop_npc_players.invalidate()
-	W.CH._follow_tick()
-	check(H.teleported and H.teleported.id == 300 and H.teleported.gvid == 9, "his squad is teleported to where he stands")
-	check(W.CH._leaders()[300] == nil and H.env.axr_companions.companion_squads[300] == nil, "it is no companion of this level any more")
-	local adopt = sent[#sent]
-	check(adopt and adopt.name == "npc.comp_adopt" and adopt.to == 0x101 and adopt.t.s == 300 and adopt.t.l == 500,
-		"the authority of his level takes it")
-
-	-- a player of that level asks: the world server passes it on, whoever he is there
-	sent = {}
-	H.event = H.event or nil
-	A.env.coop_npc_players.send("npc.comp_req", {}, 0)
-	pump()
-	local passed = sent[#sent]
-	check(passed and passed.name == "npc.comp_req" and passed.to == 0x101 and passed.t._peer == 1, "the world server passes a request on with his peer")
-end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

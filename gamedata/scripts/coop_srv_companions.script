@@ -1,0 +1,458 @@
+-- Server (srv): companion handoff between the world and map authorities (docs/MODES.md).
+-- A map server lets its squad go, the world server moves it to the leader's body, and the destination takes it.
+-- The transport supplies the sending authority. The peer in FOLLOW/ADOPT identifies the squad's leader.
+-- npc.comp_follow { s = squad, p = peer, l = character }: source map -> world.
+-- npc.comp_adopt  { s = squad, p = peer, l = character, d = no dismissal, c = no teleport }: world -> destination.
+-- npc.comp_drop   { s = squad, m = moved, keep stock marks }: world -> source.
+-- npc.comp_recall { s = squad }: world -> map holding the squad online.
+
+local TAG = "companions"
+local P, C -- player helpers and the shared companion state
+local EV_FOLLOW, EV_ADOPT, EV_DROP, EV_RECALL = "npc.comp_follow", "npc.comp_adopt", "npc.comp_drop", "npc.comp_recall"
+local RECALLED, RECALL_AGAIN_MS = "recalled", 20000
+local far, far_last = {}, {} -- level id -> leader and previous-leader tables
+local down_heard = false -- a map server takes the saved leaders of its level once
+local teleport_rule
+local set_stock_squad, set_stock_teleport_rule
+
+local function split_levels()
+	local api = rawget(_G, "coop")
+	local l = api and api.levels
+	return l and l.split and l.split() == true and l or nil
+end
+
+local function far_leader(squad_id)
+	for _, row in pairs(far) do
+		if row[squad_id] then return row[squad_id] end
+	end
+	return nil
+end
+
+-- World server: whose word this squad is now; level_id nil: no map server's.
+local function note_far(level_id, squad_id, lead)
+	for _, row in pairs(far) do row[squad_id] = nil end
+	if level_id == nil then return end
+	far[level_id] = far[level_id] or {}
+	far[level_id][squad_id] = lead
+end
+
+-- Do these two stand on different levels? The engine's table says, on the process that leads the level: no client decides this.
+local function on_other_level(a, b)
+	local l = split_levels()
+	if not l then return false end
+	local la, lb = l.level_of_player(a), l.level_of_player(b)
+	return la ~= nil and lb ~= nil and la ~= lb
+end
+
+-- A save holds the leaders of every level: once after a load, a squad of another level is its authority's. The world server keeps the
+-- word for the next save, a map server drops it. Once: a squad a map server adopts later stands, on its copy of the world, where it last
+-- heard of it (the place comes after the word).
+local function sort_loaded_leaders()
+	local leaders = C.leaders()
+	if not split_levels() then return end
+	for squad_id, lead in pairs(leaders) do
+		local squad = alife_object(squad_id)
+		local level_id, at = nil, nil
+		if squad then level_id, at = C.level_of_squad(squad) end
+		if at and at ~= level.name() then
+			leaders[squad_id] = nil
+			if P.is_world_server() then note_far(level_id, squad_id, lead) end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- A leader on another level (split levels, one player moves): his companions go after him. The authority of the level he left lets
+-- them go; the world server teleports them when none of them is online at a map server, and tells the authority of his level.
+-------------------------------------------------------------------------------
+local followers = {} -- world server: squad id -> { p = peer, l = leader's character, b = bridge of the map server that let it go }
+-- map server: squad id -> true: let go to the world server, still here and still its owner's until the world server took it (npc.comp_drop
+-- with m): a friend who stays by it keeps it online here, and nothing may forget whose it is meanwhile
+local leaving = {}
+local adopting = {} -- map server: squad id -> { word of the world server, when it came }: the squad is not here yet
+local ADOPT_WAIT_MS = 60000
+
+-- This process takes the squad. t: the world server's word with the stock's marks, it writes them for a map server's copy of the world.
+local function adopt(squad_id, lead, t)
+	local leaders = C.leaders()
+	local squad = alife_object(squad_id)
+	if not (squad and axr_companions) then return false end
+	leaders[squad_id] = lead
+	set_stock_squad(squad_id, squad)
+	C.lead_peer[squad_id] = t and t.p or C.lead_peer[squad_id]
+	for k in squad:squad_members() do
+		if t then C.put_marks(k.id, true, t.d or nil, t.c or nil) end
+		local st = db.storage[k.id]
+		local npc = st and st.object or level.object_by_id(k.id)
+		if npc and not npc:has_info("npcx_is_companion") then -- a second setup would reset his orders
+			axr_companions.setup_companion_logic(npc, st, false, t and t.d)
+		end
+	end
+	return true
+end
+
+-- World server: the map server of the level this squad stands on, and that level's id.
+local function map_server_of(squad)
+	local l = split_levels()
+	if not (l and P.is_world_server()) then return nil end
+	local id = C.level_of_squad(squad)
+	for _, ms in ipairs(l.map_servers()) do
+		if ms.level == id then return ms.bridge, id end
+	end
+	return nil
+end
+
+local function send_adopt(bridge, squad, lead, peer)
+	local m = C.marks_of(squad)
+	return P.send(EV_ADOPT, { s = squad.id, l = lead, p = peer, d = m.d, c = m.c }, bridge)
+end
+
+-- World server: a squad that was just claimed and stands on a map server's level is that server's to lead.
+local function claimed_far(squad_id, lead, peer)
+	local leaders = C.leaders()
+	local squad = alife_object(squad_id)
+	if not squad then return end
+	local bridge, level_id = map_server_of(squad)
+	if not bridge then return end
+	leaders[squad_id] = nil
+	note_far(level_id, squad_id, lead)
+	send_adopt(bridge, squad, lead, peer)
+end
+
+-- The stock's add_special_squad marks a member only where he is a live NPC, and the world server has none of a map server's level: the
+-- escort would come with no ban on dismissing it. The marks go on its record: the word to the map server reads them there, the next word
+-- (follow_home) and the save too. Called with the arguments of the stock function.
+local function mark_far(before, squad, special, cannot_teleport)
+	if not squad or before[squad.id] or not map_server_of(squad) then return end
+	for k in squad:squad_members() do C.put_marks(k.id, true, true, cannot_teleport and true or nil) end
+end
+
+local function all_home(squad, l)
+	for k in squad:squad_members() do
+		if l.online_at_server(k.id) then return false end
+	end
+	return true
+end
+
+-- World server: a friend who stays by the squad keeps it online at its map server, and it would never come home. That server is asked to
+-- take it offline now and give it back (coop.levels.recall there), once, and again only after a while: the word or its answer can be lost.
+-- Never a squad that may not teleport: it stays where it is, as in the stock. An engine without holder_of: it waits, as before.
+local function ask_recall(l, squad_id, squad, f)
+	if not l.holder_of or (f.r and time_global() - f.r < RECALL_AGAIN_MS) or not C.may_follow(squad) then return end
+	local bridge = l.holder_of(squad_id)
+	for k in squad:squad_members() do bridge = bridge or l.holder_of(k.id) end
+	if bridge and P.send(EV_RECALL, { s = squad_id }, bridge) then
+		f.r = time_global()
+		C.stats.recall = C.stats.recall + 1
+		P.log(TAG, "recall of squad %s asked of map server %s", tostring(squad_id), tostring(bridge))
+	end
+end
+
+local function follow_home(l)
+	for squad_id, f in pairs(followers) do
+		local squad = alife_object(squad_id)
+		local _, at = nil, nil
+		if squad then _, at = C.level_of_squad(squad) end
+		if not squad then
+			followers[squad_id] = nil
+		elseif at and at == l.level_name(l.level_of_player(f.p)) then
+			followers[squad_id] = nil -- he came back before it left: the map server there leads it again (follow_tick)
+		elseif all_home(squad, l) then
+			local body = nil
+			for _, p in ipairs(P.players()) do
+				if p.id == f.p then body = p.avatar_id and alife_object(p.avatar_id) end
+			end
+			if body then
+				TeleportSquad(squad, body.position, body.m_level_vertex_id, body.m_game_vertex_id)
+				followers[squad_id] = nil
+				C.stats.follow = C.stats.follow + 1
+				if f.b then P.send(EV_DROP, { s = squad_id, m = true }, f.b) end -- the map server it left forgets it, no dismissal
+				local bridge = l.bridge_of_player(f.p)
+				if bridge then
+					set_stock_squad(squad_id, nil)
+					note_far(l.level_of_player(f.p), squad_id, f.l)
+					send_adopt(bridge, squad, f.l, f.p)
+				else
+					note_far(nil, squad_id)
+					adopt(squad_id, f.l)
+				end
+			end
+		else
+			ask_recall(l, squad_id, squad, f)
+		end
+	end
+end
+
+-- World server: it stands in for the authority of a level nobody leads. A level entered together leaves a squad somebody else leads behind
+-- (teleport_rule) while its leader comes along: the squad goes after him as any other. Every tick and not with the sort of the save: a
+-- character is back in the list of players a moment after the world. Its word stays in `far` until it is taken: the save needs it.
+local function left_behind(l)
+	local led = {}
+	for _, ms in ipairs(l.map_servers()) do led[ms.level] = true end
+	for level_id, row in pairs(far) do
+		if not led[level_id] then
+			for squad_id, lead in pairs(row) do
+				local squad = alife_object(squad_id)
+				local peer = P.peer_of(lead)
+				local there = peer and l.level_name(l.level_of_player(peer))
+				if squad and there and not followers[squad_id] then
+					local _, at = C.level_of_squad(squad)
+					if at and there ~= at and C.may_follow(squad) then followers[squad_id] = { p = peer, l = lead } end
+				end
+			end
+		end
+	end
+end
+
+local function follow_tick()
+	local leaders = C.leaders()
+	local l = split_levels()
+	if not l then return end
+	for squad_id, lead in pairs(leaders) do
+		local peer = P.peer_of(lead) or C.lead_peer[squad_id]
+		C.lead_peer[squad_id] = peer
+		local there = peer and l.level_name(l.level_of_player(peer))
+		local squad = alife_object(squad_id)
+		if leaving[squad_id] then
+			if there == level.name() then -- he came back first: the world server drops its way too
+				if leaving[squad_id] == RECALLED and l.recall then l.recall(squad_id, 0) end -- it may come online for him at once
+				leaving[squad_id] = nil
+			end
+		elseif there and there ~= level.name() and (not squad or C.may_follow(squad)) then
+			if P.is_map_server() then
+				-- the squad goes when the engine gives it back (nothing of it online here); a friend by it keeps it here, so the owner stays
+				leaving[squad_id] = P.send(EV_FOLLOW, { s = squad_id, p = peer, l = lead }, 0) or nil
+			else
+				leaders[squad_id], C.lead_peer[squad_id] = nil, nil
+				followers[squad_id] = { p = peer, l = lead }
+			end
+		end
+	end
+	if P.is_world_server() then
+		left_behind(l)
+		follow_home(l)
+	end
+end
+
+-- The stock's level change takes every companion along; with split levels a squad somebody else leads stays where it is. Useful Idiots
+-- replaces this function after this script's on_game_start (z_idiots_patches): the wrapper goes on in the update, and again over a later
+-- patch. follow_tick asks what was there before: the leader's own going is not the host's.
+local function wrap_teleport()
+	local ac = axr_companions
+	local f = ac and ac.companion_squad_can_teleport
+	if type(f) ~= "function" or f == teleport_rule then return end
+	C.remember_teleport_rule(f)
+	teleport_rule = function(squad)
+		if squad and split_levels() and (C.leaders()[squad.id] ~= nil or far_leader(squad.id) ~= nil) then return false end
+		return f(squad)
+	end
+	set_stock_teleport_rule(ac, teleport_rule)
+end
+
+-- Map server: the word that came before its squad.
+local function adopt_tick()
+	local now = time_global()
+	for squad_id, a in pairs(adopting) do
+		if adopt(squad_id, a.t.l, a.t) or now - a.at > ADOPT_WAIT_MS then adopting[squad_id] = nil end
+	end
+end
+
+local function integer_in(value, min, max)
+	return type(value) == "number" and value >= min and value <= max and value % 1 == 0
+end
+
+local function entity_id(value)
+	return integer_in(value, 1, 0xfffe) -- 0 is the actor, 0xffff is the engine's invalid id
+end
+
+local function player_peer(value)
+	local api = rawget(_G, "coop")
+	local info = api and api.session_info and api.session_info()
+	return integer_in(value, 1, info and info.max_players or 8)
+end
+
+local function transfer_word(name, ok, from)
+	-- Transport roles and well-formed wire fields are prerequisites even while trust is in log mode.
+	return coop_trust.pass(name, ok, "invalid companion transfer from peer %s", tostring(from)) and ok
+end
+
+local function on_follow(t, from)
+	local ok = P.is_world_server() and integer_in(from, 0x101, 0x107) -- engine map server slots
+		and entity_id(t.s) and entity_id(t.l) and player_peer(t.p)
+	if not transfer_word("comp_follow", ok, from) then return end
+	followers[t.s] = { p = t.p, l = t.l, b = from }
+	note_far(nil, t.s)
+end
+
+local function on_adopt(t, from)
+	local ok = P.is_map_server() and from == 0 and entity_id(t.s) and entity_id(t.l)
+		and (t.p == nil or player_peer(t.p)) and (t.d == nil or type(t.d) == "boolean")
+		and (t.c == nil or type(t.c) == "boolean")
+	if not transfer_word("comp_adopt", ok, from) then return end
+	if not adopt(t.s, t.l, t) then adopting[t.s] = { t = t, at = time_global() } end
+end
+
+-- A task of the world server lets a squad go that a map server holds (Hidden Threat, the player left the station): the NPC is there.
+local function on_drop(t, from)
+	local leaders = C.leaders()
+	local ok = P.is_map_server() and from == 0 and entity_id(t.s) and (t.m == nil or type(t.m) == "boolean")
+	if not transfer_word("comp_drop", ok, from) then return end
+	local recalled = leaving[t.s] == RECALLED
+	leaders[t.s], adopting[t.s], C.lead_peer[t.s], leaving[t.s] = nil, nil, nil, nil
+	if t.m == true then -- m: it went to its leader on another level, the world server took it; no dismissal
+		if axr_companions then set_stock_squad(t.s, nil) end
+		local l = recalled and split_levels()
+		if l and l.recall then l.recall(t.s, 0) end -- it is on his level now: the pin has nothing left to hold
+		return
+	end
+	local squad = alife_object(t.s)
+	if squad and C.is_companion_squad(squad) then axr_companions.dismiss_special_squad(squad) end
+end
+
+-- Map server: the world server's word (npc.comp_recall). Only a squad this server let go itself and that may still teleport; a client's
+-- word comes with his peer, never 0 (coop_script.cpp server_on_script_event), and the engine's recall is a map server's alone.
+local function on_recall(t, from)
+	local l = split_levels()
+	local ok = l and l.recall and P.is_map_server() and from == 0 and entity_id(t.s)
+	if not transfer_word("comp_recall", ok, from) then return end
+	if not leaving[t.s] then return end
+	local squad = alife_object(t.s)
+	if squad and C.may_follow(squad) and l.recall(t.s) then
+		leaving[t.s] = RECALLED
+		C.stats.recall = C.stats.recall + 1
+		P.log(TAG, "squad %s recalled by the world server: offline here until it took it", tostring(t.s))
+	end
+end
+
+-- Who leads what, between the processes (coop_srv_levels_share): the squads of a map server's level are its own, the save is the world
+-- server's. Up: what this map server leads. Down: all of it, a new map server takes the squads of its level, once: what it changed
+-- after that is newer than what the world server has heard.
+local function leaders_here()
+	local leaders = C.leaders()
+	if C.sort_pending() then return nil end -- the leaders of a save are every level's: this word would take them off the rows of the other map servers
+	local t = {}
+	-- not one on its way out: the world server holds its owner (followers), this word would put it back on this level's row
+	for id, lead in pairs(leaders) do t[id] = not leaving[id] and lead or nil end
+	for id, a in pairs(adopting) do t[id] = a.t.l end
+	return { l = t, b = C.last_leaders() }
+end
+
+local function leaders_heard(v, level_id)
+	if type(v) ~= "table" or type(v.l) ~= "table" or level_id == nil then return end
+	for id in pairs(v.l) do note_far(nil, id) end
+	far[level_id] = v.l
+	far_last[level_id] = type(v.b) == "table" and v.b or nil
+end
+
+local function add_saved_leaders(t, gone)
+	for _, row in pairs(far) do
+		for id, lead in pairs(row) do t[id] = lead end
+	end
+	-- on its way to its leader: on_follow took it off `far`; after a load the authority of its level lets it go again (follow_tick)
+	for id, f in pairs(followers) do t[id] = f.l end
+	if gone then
+		for _, row in pairs(far_last) do
+			for id, lead in pairs(row) do gone[id] = lead end
+		end
+	end
+end
+
+local function all_leaders()
+	local t, peers = {}, {}
+	for id, lead in pairs(C.leaders()) do t[id] = lead end
+	add_saved_leaders(t)
+	for _, p in ipairs(P.players()) do
+		if type(p.avatar_id) == "number" then peers[p.avatar_id] = p.id end
+	end
+	return { l = t, p = peers }
+end
+
+local function leaders_given(v)
+	local leaders = C.leaders()
+	if down_heard or type(v) ~= "table" or type(v.l) ~= "table" then return end
+	down_heard = true
+	local peers = type(v.p) == "table" and v.p or {}
+	for id, lead in pairs(v.l) do
+		local squad = type(id) == "number" and alife_object(id)
+		local at = nil
+		if squad then
+			local _
+			_, at = C.level_of_squad(squad)
+		end
+		if at == level.name() then
+			if leaders[id] == nil then adopt(id, lead) end
+			-- also for a leader of the save: this session may never have seen him, and follow_tick asks where he stands
+			if leaders[id] == lead then C.lead_peer[id] = peers[lead] or C.lead_peer[id] end
+		end
+	end
+end
+
+local function dismiss_target(squad)
+	if not squad then return nil end
+	local way = followers[squad.id]
+	return (far_leader(squad.id) and map_server_of(squad)) or (way and way.b)
+end
+
+local function dismissed(id, bridge)
+	note_far(nil, id)
+	followers[id], leaving[id] = nil, nil
+	if bridge then P.send(EV_DROP, { s = id }, bridge) end
+end
+
+local function refresh()
+	local ok, err = pcall(follow_tick)
+	if not ok then P.report(TAG, "follow", err) end
+	ok, err = pcall(adopt_tick)
+	if not ok then P.report(TAG, "adopt", err) end
+end
+
+local function refresh_without_players()
+	-- A map server still has to let a squad go after its last player leaves.
+	return P.is_map_server() and split_levels() ~= nil
+end
+
+local function prune_missing()
+	for _, row in pairs(far) do
+		for id in pairs(row) do
+			if not alife_object(id) then row[id] = nil end
+		end
+	end
+end
+
+local function reset_travel()
+	-- The saved owners start a new handoff, without the previous world's in-flight records.
+	far, far_last, followers, leaving = {}, {}, {}, {}
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		P = coop_npc_players
+		if not (P.is_world_server() or P.is_map_server()) then return end
+		set_stock_squad = function(id, squad) axr_companions.companion_squads[id] = squad end
+		set_stock_teleport_rule = function(ac, rule) ac.companion_squad_can_teleport = rule end
+		C = coop_npc_companions.set_transfer_hooks({
+			far_leader = far_leader,
+			has_remote_leaders = function() return next(far) ~= nil end,
+			on_other_level = on_other_level,
+			claimed_far = claimed_far,
+			mark_far = mark_far,
+			sort_loaded_leaders = sort_loaded_leaders,
+			prune_missing = prune_missing,
+			dismiss_target = dismiss_target,
+			dismissed = dismissed,
+			wrap_teleport = wrap_teleport,
+			refresh_without_players = refresh_without_players,
+			refresh = refresh,
+			follow_tick = follow_tick,
+			add_saved_leaders = add_saved_leaders,
+			reset_travel = reset_travel,
+		})
+		P.on(EV_FOLLOW, on_follow, nil, TAG)
+		P.on(EV_ADOPT, on_adopt, nil, TAG)
+		P.on(EV_DROP, on_drop, nil, TAG)
+		P.on(EV_RECALL, on_recall, nil, TAG)
+		local share = coop_quests_core.share()
+		share.up("comp_leaders", leaders_here, leaders_heard)
+		share.down("comp_leaders", all_leaders, leaders_given)
+	end)
+end
