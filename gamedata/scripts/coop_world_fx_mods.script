@@ -1,0 +1,712 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- G11-1. The level authority has the NPCs, corpses and binders; the world authority has the story flags.
+-- Keep only ongoing state for late viewers. The stock scripts still drive the gameplay and local effects.
+
+local EVENT, CUT = "fxm_show", "fxm_skin_take"
+local BONE_KEY = "coop_fx_skin_bones"
+local HOSPITAL, ASSAULT = "l11_hospital", "lttz_ms_hospital_assault"
+local PSI_ID, PSI_PP, PSI_CAM = 15000, "psi.ppe", "camera_effects\\fatigue.anm"
+local PULSE_ON, PULSE_FLASH, PULSE_END = 5500, 11500, 12000
+local SNAPSHOT_MS, SNAPSHOT_BUDGET = 250, 8
+local MAX_BONES, MAX_SEQUENCE = 64, 2147483647
+
+local serial, next_snapshot = 0, 0
+local pulses, mechanisms, carcasses = {}, {}, {}
+local psi
+local local_pulses, pulses_seen, local_mechanisms, local_carcasses = {}, {}, {}, {}
+local local_psi, local_particle, particles_kept = nil, 0, {}
+local installed = false
+
+local function C() return coop_mods_core end
+
+local function step(name, f, ...)
+	local ok, err = pcall(f, ...)
+	if not ok then printf("[coop-fxm] %s: %s", name, tostring(err)) end
+end
+
+local function whole(n, lo, hi)
+	return type(n) == "number" and n >= lo and n <= hi and n % 1 == 0
+end
+
+local function object_id(n) return whole(n, 1, 65534) end
+local function token(s) return type(s) == "string" and #s <= 96 and s:match("^[%w_.%-]+$") ~= nil end
+local function resource(s) return type(s) == "string" and #s > 0 and #s <= 192 end
+
+local function next_serial()
+	serial = serial + 1
+	return serial
+end
+
+local function point(t) return vector():set(t.x, t.y, t.z) end
+
+local function put_point(t, pos)
+	t.x, t.y, t.z = pos.x, pos.y, pos.z
+	return t
+end
+
+local function wire(kind, map, extra)
+	local t = extra or {}
+	t.k, t.m, t.q, t.start = kind, map, next_serial(), time_global()
+	return t
+end
+
+local function record(data) return { data = data, sent = {} } end
+
+local function lookup(id)
+	local lid = C().lid(id)
+	return lid and level.object_by_id(lid)
+end
+
+-- On the map authority the facade knows which characters have arrived. The world authority only has their roster map ids.
+local function viewers(map, rows)
+	local local_map = coop_mode.leads_here() and level.name() == map
+	local world = not local_map and coop_mode.decides_world() and alife()
+	local out = {}
+	for _, peer in ipairs(rows or C().players()) do
+		if not peer.is_self and peer.id ~= C().self_peer() and peer.avatar_id ~= nil then
+			local here = local_map and coop_mode.where(peer.id) == "here"
+			if here or (world and peer.level ~= nil and world:level_name(peer.level) == map) then out[peer.id] = true end
+		end
+	end
+	return out
+end
+
+local function publish(rec, live)
+	local t = {}
+	for k, v in pairs(rec.data) do t[k] = v end
+	t.age = math.max(0, time_global() - t.start)
+	local rows = C().players()
+	local peers = viewers(t.m, rows)
+	-- A world effect can use the shared publish path when the entire remote roster is already on its map.
+	if live and t.k == "psi" and coop_mode.decides_world() and coop_mode.leads_here() and next(peers) then
+		local all_here = true
+		for _, peer in ipairs(rows) do
+			if not peer.is_self and peer.id ~= C().self_peer() and not peers[peer.id] then all_here = false end
+		end
+		if all_here and C().publish(EVENT, t) then
+			for peer in pairs(peers) do rec.sent[peer] = true end
+			return
+		end
+	end
+	for peer in pairs(peers) do
+		if C().to_peer(peer, EVENT, t) then rec.sent[peer] = true end
+	end
+end
+
+local function snapshot(now)
+	local rows, by_map, budget = C().players(), {}, {}
+	local function send(rec, phase)
+		local t = rec.data
+		local peers = by_map[t.m]
+		if not peers then
+			peers = viewers(t.m, rows)
+			by_map[t.m] = peers
+		end
+		for peer in pairs(rec.sent) do if not peers[peer] then rec.sent[peer] = nil end end
+		for peer in pairs(peers) do
+			local left = budget[peer] or SNAPSHOT_BUDGET
+			if not rec.sent[peer] and left > 0 then
+				local data = {}
+				for k, v in pairs(t) do data[k] = v end
+				data.age, data.phase = math.max(0, now - t.start), phase or data.phase
+				if phase == "hum" then data.cue = nil end
+				if C().to_peer(peer, EVENT, data) then rec.sent[peer] = true end
+				budget[peer] = left - 1
+			end
+		end
+	end
+	for id, rec in pairs(pulses) do
+		if now - rec.data.start < rec.data.finish then send(rec) else pulses[id] = nil end
+	end
+	if psi then send(psi) end
+	for _, rec in pairs(mechanisms) do if rec.data.hum then send(rec, "hum") end end
+	for _, rec in pairs(carcasses) do send(rec) end
+end
+
+local function tick_pulses(now)
+	for id, state in pairs(local_pulses) do
+		local t, light = state.data, state.light
+		local age = now - state.at
+		if age >= t.finish then
+			if light then
+				light.enabled = false
+				light:update()
+			end
+			local_pulses[id] = nil
+		elseif age >= t.on then
+			if not light then
+				light = script_light()
+				light.range, light.lanim = 100, "koster_01_electra"
+				light.volumetric, light.volumetric_quality = true, 1
+				light:set_position(point(t))
+				state.light = light
+			end
+			local flash = age >= t.flash
+			light.lanim_brightness = flash and 0.2 or 0.025
+			light.volumetric_distance = flash and 1 or 0.25
+			light.volumetric_intensity = flash and 0.1 or 0.05
+			light.enabled = true
+			light:update()
+		end
+	end
+end
+
+local function play_sound(path, obj, delay, loop)
+	if not (resource(path) and obj) then return nil end
+	local sound = sound_object(path)
+	sound:play_at_pos(obj, obj:position(), delay, sound_object.s3d + (loop and sound_object.looped or 0))
+	return sound
+end
+
+local function stop_loop(state)
+	if state and state.hum then
+		state.hum:stop()
+		state.hum = nil
+	end
+end
+
+local function mechanism_object(t)
+	local obj = lookup(t.i)
+	if obj and obj:name() == t.name then return obj end
+end
+
+local function receive_mechanism(t, now)
+	if not object_id(t.i) then return end
+	local prev = local_mechanisms[t.i]
+	if prev and prev.q >= t.q then return end
+	stop_loop(prev)
+	local obj = mechanism_object(t)
+	local state = { q = t.q, i = t.i, name = t.name }
+	local_mechanisms[t.i] = state
+	if t.phase == "stop" then
+		state.cue = play_sound(t.cue, obj, 0, false)
+		return
+	end
+	if t.phase == "start" then state.cue = play_sound(t.cue, obj, math.max(0, (t.delay or 0) - t.age) / 1000, false) end
+	if resource(t.hum) and whole(t.hum_at, 0, 600000) then
+		state.path, state.at = t.hum, now + math.max(0, t.hum_at - t.age)
+	end
+end
+
+local function tick_mechanisms(now)
+	for _, state in pairs(local_mechanisms) do
+		if state.path and now >= state.at then
+			local obj = mechanism_object(state)
+			if not obj then stop_loop(state)
+			elseif not state.hum then state.hum = play_sound(state.path, obj, 0, true) end
+		end
+	end
+end
+
+local function corpse(id, name)
+	local obj = lookup(id)
+	if obj and IsMonster(obj) and not obj:alive() and (name == nil or obj:name() == name) then return obj end
+end
+
+local function split_bones(list)
+	local out = {}
+	if type(list) == "string" then
+		for bone in list:gmatch("[^,]+") do
+			if not token(bone) or #out >= MAX_BONES then return {} end
+			out[#out + 1] = bone
+		end
+	end
+	return out
+end
+
+local function apply_bones(state, obj)
+	for _, bone in ipairs(state.bones) do obj:set_bone_visible(bone, false, true) end
+	state.applied = true
+end
+
+local function tick_bones()
+	for id, state in pairs(local_carcasses) do
+		local obj = corpse(id, state.name)
+		if not obj then state.applied = false
+		elseif not state.applied then apply_bones(state, obj) end
+	end
+end
+
+local function receive(t)
+	if not (C().active() and coop_mode.is_player_mirror() and t.m == level.name()
+		and whole(t.q, 1, MAX_SEQUENCE) and type(t.age) == "number" and t.age >= 0) then return end
+	local now = time_global()
+	if t.k == "pulse" then
+		local slot = t.q % 64
+		if t.on == PULSE_ON and t.flash == PULSE_FLASH and t.finish == PULSE_END and t.age < t.finish
+			and pulses_seen[slot] ~= t.q then
+			pulses_seen[slot] = t.q
+			local_pulses[t.q] = { data = t, at = now - t.age }
+			tick_pulses(now)
+		end
+	elseif t.k == "alq" and t.q > local_particle and resource(t.path) then
+		local_particle = t.q
+		particles_kept[t.q % 48] = coop_world_fx.play(t.path, point(t))
+	elseif t.k == "mechanism" then
+		receive_mechanism(t, now)
+		tick_mechanisms(now)
+	elseif t.k == "bones" and object_id(t.i) and type(t.name) == "string" then
+		local prev = local_carcasses[t.i]
+		if prev and prev.q >= t.q then return end
+		local state = { q = t.q, name = t.name, bones = split_bones(t.bones) }
+		local_carcasses[t.i] = state
+		local obj = corpse(t.i, state.name)
+		if obj then apply_bones(state, obj) end
+	elseif t.k == "psi" and t.m == HOSPITAL and (not local_psi or t.q > local_psi.q) then
+		local_psi = t
+		if t.phase == "on" then level.add_pp_effector(PSI_PP, PSI_ID, false)
+		else level.remove_pp_effector(PSI_ID) end
+	end
+end
+
+local function restored(module, key, previous, ok, ...)
+	rawset(module, key, previous)
+	if not ok then error((...), 0) end
+	return ...
+end
+
+local function scoped(module, key, value, f, ...)
+	local previous = rawget(module, key)
+	rawset(module, key, value)
+	return restored(module, key, previous, pcall(f, ...))
+end
+
+local function no_light()
+	local function ignore() end
+	return { set_position = ignore, update = ignore }
+end
+
+local function install_pulse()
+	local mod = C().mod("nta_utils")
+	C().wrap(mod, "spawn_pulse", "nta_utils.spawn_pulse light", function(orig)
+		return function(pos, ...)
+			if C().active() and pos and (coop_mode.leads_here() or coop_mode.decides_world()) then
+				local t = wire("pulse", level.name(), put_point({ on = PULSE_ON, flash = PULSE_FLASH, finish = PULSE_END }, pos))
+				local rec = record(t)
+				pulses[t.q] = rec
+				step("pulse", publish, rec, true)
+				-- The original particle and sound keep their existing relay. Only a playing actor needs its stock light.
+				if not coop_mode.actor_is_player() then return scoped(mod, "script_light", no_light, orig, pos, ...) end
+			end
+			return orig(pos, ...)
+		end
+	end)
+end
+
+local function install_alq()
+	local mod = C().mod("alq_scheme")
+	local cls = mod and mod.act_alq_quest
+	C().wrap(cls, "search", "alq_scheme.act_alq_quest.search flash", function(orig)
+		return function(self, ...)
+			if not C().active() then return orig(self, ...) end
+			if not coop_mode.leads_here() then return end
+			-- blast_accident is the only particle creation in this path. Its sound and damage still run in the stock code.
+			local create = mod.particles_object
+			local function flash(path)
+				local fx = create(path)
+				return { play_at_pos = function(_, pos)
+					fx:play_at_pos(pos)
+					step("ALQ flash", publish, record(wire("alq", level.name(), put_point({ path = path }, pos))), true)
+				end }
+			end
+			return scoped(mod, "particles_object", flash, orig, self, ...)
+		end
+	end)
+end
+
+local function camera(on)
+	local api = C().engine()
+	local sync = api and api.sync
+	if not sync then return end
+	local data = { k = on and "cam" or "uncam", n = PSI_CAM, i = PSI_ID, l = false }
+	-- Mk: only the story authority calls this. A map server never casts this story camera from its ghost.
+	for peer in pairs(viewers(HOSPITAL)) do sync.broadcast("world.cfx", data, { to = peer }) end
+end
+
+local function psi_finished()
+	return has_alife_info("kat_greh_sabaoth_psi_end") or has_alife_info("kat_greh_sabaoth_psi_conversion")
+		or has_alife_info("kat_greh_sabaoth_psi_death") or has_alife_info("kat_greh_sabaoth_mortal_sin")
+		or has_alife_info("lttz_ms_hospital_assault_task_done")
+end
+
+local function stop_psi()
+	if not psi then return end
+	psi = nil
+	if coop_mode.actor_is_player() and level.name() == HOSPITAL then
+		level.remove_pp_effector(PSI_ID)
+		level.remove_cam_effector(PSI_ID)
+	end
+	publish(record(wire("psi", HOSPITAL, { phase = "off" })), true)
+	camera(false)
+end
+
+local function psi_step(pp, cam)
+	if psi_finished() then
+		stop_psi()
+		return
+	end
+	if pp and (not psi or time_global() - psi.data.start >= SNAPSHOT_MS) then
+		psi = record(wire("psi", HOSPITAL, { phase = "on" }))
+		publish(psi, true)
+	end
+	if cam then camera(true) end
+end
+
+local function task_done(pp, cam, ok, ...)
+	if not ok then error((...), 0) end
+	if coop_mode.decides_world() then step("Sabaoth", psi_step, pp, cam) end
+	return ...
+end
+
+local function install_psi()
+	local mod = C().mod("task_status_functor")
+	C().wrap(mod, "special_steps_for_lostzone_tasks", "task_status_functor Sabaoth effectors", function(orig)
+		return function(task, id, ...)
+			if id ~= ASSAULT or not C().active() then return orig(task, id, ...) end
+			local real = mod.level
+			local pp, cam
+			local show = coop_mode.actor_is_player() and not coop_mode.is_player_mirror() and level.name() == HOSPITAL
+			local fx = setmetatable({
+				add_pp_effector = function(name, index, ...)
+					if name ~= PSI_PP or index ~= PSI_ID then return real.add_pp_effector(name, index, ...) end
+					pp = true
+					if show then return real.add_pp_effector(name, index, ...) end
+				end,
+				add_cam_effector = function(name, index, ...)
+					if name ~= PSI_CAM or index ~= PSI_ID then return real.add_cam_effector(name, index, ...) end
+					cam = true
+					if show then return real.add_cam_effector(name, index, ...) end
+				end,
+			}, { __index = real })
+			local function finished(ok, ...)
+				return task_done(pp, cam, ok, ...)
+			end
+			return finished(pcall(scoped, mod, "level", fx, orig, task, id, ...))
+		end
+	end)
+end
+
+local function mechanism_start(binder, spec, paths, live)
+	if not (C().active() and coop_mode.leads_here() and binder.object) then return end
+	local id = C().hid(binder.object:id())
+	if not object_id(id) or (not live and mechanisms[id]) then return end
+	local cue, hum = spec.path(binder, paths, "start"), spec.path(binder, paths, "idle")
+	if not (cue or hum) then return end
+	local delay, hum_at = spec.delay(binder)
+	local t = wire("mechanism", level.name(), {
+		i = id, name = binder.object:name(), phase = live and "start" or "hum", cue = live and cue or nil, hum = hum,
+		delay = delay, hum_at = live and hum_at or 0,
+	})
+	local rec = record(t)
+	mechanisms[id] = rec
+	if live then publish(rec, true) end
+end
+
+local function mechanism_stop(binder, spec, paths, edge)
+	if not (C().active() and coop_mode.leads_here() and binder.object) then return end
+	local id = C().hid(binder.object:id())
+	if not (id and mechanisms[id]) then return end
+	mechanisms[id] = nil
+	local cue = edge and spec.path(binder, paths, edge)
+	publish(record(wire("mechanism", level.name(), { i = id, name = binder.object:name(), phase = "stop", cue = cue })), true)
+end
+
+local function mechanism_result(after, ok, ...)
+	if not ok then error((...), 0) end
+	step("mechanism", after, ...)
+	return ...
+end
+
+local function install_mechanism(spec)
+	local mod = C().mod(spec.module)
+	local cls = mod and mod[spec.class]
+	local paths = setmetatable({}, { __mode = "k" })
+	local function wrap(key, after, captures)
+		C().wrap(cls, key, spec.module .. "." .. key, function(orig)
+			return function(self, ...)
+				if not (C().active() and coop_mode.leads_here()) then return orig(self, ...) end
+			local function done(result)
+					if after then after(self, result) end
+				end
+				if captures then
+					local real = mod.sound_object
+					local capture = setmetatable({}, { __index = real, __call = function(_, path, ...)
+						local sound = real(path, ...)
+						if sound then paths[sound] = path end
+						return sound
+					end })
+					return mechanism_result(done, pcall(scoped, mod, "sound_object", capture, orig, self, ...))
+				end
+				return mechanism_result(done, pcall(orig, self, ...))
+			end
+		end)
+	end
+	local function restore(binder)
+		if spec.moving(binder) then mechanism_start(binder, spec, paths, false) end
+	end
+	local function start(binder) mechanism_start(binder, spec, paths, true) end
+	wrap("__init", nil, true)
+	wrap("net_spawn", function(binder, spawned) if spawned then restore(binder) end end, true)
+	wrap("load", restore)
+	wrap("anim_forward", start)
+	wrap("anim_backward", start)
+	wrap("anim_stop", function(binder) mechanism_stop(binder, spec, paths, "stop") end)
+	C().wrap(cls, "animation_end_callback", spec.module .. ".animation_end_callback", function(orig)
+		return function(self, ended, ...)
+			if not (C().active() and coop_mode.leads_here()) then return orig(self, ended, ...) end
+			local function done()
+				if spec.end_cue == "down" or ended then mechanism_stop(self, spec, paths, spec.end_cue) end
+			end
+			return mechanism_result(done, pcall(orig, self, ended, ...))
+		end
+	end)
+	wrap("net_destroy", function(binder) mechanism_stop(binder, spec, paths) end)
+end
+
+local bridge_paths = { start = "bridge_start", idle = "bridge_move", stop = "bridge_stop", down = "bridge_down" }
+local function bridge_path(binder, paths, key)
+	return paths[binder[key .. "_snd"]] or "device\\bridge\\" .. bridge_paths[key]
+end
+
+local function door_path(binder, paths, key)
+	local sound = binder[key .. "_snd"]
+	if not sound then return nil end
+	if paths[sound] then return paths[sound] end
+	local spawn = binder.object:spawn_ini()
+	local cfg = spawn and spawn:r_string_ex("animated_object", "cfg")
+	local ini = cfg and ini_file(cfg)
+	return (ini and ini:r_string_ex("animated_object", key .. "_snd")) or "device\\airtight_door_" .. key
+end
+
+local function install_bridge()
+	install_mechanism({ module = "bind_red_forest_bridge", class = "bridge_binder", end_cue = "down", path = bridge_path,
+		delay = function() return 0, 5000 end, moving = function(b) return b.bridge_idle == true end })
+end
+
+local function install_door()
+	install_mechanism({ module = "bind_door_labx8", class = "door_binder_labx8", end_cue = "stop", path = door_path,
+		delay = function(b) return b.start_delay, b.start_delay + b.idle_delay end,
+		moving = function(b) return b.is_idle == false end })
+end
+
+local function bone_names(choice)
+	return type(choice) == "table" and choice or { choice }
+end
+
+local function hidden_bones(mod, obj, remaining)
+	local id, name = obj:id(), obj:name()
+	local saved = se_load_var(id, name, BONE_KEY)
+	if type(saved) == "table" and saved.name == name then return split_bones(saved.bones) end
+	-- Old saves preserve the remaining choices for partially skinned bodies. Recover only what that table proves.
+	local full = mod.getBoneTable(mod.getMutantType(obj))
+	local out, seen = {}, {}
+	for part, choices in pairs(full) do
+		local present = {}
+		for _, choice in ipairs(remaining[part] or {}) do
+			for _, name in ipairs(bone_names(choice)) do present[name] = true end
+		end
+		for _, choice in ipairs(choices) do
+			for _, name in ipairs(bone_names(choice)) do
+				if not present[name] and not seen[name] then out[#out + 1], seen[name] = name, true end
+			end
+		end
+	end
+	return out
+end
+
+local function remember_corpse(obj, bones, live)
+	local id = C().hid(obj:id())
+	if not object_id(id) or #bones == 0 then return end
+	local rec = record(wire("bones", level.name(), { i = id, name = obj:name(), bones = table.concat(bones, ",") }))
+	carcasses[id] = rec
+	if live then publish(rec, true) end
+end
+
+local function cut_bones(mod, obj, remaining, counts)
+	local hidden = hidden_bones(mod, obj, remaining)
+	local seen, took, changed = {}, false, false
+	for _, name in ipairs(hidden) do seen[name] = true end
+	for part, count in pairs(counts) do
+		local choices = remaining[part]
+		if choices then
+			for _ = 1, math.min(count, #choices) do
+				local choice = table.remove(choices, math.random(#choices))
+				took = true
+				for _, name in ipairs(bone_names(choice)) do
+					if not seen[name] and #hidden < MAX_BONES then
+						seen[name], hidden[#hidden + 1], changed = true, name, true
+					end
+				end
+			end
+			if #choices == 0 then remaining[part] = nil end
+		end
+	end
+	-- Keep the stock remaining-choice table usable, including an empty table when every choice is gone.
+	if took then mod.saveBones(obj, remaining) end
+	if not changed then return end
+	local name = obj:name()
+	se_save_var(obj:id(), name, BONE_KEY, { name = name, bones = table.concat(hidden, ",") })
+	mod.switchBones(obj, hidden, false)
+	remember_corpse(obj, hidden, true)
+end
+
+local function install_skinning()
+	local mod, loot = C().mod("immersive_skinning"), C().mod("ui_mutant_loot")
+	local load_bones = C().fn(mod, "loadBones")
+	if not (load_bones and loot and loot.UIMutantLoot) then return end
+	local class = loot.UIMutantLoot
+	local world = C().mod("coop_core_world")
+	local close = world and C().upvalue(world.on_game_start, "on_mloot_close")
+	local locks = C().upvalue(close, "locks")
+	local used = setmetatable({}, { __mode = "k" })
+	local transaction, wrapped_loot
+
+	C().set_limit(CUT, 16, 8)
+	C().on(CUT, function(t, from)
+		local id_ok = object_id(t.i)
+		local obj = id_ok and corpse(t.i)
+		local lock = obj and locks and locks[obj:id()]
+		local valid = lock and lock.peer == from and coop_mode.where(from) == "here" and whole(t.q, 1, MAX_SEQUENCE)
+		if not coop_trust.pass(CUT, valid == true, "peer %s, corpse %s: no matching skinning operation", tostring(from), tostring(t.i)) then return end
+		if not valid or (used[lock] or 0) >= t.q then return end
+		local remaining = load_bones(obj)
+		local parts, clean = {}, true
+		for k, v in pairs(t) do
+			if k:sub(1, 2) == "p:" then
+				local part = k:sub(3)
+				if token(part) and whole(v, 1, MAX_BONES) then parts[part] = v else clean = false end
+			end
+		end
+		if not coop_trust.pass(CUT .. "_counts", clean, "peer %s, corpse %d: invalid part counts", tostring(from), t.i) then return end
+		used[lock] = t.q
+		cut_bones(mod, obj, remaining, parts)
+	end, "host")
+
+	local function flush(gui, tx)
+		if not tx or tx.gui ~= gui or tx.sent then return end
+		tx.sent = true
+		local id = C().hid(gui.id)
+		if not object_id(id) then return end
+		local counts, wire_counts = {}, { i = id, q = next_serial() }
+		for part, before in pairs(tx.counts) do
+			local left = gui.loot and gui.loot[part]
+			local count = before - (left and left.count or 0)
+			if token(part) and whole(count, 1, MAX_BONES) then counts[part], wire_counts["p:" .. part] = count, count end
+		end
+		if not next(counts) then return end
+		if coop_mode.leads_here() and coop_mode.actor_is_player() then
+			local obj = corpse(id)
+			if obj then cut_bones(mod, obj, load_bones(obj), counts) end
+		elseif coop_mode.is_player_mirror() then
+			C().to_host(CUT, wire_counts)
+		end
+	end
+
+	C().wrap(class, "SetMutantState", "Immersive Skinning before corpse close", function(orig)
+		return function(gui, ...)
+			if C().active() then step("skinning close", flush, gui, transaction) end
+			return orig(gui, ...)
+		end
+	end)
+	C().wrap(mod, "loadBones", "Immersive Skinning authority chooses bones", function(orig)
+		return function(...)
+			if transaction and C().active() then return {} end
+			return orig(...)
+		end
+	end)
+	local function finish_loot(gui, tx, prev, ok, ...)
+		transaction = prev
+		if not ok then error((...), 0) end
+		step("skinning loot", flush, gui, tx)
+		return ...
+	end
+	local function wrap_loot()
+		if class.Loot == wrapped_loot then return end
+		C().wrap(class, "Loot", "Immersive Skinning loot counts", function(orig)
+			return function(gui, ...)
+				if not C().active() then return orig(gui, ...) end
+				local prev, tx = transaction, { gui = gui, counts = {} }
+				for part, entry in pairs(gui.loot or {}) do tx.counts[part] = entry.count end
+				transaction = tx
+				return finish_loot(gui, tx, prev, pcall(orig, gui, ...))
+			end
+		end)
+		wrapped_loot = class.Loot
+	end
+	C().wrap(mod, "on_game_start", "Immersive Skinning install loot hook", function(orig)
+		return function(...)
+			local function after(...)
+				step("skinning hook", wrap_loot)
+				return ...
+			end
+			return after(orig(...))
+		end
+	end)
+	if C().fn(mod, "Loot") then wrap_loot() end
+
+	RegisterScriptCallback("monster_on_net_spawn", function(obj)
+		if not C().active() then return end
+		local id = C().hid(obj:id())
+		if not object_id(id) then return end
+		if coop_mode.leads_here() and not obj:alive() then
+			local bones = hidden_bones(mod, obj, load_bones(obj))
+			if #bones > 0 then
+				mod.switchBones(obj, bones, false)
+				remember_corpse(obj, bones, true)
+			end
+		elseif local_carcasses[id] then
+			local_carcasses[id].applied = false
+		end
+	end)
+	RegisterScriptCallback("monster_on_net_destroy", function(obj)
+		local id = C().hid(obj:id())
+		if id and coop_mode.leads_here() then carcasses[id] = nil end
+		if id and local_carcasses[id] then local_carcasses[id].applied = false end
+	end)
+end
+
+local function clear_view()
+	for _, state in pairs(local_pulses) do
+		if state.light then
+			state.light.enabled = false
+			state.light:update()
+		end
+	end
+	for _, state in pairs(local_mechanisms) do
+		stop_loop(state)
+		if state.cue then state.cue:stop() end
+	end
+	local_pulses, pulses_seen, local_mechanisms, local_carcasses, particles_kept = {}, {}, {}, {}, {}
+	local_psi, local_particle = nil, 0
+end
+
+local function update()
+	if not C().active() then return end
+	local now = time_global()
+	if coop_mode.is_player_mirror() then
+		tick_pulses(now)
+		tick_mechanisms(now)
+		tick_bones()
+		return
+	end
+	if now < next_snapshot then return end
+	next_snapshot = now + SNAPSHOT_MS
+	if psi and coop_mode.decides_world() and psi_finished() then stop_psi() end
+	if next(pulses) or next(mechanisms) or next(carcasses) or psi then snapshot(now) end
+end
+
+function on_game_start()
+	if installed then return end
+	installed = true
+	step("relay", function() C().on(EVENT, receive, "player") end)
+	step("NTA pulse", install_pulse)
+	step("ALQ", install_alq)
+	step("Sabaoth", install_psi)
+	step("bridge", install_bridge)
+	step("Lab X8 door", install_door)
+	step("skinning", install_skinning)
+	step("callbacks", function()
+		RegisterScriptCallback("actor_on_update", function() step("update", update) end)
+		RegisterScriptCallback("actor_on_net_destroy", function() step("view cleanup", clear_view) end)
+	end)
+end
