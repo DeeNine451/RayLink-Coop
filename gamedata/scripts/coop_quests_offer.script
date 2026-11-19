@@ -336,6 +336,11 @@ local function over_far_view()
 	return ok and scope ~= nil
 end
 
+local request_peer
+
+-- The transport peer while the Core builds an offer. Mode adapters may read it synchronously.
+function requester() return request_peer end
+
 local function offer_here(t, from)
 	stats.req_in = stats.req_in + 1
 	local npc_id, seq = tonumber(t.n), tonumber(t.q) or 0
@@ -360,7 +365,14 @@ local function offer_here(t, from)
 	local max = t.b and MAX_DIST_BOARD or MAX_DIST_DIALOG
 	if av and npc:position():distance_to_sqr(av:position()) > max * max then return refuse("far") end
 
-	local list, data = host_generate(npc, kind == "sim")
+	local previous = request_peer
+	request_peer = from
+	local ok, list, data = pcall(host_generate, npc, kind == "sim")
+	request_peer = previous
+	if not ok then
+		qc.report(TAG, "generate offer", list)
+		return refuse("error")
+	end
 	if not list then return refuse("error") end
 	local far = over_far_view()
 	-- round 7 (P-S3b of the round 6 review): an empty list made over the far view is no answer to his machine, which makes this

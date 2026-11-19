@@ -1,0 +1,318 @@
+-- Сервер (srv): GAMMA quest progression and offer context on the world server (docs/MODES.md).
+local TAG = "quests_gamma"
+local DARKSCAPE = "k01_darkscape"
+local UNDERPASS = "jupiter_underground"
+local JUPITER = "jupiter"
+local LEADER = "lttz_hb_spawned_ds_isg_leader_squad"
+local STARTED = "lttz_hb_task_1_1_dushman_intel_started"
+local CROSSFIRE = "lttz_hb_task_4_1_crossfire_done"
+local DAY = 86400
+local DEFENSE = { "monolith", "zombie" }
+-- The vendor closures share a cache between their prerequisite and setup effects.
+local NORTH_CACHES = {
+	{ "tasks_agent_rescue", "setup_spy_task", "cache" },
+	{ "tasks_assault", "setup_assault_task", "cache_assault" },
+	{ "tasks_bounty", "setup_bounty_task", "bounty_cache" },
+	{ "tasks_delivery", "on_init_delivery_task", "delivery_cache" },
+	{ "tasks_fate", "on_init_fate_task", "fate_cache" },
+	{ "tasks_measure", "setup_measure_task", "cache" },
+	{ "tasks_stash", "drx_sl_create_quest_stash", "cache_stash" },
+}
+
+local function step(what, fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then coop_mods_core.report(TAG, what, err) end
+end
+
+local function world_live()
+	return coop_mods_core.active() and coop_mode.decides_world() and not coop_mode.actor_is_player()
+end
+
+-- The world process has no map. Its roster names the players' maps even when every player is "away".
+local function participant_maps()
+	local maps, placed, joining = {}, false, false
+	local sim = alife()
+	for _, player in ipairs(coop_mods_core.players()) do
+		if coop_mode.seat_plays(player.id) then
+			local name = coop_mode.where(player.id) ~= "joining" and player.level and sim:level_name(player.level)
+			if type(name) == "string" and name ~= "" then maps[name], placed = true, true else joining = true end
+		end
+	end
+	return maps, placed and not joining
+end
+
+local function lost_zone_tick(mod, state)
+	if not world_live() or not db.actor then return end
+	local started, finished = has_alife_info(STARTED), has_alife_info(CROSSFIRE)
+	if started and not finished then
+		if not state.stash then
+			CreateTimeEvent("cycle", "isg_stash", 60, function()
+				if not world_live() or not has_alife_info(STARTED) or has_alife_info(CROSSFIRE) then
+					state.stash = false
+					return true
+				end
+				return mod.isg_emergency_stash_timer()
+			end)
+			state.stash = true
+			local mdata = alife_storage_manager.get_state()
+			if not (mdata.lttz_hb_next_stash_time and mdata.lttz_hb_last_stash_time) then
+				mod.isg_emergency_stash_timer()
+			end
+		end
+	elseif state.stash then
+		RemoveTimeEvent("cycle", "isg_stash")
+		state.stash = false
+	end
+
+	if not has_alife_info("story_mode_disabled") and not has_alife_info(LEADER) and dialogs.actor_true_isg() then
+		xr_effects.clear_smart_terrain(nil, nil, { "ds2_domik_st", "true" })
+		xr_effects.create_squad(nil, nil, { "ds_isg_leader_squad", "ds2_domik_st" })
+		xr_effects.create_squad(nil, nil, { "ds_isg_recon_squad", "ds2_domik_st" })
+		give_info(LEADER)
+	end
+
+	local remove_leader = started and not has_alife_info("lttz_hb_removed_ds_isg_leader_squad")
+	local spawn_guards = has_alife_info("lttz_hb_isg_breakthrough") and not has_alife_info("lttz_hb_spawned_jup_u_isg_guard_squad")
+	local leave_u = finished and not has_alife_info("lttz_hb_leaving_jup_u_done")
+	local leave_jup = finished and not has_alife_info("lttz_hb_leaving_jup_done")
+	if not (remove_leader or spawn_guards or leave_u or leave_jup) then return end
+
+	local maps, settled = participant_maps()
+	if settled and remove_leader and not maps[DARKSCAPE] then
+		xr_effects.remove_squad(nil, nil, { "ds_isg_leader_squad" })
+		xr_effects.remove_squad(nil, nil, { "ds_isg_recon_squad" })
+		give_info("lttz_hb_removed_ds_isg_leader_squad")
+	end
+	if settled and spawn_guards and not maps[UNDERPASS] then
+		xr_effects.create_squad(nil, nil, { "jup_u_isg_guard_squad", "pas_b400_hall" })
+		xr_effects.create_squad(nil, nil, { "jup_u_isg_guard_2_squad", "pas_b400_hall" })
+		give_info("lttz_hb_spawned_jup_u_isg_guard_squad")
+	end
+	if leave_u or leave_jup then
+		local mdata = alife_storage_manager.get_state()
+		local now = game.get_game_time()
+		local since = mdata.lttz_hb_leave_time
+		if not since then
+			mdata.lttz_hb_leave_time = utils_data.CTime_to_table(now)
+		elseif settled and now:diffSec(utils_data.CTime_from_table(since)) > 7200 then
+			if leave_u and not maps[UNDERPASS] then give_info("lttz_hb_leaving_jup_u_done") end
+			if leave_jup and not maps[JUPITER] then give_info("lttz_hb_leaving_jup_done") end
+		end
+	end
+end
+
+local function defense_audience()
+	local players, eligible = {}, {}
+	for _, p in ipairs(coop_mods_core.players()) do
+		if coop_mode.seat_plays(p.id) and coop_mode.where(p.id) ~= "joining" then
+			players[#players + 1] = p.id
+			local faction = coop_faction.faction_of(p.id)
+			if faction and not game_relations.is_factions_enemies(faction, "freedom") then
+				eligible[#eligible + 1] = p.id
+			end
+		end
+	end
+	return players, eligible
+end
+
+local function send_defense(peer, task, expire)
+	-- The existing player-side handler applies the local flag and news.
+	return coop_mods_core.to_peer(peer, "npcrel_offer", { tid = task, expire = expire })
+end
+
+local function defense_tick(mod, expired)
+	if not world_live() or not db.actor then return end
+	local data = coop_mods_core.upvalue(mod.save_state, "MDATA")
+	if not data then return end
+	local all, eligible = defense_audience()
+	if #all == 0 then return end
+	local now = game.get_game_time()
+	for _, kind in ipairs(DEFENSE) do
+		local task = "barrier_defense_" .. kind
+		local stamp = data[task].last_msg_time
+		local info = task .. "_announced"
+		local announced = db.actor:has_info(info)
+		if (stamp and now:diffSec(utils_data.CTime_from_table(stamp)) > DAY) or (announced and not stamp) then
+			local notified = expired[task]
+			if not notified or notified.stamp ~= stamp then
+				notified = { stamp = stamp, peers = {} }
+				expired[task] = notified
+			end
+			-- Old saves can have a world flag from stock. Live offers set the flag only on recipients.
+			if announced then db.actor:disable_info_portion(info) end
+			for _, peer in ipairs(all) do
+				if not notified.peers[peer] and send_defense(peer, task, true) then notified.peers[peer] = true end
+			end
+		end
+	end
+	if #eligible == 0 then return end
+	for _, kind in ipairs(DEFENSE) do
+		local task = "barrier_defense_" .. kind
+		local last_check = data[task].last_check_time
+		-- Skip polling inside the mod's saved daily interval. The picker still owns the roll,
+		-- weekly cooldown, active task and stock info checks.
+		local due = not last_check or now:diffSec(utils_data.CTime_from_table(last_check)) >= DAY
+		if due and mod.barrier_defense_available(task) then
+			local sent = false
+			for _, peer in ipairs(eligible) do
+				if send_defense(peer, task, false) then sent = true end
+			end
+			if sent then
+				data[task].last_msg_time = utils_data.CTime_to_table(now)
+				CreateTimeEvent(math.random(999), "chatter", 5, mod.f_chatter, kind, 0)
+			end
+			return
+		end
+	end
+end
+
+local function map_live()
+	return coop_mods_core.active() and coop_mode.leads_here() and not coop_mode.actor_is_player()
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		local C = coop_mods_core
+		local world = coop_mode.decides_world()
+		if not world and not coop_mode.leads_here() then return end
+		local lost = C.mod("dialogs_lostzone")
+		if not world then
+			-- The stock Darkscape cleanup needs the actual online NPCs of that map.
+			if lost and type(lost.kill_darkscape_stalkers) == "function" then
+				C.wrap(lost, "kill_darkscape_stalkers", "quests_gamma.darkscape_npcs", function(original)
+					return function(...)
+						if not map_live() then return original(...) end
+						local players, npcs = { [0] = true }, {}
+						for _, p in ipairs(C.players()) do
+							if p.avatar_id then players[p.avatar_id] = true end
+						end
+						for _, id in ipairs(db.OnlineStalkers) do
+							if not players[id] then npcs[#npcs + 1] = id end
+						end
+						local env = getfenv(original)
+						local db_view = setmetatable({ OnlineStalkers = npcs }, { __index = db })
+						setfenv(original, setmetatable({ db = db_view }, { __index = env }))
+						local ok, result = pcall(original, ...)
+						setfenv(original, env)
+						if not ok then error(result, 0) end
+						return result
+					end
+				end)
+				local function occupied()
+					for _, p in ipairs(C.players()) do
+						if coop_mode.seat_plays(p.id) and coop_mode.where(p.id) == "here" then return true end
+					end
+					return false
+				end
+				local pending = false
+				RegisterScriptCallback("actor_on_update", function()
+					if pending or not (map_live() and db.actor and has_alife_info(LEADER)
+						and not has_alife_info("killed_darkscape_stalkers") and level.name() == DARKSCAPE and occupied()) then return end
+					CreateTimeEvent(0, "kill_stalkers", 10, function()
+						pending = false
+						if map_live() and occupied() and not has_alife_info("killed_darkscape_stalkers") then
+							step("Darkscape cleanup", lost.kill_darkscape_stalkers)
+						end
+						return true
+					end)
+					pending = true
+				end)
+			end
+			return
+		end
+
+		local run_lost, run_defense
+		step("install Lost Zone", function()
+			if not lost or type(lost.isg_emergency_stash_timer) ~= "function" then return end
+			-- This vendor callback is a file local. Replace the registration's reference too so NTA's
+			-- late-player retry sees this same check. The original still handles an inactive session.
+			local original, holder, slot = C.upvalue(lost.on_game_start, "actor_on_first_update")
+			if type(original) ~= "function" then return end
+			local state = {}
+			run_lost = function() lost_zone_tick(lost, state) end
+			local function check(...)
+				if not world_live() then return original(...) end
+				step("Lost Zone stages", run_lost)
+			end
+			debug.setupvalue(holder, slot, check)
+			C.swap_callback("actor_on_first_update", original, check)
+		end)
+
+		step("install Barrier defense", function()
+			local mod = C.mod("tasks_defense")
+			if not (mod and type(mod.save_state) == "function" and type(mod.barrier_defense_available) == "function") then return end
+			local old, expired = mod.actor_on_first_update, {}
+			local ready_at = time_global() + 20000
+			if C.wrap(mod, "actor_on_first_update", "quests_gamma.periodic_defense", function(original)
+				return function(...)
+					if not world_live() then return original(...) end
+				end
+			end) then
+				C.swap_callback("actor_on_first_update", old, mod.actor_on_first_update)
+				run_defense = function(now)
+					if now >= ready_at then defense_tick(mod, expired) end
+				end
+			end
+		end)
+
+		step("install north picker", function()
+			local helper = C.mod("blacklist_helper")
+			local offers = C.mod("coop_quests_offer")
+			if not (helper and offers and offers.requester and type(helper.ShouldBlacklistNorth) == "function") then return end
+			-- Keep the vendor's immune factions and its own story gate. Only its faction lookup is scoped.
+			C.wrap(helper, "ShouldBlacklistNorth", "quests_gamma.north_faction", function(original)
+				local env = getfenv(original)
+				setfenv(original, setmetatable({ get_actor_true_community = function(...)
+					local peer = world_live() and offers.requester()
+					return (peer and coop_faction.faction_of(peer)) or env.get_actor_true_community(...)
+				end }, { __index = env }))
+				return original
+			end)
+			local slots, scoped, last_faction, last_blocked
+			C.wrap(offers, "with_talk", "quests_gamma.north_picker_cache", function(original)
+				return function(...)
+					local peer = world_live() and offers.requester()
+					if not peer then return original(...) end
+					local faction, blocked = coop_faction.faction_of(peer), helper.ShouldBlacklistNorth()
+					if not slots then
+						slots = {}
+						for _, entry in ipairs(NORTH_CACHES) do
+							if C.mod(entry[1]) then
+								local cache, holder, index = C.find_local({ setup = xr_effects[entry[2]] }, entry[3])
+								if type(cache) == "table" then slots[#slots + 1] = { holder, index } end
+							end
+						end
+					end
+					if not scoped or faction ~= last_faction or blocked ~= last_blocked then
+						scoped, last_faction, last_blocked = { blacklist = {} }, faction, blocked
+						for i = 1, #slots do scoped[i] = {} end
+					end
+					local old = { blacklist = helper.TaskBlacklist }
+					helper.TaskBlacklist = scoped.blacklist
+					for i, slot in ipairs(slots) do
+						local _, value = debug.getupvalue(slot[1], slot[2])
+						old[i] = value
+						debug.setupvalue(slot[1], slot[2], scoped[i])
+					end
+					-- with_talk returns a protected-call result. Restore stock caches on either return path.
+					local function restore(called, ...)
+						for i, slot in ipairs(slots) do debug.setupvalue(slot[1], slot[2], old[i]) end
+						helper.TaskBlacklist = old.blacklist
+						if not called then error((...), 0) end
+						return ...
+					end
+					return restore(pcall(original, ...))
+				end
+			end)
+		end)
+
+		local next_check = 0
+		RegisterScriptCallback("actor_on_update", function()
+			local now = time_global()
+			if now < next_check then return end
+			next_check = now + 1000
+			if run_lost then step("Lost Zone stages", run_lost) end
+			if run_defense then step("Barrier defense", run_defense, now) end
+		end)
+	end)
+end
