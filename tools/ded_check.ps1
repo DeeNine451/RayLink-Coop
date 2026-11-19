@@ -17,9 +17,10 @@ param(
     [switch]$Bom                 # write a UTF-8 BOM before the first command, as PowerShell pipes do: it must be harmless now
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'stand_common.ps1')  # Remove-StandFile: never delete through a junction or with a cleared read-only attribute (TZ R21)
 $log = Join-Path $GameDir ('appdata_server\logs\xray_' + $env:USERNAME + '.log')
 if (Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue) { throw "UDP port $Port is taken" }
-if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
+Remove-StandFile -Path $log
 
 $worldKey = if ($World -eq 'new') { '-coop_new' } else { '-coop_load last' }
 $hiddenKey = if ($Hidden) { ' -coop_hidden' } else { '' }

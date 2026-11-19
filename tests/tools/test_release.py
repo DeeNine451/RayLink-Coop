@@ -657,7 +657,8 @@ PUBLISHES = re.compile(
     r"--upload-file|--post-data|--post-file)\b)|"
     r"\bInvoke-(?:RestMethod|WebRequest)\b[^\n]*-Method\s+(?:Post|Patch|Put|Delete)\b|"
     r"\bInvoke-(?:RestMethod|WebRequest)\b[^\n]*\s-(?:Body|InFile)\b", re.I)
-TEXT_SUFFIXES = {".sh", ".ps1", ".psm1", ".py", ".cmd", ".bat", ".js", ".mjs", ".cjs", ".ts", ".lua"}
+TEXT_SUFFIXES = {".sh", ".bash", ".zsh", ".ps1", ".psm1", ".py", ".pyw", ".cmd", ".bat", ".js", ".mjs", ".cjs", ".ts",
+                 ".mts", ".cts", ".lua"}  # and a file without a suffix (round 8, R4)
 CONTINUED = re.compile(r"(?:\\|`|\^)\s*$")
 
 
@@ -683,18 +684,81 @@ VERIFY_FIRST = {"tools/publish_github.sh": "stable"}
 NOT_YET_GATED: set[str] = set()
 
 
-def publishing_tools() -> set[str]:
-    found = set()
-    for path in sorted((ROOT / "tools").rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES or "__pycache__" in path.parts:
-            continue
-        for line in logical_lines(path.read_text(encoding="utf-8", errors="replace")):
-            code = line.lstrip()
-            if code.startswith(("#", "rem ", "REM ", "::", "--")):
+# Guard round 8 (the review of round 7, R4): gh repo changes (visibility, create, delete), a PowerShell argument array
+# (`& gh @('release', 'create', ...)`, also kept in a variable), Python and JS HTTP sends (requests / httpx, urllib with
+# a body or a method, http.client, fetch with a method), a list split one item per line (bracket_lines), and a tool
+# file without a suffix (a shebang script).
+PUBLISHES_MORE = re.compile(
+    r"\bgh\s+repo\s+(?:create|edit|delete|rename|archive|unarchive|fork|sync)\b|"
+    rf"{Q}gh{Q}\s*,\s*{Q}repo{Q}\s*,\s*{Q}(?:create|edit|delete|rename|archive|unarchive|fork|sync){Q}|"
+    rf"@\(\s*{Q}(?:release|repo){Q}\s*,\s*{Q}(?:create|edit|upload|delete|rename|archive){Q}|"
+    rf"@\(\s*{Q}api{Q}\s*,[^)\n]*{Q}(?:-X|--method|-f|-F|--field|--raw-field|--input){Q}|"
+    r"\b(?:requests|httpx|aiohttp|session)\s*\.\s*(?:post|put|patch|delete)\s*\(|"
+    rf"\.\s*request\s*\(\s*{Q}(?:POST|PUT|PATCH|DELETE){Q}|"
+    rf"\bRequest\s*\([^\n]*(?:\bdata\s*=|\bmethod\s*=\s*{Q}(?:POST|PUT|PATCH|DELETE){Q})|"
+    r"\burlopen\s*\([^\n]*\bdata\s*=|"
+    rf"\bfetch\s*\([^\n]*\bmethod\s*:\s*{Q}(?:POST|PUT|PATCH|DELETE){Q}", re.I)
+COMMENT_STARTS = ("#", "rem ", "REM ", "::", "--", "//")
+MAX_JOINED = 40  # lines a bracket may hold open before the join gives up (a stray bracket in a string)
+
+
+def bracket_delta(code: str) -> int:
+    """How many brackets a line leaves open (strings and an inline `# comment` left out)."""
+    depth, quote, i = 0, None, 0
+    while i < len(code):
+        c = code[i]
+        if quote:
+            if c == "\\":
+                i += 2
                 continue
-            if PUBLISHES.search(code):
-                found.add(path.relative_to(ROOT).as_posix())
-                break
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or code[i - 1] in " \t"):
+            break
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        i += 1
+    return depth
+
+
+def bracket_lines(text: str) -> list[str]:
+    """The lines of a tool with a bracketed list or call over several lines joined into one."""
+    out, acc, depth, held = [], "", 0, 0
+    for line in text.splitlines():
+        code = "" if line.lstrip().startswith(COMMENT_STARTS) else line
+        acc += " " + code
+        depth = max(0, depth + bracket_delta(code))
+        held = held + 1 if depth else 0
+        if depth == 0 or held >= MAX_JOINED:
+            out.append(acc.strip())
+            acc, depth, held = "", 0, 0
+    if acc.strip():
+        out.append(acc.strip())
+    return out
+
+
+def publishes(text: str) -> bool:
+    """Any line (a logical line, or a bracket joined over lines) of a tool's text sends a release, a push or a body."""
+    for line in logical_lines(text) + bracket_lines(text):
+        code = line.lstrip()
+        if code and not code.startswith(COMMENT_STARTS) and (PUBLISHES.search(code) or PUBLISHES_MORE.search(code)):
+            return True
+    return False
+
+
+def publishing_tools(tools: Path = ROOT / "tools") -> set[str]:
+    found = set()
+    for path in sorted(tools.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if path.suffix.lower() not in TEXT_SUFFIXES and path.suffix:
+            continue
+        if publishes(path.read_text(encoding="utf-8", errors="replace")):
+            found.add(path.relative_to(tools.parent).as_posix())
     return found
 
 
@@ -727,6 +791,38 @@ def test_only_release_py_publishes():
 def test_the_publish_detector_sees_every_form(text, sends):
     # review 6, residual (e): the list form, gh api with a field, curl / Invoke-RestMethod sends, split lines
     assert any(PUBLISHES.search(line) for line in logical_lines(text)) == sends
+
+
+# Guard round 8 (the review of round 7, R4): forms the detector did not see
+@pytest.mark.parametrize(("text", "sends"), [
+    ('subprocess.run(\n    [\n        "gh",\n        "release",\n        "create",\n        tag,\n    ]\n)', True),
+    ("run([\n    'git',\n    '-C', d,  # the public copy\n    'push', url,\n])", True),
+    ("& gh @('release', 'create', $tag, $zip)", True),
+    ("$a = @('release', 'create', $tag)\n& gh @a", True),
+    ("requests.post(url, json=body)", True),
+    ("httpx.put(url, content=data)", True),
+    ("urllib.request.urlopen(urllib.request.Request(url, data=payload))", True),
+    ("req = Request(url, method='PATCH')", True),
+    ("conn.request('POST', '/repos/o/r/releases', body)", True),
+    ("await fetch(url, { method: 'POST', body })", True),
+    ("gh repo edit o/r --visibility public", True),
+    ("gh repo create o/r --public", True),
+    ('subprocess.run(\n    ["gh", "release", "view", tag]\n)', False),
+    ("requests.get(url)", False),
+    ("urllib.request.urlopen(url)", False),
+    ("& gh @('release', 'view', $tag)", False),
+])
+def test_round8_the_publish_detector_sees_more_forms(text, sends):
+    assert publishes(text) == sends
+
+
+def test_round8_a_tool_without_a_suffix_is_read(tmp_path):
+    tools = tmp_path / "tools"
+    (tools / "sub").mkdir(parents=True)
+    (tools / "publish").write_text("#!/bin/sh\ngh release create b57 a.zip\n", encoding="utf-8")
+    (tools / "sub" / "push.bash").write_text("git push origin main\n", encoding="utf-8")
+    (tools / "notes").write_text("nothing here sends\n", encoding="utf-8")
+    assert publishing_tools(tools) == {"tools/publish", "tools/sub/push.bash"}
 
 
 # any command that talks to GitHub or publishes: gh, git push / fetch / ls-remote, release.py draft / publish
@@ -890,3 +986,14 @@ def test_publish_github_refuses_bad_input_before_anything_runs(tmp_path, env):
     code, out, calls = publish_github(tmp_path, **env)
     assert code == 2 and calls == [], out + str(calls)
     assert "Nothing was published" in out, out
+
+
+def test_round8_publish_github_says_why_a_point_build_is_no_stable_build(tmp_path):
+    # the review of round 7, R5: the refusal of BUILD=57.1 pointed only to Dev. release.py itself refuses a Stable
+    # point build (names_for: "a Stable build is a whole number"), so the script says that rule and the Dev command
+    with pytest.raises(release.Refused, match="whole number"):
+        release.names_for("stable", "57.1")
+    assert release.names_for("dev", "57.1").tag == "dev-57.1"
+    code, out, calls = publish_github(tmp_path, BUILD="57.1")
+    assert code == 2 and calls == [], out + str(calls)
+    assert "whole number" in out and "release.py --channel dev --build 57.1" in out, out

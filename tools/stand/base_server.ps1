@@ -26,8 +26,8 @@ $clientLog = Join-Path $Stand ('appdata_t\logs\xray_' + $env:USERNAME + '.log')
 $msLog = Join-Path $Stand ('appdata_ms1\logs\xray_' + $env:USERNAME + '.log')
 $scripts = Join-Path $Stand 'gamedata\scripts'
 $probe = Join-Path $scripts 'coop_zz_base.script'
-foreach ($stale in @('coop_zz_npcprobe.script', 'coop_zz_lone.script')) { $p = Join-Path $scripts $stale; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p } }
-foreach ($f in @($serverLog, $clientLog, $msLog)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
+foreach ($stale in @('coop_zz_npcprobe.script', 'coop_zz_lone.script')) { Remove-StandFile -Path (Join-Path $scripts $stale) }
+foreach ($f in @($serverLog, $clientLog, $msLog)) { Remove-StandFile -Path $f }
 Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_base.script') -To $probe
 
 function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
@@ -98,7 +98,7 @@ finally {
     foreach ($pair in @(@($clientLog, 'client'), @($serverLog, 'server'), @($msLog, 'ms1'))) {
         if (Test-Path -LiteralPath $pair[0]) { Copy-Item -LiteralPath $pair[0] -Destination (Join-Path $OutDir "${Tag}_bases_$($pair[1]).log") -Force }
     }
-    if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe }
+    Remove-StandFile -Path $probe
 }
 Write-Host '--- client ---'
 Show-Lines $clientLog '\[base\]|FATAL ERROR|LUA error|stack traceback|! \[coop' 80

@@ -482,6 +482,8 @@ def put(stand: pathlib.Path, rel: str, data: bytes) -> int:
     may be the launcher's hard link to a mod's own file, TZ R21). Returns the old name's link count."""
     target = stand / rel
     try:
+        # guard round 8 (R3): the junction check before the folder is made, or mkdir makes it in the mod behind one
+        mo2_stand.refuse_link_on_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         return mo2_stand.replace_file(target, data)
     except OSError as error:

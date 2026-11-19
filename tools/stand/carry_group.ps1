@@ -105,7 +105,7 @@ function Show-Lines([string]$file, [string]$pattern, [int]$most, [int]$after = 0
 $hostData = New-Profile 'h' 'hoster'
 $hostLog = Join-Path $hostData ('logs\xray_' + $env:USERNAME + '.log')
 $clientLog = Join-Path $Stand ('appdata_t\logs\xray_' + $env:USERNAME + '.log')
-foreach ($f in @($hostLog, $clientLog)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
+foreach ($f in @($hostLog, $clientLog)) { Remove-StandFile -Path $f }
 $scripts = Join-Path $Stand 'gamedata\scripts'
 Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
 foreach ($p in @('coop_zz_carry.script')) { Copy-StandFile -From (Join-Path $PSScriptRoot $p) -To (Join-Path $scripts $p) }

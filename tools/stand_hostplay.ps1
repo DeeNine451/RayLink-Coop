@@ -22,7 +22,8 @@ $scenarios = @(
     @{ Name = 'base_group'; Script = 'base_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @($group); Bad = @('^! ') },
     @{ Name = 'sil_group'; Script = 'sil_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @($group); Bad = @('^! ') },
     @{ Name = 'squads_group'; Script = 'squads_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @($group, '\[squads\] ag PASS', 'squads: PASS'); Bad = @('squads: FAIL') },
-    @{ Name = 'sp_smoke'; Script = 'sp_smoke.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('sp_smoke: PASS'); Bad = @('sp_smoke: FAIL') }
+    @{ Name = 'sp_smoke'; Script = 'sp_smoke.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('sp_smoke: PASS'); Bad = @('sp_smoke: FAIL') },
+    @{ Name = 'companions_group'; Script = 'companions_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('companions_group: PASS'); Bad = @('companions_group: FAIL') }
 )
 $code = Invoke-Stand -Mode 'hostplay' -Scenarios $scenarios -Tag $Tag -Stand $Stand -Only $Only -NoMark:$NoMark
 exit $code

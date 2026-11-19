@@ -122,7 +122,7 @@ function Show-Lines([string]$file, [string]$pattern, [int]$most) {
     }
 }
 function Start-Client([string]$exePath, [string]$letter, [string]$nick, [string]$role, [string]$log) {
-    if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
+    Remove-StandFile -Path $log
     $p = Start-Process -FilePath $exePath -WorkingDirectory $Stand -PassThru -ArgumentList "-fsltx fsgame_$letter.ltx -coop_nick $nick -coop_autochoose $Faction -coop_connect 127.0.0.1:$Port -coop_probe $role -zz_token $token -zz_save $Save -silent_error_mode"
     $null = $p.Handle
     Write-Host "player $nick pid $($p.Id), role $role"
@@ -141,14 +141,14 @@ $hostLog = Join-Path $hostData ('logs\xray_' + $env:USERNAME + '.log')
 $logA = Join-Path $Stand ('appdata_t\logs\xray_' + $env:USERNAME + '.log')
 $logC = $null
 if ($Players -ge 3) { $null = New-Profile 'u' 'tester2' $null; $logC = Join-Path $Stand ('appdata_u\logs\xray_' + $env:USERNAME + '.log') }
-if (Test-Path -LiteralPath $hostLog) { Remove-Item -LiteralPath $hostLog }
+Remove-StandFile -Path $hostLog
 $hostSaves = Join-Path $hostData 'savedgames'
 if (Test-Path -LiteralPath $hostSaves) { Get-ChildItem -LiteralPath $hostSaves -Filter "$Save*" | ForEach-Object { Remove-StandFile -Path $_.FullName } }
 $scripts = Join-Path $Stand 'gamedata\scripts'
 Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
 Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_hybrid.script') -To (Join-Path $scripts 'coop_zz_hybrid.script')
 Get-ChildItem -LiteralPath $Stand -Filter 'zz_hybrid_*.txt' | ForEach-Object { Remove-StandFile -Path $_.FullName }
-Get-ChildItem -LiteralPath $Stand -Directory -Filter 'appdata_ms*' | ForEach-Object { $l = Join-Path $_.FullName ('logs\xray_' + $env:USERNAME + '.log'); if (Test-Path -LiteralPath $l) { Remove-Item -LiteralPath $l } }
+Get-ChildItem -LiteralPath $Stand -Directory -Filter 'appdata_ms*' | ForEach-Object { Remove-StandFile -Path (Join-Path $_.FullName ('logs\xray_' + $env:USERNAME + '.log')) }
 
 $opt = Join-Path $Stand 'gamedata\configs\axr_options.ltx'
 $optKeep = Join-Path $OutDir 'axr_options.before_hybrid.ltx'

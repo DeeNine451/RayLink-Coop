@@ -105,7 +105,7 @@ $token = 'sq' + (Get-Date -Format 'HHmmss')
 $hostData = New-Profile 'h' 'hoster'
 $hostLog = Join-Path $hostData ('logs\xray_' + $env:USERNAME + '.log')
 $clientLog = Join-Path $Stand ('appdata_t\logs\xray_' + $env:USERNAME + '.log')
-foreach ($f in @($hostLog, $clientLog)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
+foreach ($f in @($hostLog, $clientLog)) { Remove-StandFile -Path $f }
 $scripts = Join-Path $Stand 'gamedata\scripts'
 Get-ChildItem -LiteralPath $scripts -Filter 'coop_zz_*.script' | ForEach-Object { Remove-StandFile -Path $_.FullName }
 Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_squads.script') -To (Join-Path $scripts 'coop_zz_squads.script')

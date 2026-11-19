@@ -96,6 +96,7 @@ def main():
                 keep.parent.mkdir(parents=True, exist_ok=True)
                 keep.write_bytes(dst.read_bytes())  # a copy of our own (copy2 would carry a mod's read-only bit)
         if not dry:
+            mo2_stand.refuse_link_on_path(dst)  # guard round 8 (R3): before mkdir, which would make a folder in a mod
             dst.parent.mkdir(parents=True, exist_ok=True)
             mo2_stand.replace_file(dst, data)
     if added and not dry:

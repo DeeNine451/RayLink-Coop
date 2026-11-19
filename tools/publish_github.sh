@@ -30,7 +30,12 @@ refuse() {
 	echo "  Nothing was published." >&2
 	exit "${2:-2}"
 }
-[[ "$BUILD" =~ ^[0-9]{1,3}$ ]] || refuse "BUILD must be a whole Stable build number (BUILD=57); a Dev build goes out with release.py --channel dev"
+# guard round 8 (R5): a point build is no Stable build in tools/release.py either (names_for: "a Stable build is a whole
+# number"); it goes out to Dev only
+if [[ "$BUILD" =~ ^[0-9]{1,3}\.[0-9]{1,2}$ ]]; then
+	refuse "BUILD=$BUILD is a point build: a Stable build is a whole number (BUILD=57), tools/release.py refuses a Stable $BUILD too. A point build goes out to Dev only: python -I tools/release.py --channel dev --build $BUILD prepare, then verify"
+fi
+[[ "$BUILD" =~ ^[0-9]{1,3}$ ]] || refuse "BUILD must be a whole Stable build number (BUILD=57): a Stable build is a whole number; a Dev build goes out with release.py --channel dev"
 [ "$OWNER" = "$ORG" ] || refuse "tools/release.py publishes to $ORG only: leave OWNER unset or set it to $ORG"
 [ "$VIS" = public ] || [ "$VIS" = private ] || refuse "VISIBILITY is public or private"
 

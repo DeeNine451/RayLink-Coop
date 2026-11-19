@@ -13,13 +13,14 @@ param(
     [int]$UpTimeoutS = 600
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'stand_common.ps1')  # Remove-StandFile: never delete through a junction or with a cleared read-only attribute (TZ R21)
 $exe = Join-Path $Stand 'bin\AnomalyCoopDX11AVX.exe'
 foreach ($need in @($exe, (Join-Path $Stand 'fsgame_server.ltx'), (Join-Path $Stand $ClientFs))) {
     if (-not (Test-Path -LiteralPath $need)) { throw "missing: $need (tools/stand_server.ps1 makes the server's files)" }
 }
 if (Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue) { throw "UDP port $Port is taken" }
 $serverLog = Join-Path $Stand ('appdata_server\logs\xray_' + $env:USERNAME + '.log')
-if (Test-Path -LiteralPath $serverLog) { Remove-Item -LiteralPath $serverLog }
+Remove-StandFile -Path $serverLog
 
 $worldKey = if ($World -eq 'new') { '-coop_new' } else { '-coop_load last' }
 $psi = [System.Diagnostics.ProcessStartInfo]::new()

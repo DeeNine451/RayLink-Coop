@@ -151,8 +151,9 @@ DEPLOY_SKIP_EXT = frozenset({".bak", ".tmp", ".log", ".orig"})
 # every scenario of each stand runner (tools/stand_hostplay.ps1, tools/stand_srv.ps1; tests/tools/test_gates.py keeps
 # the two in step): a mark of a part of the stand does not count
 SCENARIOS = {
-    "hostplay": ("carry_group", "base_group", "sil_group", "squads_group", "sp_smoke"),
-    "srv": ("ded_check", "base_server", "carry_server", "taskboard_ws"),
+    # guard round 8 (the review of round 7, R7): companions_group (F5-CMP-1) and phantoms_server (S3) were in no runner
+    "hostplay": ("carry_group", "base_group", "sil_group", "squads_group", "sp_smoke", "companions_group"),
+    "srv": ("ded_check", "base_server", "carry_server", "taskboard_ws", "phantoms_server"),
 }
 
 

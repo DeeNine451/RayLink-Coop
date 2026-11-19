@@ -360,7 +360,7 @@ def test_mark_of_other_ids_or_other_exe_does_not_count(repos, capsys):
     ((), {"mode": "hostplay"}, "mode hostplay"),                      # the other runner's mark under this name
     ((), {"dirty": "7"}, "dirty=7"),                                  # the stand ran an exe of uncommitted code
     (("dirty",), {}, "dirty=missing"),
-    ((), {"scenarios": "ded_check"}, "base_server, carry_server, taskboard_ws did not run"),  # a part of the stand
+    ((), {"scenarios": "ded_check"}, "base_server, carry_server, taskboard_ws, phantoms_server did not run"),  # a part
     (("scenarios",), {}, "did not run"),
     # B12: the scenario files that ran are HEAD's (tools/stand is tracked; a relaxed check is a change of HEAD)
     (("scenarios_sha256",), {}, "scenarios_sha256 missing"),
@@ -398,6 +398,30 @@ def test_stand_runners_list_the_scenarios_the_gate_demands():
     for mode, names in gates.SCENARIOS.items():
         text = (ROOT / "tools" / f"stand_{mode}.ps1").read_text(encoding="utf-8")
         assert tuple(re.findall(r"@\{ Name = '([^']+)'", text)) == names, mode
+
+
+# A scenario of tools/stand that no runner runs is one the gate never demands (the review of round 7, R7:
+# phantoms_server.ps1 of S3 and companions_group.ps1 of F5-CMP-1). Only these are run by no runner, with the reason.
+NOT_A_GATED_SCENARIO = {
+    "run_guarded": "the guard every scenario runs under (tools/stand_common.ps1 Invoke-Scenario)",
+    "hybrid_save": "the hybrid's save scenario: the hybrid is removed (docs/plans/2026-11-18-two-modes.md), so is it",
+}
+
+
+def test_every_stand_scenario_is_run_by_a_runner_of_its_mode():
+    ran = {}
+    for mode in gates.SCENARIOS:
+        text = (ROOT / "tools" / f"stand_{mode}.ps1").read_text(encoding="utf-8")
+        for script in re.findall(r"Script = '([^']+)'", text):
+            ran[Path(script).stem] = mode
+    scenarios = {p.stem for p in (ROOT / "tools" / "stand").glob("*.ps1")}
+    assert scenarios - set(ran) == set(NOT_A_GATED_SCENARIO), "a scenario no runner runs: add it to " \
+        "tools/stand_<mode>.ps1 and check_gates.SCENARIOS (its mode: *_group co-op, *_server the server)"
+    for stem, mode in ran.items():
+        if stem.endswith("_group"):
+            assert mode == "hostplay", stem
+        elif stem.endswith("_server"):
+            assert mode == "srv", stem
 
 
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is not here")
@@ -1744,6 +1768,63 @@ def test_stand_overlay_replaces_a_linked_stand_file_without_writing_through_it(w
     assert untouched(items, MOD_ITEMS) and os.stat(items).st_nlink == 1
 
 
+def load_tool(path: Path, name: str):
+    """A tool module loaded from its file under a name of its own (not the repository's copy)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # its dataclasses look their module up there
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows thing")
+def test_round8_stand_head_put_makes_no_folder_through_a_junction(work):
+    # guard round 8 (review of round 7, R3): put() made the target's folder before replace_file refused, so a direct
+    # call left an empty folder in the mod behind a junction
+    import _winapi
+
+    head = load_tool(ROOT / "tools" / "stand" / "stand_head.py", "stand_head_r8")
+    mod_dir = work / "mo2" / "mods" / "40- A mod" / "gamedata" / "configs"
+    mod_dir.mkdir(parents=True)
+    stand = work / "stand"
+    (stand / "gamedata").mkdir(parents=True)
+    _winapi.CreateJunction(str(mod_dir), str(stand / "gamedata" / "configs"))
+    try:
+        with pytest.raises(head.Refused, match="junction"):
+            head.put(stand, "gamedata/configs/zz_new/zz_sub.ltx", b"[ours]\n")
+        assert list(mod_dir.iterdir()) == [], "a folder was made in the mod"
+    finally:
+        os.rmdir(stand / "gamedata" / "configs")  # the junction itself (rmtree would follow it)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows thing")
+def test_round8_stand_overlay_makes_no_folder_through_a_junction(work, monkeypatch):
+    # R3 for tools/stand_overlay.py: the same mkdir before replace_file. Today the stand's record or the per-file check
+    # comes first; with both out of the way the write itself must refuse before it makes a folder
+    import _winapi
+
+    root = work / "mod"
+    (root / "tools").mkdir(parents=True)
+    for name in ("stand_overlay.py", "mo2_stand.py"):
+        shutil.copy2(ROOT / "tools" / name, root / "tools" / name)
+    write(root, "gamedata/configs/zz_new/zz_sub.ltx", "[ours]\n")
+    real = work / "mo2_mods_folder"
+    (real / "stand" / "gamedata").mkdir(parents=True)
+    (real / "stand" / "bin").mkdir()
+    _winapi.CreateJunction(str(real), str(work / "through"))
+    overlay = load_tool(root / "tools" / "stand_overlay.py", "stand_overlay_r8")
+    monkeypatch.setattr(overlay.mo2_stand, "remember_on_stand", lambda *a, **k: None)
+    monkeypatch.setattr(overlay.mo2_stand, "link_folder", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["stand_overlay.py", str(work / "through" / "stand"), str(work / "bk"), "--no-exe"])
+    try:
+        with pytest.raises(OSError, match="junction"):
+            overlay.main()
+        assert not (real / "stand" / "gamedata" / "configs").exists(), "a folder was made behind the junction"
+    finally:
+        os.rmdir(work / "through")
+
+
 PS_HELPERS = r"""
 $ErrorActionPreference = 'Stop'
 . '{common}'
@@ -1959,8 +2040,12 @@ def test_every_powershell_tool_is_a_stand_writer_unless_named_with_its_reason():
 #     passes); or such a path with a suffix ($outPath + '.err');
 #   - a write into a process's standard input (a StreamWriter on .StandardInput, $in.WriteLine) is allowed;
 #   - robocopy, xcopy and cmd's copy never are (Copy-StandTree).
-# Not judged: Remove-Item without -Force (it deletes one name and fails on a read-only link; through a junction folder
-# it deletes the mod's own file: the scenarios that use it are named in the round-7 report).
+# Round 8 (the review of round 7, R1 and R2): Remove-Item without -Force is a write too (through a junction folder it
+# deleted the mod's own file; the scenarios use Remove-StandFile); so are New-Item of a file (or of a link with -Force),
+# XmlDocument.Save, an attribute set (.IsReadOnly / .Attributes =, Set-ItemProperty IsReadOnly, attrib),
+# [IO.Directory]::Delete / Move; code the lint cannot read (a [IO.File] kept in a variable, Invoke-Expression, a child
+# PowerShell's -Command) is refused. A variable set by foreach, Set-Variable or as a parameter without a default is no
+# repository folder, and a variable child that the file assigns a ".." is no plain name.
 
 def ps_code(text: str) -> list[tuple[int, str]]:
     """(first line number, code) per logical line: comments and <# #> blocks out, here-strings emptied, a line ending
@@ -2154,24 +2239,29 @@ def split_plus(expr: str) -> list[str]:
         i = len(expr) - len(rest) + 1
 
 
-def name_part(term: str) -> "str | None":
+CLIMB = "@climb"  # the key of `known` that holds the variables a ".." was assigned to (no variable name has an @)
+
+
+def name_part(term: str, known: "dict | None" = None) -> "str | None":
     """One term of a child name as a "/"-path: a quoted literal ($var / $(...) inside it read as one plain name), or a
-    variable ($x, $x.Name, $x.BaseName: one plain name); None otherwise."""
+    variable ($x, $x.Name, $x.BaseName: one plain name, unless the file assigns it a text with ".."; round 8, R2);
+    None otherwise."""
     term = term.strip()
     if len(term) >= 2 and term[0] in "'\"" and term[-1] == term[0]:
         body = term[1:-1]
         if term[0] == '"':
             body = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)|\$\{[^}]*\}|\$[\w:]+(?:\.\w+)*", "x", body)
         return body.replace("\\", "/")
-    if re.fullmatch(r"\$[\w:]+(?:\.(?:Name|BaseName))?", term):
-        return "x"
+    m = re.fullmatch(r"\$([\w:]+)(?:\.(?:Name|BaseName))?", term)
+    if m:
+        return None if known and var_key(m.group(1)) in known.get(CLIMB, ()) else "x"
     return None
 
 
-def literal_child(expr: str) -> "str | None":
+def literal_child(expr: str, known: "dict | None" = None) -> "str | None":
     """A Join-Path child: a name part or a (...) + concatenation of name parts."""
     terms = split_plus(unwrap(expr))
-    parts = [name_part(t) for t in terms]
+    parts = [name_part(t, known) for t in terms]
     return None if not parts or any(p is None for p in parts) else "".join(parts)
 
 
@@ -2182,7 +2272,7 @@ def repo_path(expr: "str | None", known: dict, root: str) -> "str | None":
     expr = unwrap(expr)
     terms = split_plus(expr)
     if len(terms) > 1:  # a path with a suffix ($outPath + '.err'): the suffix may not leave the file's folder
-        base, tail = repo_path(terms[0], known, root), [name_part(t) for t in terms[1:]]
+        base, tail = repo_path(terms[0], known, root), [name_part(t, known) for t in terms[1:]]
         return None if base is None or any(t is None or "/" in t for t in tail) else base + "".join(tail)
     m = re.fullmatch(r"\(Resolve-Path\s+(?:-LiteralPath\s+|-Path\s+)?(.+)\)\.(?:Path|ProviderPath)", expr, re.S | re.I)
     if m:
@@ -2198,7 +2288,7 @@ def repo_path(expr: "str | None", known: dict, root: str) -> "str | None":
     child_expr, j = take_expr(rest, 0)
     if rest[j:].strip():
         return None  # more than one child, or a switch: not this rule's
-    base, child = repo_path(base_expr, known, root), literal_child(child_expr)
+    base, child = repo_path(base_expr, known, root), literal_child(child_expr, known)
     if base is None or child is None or re.match(r"^(?:[A-Za-z]:|/)", child):
         return None
     path = posixpath.normpath(posixpath.join(base, child))
@@ -2232,19 +2322,57 @@ STAND_COMMON_SOURCED = re.compile(r"^\s*\.\s+\(?\s*Join-Path\s+\$PSScriptRoot\s+
                                   re.I | re.M)
 
 
+FOREACH_VAR = re.compile(r"\bforeach\s*\(\s*\$([\w:]+)\s+in\b", re.I)
+SET_VARIABLE = re.compile(r"(?<![\w$@.:\\/-])(?:Set-Variable|sv|New-Variable|nv)(?![\w-])([^;|]*)", re.I)
+PARAM_LIST = re.compile(r"\bparam\s*\(|\bfunction\s+[\w:-]+\s*\(", re.I)
+
+
+def unknown_assignments(code: str) -> set[str]:
+    """Variables a file sets without `$x = ...` (round 8, R2): a foreach variable, Set-Variable / New-Variable, and a
+    parameter without a default (of the script's param() or of a function: the caller passes it)."""
+    out = {var_key(m.group(1)) for m in FOREACH_VAR.finditer(blank_strings(code))}
+    for m in SET_VARIABLE.finditer(code):
+        args = m.group(1)
+        named = re.search(r"-Name\s+['\"]?([\w:]+)", args, re.I)
+        first = re.match(r"\s+(?!-)['\"]?([\w:]+)", args)
+        if named or first:
+            out.add(var_key((named or first).group(1)))
+    blank = blank_strings(code)
+    for m in PARAM_LIST.finditer(blank):
+        group, _ = take_expr(blank, m.end() - 1)
+        for arg in split_args(group[1:-1]):
+            depth, name, i = 0, None, 0
+            while i < len(arg):  # the parameter's name: the first $name outside [attributes]
+                if arg[i] == "[":
+                    depth += 1
+                elif arg[i] == "]":
+                    depth -= 1
+                elif arg[i] == "$" and depth == 0:
+                    name = re.match(r"\$([\w:]+)", arg[i:])
+                    break
+                i += 1
+            if name and not re.match(r"\s*=", arg[i + len(name.group(0)):]):
+                out.add(var_key(name.group(1)))
+    return out
+
+
 def repo_vars(lines: list[tuple[int, str]], script_dir: str, root: str, text: str) -> tuple[dict, set]:
-    """(repository variables: name -> "/"-path; the variables that hold a process's standard input)."""
+    """(repository variables: name -> "/"-path, and under CLIMB the variables a ".." is assigned to; the variables
+    that hold a process's standard input)."""
     assigned: dict[str, list[str]] = {}
     for _, code in lines:
         for m in ASSIGN.finditer(blank_strings(code)):  # never an "$x = " inside a string
             assigned.setdefault(var_key(m.group(1)), []).append("" if m.group(2) else assignment_rhs(code, m.end()))
+    for name in unknown_assignments("\n".join(code for _, code in lines)):
+        assigned.setdefault(name, []).append("")  # set in a way the lint does not follow: never a repository path
     bases = {"psscriptroot": script_dir}
     sourced = STAND_COMMON_SOURCED.search(text)  # the real stand_common.ps1, not a file of that name elsewhere
     if sourced and posixpath.normpath(posixpath.join(script_dir, sourced.group(1).replace("\\", "/"))) == \
             root + "/tools/stand_common.ps1":
         bases.update(root=root, standdir=root + "/temp/stand", markdir=root + "/temp/gates",
                      scenariodir=root + "/tools/stand")
-    known = {k: v for k, v in bases.items() if k not in assigned}
+    known: dict = {k: v for k, v in bases.items() if k not in assigned}
+    known[CLIMB] = frozenset(name for name, rhss in assigned.items() if any(".." in r for r in rhss))
     changed = True
     while changed:
         changed = False
@@ -2267,14 +2395,27 @@ WRITES = {
     "copy-item": re.compile(CMD + r"(?:Copy-Item|copy|cp|cpi)(?![\w-])", re.I),
     "content": re.compile(CMD + r"(?:Set-Content|sc|Add-Content|ac|Clear-Content|clc|Out-File|Tee-Object|tee|"
                           r"Export-Csv|epcsv|Export-Clixml)(?![\w-])", re.I),
-    "move": re.compile(CMD + r"(?:(?:Remove-Item|rm|del|erase|ri|rd|rmdir)(?![\w-])[^|;]*\s-Force\b|"
+    # round 8 (R1): every delete counts, not only -Force (through a junction folder Remove-Item deleted a mod's file)
+    "move": re.compile(CMD + r"(?:(?:Remove-Item|rm|del|erase|ri|rd|rmdir)(?![\w-])|"
                        r"(?:Move-Item|move|mv|mi|Rename-Item|ren|rni)(?![\w-]))", re.I),
     "file-method": re.compile(r"\[(?:System\.)?IO\.(?:File|FileInfo)\]::(WriteAll\w*|AppendAll\w*|AppendText|Create\w*|"
                               r"Open\w*|Copy|Move|Replace|Encrypt|Decrypt|SetAttributes|Delete)\s*\(", re.I),
     "stream": re.compile(r"\[(?:System\.)?IO\.(?:StreamWriter|FileStream|BinaryWriter)\]::new\s*\(|New-Object\s+"
                          r"(?:-TypeName\s+)?(?:System\.)?IO\.(?:StreamWriter|FileStream|BinaryWriter)\b", re.I),
     "member": re.compile(r"\.(Write|WriteLine|WriteAllText|CopyTo|MoveTo|Create|CreateText|AppendText|Delete|"
-                         r"Encrypt|Decrypt)\s*\(", re.I),
+                         r"Encrypt|Decrypt|Save)\s*\(", re.I),
+    # round 8 (R2): New-Item of a file (-ItemType File or none) truncates an existing one with -Force, a link with -Force
+    # replaces the name; an attribute set on a file is set for every link of it; [IO.Directory] deletes and moves;
+    # code the lint cannot read (a type kept in a variable, Invoke-Expression, a child PowerShell's -Command)
+    "new-item": re.compile(CMD + r"(?:New-Item|ni)(?![\w-])", re.I),
+    "attribute": re.compile(r"\.(?:IsReadOnly|Attributes)\s*(?:[-+*/]?=)(?!=)|" + CMD + r"attrib(?:\.exe)?(?![\w-])|"
+                            + CMD + r"(?:Set-ItemProperty|sp)(?![\w-])(?=[^;|]*-Name\s+['\"]?(?:IsReadOnly|Attributes)\b)",
+                            re.I),
+    "dir-method": re.compile(r"\[(?:System\.)?IO\.(?:Directory|DirectoryInfo)\]::(Delete|Move)\s*\(", re.I),
+    "unreadable": re.compile(r"=\s*\[(?:System\.)?IO\.(?:File|FileInfo|Directory|DirectoryInfo|StreamWriter|FileStream|"
+                             r"BinaryWriter)\]\s*$|" + CMD + r"(?:Invoke-Expression|iex)(?![\w-])|" + CMD
+                             + r"(?:powershell|pwsh)(?:\.exe)?(?![\w-])(?=[^;|]*\s-(?:Command|c|EncodedCommand|enc|e)\b)",
+                             re.I),
     "out-param": re.compile(r"\s-(?:OutFile|RedirectStandardOutput|RedirectStandardError)\s*:?\s+", re.I),
     "redirect": re.compile(r"(?<![-<>=])(?:\d|\*)?>>?(?![>&])"),
 }
@@ -2335,11 +2476,31 @@ def write_problems(stmt: str, known: dict, stdin: set, root: str) -> list[str]:
                 if method in ("write", "writeline") and parts and (
                         var_key(parts[0][1:]) in stdin or "standardinput" in [p.lower() for p in parts[1:]]):
                     continue
-                if method == "copyto":  # FileInfo.CopyTo(destination): a copy OUT of the stand is allowed
+                if method in ("copyto", "save"):  # FileInfo.CopyTo(destination), XmlDocument.Save(path): our file
                     args = call_args(stmt, m.end() - 1)
                     if args and ok(args[0]):
                         continue
                 out.append(f".{m.group(1)}() of something that is not a process's standard input or a repository file")
+            elif kind == "new-item":
+                kind_ = (param_value(stmt, "ItemType|Type", m.end()) or "File").strip("'\"").lower()
+                force = re.search(r"\s-Force\b", stmt[m.end():], re.I)
+                if kind_ == "directory" or (kind_ in ("hardlink", "symboliclink", "junction") and not force):
+                    continue  # a folder, or a new link name (a scenario's bin_b): no file's bytes change
+                path = param_value(stmt, "LiteralPath|Path", m.end()) or take_expr(stmt, m.end())[0]
+                if not ok(path):
+                    out.append("New-Item makes or truncates a stand file: Write-StandText / Write-StandBytes")
+            elif kind == "attribute":
+                path = param_value(stmt, "LiteralPath|Path", m.end())
+                if not (path and ok(path)):
+                    out.append("sets a file's attributes, which every hard link of it shares: never on a stand file")
+            elif kind == "dir-method":
+                args, method = call_args(stmt, m.end() - 1), m.group(1).lower()
+                targets = args[:2] if method == "move" else args[:1]
+                if not targets or not all(ok(t) for t in targets):
+                    out.append(f"[IO.Directory]::{m.group(1)} in a stand: Remove-StandFile")
+            elif kind == "unreadable":
+                out.append("code the lint cannot read (a type kept in a variable, Invoke-Expression, a child "
+                           "PowerShell's -Command): write it out with the helpers of stand_common.ps1")
             elif kind == "out-param" and not ok(take_expr(stmt, m.end())[0]):
                 out.append("a file written by -OutFile / -RedirectStandard*: point it into the repository")
             elif kind == "redirect":
@@ -2447,6 +2608,48 @@ LINT_BAD["cmd-quoted"] = "cmd /c \"copy /y a.txt $Stand\\x.txt\"\n"
 LINT_BAD["start-robocopy"] = "Start-Process -FilePath 'robocopy.exe' -ArgumentList \"$a $Stand /E\" -Wait\n"
 LINT_BAD["start-cmd"] = "Start-Process cmd -ArgumentList '/c copy a b' -Wait\n"
 LINT_GOOD["message"] = "Write-Host 'robocopy is not used here: Copy-StandTree'\nif ($x) { throw \"no xcopy\" }\n"
+# Guard round 8 (the review of round 7, R1): Remove-Item without -Force deleted a mod's read-write file through a
+# junction folder; every delete is a write now, and a stand file goes through Remove-StandFile
+OUT_DIR = "$OutDir = Join-Path $PSScriptRoot '..\\..\\temp\\stand'\n"
+LINT_BAD["remove-plain"] = "Remove-Item -LiteralPath (Join-Path $Stand 'x')\n"
+LINT_BAD["remove-test-path"] = ("$log = Join-Path $Stand 'appdata\\logs\\x.log'\n"
+                                "if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }\n")
+LINT_BAD["remove-alias"] = "del (Join-Path $Stand 'y')\nri -Path (Join-Path $Stand 'z')\n"
+LINT_GOOD["remove-own"] = OUT_DIR + "Remove-Item -LiteralPath (Join-Path $OutDir 'x.out') -ErrorAction SilentlyContinue\n"
+# R2: writes the lint did not see (each one changed a hard-linked mod file in the review's harness, or could)
+LINT_BAD["new-item-file"] = "New-Item -ItemType File -Force -Path (Join-Path $Stand 'gamedata\\configs\\x.ltx') | Out-Null\n"
+LINT_BAD["new-item-default"] = "New-Item -Path (Join-Path $Stand 'x.txt') -Value 'ours' -Force\n"
+LINT_BAD["new-link-force"] = "New-Item -ItemType HardLink -Force -Path (Join-Path $Stand 'x') -Target $a\n"
+LINT_BAD["xml-save"] = "$xml = [xml](Get-Content $a)\n$xml.Save((Join-Path $Stand 'gamedata\\configs\\x.xml'))\n"
+LINT_BAD["isreadonly"] = "(Get-Item (Join-Path $Stand 'x')).IsReadOnly = $false\n"
+LINT_BAD["set-itemproperty"] = "Set-ItemProperty -LiteralPath (Join-Path $Stand 'x') -Name IsReadOnly -Value $false\n"
+LINT_BAD["attrib"] = "attrib -r (Join-Path $Stand 'x')\n"
+LINT_BAD["attributes"] = "$f = Get-Item (Join-Path $Stand 'x')\n$f.Attributes = 'Normal'\n"
+LINT_BAD["directory-delete"] = "[System.IO.Directory]::Delete((Join-Path $Stand 'gamedata\\x'), $true)\n"
+LINT_BAD["directory-move"] = "[IO.Directory]::Move((Join-Path $Stand 'a'), (Join-Path $Stand 'b'))\n"
+LINT_BAD["foreach-reassign"] = (OUT_DIR + "foreach ($OutDir in @($Stand)) "
+                                "{ Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir 'x') }\n")
+LINT_BAD["set-variable"] = (OUT_DIR + "Set-Variable -Name OutDir -Value $Stand\n"
+                            "Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir 'x')\n")
+LINT_BAD["function-parameter"] = ("function Put([string]$StandDir) "
+                                  "{ Copy-Item -LiteralPath $a -Destination (Join-Path $StandDir 'x') }\nPut $Stand\n")
+LINT_BAD["param-in-function"] = ("function Put {\n    param([string]$StandDir)\n"
+                                 "    Copy-Item -LiteralPath $a -Destination (Join-Path $StandDir 'x')\n}\n")
+LINT_BAD["child-var-climbs"] = (OUT_DIR + "$up = '..\\..\\..\\..\\game-dev\\gamedata\\x.ltx'\n"
+                                "Copy-Item -LiteralPath $a -Destination (Join-Path $OutDir $up)\n")
+LINT_BAD["io-file-in-variable"] = "$f = [IO.File]\n$f::WriteAllText((Join-Path $Stand 'x'), 'y')\n"
+LINT_BAD["iex"] = "iex \"Set-Content -Path $Stand\\x -Value 1\"\n"
+LINT_BAD["invoke-expression"] = "Invoke-Expression $cmd\n"
+LINT_BAD["child-powershell"] = "powershell -NoProfile -Command \"Set-Content -Path '$Stand\\x' -Value 1\"\n"
+LINT_BAD["child-pwsh-encoded"] = "pwsh -EncodedCommand $b64\n"
+LINT_GOOD["new-item-dir"] = "New-Item -ItemType Directory -Force -Path (Join-Path $Stand 'appdata_t') | Out-Null\n"
+LINT_GOOD["new-link"] = "New-Item -ItemType HardLink -Path (Join-Path $Stand 'bin_b\\x.dll') -Target $a | Out-Null\n"
+LINT_GOOD["new-item-own-file"] = OUT_DIR + "New-Item -ItemType File -Force -Path (Join-Path $OutDir 'x.txt') | Out-Null\n"
+LINT_GOOD["xml-save-own"] = OUT_DIR + "$xml.Save((Join-Path $OutDir 'x.xml'))\n"
+LINT_GOOD["child-var-plain"] = OUT_DIR + "$name = 'x.log'\nCopy-Item -LiteralPath $a -Destination (Join-Path $OutDir $name)\n"
+LINT_GOOD["powershell-file"] = "$o = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $guard -Script $s)\n"
+LINT_GOOD["function-parameter-own"] = ("function Put([string]$Name) "
+                                       "{ Copy-StandFile -From $a -To (Join-Path $Stand $Name) }\nPut 'x'\n")
 
 
 @pytest.mark.parametrize("case", sorted(LINT_BAD))

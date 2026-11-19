@@ -661,3 +661,208 @@ def test_x11_a_static_initializer_with_a_call_in_a_srv_test_is_l9c(work, capsys)
     assert code == 1, out
     assert found(out, "tests/test_srv_far_env.cpp", "L9C") == [3], out  # 4: no call
     assert not found(out, "tests/test_items.cpp", "L9C"), out  # a co-op test file is the co-op tests' own business
+
+
+# --- guard round 8: the S4 reviews' holes (temp/s4/07_7.md F2, 08_8.md B4, 04_4.md h2) ---------------------------------
+# Hostile trees of the reviews (temp/rv_A-S4C/hostile.py H1-H5, H9, H11; temp/rv_A-S4ML/hostile.py h5, h6;
+# temp/rv_A-S4S probe h2), written here for the same reason as above (.gitignore `engine/`).
+
+MGR = "engine/src/xrGame/coop/coop_manager.cpp"
+LEVELS = "engine/src/xrGame/coop/coop_levels.cpp"
+
+# (1) the S4 interface (xrCoop/coop_mode.h) asked as a mode check in an Ядро file (review A-S4C, F2)
+F2_NET = ("// Ядро\n#include \"xrCoop/coop_mode.h\"\nnamespace coop\n{\nvoid host_flush(PeerId to)\n{\n"
+          "\tif (has(mode().roles(), ProcessRole::MapServer)) return;\n"                        # 7  H1
+          "\tif (mgr().world_session().session_mode() == SessionMode::Server) return;\n"      # 8  H2
+          "\tif (!strcmp(mode().name(), \"map server\")) return;\n"                            # 9  H3
+          "\tif (mode().roles() & 16) return;\n"                                              # 10 H4
+          "\tif (&mode() == mode_for(Entry::MapServer, SessionMode::Server)) return;\n"       # 11 H5
+          "\tswitch (mgr().session().session_mode()) { case SessionMode::Server: return; default: break; }\n"  # 12 H9
+          "\tif (mode().takes_own_ids()) return;\n"                                           # 13 H10: an answer
+          "\t::Msg(\"[coop] mode %s\", mode().name());\n"                                     # 14 printed, not compared
+          "\tif (mgr().roles() == 19) return;\n"                                              # 15 Manager's roles
+          "\tif (roles_of(Phase::Live) & 16) return;\n"                                       # 16 roles_of outside set_phase
+          "\tif (boot_layers()) return;\n"                                                    # 17 a boot outside the starts
+          "\tif (install_mode(*mode_for(Entry::Host, SessionMode::None))) return;\n"          # 18
+          "\tconst Mode& m = mode();\n\tif (m.name()[0] == 'm') return;\n"                    # 19, 20 an alias of mode()
+          "\tif (typeid(mode()) == typeid(Mode)) return;\n"                                   # 21
+          "\tif (mgr().has_role(ProcessRole::Player)) return;\n"                              # 22 is_player: one meaning
+          "\tif (cfg.mode == SessionMode::None) return;\n"                                    # 23 no mode: no question
+          "}\n}\n")
+F2_MGR = ("// Ядро\n#include \"coop_manager.h\"\nnamespace coop\n{\n"
+          "u8 roles_of(Phase p)\n{\n\tif (p == Phase::Off)\n\t\treturn 0;\n"
+          "\tconst u8 roles = mode().roles();\n\treturn roles ? roles : client_roles();\n}\n"        # 9 allowed
+          "void Manager::set_phase(Phase p)\n{\n\tm_phase = p;\n\tm_roles = roles_of(p);\n}\n"         # 15 allowed
+          "bool Manager::enter_mode(Mode* m)\n{\n\treturn m && install_mode(*m);\n}\n"                  # 19 allowed
+          "void Manager::enter_mode_of_welcome(SessionMode said)\n{\n"
+          "\tif (Mode* m = mode_for(Entry::Client, said))\n\t\tinstall_mode(*m);\n}\n"                  # 23, 24 allowed
+          "bool Manager::start_host(u16 port)\n{\n\treturn enter_mode(mode_for(Entry::Host, SessionMode::None));\n}\n"
+          "bool Manager::start_map_server(u16 port)\n{\n"
+          "\treturn enter_mode(mode_for(Entry::MapServer, SessionMode::Server));\n}\n"                 # 32 allowed
+          "void Manager::autostart()\n{\n\tif (boot_layers())\n\t\treturn;\n}\n"                       # 36 allowed
+          "void Manager::frame()\n{\n"
+          "\tif (m_roles & 16)\n\t\treturn;\n"                                                         # 41 not a start
+          "\tif (mode_for(Entry::Host, SessionMode::Server) == &mode())\n\t\treturn;\n"                # 43
+          "\tif (enter_mode(mode_for(Entry::MapServer, SessionMode::Server)))\n\t\treturn;\n"          # 45
+          "}\n}\n")
+F2_LEVELS = ("// Ядро\nnamespace coop::levels\n{\nbool split()\n{\n\tif (mgr().is_client())\n"
+             "\t\treturn mgr().world_session().session_mode() == SessionMode::Server;\n"              # 7 allowed
+             "\treturn false;\n}\n"
+             "bool remote()\n{\n\treturn mgr().world_session().session_mode() == SessionMode::Server;\n}\n}\n")  # 12
+# the words' own definitions: the enums' codec and role sets (VOCABULARY in check_layers.py)
+F2_ROLES = ("// Ядро\n#pragma once\nnamespace coop\n{\nenum class ProcessRole : uint8_t\n{\n\tWorldServer = 1,\n"
+            "\tMapServer = 16,\n};\nconstexpr uint8_t host_roles()\n{\n"
+            "\treturn uint8_t(ProcessRole::WorldServer);\n}\n"                                        # 12 allowed
+            "constexpr bool is_ms(uint8_t r)\n{\n\treturn (r & uint8_t(ProcessRole::MapServer)) != 0;\n}\n}\n")  # 16
+F2_PROTOCOL = ("// Ядро\nnamespace coop\n{\nconst char* session_mode_name(SessionMode mode)\n{\n"
+               "\tswitch (mode)\n\t{\n\tcase SessionMode::Coop: return \"coop\";\n"                    # 8 allowed
+               "\tcase SessionMode::Server: return \"server\";\n\t}\n\treturn \"none\";\n}\n"          # 9 allowed
+               "bool HelloMsg::read(Reader& r)\n{\n\treturn r.u8() == uint8_t(SessionMode::Server);\n}\n}\n")  # 15
+F2_SRV_MODE = ("// srv\nnamespace coop::srv\n{\nLayer& layer()\n{\n\tstatic ServerLayer s;\n\treturn s;\n}\n"
+               "Mode* mode_of(Entry e, SessionMode said) { return said == SessionMode::Server ? nullptr : nullptr; }\n}\n")
+F2_H11 = ("// Ядро\nnamespace coop\n{\nvoid boot()\n{\n\tstatic coop::Layer* const s_srv{&srv::layer()};\n"  # 6 H11
+          "\ts_srv->boot_frame();\n}\n}\n")
+
+
+def test_r8_core_asking_the_mode_interface_is_l1(work, capsys):
+    root = tree(work, {X: F2_NET})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    # 13: an interface answer; 14: the name printed; 22: has_role(ProcessRole::Player); 23: SessionMode::None
+    assert found(out, "coop_x.cpp", "L1") == [7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 20, 21], out
+    assert "the session's mode" in out
+
+
+def test_r8_the_mode_interface_is_asked_only_in_the_starts_split_and_roles_of(work, capsys):
+    root = tree(work, {MGR: F2_MGR, LEVELS: F2_LEVELS})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_manager.cpp", "L1") == [41, 43, 45], out  # Manager::frame is no start
+    # 4: `bool split()` names the predicate (the old L1); 7: split() itself asks the Welcome's mode (S4C)
+    assert found(out, "coop_levels.cpp", "L1") == [4, 12], out
+
+
+def test_r8_the_words_own_definitions_pass_and_a_new_user_beside_them_fails(work, capsys):
+    root = tree(work, {"engine/src/xrCoop/coop_roles.h": F2_ROLES, "engine/src/xrCoop/coop_protocol.cpp": F2_PROTOCOL,
+                       "engine/src/xrGame/coop/srv/coop_srv_mode.cpp": F2_SRV_MODE})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_roles.h", "L1") == [16], out  # 12: host_roles() is the role set's own definition
+    assert found(out, "coop_protocol.cpp", "L1") == [15], out  # 8, 9: the Welcome byte's own name
+    assert not found(out, "coop_srv_mode.cpp", "L1"), out  # a srv file may ask what it likes
+
+
+def test_r8_h11_a_brace_initialized_address_of_a_srv_function_is_l3(work, capsys):
+    root = tree(work, {X: F2_H11, "engine/src/xrGame/coop/srv/coop_srv_mode.cpp": F2_SRV_MODE})
+    code, out = run(root, capsys)
+    assert code == 1 and found(out, "coop_x.cpp", "L3") == [6], out
+
+
+def test_r8_the_frozen_lists_only_name_their_functions():
+    # the exemptions are functions of named files (review A-S4C F2: only split() and roles_of, plus the starts the
+    # switchboard serves and the words' own definitions); a list entry is never a whole file
+    for (path, qual, name), kinds in check.IFACE_ALLOWED.items():
+        assert path == path.lower() and path.startswith("engine/src/") and name and kinds, (path, qual, name)
+        assert kinds <= set(check.IFACE_KINDS), kinds
+    starts = {name for (path, _, name) in check.IFACE_ALLOWED if path.endswith("coop_manager.cpp")}
+    assert starts == {"roles_of", "set_phase", "enter_mode", "enter_mode_of_welcome", "start_host", "start_map_server",
+                      "autostart"}, starts
+
+
+# (2) Lua: a server part's presence used as a mode test (review A-S4ML, B4 h6); calling a part's function is the
+# sanctioned way (docs/contracts/coop_mode_api.md "Server parts") and stays allowed (h5)
+B4_CORE = ("-- Ядро\nlocal qc = rawget(_G, \"coop_quests_core\")\n"
+           "local function far_mod() return coop_quests_core.part(\"far\") end\n"         # 3 a getter: allowed
+           "function order(id)\n\treturn coop_quests_core.part(\"far\").order(id)\nend\n"  # 5 h5: allowed
+           "function server_now()\n\treturn coop_quests_core.part(\"far\") ~= nil\nend\n"  # 8 h6
+           "function tick()\n\tif qc.part(\"levels\") then return 1 end\n"               # 11
+           "\tif not qc.part(\"brain\") then return 2 end\n"                               # 12
+           "\tlocal srv = qc.part(\"far\") and \"server\" or \"coop\"\n"                   # 13
+           "\tlocal x = qc.part(\"audience\") or start_coop_only()\n"                      # 14
+           "\tlocal lv = qc and qc.part and qc.part(\"levels\")\n"                         # 15 a guarded fetch: allowed
+           "\tlocal text = lv and lv.elsewhere_text and lv.elsewhere_text(1)\n"            # 16 a part's function
+           "\tlocal far = qc and qc.part and qc.part(\"far\") or nil\n"                    # 17 allowed
+           "\tif far and far.fallback then return far.fallback(1) end\n"                   # 18 allowed
+           "\tlocal is_srv = far ~= nil\n"                                                # 19 its presence kept
+           "\tif far_mod() then return 4 end\n"                                           # 20 a getter's presence
+           "\tif type(qc.part(\"far\")) == \"table\" then return 5 end\n"                 # 21
+           "\tlocal mine = far_mod()\n"                                                   # 22 allowed
+           "\tif mine == nil then return 6 end\n"                                         # 23 the guard before a call
+           "\treturn mine ~= nil and mine.at_home(tick)\nend\n")                          # 24 the same guard
+B4_QC = ("-- Ядро\nlocal held = { parts = {} }\nfunction set_part(name, t) held.parts[name] = t end\n"
+         "function part(name) return held.parts[name] end\n"                               # 4 the definition
+         "local function far() return part(\"far\") end\n"                                 # 5 a getter
+         "function is_server() return part(\"far\") ~= nil end\n")                         # 6
+
+
+def test_r8_lua_a_server_part_used_as_a_mode_test_is_l1(work, capsys):
+    root = tree(work, {"gamedata/scripts/coop_x.script": B4_CORE, "gamedata/scripts/coop_quests_core.script": B4_QC})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_x.script", "L1") == [8, 11, 12, 13, 14, 19, 20, 21], out
+    assert found(out, "coop_quests_core.script", "L1") == [6], out
+    assert "presence" in out
+
+
+# (3) Ядро calling the server's part of Session directly (review A-S4S, probe h2): a rule of its own (L11), never in
+# the allow list; today's callers are SESSION_SRV_FROZEN in check_layers.py (A-S4Sb moves them), a list that only
+# shrinks
+H2_CORE = ("// Ядро\nnamespace coop\n{\nvoid bridges_up(Session& s)\n{\n"
+           "\ts.issue_bridge(1, token);\n"                                    # 6
+           "\tif (s.bridge_connected(0x101)) s.virtual_join(0x101, \"x\");\n"  # 7
+           "\ts.on_bridge_joined = [](PeerId) {};\n"                          # 8
+           "\tmgr().session().revoke_bridge(2);\n"                            # 9
+           "\tif (s.is_virtual()) return;\n"                                  # 10
+           "\tcfg.operator_token = token;\n"                                  # 11
+           "\ts.on_operator_command = nullptr;\n"                             # 12
+           "\tauto f = &Session::host_virtual;\n"                             # 13
+           "\ts.send(0, Lane::Reliable, Msg::Chat, w);\n"                     # 14 the Core's own part
+           "\tfor (const PeerId b : mgr().session().bridges()) kick(b);\n"    # 15
+           "}\n}\n")
+SESSION_SELF = ("// Ядро\nnamespace coop\n{\nvoid Session::Impl::bridge_joined(PeerId id)\n{\n"
+                "\tif (m_self.on_bridge_joined)\n\t\tm_self.on_bridge_joined(id);\n}\n}\n")
+
+
+def test_r8_core_calling_the_server_members_of_session_is_l11(work, capsys):
+    root = tree(work, {X: H2_CORE, "engine/src/xrCoop/coop_session.cpp": SESSION_SELF})
+    code, out = run(root, capsys)
+    assert code == 1, out
+    assert found(out, "coop_x.cpp", "L11") == [6, 7, 8, 9, 10, 11, 12, 13, 15], out  # 14: send is the Core's
+    assert not found(out, "coop_session.cpp", "L11"), out  # the class's own body (A-S4Sb moves it into srv)
+    assert "server's part of Session" in out
+
+
+def frozen_tree(work: Path, path: str, code_line: str, times: int) -> Path:
+    body = "".join("\t" + code_line + "\n\t{\n\t}\n" for _ in range(times))
+    return tree(work, {path: "// Ядро\nnamespace coop\n{\nvoid f()\n{\n" + body + "}\n}\n"})
+
+
+def test_r8_l11_is_never_allowed_and_the_frozen_callers_pass_once(work, capsys):
+    assert "L11" not in check.ALLOWABLE
+    for k, (path, code_line) in enumerate(sorted(check.SESSION_SRV_FROZEN)):
+        name = path.rsplit("/", 1)[-1]
+        code, out = run(frozen_tree(work / f"once{k}", path, code_line, 1), capsys)
+        assert not found(out, name, "L11"), out  # today's line, once (its other rules are the allow list's)
+        # once more than frozen: both lines fail, and an allow entry does not help (L11 is never allowed)
+        twice = frozen_tree(work / f"twice{k}", path, code_line, 2)
+        allow = twice / "tools" / "layers_allow.txt"
+        allow.write_text(allow.read_text(encoding="utf-8").replace("# ceiling: 2", "# ceiling: 4")
+                         + f"L11|{path}|{code_line}|2\n", encoding="utf-8", newline="\n")
+        code, out = run(twice, capsys)
+        assert code == 1 and found(out, name, "L11") == [6, 9], out
+
+
+# today's callers (2026-11-19, review A-S4S blocker 2): the frozen list may only lose entries
+SESSION_SRV_TODAY = {
+    ("engine/src/xrGame/coop/coop_join.cpp", "if (mgr().session().bridge_connected(bridge))"),
+    ("engine/src/xrGame/coop/coop_levels.cpp", "for (const PeerId bridge : mgr().session().bridges())"),
+    ("engine/src/xrGame/coop/coop_manager.cpp",
+     "m_session.on_operator_command = [](PeerId from, const std::string& line) { dedicated::run_for(from, line); };"),
+    ("engine/src/xrGame/coop/coop_manager.cpp",
+     "if (!m_world.connect(cfg, \"127.0.0.1\", port, &err) || !m_session.host_virtual(cfg, m_world, &err))"),
+}
+
+
+def test_r8_the_frozen_session_callers_only_shrink():
+    assert set(check.SESSION_SRV_FROZEN) <= SESSION_SRV_TODAY
+    assert all(n == 1 for n in check.SESSION_SRV_FROZEN.values())

@@ -21,7 +21,8 @@ $scenarios = @(
     @{ Name = 'ded_check'; Script = '..\ded_check.ps1'; Args = '-World new'; TagArg = $false; StandArg = '-GameDir'; Pass = @('(?m)^PASS\s*$'); Bad = @() },
     @{ Name = 'base_server'; Script = 'base_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('the client is in the world', $alive); Bad = @("^! the client's steps did not end", '^! the server did not quit') },
     @{ Name = 'carry_server'; Script = 'carry_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('the client is in the world', $alive); Bad = @("^! the client's steps did not end", '^! the server did not quit') },
-    @{ Name = 'taskboard_ws'; Script = 'taskboard_ws.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('the client is in the world', $alive); Bad = @('^! the board answer did not come', '^! the server did not quit') }
+    @{ Name = 'taskboard_ws'; Script = 'taskboard_ws.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('the client is in the world', $alive); Bad = @('^! the board answer did not come', '^! the server did not quit') },
+    @{ Name = 'phantoms_server'; Script = 'phantoms_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('the client is in the world', $alive, 'phantoms: PASS'); Bad = @("^! the client's steps did not end", '^! the server did not quit', 'phantoms: FAIL') }
 )
 $code = Invoke-Stand -Mode 'srv' -Scenarios $scenarios -Tag $Tag -Stand $Stand -Only $Only -NoMark:$NoMark
 exit $code

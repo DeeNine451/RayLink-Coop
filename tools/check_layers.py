@@ -30,6 +30,14 @@ Rules (ids as in docs/MODES.md section 5):
       namespace`; Lua by name inside the file (locals, aliases `local split = coop.levels.split`), as `script.fn(` from
       other files, through a module-table alias (`local L = coop.levels; L.split()`) and an indexed field
       (`coop.levels["split"]()`)
+      Round 8 (review A-S4C F2): an Ядро C++ line that asks the S4 interface which mode it is in: session_mode(,
+      SessionMode::Coop / ::Server, ProcessRole:: (but has_role(ProcessRole::X), the old rule), .roles() / m_roles /
+      roles_of(, mode_for( / install_mode( / boot_layers(, &mode() ==, typeid / dynamic_cast of mode(), and the mode's
+      name (mode().name(), an alias of mode(), session_mode_name() anywhere but in a log call); only in the functions
+      IFACE_ALLOWED names (coop_levels.cpp split(), roles_of, coop_manager.cpp's starts, the words' own definitions).
+      Lua (review A-S4ML B4): a server part's presence used as a mode test (coop_quests_core.part(...) compared with
+      nil, a condition of if / while / not / and / or, type(...) of it; a getter of one; a local part's presence kept
+      as a value); calling a part's function is allowed
   L2  Ядро uses an overloaded role: C++ is_host( is_client( is_map_authority( has_role(ProcessRole::WorldClient);
       Lua is_world_server( is_host(; and wrappers of those (taint as L1)
   L3  a reference across layers: Ядро or stock -> srv / hostplay, srv <-> hostplay. C++ #include of a file of that
@@ -68,6 +76,10 @@ Rules (ids as in docs/MODES.md section 5):
       class of ours with a user-declared constructor (`static Registrar s_r;`, `static Registrar s_r(1);`, review 3 C7):
       static initialization runs in every process, the co-op host too; constexpr initializers are not calls
   L10 a key of persisted_keys.txt no longer appears in any script
+  L11 an Ядро or stock C++ line names the server's part of Session (issue_bridge, revoke_bridge, bridges, bridge_*,
+      virtual_*, is_virtual, host_virtual, on_bridge_*, on_operator_command, operator_refused, operator_token; review
+      A-S4S probe h2): only srv reaches it, through srv::SessionSrv. Never an allow entry: today's callers are
+      SESSION_SRV_FROZEN (a list that only shrinks); coop_session.cpp/.h are the class itself
 Comments are not code; string contents are not code either (L6, L8, the command-line keys and the Lua module
 references read them).
 
@@ -118,6 +130,82 @@ DYING_FROZEN = frozenset({
     "gamedata/scripts/coop_world_wait.script",
     "gamedata/scripts/coop_world_stage_file.script",
 })
+
+# Guard round 8 (review A-S4C, F2). The S4 interface (xrCoop/coop_mode.h) lets Ядро ask a mode's layer about a player,
+# a level or its own actor (where, decider_of, decides_world, ...): those answers are allowed. What mode the session is
+# in, which roles the process has, the mode's name and the switchboard are not questions Ядро may ask: in an Ядро C++
+# file each of these kinds is L1, except in the functions IFACE_ALLOWED names for it.
+IFACE_KINDS: dict[str, tuple[Optional[re.Pattern[str]], str]] = {
+    "session_mode": (re.compile(r"\bsession_mode\s*\("), "the session's mode (Session::session_mode)"),
+    "SessionMode": (re.compile(r"\bSessionMode\s*::\s*(?:Coop|Server)\b"), "a session mode by name"),
+    "ProcessRole": (re.compile(r"\bProcessRole\s*::\s*[A-Za-z_]\w*"), "a process role by name"),
+    "roles": (re.compile(r"(?:\.|->)\s*roles\s*\(\s*\)"), "the process's roles (mode().roles(), mgr().roles())"),
+    "m_roles": (re.compile(r"\bm_roles\b"), "the Manager's roles"),
+    "roles_of": (re.compile(r"\broles_of\s*\("), "the roles of a phase (roles_of)"),
+    "mode_for": (re.compile(r"\bmode_for\s*\("), "the switchboard (mode_for)"),
+    "install_mode": (re.compile(r"\binstall_mode\s*\("), "the switchboard (install_mode)"),
+    "boot_layers": (re.compile(r"\bboot_layers\s*\("), "the layers' boots (boot_layers)"),
+    "mode_identity": (re.compile(
+        r"&\s*(?:coop\s*::\s*)?mode\s*\(\s*\)\s*[!=]=|[!=]=\s*&\s*(?:coop\s*::\s*)?mode\s*\(\s*\)"
+        r"|\btypeid\s*\(\s*\*?\s*&?\s*(?:coop\s*::\s*)?mode\s*\("
+        r"|\bdynamic_cast\s*<[^<>;]*>\s*\(\s*&?\s*(?:coop\s*::\s*)?mode\s*\("), "which mode object the session has"),
+    # mode().name() / session_mode_name(...) anywhere but as an argument of a log call (IFACE_LOG_CALLS)
+    "mode_name": (None, "the mode's name used for something else than the log"),
+}
+# the log calls a mode's name may be given to (they return nothing to branch on)
+IFACE_LOG_CALLS = frozenset({"Msg", "Log", "logf", "log", "log_line", "printf", "fprintf", "LogMsg"})
+IFACE_MODE_NAME = re.compile(r"\b(?:coop\s*::\s*)?mode\s*\(\s*\)\s*(?:\.|->)\s*name\s*\(\s*\)|\bsession_mode_name\s*\(")
+IFACE_MODE_ALIAS = re.compile(r"\b(?:Mode|auto)\s*(?:const\s*)?[&*]\s*([A-Za-z_]\w*)\s*(?:=|\{)\s*&?\s*"
+                              r"(?:coop\s*::\s*)?mode\s*\(\s*\)")
+IFACE_LITERALS = ("session_mode", "SessionMode", "ProcessRole", "roles", "mode_for", "install_mode", "boot_layers",
+                  "mode(", "mode (", "name(", "name (")
+# (file, qualifier, function) -> the kinds it may use. This list only shrinks; it never names a whole file. The review
+# allowed two (coop_levels.cpp split(): a client's answer from its Welcome, S4C; roles_of: the roles come from the
+# mode); the starts of coop_manager.cpp are the switchboard's only callers (a SessionMode there only as mode_for's
+# argument); the Manager's own accessors of its roles; and the words' own definitions (the role sets of coop_roles.h,
+# the Welcome's mode byte of coop_protocol, Session::session_mode itself).
+IFACE_ALLOWED: dict[tuple[str, str, str], frozenset[str]] = {
+    ("engine/src/xrgame/coop/coop_levels.cpp", "levels", "split"): frozenset({"session_mode", "SessionMode"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "coop", "roles_of"): frozenset({"roles"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "Manager", "set_phase"): frozenset({"roles_of", "m_roles"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "Manager", "enter_mode"): frozenset({"install_mode"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "Manager", "enter_mode_of_welcome"): frozenset({"mode_for",
+                                                                                                 "install_mode"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "Manager", "start_host"): frozenset({"mode_for"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "Manager", "start_map_server"): frozenset({"mode_for"}),
+    ("engine/src/xrgame/coop/coop_manager.cpp", "Manager", "autostart"): frozenset({"boot_layers"}),
+    ("engine/src/xrgame/coop/coop_manager.h", "Manager", "has_role"): frozenset({"m_roles"}),
+    ("engine/src/xrgame/coop/coop_manager.h", "Manager", "roles"): frozenset({"m_roles"}),
+    ("engine/src/xrcoop/coop_roles.h", "coop", "host_roles"): frozenset({"ProcessRole"}),
+    ("engine/src/xrcoop/coop_roles.h", "coop", "dedicated_roles"): frozenset({"ProcessRole"}),
+    ("engine/src/xrcoop/coop_roles.h", "coop", "client_roles"): frozenset({"ProcessRole"}),
+    ("engine/src/xrcoop/coop_roles.h", "coop", "map_server_roles"): frozenset({"ProcessRole"}),
+    ("engine/src/xrcoop/coop_protocol.h", "coop", "session_mode_of_seat"): frozenset({"SessionMode"}),
+    ("engine/src/xrcoop/coop_protocol.cpp", "coop", "session_mode_name"): frozenset({"SessionMode"}),
+    ("engine/src/xrcoop/coop_protocol.cpp", "WelcomeMsg", "read"): frozenset({"SessionMode"}),
+    ("engine/src/xrcoop/coop_session.cpp", "Session", "session_mode"): frozenset({"session_mode"}),
+}
+
+# Guard round 8 (review A-S4S, probe h2): the server's part of Session (the bridges, the virtual host, the operator
+# token's host side; srv::SessionSrv, xrCoop/srv/coop_session_srv.h, is its API) named from Ядро or stock is L11, a
+# rule of its own that the allow list never takes. The class's own files define and run it (A-S4Sb moves the bodies
+# into srv). SESSION_SRV_FROZEN: today's callers (path, the line's code with its strings, as an allow entry) -> count,
+# which A-S4Sb switches. This list only shrinks.
+SESSION_SRV = re.compile(
+    r"(?:\.|->|\bSession\s*::)\s*(issue_bridge|revoke_bridge|bridges|bridge_\w+|virtual_\w+|is_virtual|host_virtual|"
+    r"on_bridge_\w+|on_operator_command|operator_refused|operator_token)\b")
+SESSION_SELF = frozenset({"engine/src/xrcoop/coop_session.cpp", "engine/src/xrcoop/coop_session.h"})
+SESSION_SRV_FROZEN: dict[tuple[str, str], int] = {}  # A-S4Sb switched every caller (2026-11-19): empty for good
+
+# Guard round 8 (review A-S4ML, B4 h6): Lua Ядро reaches the server scripts only through coop_quests_core.part(name)
+# (docs/contracts/coop_mode_api.md "Server parts"): calling a part's function is allowed; its presence used as a mode
+# test (compared with nil, a condition of if / while / not / and / or) is L1. The part is a call `part(...)` (bare in
+# coop_quests_core, `x.part(...)` elsewhere), a function of the file that returns one, or a local set to one
+# (compared with nil).
+LUA_PART = re.compile(r"(?<![\w])(?:((?:[A-Za-z_]\w*(?:\s*\(\s*\))?\s*[.:]\s*)*)|)\bpart\s*\(")
+LUA_PART_DEFAULT = re.compile(r"\s*or\s+(?:nil|false|\{\s*\})(?![\w.:(\[])")
+LUA_PART_TEST_AFTER = re.compile(r"\s*(?:then\b|do\b|and\b|or\b|==|~=)")
+LUA_PART_TEST_BEFORE = re.compile(r"(?:\b(?:if|elseif|while|until|not)|==|~=)\s*$")
 
 # ---- rule patterns ------------------------------------------------------------------------------------------------
 
@@ -246,6 +334,8 @@ WHY = {
     "L9C": "a static initializer runs in every process, the co-op host too; register from the mode's init through "
            "mode() (review 2, B3)",
     "L10": "a saved key disappeared from the scripts; saved names are never renamed or dropped (§3 rule 10)",
+    "L11": "Ядро calls the server's part of Session (bridges, virtual host, operator token): only srv does, through "
+           "srv::SessionSrv (docs/MODES.md §4; never an allow entry, SESSION_SRV_FROZEN only shrinks)",
 }
 ALLOWABLE = frozenset({"L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L9C"})
 
@@ -1913,6 +2003,190 @@ def lua_load_calls(src: Source, own: set[str], when_spans: list[tuple[int, int]]
 
 # ---- the scan -----------------------------------------------------------------------------------------------------
 
+def enclosing_function(src: Source, line: int) -> Optional[CppFunction]:
+    """The innermost C++ function (or lambda) whose head or body holds line, None at namespace or class scope."""
+    best: Optional[CppFunction] = None
+    for fn in src.cpp.functions if src.cpp else ():
+        first = fn.head_line or fn.line
+        last = fn.line + fn.body.count("\n")
+        if first <= line <= last and (best is None or first >= (best.head_line or best.line)):
+            best = fn
+    return best
+
+
+def is_call_at(line: str, pos: int) -> bool:
+    """name( at pos is a call, not the head of its own definition or declaration (`SessionMode Session::session_mode()
+    const`, `bool install_mode(Mode& m);`)."""
+    before = line[:chain_start(line, pos)]
+    if before.rstrip().endswith(("->", ".")):
+        return True
+    return not declares(before)
+
+
+def call_name_around(code: str, pos: int) -> str:
+    """The name of the call whose argument list holds pos (`Msg` of `::Msg("%s", mode().name())`), "" if none."""
+    open_ = open_paren_before(code, pos)
+    if open_ is None:
+        return ""
+    m = re.search(r"([A-Za-z_]\w*)\s*$", code[max(0, open_ - 80):open_])
+    return m.group(1) if m else ""
+
+
+def strip_mode_for_args(line: str) -> str:
+    """The line with the argument list of every mode_for(...) blanked: a start may say the mode it asks for there."""
+    out = line
+    for m in reversed(list(re.finditer(r"\bmode_for\s*\(", line))):
+        depth, j = 0, m.end() - 1
+        while j < len(line):
+            if line[j] == "(":
+                depth += 1
+            elif line[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out = out[:m.end()] + " " * max(0, j - m.end()) + out[j:]
+    return out
+
+
+def iface_check(src: Source, number: int, line: str, starts: list[int], aliases: set[str]) -> Optional[str]:
+    """Why an Ядро C++ line asks the mode through the S4 interface (IFACE_KINDS), or None (guard round 8, F2)."""
+    fn = enclosing_function(src, number)
+    allowed = IFACE_ALLOWED.get((src.path.lower(), fn.qualifier, fn.name), frozenset()) if fn else frozenset()
+    if "mode_for" in allowed:
+        line = strip_mode_for_args(line)
+    for kind, (rx, what) in IFACE_KINDS.items():
+        if rx is None or kind in allowed:
+            continue
+        for m in rx.finditer(line):
+            if kind == "m_roles" and fn is None:
+                continue  # the member's own declaration (`u8 m_roles = 0;`)
+            if kind == "ProcessRole" and re.search(r"\bhas_role\s*\(\s*$", line[:m.start()]):
+                continue  # has_role(ProcessRole::X): the old predicates' own rule (L1 / L2; Player is is_player)
+            if kind in ("session_mode", "roles_of", "mode_for", "install_mode", "boot_layers") and \
+                    not is_call_at(line, m.start()):
+                continue  # the head of its own definition or declaration
+            return f"asks {what}: Ядро asks coop_mode about a player, a level or its own actor ('{m.group(0)}')"
+    if "mode_name" not in allowed:
+        names = [m for m in IFACE_MODE_NAME.finditer(line)]
+        if aliases:
+            names += list(re.finditer(r"\b(?:" + "|".join(map(re.escape, aliases)) + r")\s*(?:\.|->)\s*name\s*\(\s*\)",
+                                      line))
+        for m in names:
+            if m.group(0).startswith("session_mode_name") and not is_call_at(line, m.start()):
+                continue  # its own definition
+            if call_name_around(src.code, starts[number - 1] + m.start()) in IFACE_LOG_CALLS:
+                continue
+            return f"asks {IFACE_KINDS['mode_name'][1]} ('{m.group(0)}'): print it, never compare or keep it"
+    return None
+
+
+def lua_part_tests(src: Source, getters: dict[tuple[str, str], str]) -> list[tuple[int, str]]:
+    """(line, why) of every use of a server part's presence as a mode test in an Ядро script (guard round 8, B4 h6).
+    getters: (module, function) -> origin of the functions of any Ядро script that return a part."""
+    mod_name = pathlib.PurePosixPath(src.path).stem
+    lines = src.lines()
+    out: list[tuple[int, str]] = []
+    local_getters = {nm for (mod, nm) in getters if mod == mod_name}
+
+    def parts_in(text: str) -> list[tuple[int, int]]:
+        """(start, end) of every part expression of text: `part(...)`, `x.part(...)`, `getter()`, `mod.getter()`."""
+        found = []
+        for m in LUA_PART.finditer(text):
+            if re.search(r"\bfunction\s+(?:[A-Za-z_][\w.:]*[.:]\s*)?$", text[:m.start(0) + len(m.group(1) or "")]):
+                continue  # `function part(` / `function M.part(`: the definition
+            found.append((m.start(0), m.end(0) - 1))
+        for m in re.finditer(r"(?<![\w.:])(?:([A-Za-z_]\w*)\s*\.\s*)?([A-Za-z_]\w*)\s*\(", text):
+            mod, nm = m.group(1), m.group(2)
+            if (mod and (mod, nm) in getters) or (not mod and nm in local_getters):
+                if not re.search(r"\bfunction\s+$", text[:m.start()]):
+                    found.append((m.start(), m.end() - 1))
+        result = []
+        for start, open_ in found:
+            depth, j = 0, open_
+            while j < len(text):
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            result.append((start, j + 1))
+        return result
+
+    def test_use(text: str, start: int, end: int) -> bool:
+        before, after = text[:start], text[end:]
+        while True:  # (P), type(P): the same presence
+            b = before.rstrip()
+            if b.endswith("(") and after.lstrip().startswith(")"):
+                before = b[:-1]
+                after = after.lstrip()[1:]
+                if re.search(r"\btype\s*$", before):
+                    before = re.sub(r"\btype\s*$", "", before)
+                continue
+            break
+        if LUA_PART_DEFAULT.match(after):
+            after = after[LUA_PART_DEFAULT.match(after).end():]  # `P or nil`: still the part
+        if re.match(r"\s*[.:\[]", after):
+            return False  # P.fn(...): calling a part's function
+        return bool(LUA_PART_TEST_AFTER.match(after) or LUA_PART_TEST_BEFORE.search(before))
+
+    getter_names = {nm for (_, nm) in getters}
+    part_vars: dict[str, int] = {}
+    for number, line in enumerate(lines, 1):
+        spans = parts_in(line) if "part" in line or any(nm in line for nm in getter_names) else []
+        if any(test_use(line, start, end) for start, end in spans):
+            out.append((number, "uses a server part's presence as a mode test (coop_quests_core.part): call the "
+                                "part's function, or ask coop_mode"))
+            continue
+        for start, end in spans:
+            m = re.search(r"\blocal\s+([A-Za-z_]\w*)\s*=\s*(?:[^=]*\band\s+)?$", line[:start])
+            rest = line[end:]
+            rest = rest[LUA_PART_DEFAULT.match(rest).end():] if LUA_PART_DEFAULT.match(rest) else rest
+            if m and not rest.strip():
+                part_vars[m.group(1)] = number
+        for var, at in part_vars.items():
+            # its presence kept or returned as a value (`return far ~= nil`, `local srv = not not far`); a guard
+            # before a call of its function (`if far == nil then return fn() end`, `far ~= nil and far.f()`) is not
+            v = re.escape(var)
+            if var in line and re.search(
+                    rf"(?:\breturn|(?<![=~<>])=)\s*(?:{v}\s*[~=]=\s*nil|nil\s*[~=]=\s*{v}|not\s+not\s+{v})\s*(?:;|\bend\b|$)",
+                    line):
+                out.append((number, f"keeps the presence of {var}, a server part (line {at}), as a value: a mode "
+                                    "test; call the part's function, or ask coop_mode"))
+                break
+    return out
+
+
+def lua_part_getters(sources: list[Source]) -> dict[tuple[str, str], str]:
+    """(module, function) of the Ядро script functions whose return value is a server part (`return part("far")`,
+    `return qc and qc.part and qc.part("far") or nil`)."""
+    out: dict[tuple[str, str], str] = {}
+    for src in sources:
+        if src.lang != "lua" or src.layer != "core" or "part" not in src.code:
+            continue
+        mod_name = pathlib.PurePosixPath(src.path).stem
+        for fn in src.lua_functions:
+            if fn.name == "part":
+                continue
+            for m in re.finditer(r"\breturn\b([^\n]*)", fn.body):
+                expr = LUA_PART_DEFAULT.sub("", m.group(1)).strip()
+                expr = re.sub(r"\s*\bend\s*$", "", expr).strip()
+                if re.search(r"(?:^|\band\s+)(?:[A-Za-z_]\w*(?:\s*\(\s*\))?\s*[.:]\s*)*part\s*\([^()]*\)$", expr):
+                    out[(mod_name, fn.name)] = f"{src.path}:{fn.line}"
+                    break
+    return out
+
+
+def session_srv_line(src: Source, line: str) -> Optional[str]:
+    """Why an Ядро / stock C++ line names the server's part of Session (L11), or None."""
+    if src.path.lower() in SESSION_SELF:
+        return None
+    m = SESSION_SRV.search(line)
+    return f"'{m.group(1)}' of Session: the server's part (srv::SessionSrv)" if m else None
+
+
 def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -> list[Finding]:
     layers, sources = model.layers, model.sources
     qualified, by_ns, local, defs = model.qualified, model.by_ns, model.local, model.defs
@@ -1926,6 +2200,7 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                               + r")\b") for r in ("L1", "L2") if any(t.rule == r for t in model.macros.values())}
     l1_qual = {k: t for k, t in qualified.items() if t.rule == "L1"}
     stock_words = tuple(sorted(defs.outside | {q for (q, _) in l1_qual if q}))
+    part_getters = lua_part_getters(sources)
 
     for src in sources:
         if not src.code:
@@ -1987,6 +2262,11 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                 candidates |= lines_with(LIT_STOCK + model.entry_lits + stock_words)
             if layer in ("core", "stock"):
                 candidates |= lines_with(('"coop_',)) | (lines_with(("extern",)) if model.srv_globals else set())
+                candidates |= lines_with(("bridge", "virtual", "operator_"))  # L11
+            iface_aliases: set[str] = set()
+            if layer == "core":
+                candidates |= lines_with(IFACE_LITERALS)
+                iface_aliases = set(IFACE_MODE_ALIAS.findall(src.code))
             for number in sorted(candidates):
                 line = code_lines[number - 1]
                 with_strings = string_lines[number - 1] if number - 1 < len(string_lines) else line
@@ -2011,10 +2291,19 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                                 break
                     if l3s:
                         add("L3", number, l3s)
+                    why = session_srv_line(src, line)
+                    if why:
+                        add("L11", number, why)
                 if layer == "core" and not inc:
                     hit = CPP_MODE.search(rew) or MODE_KEY.search(with_strings)
+                    iface = None
+                    if not hit and (any(w in line for w in ("mode", "Mode", "roles", "ProcessRole", "boot_layers"))
+                                    or (iface_aliases and "name" in line)):
+                        iface = iface_check(src, number, line, starts, iface_aliases)
                     if hit:
                         add("L1", number, f"'{hit.group(0)}'")
+                    elif iface:
+                        add("L1", number, iface)
                     else:
                         t = tainted_call(line, qualified, bare, "L1", ("::",), src.aliases)
                         m = macro_rx["L1"].search(line) if "L1" in macro_rx and not line.lstrip().startswith("#") \
@@ -2250,6 +2539,9 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                                 break
                     if reg:
                         add("L9", number, reg)
+            if layer == "core" and ("part" in src.code or part_getters):
+                for number, why in lua_part_tests(src, part_getters):
+                    add("L1", number, why)
             if layer == "srv":
                 for number, why in lua_load_calls(src, own, spans):
                     add("L9", number, why)
@@ -2520,6 +2812,22 @@ def core_reach(model: Model, roots: Iterable[str] = ()) -> dict[str, str]:
 
 # ---- main ---------------------------------------------------------------------------------------------------------
 
+def apply_session_frozen(findings: list[Finding], root: pathlib.Path) -> tuple[list[Finding], list[str]]:
+    """L11 lines that SESSION_SRV_FROZEN still covers drop out (a (path, code) found at most as often as frozen); one
+    found more often fails on every line of it. A warning for a frozen line of an existing file that is gone (the list
+    only shrinks: delete its entry)."""
+    by_key: dict[tuple[str, str], list[Finding]] = defaultdict(list)
+    for f in findings:
+        if f.rule == "L11":
+            by_key[(f.path, f.code)].append(f)
+    covered = {id(f) for key, items in by_key.items() if len(items) <= SESSION_SRV_FROZEN.get(key, 0) for f in items}
+    warnings = [f"warning: SESSION_SRV_FROZEN names a line no longer there (frozen {n}, found "
+                f"{len(by_key.get(key, []))}): {key[0]}|{key[1]} - delete the entry in tools/check_layers.py"
+                for key, n in sorted(SESSION_SRV_FROZEN.items())
+                if len(by_key.get(key, [])) < n and (root / key[0]).is_file()]
+    return [f for f in findings if id(f) not in covered], warnings
+
+
 def group(findings: Iterable[Finding]) -> dict[Key, list[Finding]]:
     out: dict[Key, list[Finding]] = defaultdict(list)
     for f in findings:
@@ -2594,6 +2902,7 @@ def main(argv: Optional[Sequence[str]] = None, model: Optional[Model] = None) ->
         findings, sources = scan_model(model, keys, keys_rel), model.sources
     else:
         findings, sources = scan(root, layers, srv_entry, keys, keys_rel)
+    findings, frozen_warnings = apply_session_frozen(findings, root)
     found = group(findings)
     total = sum(len(v) for v in found.values())
 
@@ -2616,7 +2925,7 @@ def main(argv: Optional[Sequence[str]] = None, model: Optional[Model] = None) ->
         return 0
 
     failures: list[str] = []
-    warnings: list[str] = []
+    warnings: list[str] = list(frozen_warnings)
     used = 0
     for key, items in sorted(found.items()):
         allow = allowed.get(key, 0)

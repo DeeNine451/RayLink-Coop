@@ -82,7 +82,7 @@ function Show-Lines([string]$file, [string]$pattern, [int]$most) {
 $token = 'sp' + (Get-Date -Format 'HHmmss')
 $data = New-Profile 's'
 $log = Join-Path $data ('logs\xray_' + $env:USERNAME + '.log')
-if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
+Remove-StandFile -Path $log
 $saves = Join-Path $data 'savedgames'
 if (Test-Path -LiteralPath $saves) { Get-ChildItem -LiteralPath $saves -Filter 'zz_sp_smoke*' | ForEach-Object { Remove-StandFile -Path $_.FullName } }
 $scripts = Join-Path $Stand 'gamedata\scripts'
