@@ -3,10 +3,11 @@
 	The modxml_ prefix makes dxml_core load this script and call on_xml_read() at script start-up, before the engine reads the
 	dialog files and the first character.
 	  - A new dialog at Charon (lider_monolith_haron): he gives coop_scorcher_on_task. Its precondition
-	    (coop_scorcher.dlg_can_offer_on) opens it only for a Monolith player in a world with split levels while the Scorcher is off,
+	    (coop_conditions_stock.dlg_can_offer_on: coop_srv_scorcher's from coop_mode.when_srv, false in the co-op) opens it only for a
+	    Monolith player in a world with split levels while the Scorcher is off,
 	    not locked and the cooldown is over. Everywhere else it is never shown.
 	  - The stock "off" offer: Sakharov's helmet dialogs (gameplay\dialogs_yantar.xml) give turn_off_brain_scorcher in their
-	    actions; they get one more precondition, coop_scorcher.dlg_off_offer_ok, true outside split mode.
+	    actions; they get one more precondition, coop_conditions_stock.dlg_off_offer_ok, true outside split mode.
 	The XML is built once per process, so both exist on every co-op exe; their preconditions decide at the time of the talk.
 	Nothing happens on an exe without co-op.
 --]]
@@ -16,11 +17,11 @@ local YANTAR = [[gameplay\dialogs_yantar.xml]]
 local ID = "coop_scorcher_on_dialog"
 CHARON = "lider_monolith_haron"
 OFF_OFFERS = { "yan_stalker_sakharov_bad_psi_helmet", "yan_stalker_sakharov_good_psi_helmet" }
-OFF_PRECONDITION = "coop_scorcher.dlg_off_offer_ok"
+OFF_PRECONDITION = "coop_conditions_stock.dlg_off_offer_ok"
 
 DIALOG = [[
 <dialog id="coop_scorcher_on_dialog">
-	<precondition>coop_scorcher.dlg_can_offer_on</precondition>
+	<precondition>coop_conditions_stock.dlg_can_offer_on</precondition>
 	<phrase_list>
 		<phrase id="0">
 			<text>st_coop_scorcher_dlg_0</text>
@@ -33,7 +34,7 @@ DIALOG = [[
 		</phrase>
 		<phrase id="2">
 			<text>st_coop_scorcher_dlg_2</text>
-			<action>coop_scorcher.dlg_give_on</action>
+			<action>coop_conditions_stock.dlg_give_on</action>
 			<next>4</next>
 		</phrase>
 		<phrase id="3">

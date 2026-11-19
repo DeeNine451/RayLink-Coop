@@ -1,5 +1,9 @@
+-- Сервер (srv): сервер мира смотрит на карту, которую ведёт сервер карты, и слышит её смерти (docs/MODES.md)
 --[[
-	Anomaly Coop - split levels: the world server looks at a level a map server leads (docs\SPLIT_LEVELS.md 7a "Дальний вид").
+	Anomaly Coop - split levels: the world server looks at a level a map server leads (docs\SPLIT_LEVELS.md 7a "Дальний вид";
+	gamedata\scripts\coop_srv_quests_far.script, coop_quests_far before step S4). Its callbacks, events, shared tables, the patches
+	of the stock and what swaps the stock's globals for a far view are set up from coop_mode.when_srv only: nothing of it runs in the
+	co-op. The Core reaches it through coop_quests_core.part("far") (with_level_of, with_target, at_home, in_scope, object, ...).
 	The world, the save, the task manager and the modules of the tasks live on the world server; what a task asks about stands on another
 	process. Status functors stay here, their state is here. Two ways of one idea:
 
@@ -27,7 +31,8 @@
 		object(id)                              a stand-in of id
 		note_fail(task_id)                      what a task that failed in a scope looked for and what it got
 		order(id, verb, a, b, c)                a change to a far object
-		add_death_listener(callback, f)         a coop script's handler for the relay (coop_* are view: they do not pass by domain)
+		add_death_listener(callback, f)         a coop script's handler for the relay (coop_* are view: they do not pass by domain); the
+		                                        Core keeps the list (coop_quests_core.add_death_listener)
 		on_death(victim, killer)                the engine
 		host_handlers(callback)                 the handlers the relay calls (tests, coop_status)
 --]]
@@ -68,6 +73,11 @@ local function map_server() return api ~= nil and qc().is_map_server() end
 local stats = { scopes = 0, orders = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
 
 local scope = nil -- the far view that is open
+-- (anomalies, inside_zones, alife, CreateTimeEvent): the stock's globals a far view swaps. Set from coop_mode.when_srv (on_game_start):
+-- nil in the co-op, where no far view ever opens (usable() is false without it).
+local set_world = nil
+-- the engine's fatal window stays shut while a relayed handler fails on a stand-in (from coop_mode.when_srv, like set_world)
+local hold_window = nil
 
 -------------------------------------------------------------------------------
 -- Levels
@@ -143,7 +153,8 @@ local function held_there(se)
 end
 
 -------------------------------------------------------------------------------
--- What a stand-in answers
+-- What a stand-in answers: what a record answers is the Core's (coop_quests_core record_method: a far body there asks the same in
+-- every mode); here what only the far view has: the place, the carried items, the last hand, the orders.
 -------------------------------------------------------------------------------
 local function se_of(self) return alife_object(self[4]) end
 
@@ -156,28 +167,7 @@ local function se_call(self, name, ...)
 	return nil
 end
 
-local asked = {}
-local unknown_fns = {}
-
-local function caller()
-	local info = debug.getinfo(3, "S")
-	local src = info and info.short_src or "?"
-	return src:match("([^\\/]+)%.script") or src
-end
-
-local function unknown(name)
-	local f = unknown_fns[name]
-	if f then return f end
-	f = function()
-		if not asked[name] then
-			asked[name] = true
-			printf("[coop] far: %s asked by %s", name, caller())
-		end
-		return nil
-	end
-	unknown_fns[name] = f
-	return f
-end
+local function unknown(name) return qc().record_unknown(name) end
 
 local item_class = {}
 item_class.__index = function(t, k) return rawget(item_class, k) or unknown(k) end
@@ -204,43 +194,18 @@ class.__index = function(t, k)
 	end
 	local n = NUMBERS[k]
 	if n ~= nil then return n end
-	return unknown(k)
+	return qc().record_method(k)
 end
 
 function class:id() return self[4] end
 function class:position() return self[1] end
 function class:level_vertex_id() return self[2] end
 function class:game_vertex_id() return self[3] end
-function class:section() return se_call(self, "section_name") end
-function class:section_name() return se_call(self, "section_name") end
-function class:name() return se_call(self, "name") end
-function class:clsid() return se_call(self, "clsid") end
-function class:community() return se_call(self, "community") end
-function class:character_community() return se_call(self, "community") end
-function class:character_name() return se_call(self, "character_name") end
-function class:character_icon() return se_call(self, "character_icon") end
-function class:character_rank() return se_call(self, "rank") end
-function class:character_reputation() return se_call(self, "reputation") end
-function class:commander_id() return se_call(self, "commander_id") end
-function class:squad_members() return se_call(self, "squad_members") end
 function class:parent()
 	local se = se_of(self)
 	local pid = se and se.parent_id
 	return pid and pid ~= 65535 and object(pid) or nil
 end
-function class:alive()
-	local se = se_of(self)
-	if not se then return false end
-	local f = se.alive
-	if type(f) ~= "function" then return true end
-	local ok, v = pcall(f, se)
-	return not ok or v ~= false
-end
-function class:has_info(name)
-	local ok, v = pcall(function() return alife():has_info(self[4], name) end)
-	return ok and v == true
-end
-function class:dont_has_info(name) return not self:has_info(name) end
 function class:iterate_inventory(f, x)
 	local l = levels()
 	for _, it in ipairs(l and l.carried and l.carried(self[4]) or {}) do
@@ -258,8 +223,6 @@ function class:object(section)
 	end, nil)
 	return found
 end
-function class:is_talking() return false end
-function class:is_stalker() return true end
 -- What a player last struck with: a hit a task waits for says it (nta_utils.is_axe). A record knows no hand.
 local hands = {}
 function class:active_item()
@@ -267,25 +230,11 @@ function class:active_item()
 	if not sec then return nil end
 	return setmetatable({ item_id = 0, item_section = sec, item_condition = 1, item_owner = self }, item_class)
 end
--- what the task scripts ask most, by a scan of tasks_*, task_functor and task_status_functor: a record has no answer to these, nil is the true one
-function class:best_enemy() return nil end
-function class:best_weapon() return nil end
-function class:item_in_slot() return nil end
-function class:active_detector() return nil end
-function class:iterate_belt() end
-function class:condition() return 1 end
-function class:get_visual_name() return se_call(self, "get_visual_name") or se_call(self, "visual") end
-function class:see() return false end
 function class:transfer_item(item, to)
 	alife_release_id(item:id())
 	local cond = item:condition() -- as worn as the one that went (coop_quests_core far_body_class:transfer_item)
 	itms_manager.create_item(item:section(), to, type(cond) == "number" and cond < 1 and { cond = cond } or nil)
 end
-function class:direction() return vector():set(0, 0, 1) end
-function class:bone_position() return self[1] end
-function class:distance_to_sqr(o) return self[1]:distance_to_sqr(o) end
-function class:relation(who) return game_object and game_object.neutral or 1 end
-function class:money() return se_call(self, "money") or 0 end
 
 -- Id of a side of a change: on a map server id 0 is its ghost, the player of the scope stands for "the actor".
 local function id_there(who)
@@ -317,7 +266,7 @@ end
 
 -- What a stand-in answers, for another class of the same shape (coop_quests_core far_body).
 function fallback(name)
-	return rawget(class, name) or unknown(name)
+	return rawget(class, name) or qc().record_method(name)
 end
 
 -------------------------------------------------------------------------------
@@ -516,15 +465,15 @@ local function open(lid, peer, what)
 		on_actor_level = function(se) return se ~= nil and vertex_level(se.m_game_vertex_id) == s.id end,
 		online = function(se) return level_of_id(se.id) == s.id end, -- a smart is online on the level the actor stands on
 	}
-	db.anomaly_by_name = names_table(s, "a")
+	local anomalies = names_table(s, "a")
 	s.inside_zones = db.actor_inside_zones
-	if type(s.inside_zones) == "table" then db.actor_inside_zones = inside_zones_view(s) end
-	_G.alife = function() return s.sim_view end
+	local inside_zones = type(s.inside_zones) == "table" and inside_zones_view(s) or s.inside_zones
 	s.sim_view = sim_view(s, s.sim)
 	-- a task's timer started here looks at the same level when it fires: tasks_fate kills its dead squad three seconds later
 	s.cte = _G.CreateTimeEvent
+	local cte = s.cte
 	if type(s.cte) == "function" then
-		_G.CreateTimeEvent = function(ev, act, timer, f, ...)
+		cte = function(ev, act, timer, f, ...)
 			if type(f) == "function" then
 				local g = f
 				f = function(...) return reopen(lid, peer, what, g, ...) end
@@ -532,6 +481,7 @@ local function open(lid, peer, what)
 			return s.cte(ev, act, timer, f, ...)
 		end
 	end
+	set_world(anomalies, inside_zones, function() return s.sim_view end, cte)
 	scope = s
 	q.set_far_view(s.view)
 	stats.scopes = stats.scopes + 1
@@ -540,10 +490,7 @@ end
 
 local function close(s)
 	scope = s.prev
-	db.anomaly_by_name = s.anomalies
-	db.actor_inside_zones = s.inside_zones
-	_G.alife = s.sim
-	_G.CreateTimeEvent = s.cte
+	set_world(s.anomalies, s.inside_zones, s.sim, s.cte)
 	qc().set_far_view(scope and scope.view or nil)
 end
 
@@ -554,7 +501,7 @@ local function finish(s, ok, ...)
 end
 
 local function usable(lid)
-	return lid ~= nil and split() and world_server() and lid ~= my_level()
+	return set_world ~= nil and lid ~= nil and split() and world_server() and lid ~= my_level()
 end
 
 -- A timer of a scope, when it fires.
@@ -602,17 +549,11 @@ function at_home(fn, ...)
 	if not s then return fn(...) end
 	local anomalies, inside_zones, sim, cte = db.anomaly_by_name, db.actor_inside_zones, _G.alife, _G.CreateTimeEvent
 	scope = nil
-	db.anomaly_by_name = s.anomalies
-	db.actor_inside_zones = s.inside_zones
-	_G.alife = s.sim
-	_G.CreateTimeEvent = s.cte
+	set_world(s.anomalies, s.inside_zones, s.sim, s.cte)
 	qc().set_far_view(nil)
 	local function back(ok, ...)
 		scope = s
-		db.anomaly_by_name = anomalies
-		db.actor_inside_zones = inside_zones
-		_G.alife = sim
-		_G.CreateTimeEvent = cte
+		set_world(anomalies, inside_zones, sim, cte)
 		qc().set_far_view(s.view)
 		if not ok then error((...), 0) end
 		return ...
@@ -858,39 +799,25 @@ end
 -------------------------------------------------------------------------------
 -- The death relay
 -------------------------------------------------------------------------------
-local listeners = {} -- callback -> list of coop handlers
 local heard = {} -- world server: id -> true: its death was told here
 
-function add_death_listener(callback, f)
-	local list = listeners[callback] or {}
-	listeners[callback] = list
-	list[#list + 1] = f
-end
+-- the Core keeps the coop scripts' handlers (coop_quests_core.add_death_listener): a Core script never names this one
+function add_death_listener(callback, f) qc().add_death_listener(callback, f) end
 
 function host_handlers(callback)
 	local r = rawget(_G, "coop_route")
 	local out = r and r.domain_handlers and r.domain_handlers(callback, "host") or {}
-	for _, f in ipairs(listeners[callback] or {}) do out[#out + 1] = f end
+	for _, f in ipairs(qc().death_listeners(callback)) do out[#out + 1] = f end
 	return out
 end
 
--- A stock handler gives the stand-in to the engine where a game object is wanted (dynamic_news_manager: sender:see(victim)). The pcall below
--- takes the error, but the engine tells _G.COnLuaBindFatalError first, and its window and tempsave say a state is broken that is not.
+-- A relayed handler that fails on a stand-in: the pcall below takes the error, and hold_window (on_game_start) keeps the engine's
+-- fatal window shut meanwhile.
 local relaying = false
 local window_held = false
 
-local function hold_window()
-	local f = rawget(_G, "COnLuaBindFatalError")
-	if window_held or type(f) ~= "function" then return end
-	window_held = true
-	_G.COnLuaBindFatalError = function(...)
-		if relaying then return end
-		return f(...)
-	end
-end
-
 local function relay(callback, ...)
-	hold_window()
+	if hold_window then hold_window() end
 	local was = relaying
 	relaying = true
 	for _, f in ipairs(host_handlers(callback)) do
@@ -1069,97 +996,136 @@ function _orders_clear() orders = {} end
 function _stats() return stats end
 function _names_of() return names_of end
 
-local function patch_world_calls()
-	set_quest_runs() -- round 5 (S2): a map server's own quest spawns, noted on the world server
-	-- The logic of a companion is an NPC's on the level he stands on: tasks_agent_rescue makes the spy one from a status functor.
-	local ac = q_mod("axr_companions")
-	local setup = ac and ac.setup_companion_logic
-	if type(setup) == "function" then
-		ac.setup_companion_logic = function(npc, st, ...)
-			if npc and npc.far then return order(npc:id(), "companion") end
-			return setup(npc, st, ...)
+-- Everything that registers, patches the stock or swaps its globals runs from coop_mode.when_srv: nothing of it in the co-op.
+function on_game_start()
+	if not api then return end
+	coop_mode.when_srv(function()
+		-- fn at the actor's first update, also when that was over before this process's server layer answered (the world
+		-- server's session starts after its world is up): then at the next update
+		local function at_first_update(fn)
+			local seen = false
+			local function late()
+				UnregisterScriptCallback("actor_on_update", late)
+				if not seen then fn() end
+			end
+			RegisterScriptCallback("actor_on_first_update", function()
+				seen = true
+				fn()
+			end)
+			RegisterScriptCallback("actor_on_update", late)
 		end
-	end
-	-- The logic of an NPC runs where he is online: on his map server, whose own smart terrain gives him his job. The stock smart terrain
-	-- of the world server meets a stand-in in db.storage when a task joins a squad of that level to a smart (register_npc ->
-	-- select_npc_job -> setup_logic) and would run these on a record: nothing of them is a stand-in's.
-	local xl = q_mod("xr_logic")
-	if xl then
-		for name, answer in pairs({ configure_schemes = false, activate_by_section = false, switch_to_section = false,
-			determine_section_to_activate = "nil" }) do
-			local stock = xl[name]
-			if type(stock) == "function" then
-				xl[name] = function(npc, ...)
-					if type(npc) == "table" and npc.far then return answer or nil end
-					return stock(npc, ...)
+
+		set_world = function(anomalies, inside_zones, alife_fn, cte)
+			db.anomaly_by_name = anomalies
+			db.actor_inside_zones = inside_zones
+			_G.alife = alife_fn
+			_G.CreateTimeEvent = cte
+		end
+
+		-- A stock handler gives the stand-in to the engine where a game object is wanted (dynamic_news_manager: sender:see(victim)). The
+		-- pcall of relay takes the error, but the engine tells _G.COnLuaBindFatalError first, and its window and tempsave say a state is
+		-- broken that is not.
+		hold_window = function()
+			local f = rawget(_G, "COnLuaBindFatalError")
+			if window_held or type(f) ~= "function" then return end
+			window_held = true
+			_G.COnLuaBindFatalError = function(...)
+				if relaying then return end
+				return f(...)
+			end
+		end
+
+		local function patch_world_calls()
+			set_quest_runs() -- round 5 (S2): a map server's own quest spawns, noted on the world server
+			-- The logic of a companion is an NPC's on the level he stands on: tasks_agent_rescue makes the spy one from a status functor.
+			local ac = q_mod("axr_companions")
+			local setup = ac and ac.setup_companion_logic
+			if type(setup) == "function" then
+				ac.setup_companion_logic = function(npc, st, ...)
+					if npc and npc.far then return order(npc:id(), "companion") end
+					return setup(npc, st, ...)
+				end
+			end
+			-- The logic of an NPC runs where he is online: on his map server, whose own smart terrain gives him his job. The stock smart terrain
+			-- of the world server meets a stand-in in db.storage when a task joins a squad of that level to a smart (register_npc ->
+			-- select_npc_job -> setup_logic) and would run these on a record: nothing of them is a stand-in's.
+			local xl = q_mod("xr_logic")
+			if xl then
+				for name, answer in pairs({ configure_schemes = false, activate_by_section = false, switch_to_section = false,
+					determine_section_to_activate = "nil" }) do
+					local stock = xl[name]
+					if type(stock) == "function" then
+						xl[name] = function(npc, ...)
+							if type(npc) == "table" and npc.far then return answer or nil end
+							return stock(npc, ...)
+						end
+					end
+				end
+			end
+			local srm = q_mod("safe_release_manager")
+			local release = srm and srm.release
+			if type(release) == "function" then
+				srm.release = function(se, ...)
+					if held_there(se) then return order(se.id, "release") end
+					local lv = levels()
+					if se and lv and lv.body_stays and lv.body_stays(se.id) then return end -- a squad's remove_npc: the body lies on a map server
+					return release(se, ...)
+				end
+			end
+			local a_release, a_release_id = rawget(_G, "alife_release"), rawget(_G, "alife_release_id")
+			if type(a_release) == "function" then
+				_G.alife_release = function(se, ...)
+					if held_there(se) then return order(se.id, "release") end
+					return a_release(se, ...)
+				end
+			end
+			if type(a_release_id) == "function" then
+				_G.alife_release_id = function(id, ...)
+					if held_there(alife_object(id)) then return order(id, "release") end
+					return a_release_id(id, ...)
+				end
+			end
+			-- `smart.online` of the stock: the rest of this condition reads the actor's place, which a check keeps at the player's
+			local xc = q_mod("xr_conditions")
+			local near_smart = xc and xc.actor_near_smart
+			if type(near_smart) == "function" then
+				xc.actor_near_smart = function(actor, npc, p, ...)
+					if not scope then return near_smart(actor, npc, p, ...) end
+					local smart = p and p[1] and SIMBOARD.smarts_by_names[p[1]]
+					if not (smart and level_of_id(smart.id) == scope.id and db.actor) then return false end
+					return db.actor:position():distance_to(smart.position) < (tonumber(p[2]) or 50)
 				end
 			end
 		end
-	end
-	local srm = q_mod("safe_release_manager")
-	local release = srm and srm.release
-	if type(release) == "function" then
-		srm.release = function(se, ...)
-			if held_there(se) then return order(se.id, "release") end
-			local lv = levels()
-			if se and lv and lv.body_stays and lv.body_stays(se.id) then return end -- a squad's remove_npc: the body lies on a map server
-			return release(se, ...)
-		end
-	end
-	local a_release, a_release_id = rawget(_G, "alife_release"), rawget(_G, "alife_release_id")
-	if type(a_release) == "function" then
-		_G.alife_release = function(se, ...)
-			if held_there(se) then return order(se.id, "release") end
-			return a_release(se, ...)
-		end
-	end
-	if type(a_release_id) == "function" then
-		_G.alife_release_id = function(id, ...)
-			if held_there(alife_object(id)) then return order(id, "release") end
-			return a_release_id(id, ...)
-		end
-	end
-	-- `smart.online` of the stock: the rest of this condition reads the actor's place, which a check keeps at the player's
-	local xc = q_mod("xr_conditions")
-	local near_smart = xc and xc.actor_near_smart
-	if type(near_smart) == "function" then
-		xc.actor_near_smart = function(actor, npc, p, ...)
-			if not scope then return near_smart(actor, npc, p, ...) end
-			local smart = p and p[1] and SIMBOARD.smarts_by_names[p[1]]
-			if not (smart and level_of_id(smart.id) == scope.id and db.actor) then return false end
-			return db.actor:position():distance_to(smart.position) < (tonumber(p[2]) or 50)
-		end
-	end
-end
 
-function on_game_start()
-	if not api then return end
-	local q = qc()
-	RegisterScriptCallback("actor_on_first_update", patch_world_calls)
-	q.on("far_do", on_do, TAG)
-	q.on("far_ack", on_ack, TAG)
-	q.on("far_car", on_vehicle_death, TAG)
-	q.on("far_hit", on_hit, TAG)
-	RegisterScriptCallback("actor_on_update", tick)
-	RegisterScriptCallback("coop_world_back", on_world_back)
-	RegisterScriptCallback("server_entity_on_unregister", on_unregister)
-	RegisterScriptCallback("monster_on_before_hit", monster_on_before_hit)
-	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
-	RegisterScriptCallback("vehicle_on_death_callback", vehicle_died)
-	local share = rawget(_G, "coop_levels_share") or coop_levels_share
-	if share then
-		-- a map server's anomalies and zones: what a task looks for by name on the world server
-		share.up("names", names_tick, function(t, lid)
-			if type(t) == "table" then names_of[lid] = t end
-		end)
-		-- who stands in them: xr_conditions.actor_in_zone / actor_inside_zone of a task check in the far view
-		share.up("zones_in", zones_in_tick, function(t, lid)
-			if type(t) == "table" and lid ~= nil then zones_in[lid] = t end
-		end, ZONES_MS)
-		share.down("hit_list", hit_list, function(t)
-			if type(t) == "table" then
-				wanted.ids, wanted.sections = t.ids or {}, t.sections or {}
-			end
-		end, HITS_MS)
-	end
+		local q = qc()
+		at_first_update(patch_world_calls)
+		q.on("far_do", on_do, TAG)
+		q.on("far_ack", on_ack, TAG)
+		q.on("far_car", on_vehicle_death, TAG)
+		q.on("far_hit", on_hit, TAG)
+		RegisterScriptCallback("actor_on_update", tick)
+		RegisterScriptCallback("coop_world_back", on_world_back)
+		RegisterScriptCallback("server_entity_on_unregister", on_unregister)
+		RegisterScriptCallback("monster_on_before_hit", monster_on_before_hit)
+		RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
+		RegisterScriptCallback("vehicle_on_death_callback", vehicle_died)
+		local share = rawget(_G, "coop_srv_levels_share") or coop_srv_levels_share
+		if share then
+			-- a map server's anomalies and zones: what a task looks for by name on the world server
+			share.up("names", names_tick, function(t, lid)
+				if type(t) == "table" then names_of[lid] = t end
+			end)
+			-- who stands in them: xr_conditions.actor_in_zone / actor_inside_zone of a task check in the far view
+			share.up("zones_in", zones_in_tick, function(t, lid)
+				if type(t) == "table" and lid ~= nil then zones_in[lid] = t end
+			end, ZONES_MS)
+			share.down("hit_list", hit_list, function(t)
+				if type(t) == "table" then
+					wanted.ids, wanted.sections = t.ids or {}, t.sections or {}
+				end
+			end, HITS_MS)
+		end
+		q.set_part("far", coop_srv_quests_far)
+	end)
 end

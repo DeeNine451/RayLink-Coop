@@ -35,4 +35,4 @@ time_event@drx_da_main            = level
 ; coop_quests_story.client_before_hit, which runs the same table of drx_da_main for the client's character (since before
 ; build 51). Build 53 made the handler "owner" as well, and the flash mine ran twice for every hit of a client.
 on_enemy_eval@guards_spawner      = level
-actor_on_interaction@coop_levels_tables = host ; drx_da_main's handler in a wrapper of ours: the roll after an emission stays one
+actor_on_interaction@coop_srv_levels_tables = host ; drx_da_main's handler in a wrapper of ours: the roll after an emission stays one

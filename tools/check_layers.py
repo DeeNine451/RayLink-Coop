@@ -1299,7 +1299,7 @@ def is_definition(before: str) -> bool:
 
 def declares(before: str) -> bool:
     """is_definition, except that `= &f` / `(&f` takes the address of f (a use)."""
-    return is_definition(before) and not re.search(r"(?:[=(,?:]|return)\s*&\s*$", before)
+    return is_definition(before) and not re.search(r"(?:[=(,?:{]|return)\s*&\s*$", before)
 
 
 def chain_start(line: str, pos: int) -> int:

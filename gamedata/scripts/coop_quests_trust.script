@@ -364,7 +364,7 @@ end
 -- May player `peer` see task `id`? No audience record (every task outside a split-levels world): yes.
 local function sees(id, peer)
 	local core = qc()
-	local aud = core and core.mod("coop_task_audience")
+	local aud = core and core.part("audience") -- a server's task audience (coop_srv_task_audience), nil in the co-op
 	if type(aud) ~= "table" or type(aud.sees_character) ~= "function" then return true end
 	local ct = core.mod("coop_tasks")
 	local c = ct and type(ct.character_of) == "function" and ct.character_of(peer)
@@ -653,7 +653,7 @@ end
 local run_listeners = {}
 
 -- Round 5 (S2 of the round 4 review): fn(f, t) hears every counted effect this process's own logic ran (note_run). In a server the
--- condlists of a level run on its map server; coop_quests_far passes such a run to the world server, whose list a client's ask is
+-- condlists of a level run on its map server; coop_srv_quests_far passes such a run to the world server, whose list a client's ask is
 -- judged by. This module asks no mode: it only tells who listens.
 function on_run(fn)
 	if type(fn) == "function" then run_listeners[#run_listeners + 1] = fn end
@@ -663,7 +663,7 @@ end
 -- outside a client's request (a condlist, the host player's dialog, an on_init): its key is noted as a client's ask notes it, so a
 -- client cannot have the same thing made again. A section the effect does not make, a missing parameter: nothing. Noted on the
 -- process that ran it: the host of a co-op (its save keeps it), the world server of a server, and the listeners hear it (round 5:
--- a map server's run reaches the world server's list through coop_quests_far, event far_qnote).
+-- a map server's run reaches the world server's list through coop_srv_quests_far, event far_qnote).
 function note_run(f, t)
 	local name, key, tid, bad = count_of(f, t)
 	if not name or not key or bad then return end

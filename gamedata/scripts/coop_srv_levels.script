@@ -1,4 +1,7 @@
--- Level names and location labels for players on different maps.
+-- Сервер (srv): названия карт и подписи «на другой карте» для игроков на разных картах (docs/MODES.md)
+-- Level names and location labels for players on different maps (gamedata\scripts\coop_srv_levels.script, coop_levels before
+-- step S4). The Core asks them through coop_quests_core.part("levels"): a server process hands this script in from
+-- coop_mode.when_srv (on_game_start below), the co-op has no such part and shows nobody elsewhere.
 local api = rawget(_G, "coop") -- engine namespace (nil on an exe without co-op)
 
 -- coop.levels, nil on a build without split levels
@@ -68,4 +71,10 @@ function elsewhere_text(who)
 	if not elsewhere(who) then return "" end
 	local ok, text = pcall(string.format, tr("st_coop_levels_elsewhere"), name(level_of(who)))
 	return ok and text or ""
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		coop_quests_core.set_part("levels", coop_srv_levels)
+	end)
 end

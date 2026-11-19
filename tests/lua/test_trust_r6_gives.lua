@@ -292,7 +292,8 @@ print("== R6 Q3, Server: a give after an empty list over the far view")
 do
 	fresh({ default = "log", quest_take = "refuse", task_give_offer = "refuse" })
 	-- the world server makes the offers over stand-ins: no task of this NPC there (stand, build 54)
-	Hm.env.coop_quests_far = { in_scope = function() return {} end, with_level_of = function(peer, fn, ...) return fn(...) end }
+	-- (the server's part "far" of coop_quests_core, step S4)
+	Hm.env.coop_quests_core.set_part("far", { in_scope = function() return {} end, with_level_of = function(peer, fn, ...) return fn(...) end })
 	Hm.npc_tasks = { [750] = {} }
 	offered_at(npc_c)
 	check(Cm.local_text == nil or Cm.local_text >= 1, "(his dialog falls back to the stock local generation)")
@@ -307,7 +308,8 @@ do
 	ask("take", { s = "salt", n = 1 })
 	check(Hm.count(Hm.actor, "salt") == 0, "Server: the group's salt goes to the taker")
 	drop_task("srv_t")
-	Hm.env.coop_quests_far, Hm.npc_tasks = nil, nil
+	Hm.env.coop_quests_core.set_part("far", nil)
+	Hm.npc_tasks = nil
 end
 
 -------------------------------------------------------------------------------

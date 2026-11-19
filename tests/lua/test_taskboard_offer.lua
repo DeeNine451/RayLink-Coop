@@ -126,10 +126,11 @@ print("== an empty answer made over the far view: the list is made here")
 do
 	local a = Cm.env.axr_task_manager
 	-- the far view of a world server, as much as the offer needs: the handler runs inside it while it is open
-	Hm.env.coop_quests_far = {
+	-- (the server's part "far" of coop_quests_core, step S4)
+	Hm.env.coop_quests_core.set_part("far", {
 		in_scope = function() return Hm.far_open end,
 		with_level_of = function(peer, fn, ...) return fn(...) end,
-	}
+	})
 	-- an answer with tasks made over the far view is used as before
 	Hm.far_open = { level = "l05_bar" }
 	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)

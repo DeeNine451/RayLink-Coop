@@ -1,7 +1,7 @@
 -- Anomaly Coop test (stage 2 of docs/plans/2026-11-16-storylines-per-faction.md): with split levels and story mode each
--- faction that has players runs its own DRX questlines chain (coop_storyline.script). The machines are harness_faction.lua's
+-- faction that has players runs its own DRX questlines chain (coop_srv_storyline.script, coop_storyline before step S4). The machines are harness_faction.lua's
 -- (a world host and two clients), the stock chain code is the real text (tests/lua/support/harness_storyline.lua). Not shipped.
--- Run: tools\test_lua.cmd storyline_chains
+-- Run: tools\test_lua.cmd srv_storyline_chains
 dofile("tests/lua/support/harness_storyline.lua")
 
 local SULTAN, DUSHMAN, SID, PETRENKO, NOAH = "zat_b7_bandit_boss_sultan", "cit_killers_merc_trader_stalker", "esc_m_trader",
@@ -44,7 +44,7 @@ local function world(split, opts)
 		ticks(B, 2)
 		ticks(Hm, 2)
 	end
-	return Hm.env.coop_storyline
+	return Hm.env.coop_srv_storyline
 end
 
 local function chain(M, f, k) return pstor(M)[k .. "@" .. f] end
@@ -288,7 +288,7 @@ do
 	-------------------------------------------------------------------------
 	-- save / load: the owners are the world's m_data
 	Hm.env.SendScriptCallback("save_state", Hm.storage_state)
-	local fresh = load_script(Hm, "coop_storyline")
+	local fresh = load_script(Hm, "coop_srv_storyline")
 	fresh.on_game_start()
 	for _, f in ipairs(Hm.callbacks.actor_on_first_update) do f() end
 	check(fresh.owner_of_task(meet2) == "dolg" and fresh.owner_of_task("drx_sl_" .. SID .. "_meet_task_1") == "stalker",
@@ -476,6 +476,36 @@ do
 	check(Hm.env.xr_effects.drx_sl_meet_random_honcho == Hm.stock_fn.meet and A.env.dialogs.drx_sl_give_sl_task == A.stock_fn.give
 		and Hm.env.load_var == Hm.stock_fn.load_var, "nothing wrapped")
 	check(Hm.storage_state.coop_storyline == nil and not suffixed(Hm), "no chain set up, no suffixed key")
+end
+
+section("S4: the server's storyline starts from coop_mode.when_srv; the co-op asks coop_conditions_stock")
+do
+	world(true)
+	local cs, sl = Hm.env.coop_conditions_stock, Hm.env.coop_srv_storyline
+	check(#Hm.srv_waiting == 0 and cs.dlg_leader == sl.dlg_leader and cs.dlg_cf_free == sl.dlg_cf_free
+		and cs.dlg_story_ll == sl.dlg_story_ll and cs.client_may_write == sl.client_may_write and cs.may_take == sl.may_take,
+		"split levels: the server's answers stand in coop_conditions_stock (the dialog gates, coop_tasks' questions)")
+	world(false)
+	for _, M in ipairs({ Hm, A, B }) do
+		local c, s = M.env.coop_conditions_stock, M.env.coop_srv_storyline
+		check(#M.srv_waiting == 1 and c.dlg_leader ~= s.dlg_leader and c.may_take ~= s.may_take,
+			M.nick .. ": the co-op: its when_srv waits, the stock answers stand")
+		check(c.dlg_leader(M.actor, nil, "drx_sl_" .. SID .. "_meet_dialog") == true and c.dlg_cf_free(M.actor) == true
+			and c.dlg_story_ll(M.actor) == true and c.dlg_story_ms(M.actor) == true and c.dlg_story_oa(M.actor) == true
+			and c.may_take("lttz_ll_task_1", 1) == true, M.nick .. ": every gate open, every task takeable, as the stock")
+		check(c.client_may_write("drx_sl_coop_story_ll") == false and c.client_may_write("drx_sl_current_task") == true
+			and c.client_may_write("drx_sl_current_task@dolg") == true,
+			M.nick .. ": a client never writes the world's story record; every other key as the stock")
+		local regs = 0
+		for _, list in pairs(M.callbacks) do
+			for _, f in ipairs(list) do
+				local info = debug.getinfo(f, "S")
+				if info and info.source and info.source:find("coop_srv_storyline", 1, true) then regs = regs + 1 end
+			end
+		end
+		check(regs == 0 and M.handlers.coop_sl_req == nil and M.handlers.coop_sl_news == nil,
+			M.nick .. ": no callback, no event of the server's storyline")
+	end
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

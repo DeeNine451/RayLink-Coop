@@ -1,6 +1,6 @@
--- Split levels: what a map server shares with the world server: tables of the stock and GAMMA (coop_levels_share, coop_levels_tables), the
+-- Split levels: what a map server shares with the world server: tables of the stock and GAMMA (coop_srv_levels_share, coop_srv_levels_tables), the
 -- anomalies of a level after an emission, a story reward of a map server's condlist, a verb of a player. Real scripts over the quests
--- harness: the world server (level 1) and the map server of level 2. Run: tools\test_lua.cmd far_levels
+-- harness: the world server (level 1) and the map server of level 2. Run: tools\test_lua.cmd srv_far_levels
 dofile("tests/lua/support/harness_quests.lua")
 
 local BRIDGE = 0x101
@@ -30,7 +30,7 @@ local function world(M)
 	e.level.name = function() return M.level_name end
 end
 
-local SCRIPTS = { "coop_quests_core", "coop_levels_share", "coop_quests_far", "coop_levels_tables", "coop_tasks", "coop_quests_story" }
+local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_srv_levels_tables", "coop_tasks", "coop_quests_story" }
 
 local function boot(M)
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end

@@ -176,7 +176,7 @@ local function patch_check_task()
 		local args = { ... }
 		local verdict = self.last_check_task
 		local function checked()
-			local far = qc.mod("coop_quests_far")
+			local far = qc.part("far") -- a server's far view (coop_srv_quests_far), nil in the co-op
 			local s = far and far.in_scope()
 			-- on another level "the actor" of a stock functor is the player who stands there
 			local there = s and not fields.position and s.avatar and far.object(s.avatar)
@@ -407,7 +407,7 @@ end
 -------------------------------------------------------------------------------
 -- The commander's talk and his invulnerability are chosen by his logic on the map server of the Swamps (meet@commander and
 -- beh@guard_commander of pump_station_defense_task.ltx), whose conditions read the module's table M; only the status functor writes it,
--- on the world server. So the world server sends down what those conditions read (coop_levels_share: a map server started later gets it
+-- on the world server. So the world server sends down what those conditions read (coop_srv_levels_share: a map server started later gets it
 -- too; the talk's action itself is relayed to the world server, coop_quests_missions). The map server has the live guards, the world
 -- server's stand-ins have no best_enemy: the map server sends up whether they fight a player, keyed by the commander of that task.
 local pump = { hostile = {}, UP_MS = 1000,
@@ -893,7 +893,7 @@ function on_game_start()
 	qc.register_host_action("give_npc", host_give_npc)
 	qc.on("rf", client_on_rf, TAG)
 	qc.on("mirror", client_on_mirror, TAG)
-	local share = qc.mod("coop_levels_share")
+	local share = qc.share and qc.share() -- the Core keeps the tables, a server's share carries them
 	if share then
 		share.down("pump", pump.down_get, pump.down_set)
 		share.up("pump", pump.up_get, pump.up_set, pump.UP_MS)

@@ -1,10 +1,10 @@
 -- Split levels: "the actor is in the zone" for a player on a map server's level. The map server runs the restrictors of its level and tells
 -- the world server who of its players stands in which zone; in the far view the stand-in of a zone and db.actor_inside_zones answer from
 -- that. The stock conditions (xr_conditions.actor_in_zone, actor_inside_zone, npc_in_zone) are copied as the stock has them.
--- Run: tools\test_lua.cmd far_zones
+-- Run: tools\test_lua.cmd srv_far_zones
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_levels_share", "coop_quests_far" }
+local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far" }
 local BRIDGE = 0x101
 local LEVEL_NAMES = { "l01_escape", "jupiter" }
 
@@ -123,7 +123,7 @@ end
 
 print("== the map server tells who stands in its zones")
 share()
-check(Hm.env.coop_quests_far._names_of()[2] ~= nil, "the names of its zones reach the world server")
+check(Hm.env.coop_srv_quests_far._names_of()[2] ~= nil, "the names of its zones reach the world server")
 check(in_view(1, "actor_in_zone", ZONE) == true, "actor_in_zone: player 1 stands in it, his scope says yes")
 check(in_view(1, "actor_inside_zone", ZONE) == true, "actor_inside_zone: db.actor_inside_zones answers for him")
 check(in_view(2, "actor_in_zone", ZONE) == false, "player 2 of the same level is not in it: his scope says no")

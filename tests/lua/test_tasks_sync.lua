@@ -228,9 +228,9 @@ do
 	Cm.env.save_var(Cm.actor, "drx_sl_task_giver_9", 5)
 	pump()
 	check(HP.drx_sl_task_giver_9 == 5, "a giver counter is a delta")
-	-- split levels: a faction's chain is the world's to move (coop_storyline.client_may_write): a client's write of its keys is
-	-- refused, the keys that are world facts still pass
-	Hm.env.coop_storyline = { client_may_write = function(k) return not tostring(k):find("^drx_sl_current_task_number") end }
+	-- split levels: a faction's chain is the world's to move (coop_conditions_stock.client_may_write, the server's storyline's from
+	-- coop_mode.when_srv): a client's write of its keys is refused, the keys that are world facts still pass
+	Hm.env.coop_conditions_stock = { client_may_write = function(k) return not tostring(k):find("^drx_sl_current_task_number") end }
 	HP.drx_sl_current_task_number = 7
 	tick(Hm)
 	pump()
@@ -242,7 +242,7 @@ do
 	Cm.env.save_var(Cm.actor, "drx_sl_task_giver_9", 6)
 	pump()
 	check(HP.drx_sl_task_giver_9 == 6, "a world fact (a giver counter) still passes")
-	Hm.env.coop_storyline = nil
+	Hm.env.coop_conditions_stock = nil
 	-- an unrelated change on the host does not put an unanswered local write back
 	CP.drx_sl_local_write = "mine"
 	HP.drx_sl_unrelated = 1

@@ -25,7 +25,7 @@
 	    section stands still, and on the authority it ends when theirs end (arena.cut), or after CUT_WAIT_MS. One who falls is out;
 	    the fight goes on while a fighter is left.
 	  - His gear: the authority moves it, and keeps a ledger per player (the ids; the ids of the kit his machine made; saved with
-	    the host's world, and with split levels carried through the world server, coop_levels_share "arena_ledger"):
+	    the host's world, and with split levels carried through the world server, the server's share "arena_ledger", coop_srv_levels_share):
 	      in   his whole inventory into box 1;
 	      out  into box 2 what the arena gave him: everything he holds when the fight or the bet just ended or he stands in the
 	           arena (stock), else (a respawn elsewhere, a rejoin, a late answer) only his kit; the arena's purge (not while
@@ -1670,7 +1670,8 @@ end
 -- Split levels: a map server leads the Bar, writes nothing into the save and stops when its level is empty. Its ledger goes up to
 -- the world server (kept in its save) and comes down to the next map server of the Bar, which takes the records it has none of.
 local function share_ledger()
-	local share = C().mod("coop_levels_share")
+	local qc = rawget(_G, "coop_quests_core") -- the Core keeps the table, a server's share carries it
+	local share = qc and qc.share and qc.share()
 	if not (share and share.up and share.down) then return end
 	share.up("arena_ledger", function()
 		if level.name() ~= ARENA_LEVEL or not (got_down or next(ledger)) then return nil end

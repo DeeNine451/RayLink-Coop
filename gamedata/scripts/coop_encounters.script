@@ -574,7 +574,8 @@ function on_game_start()
 	if not rawget(_G, "coop") then return end
 	install_entries()
 	-- the squad a task keeps alive stands on a level a map server may lead: who is held off is the world server's to say
-	local share = rawget(_G, "coop_levels_share") or coop_levels_share
+	local qc = rawget(_G, "coop_quests_core") -- the Core keeps the tables, a server's share carries them
+	local share = qc and qc.share and qc.share()
 	if share then
 		share.down("guarded", function() return guarded end, function(t)
 			for id in pairs(guarded) do guarded[id] = nil end

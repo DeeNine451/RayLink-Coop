@@ -139,7 +139,7 @@
 |---|---|---|---|---|
 | `where(peer)`: Here / Away / Joining | Here для каждого сидящего | Away (Joining до посадки) | Here для игроков своей карты | Away |
 | `decider_of(character)`: This / Other / Nobody | This | Other | This для своей карты | Nobody |
-| `body_facts(character, out)` | читает объект здесь | факты, которые прислал сервер карты | читает объект здесь | false |
+| `facts_of(character, out)` (в коде так: `body_facts` — имя L1) | читает объект здесь | факты, которые прислал сервер карты | читает объект здесь | false |
 | `actor_is_player()` | true | false (призрак) | false | true (одиночная игра) |
 | `decides_world()` | true | true | false | false |
 | `leads_level()` | true | **false** (`fake_start`) | true | false |
@@ -152,13 +152,28 @@
 
 - `Mode& mode()` ставится один раз за сессию: `start_host` (Кооп), `start_client` по байту режима в Welcome (шаг S3),
   `-coop_dedicated` (сервер мира), `start_map_server` (сервер карты); сбрасывается в `set_phase(Off)`. До сессии — `none`.
+- **Коммутатор (S4, `xrGame/coop/coop_mode.cpp`).** `mode_for(Entry, SessionMode)` спрашивает слои по очереди, первым
+  серверный. Слой сам читает свои ключи (`-coop_dedicated`, `-coop_mapserver`) и режим из Welcome, кооп-слой берёт
+  остальное. Строка со списком двух слоёв — единственное место, где Ядро называет `srv::` и `hostplay::`. Для неё в
+  allow-списке одна запись L3. Тест `mode_switchboard_names_each_layer_once` не даёт добавить туда что-то ещё.
+  `boot_layers()` в каждом кадре вызывает `boot_frame` слоёв: кадр сервера мира (`dedicated::frame()`) живёт в слое srv.
+  Оба файла слоёв — gate-core в `tools/layers.txt`: их `mode_of` и `boot_frame` работают и в кооп-процессе.
+- Хуки для A-S4H уже в интерфейсе: `online_elsewhere`, `binder_may_update`, `held_update`, `switched_offline`,
+  `takes_own_ids`, `own_free_id`. У Коопа ответы пустые, серверные режимы передают их в `levels::*`.
+- Ответы C++ `Mode` и Lua-таблицы `docs/contracts/coop_mode_api.md` §2 расходятся в трёх клетках (см. там). Перед S6
+  сводятся к Lua-таблице.
 - Каждый режим ставит **свои** таблицы обработчиков. Старт Коопа никогда не ставит серверные таблицы
   (сегодня `install_handlers` ставит одни и те же таблицы хосту, серверу мира и серверу карты, `coop_manager.cpp:468-498`).
 - Хуки в стоке (`alife_switch_manager.cpp:115,128,131`, `alife_update_manager.cpp:113,475`, `GameObject.cpp:1115`,
   `xrServer.h:93,188`) зовут `mode()`. У Коопа ответы — пустые. Серверные функции после этого перестают проверять режим
   сами.
 - Класс `Session` (`coop_session.h`) остаётся Ядром. Мосты, виртуальный хост и токен оператора уходят в серверное
-  расширение (`SessionSrv`), LocalLink — в кооп-расширение (critique H10).
+  расширение (`SessionSrv`), LocalLink — в кооп-расширение (critique H10). S4 (A-S4S) сделал сам вид
+  `srv::SessionSrv` (`xrCoop/srv/coop_session_srv.h`), через него ходит `coop_mapserver.cpp`. Тела членов пока в
+  `Session`: их ещё зовут напрямую `coop_trunk`, `coop_levels_xfer`, `coop_levels`, `coop_join`, `coop_manager`,
+  `srv/coop_srv_mode` и тесты. Перенос тел — задание A-S4Sb.
+- Карта сервера получила свой шаг неба `level_sky_frame` (`coop_worldstate.cpp`). Он в Ядре, но нужен только серверу
+  карты, поэтому переезжает в srv на шаге S5 (A-S5W).
 - `xrCoop/coop_scope.h:216-268` (`scope_of`, `reaches_every_level`, `level_passes`) — серверная семантика, уходит в `srv`.
   `xrCoop/coop_world_server_rules.h` — договор лаунчер ↔ сервер, тоже `srv`.
 

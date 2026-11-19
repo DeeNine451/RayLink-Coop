@@ -416,7 +416,7 @@ local function host_split_ask(payload, from)
 			s.chars[id] = { f = claim }
 			stats.boot = stats.boot + 1
 			log("character %s of an older save is in %s (its own word, once)", tostring(id), claim)
-			-- no change, so no news line; but other scripts judged him without a faction until now (coop_task_audience: his
+			-- no change, so no news line; but other scripts judged him without a faction until now (coop_srv_task_audience: his
 			-- faction's storyline tasks): they get the callback, old = nil
 			local scb = rawget(_G, "SendScriptCallback") or SendScriptCallback
 			local ok, err = pcall(scb, CHANGED, from, id, nil, claim)
@@ -747,7 +747,7 @@ function on_game_start()
 		start_step("events", register_events)
 	end
 	start_step("callback " .. CHANGED, function()
-		-- coop_task_audience declares it too: the second declaration is a warning with a stack traceback (coop_route.declare)
+		-- coop_srv_task_audience declares it too: the second declaration is a warning with a stack traceback (coop_route.declare)
 		local okr, route = pcall(function() return coop_route end)
 		if okr and type(route) == "table" and type(route.declare) == "function" and pcall(route.declare, CHANGED) then return end
 		local add = rawget(_G, "AddScriptCallback") or AddScriptCallback

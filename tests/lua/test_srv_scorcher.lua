@@ -1,10 +1,13 @@
 -- Anomaly Coop test: the Brain Scorcher for two sides (plan docs\plans\2026-11-16-storylines-per-faction.md section 4, stage 5):
--- gamedata\scripts\coop_scorcher.script, gamedata\scripts\modxml_coop_scorcher.script, gamedata\configs\misc\task\tm_coop_scorcher.ltx
+-- gamedata\scripts\coop_srv_scorcher.script (coop_scorcher before step S4), its stock answers in gamedata\scripts\coop_conditions_stock.script,
+-- gamedata\scripts\modxml_coop_scorcher.script, gamedata\configs\misc\task\tm_coop_scorcher.ltx
 -- and the DLTX files gamedata\configs\scripts\**\mod_*_coop_scorcher.ltx merged over the stock logic files
 -- (temp\stock_configs\configs\scripts\...) the way engine\src\xrCore\Xr_ini.cpp merges them (an ![section] overrides keys,
 -- a [section] is new and must not exist in the base). Condlists are parsed and picked by the stock xr_logic code, copied below.
--- Machines: a world server, the map server of X10 and a player, each its own sealed copy of the script; the transport
--- (coop_levels_share up/down, events) is played by the test. Not shipped. Run: tools\test_lua.cmd scorcher
+-- Machines: a world server, the map server of X10 and a player, each its own sealed copy of the script and of the Core's
+-- coop_conditions_stock; the transport (coop_srv_levels_share up/down, events) is played by the test. Step S4: the script starts
+-- from coop_mode.when_srv (the machine's stand-in runs it in split mode only); in a group world and without co-op the stock
+-- answers are coop_conditions_stock's. Not shipped. Run: tools\test_lua.cmd srv_scorcher
 local PASSES, FAILS = 0, 0
 local function check(cond, what)
 	if cond then
@@ -421,9 +424,10 @@ local function reach(sections, start)
 end
 
 -------------------------------------------------------------------------------
--- Machines: sealed copies of coop_scorcher.script
+-- Machines: sealed copies of coop_srv_scorcher.script and coop_conditions_stock.script
 -------------------------------------------------------------------------------
-local SCRIPT = assert(read_file("gamedata/scripts/coop_scorcher.script"), "coop_scorcher.script")
+local SCRIPT = assert(read_file("gamedata/scripts/coop_srv_scorcher.script"), "coop_srv_scorcher.script")
+local STOCK = assert(read_file("gamedata/scripts/coop_conditions_stock.script"), "coop_conditions_stock.script")
 local GAME_SEC = 0
 local START_DAYS = 0
 -- civil_from_days (H. Hinnant), the inverse of the script's day number, written here on its own
@@ -456,8 +460,8 @@ local function decode(s) local n = tonumber(tostring(s):match("^w(%d+)$")); loca
 
 local SENT = {}
 local function machine(role, mode, faction)
-	local m = { role = role, infos = {}, cbs = {}, ups = {}, downs = {}, events = {}, storage = {}, objects = {}, switched = {}, tasks = {},
-		msgs = {}, given = {} }
+	local m = { role = role, infos = {}, cbs = {}, cblist = {}, ups = {}, downs = {}, events = {}, storage = {}, objects = {}, switched = {},
+		tasks = {}, msgs = {}, given = {}, srv_ran = 0 }
 	local actor = {
 		has_info = function(_, n) return m.infos[n] == true end,
 		give_info_portion = function(_, n) m.infos[n] = true end,
@@ -491,14 +495,42 @@ local function machine(role, mode, faction)
 		xr_conditions = {}, xr_effects = {},
 		get_actor_true_community = function() return faction end,
 		actor_menu = { set_msg = function(_, text) m.msgs[#m.msgs + 1] = text end },
-		RegisterScriptCallback = function(n, f) m.cbs[n] = f end,
+		-- axr_main: every function registered for a name runs (m.cbs[name] runs them all); one taken out keeps its place as a no-op
+		RegisterScriptCallback = function(n, f)
+			local list = m.cblist[n] or {}
+			m.cblist[n] = list
+			list[#list + 1] = f
+			m.cbs[n] = function(...) for _, g in ipairs(list) do g(...) end end
+		end,
+		UnregisterScriptCallback = function(n, f)
+			for i, g in ipairs(m.cblist[n] or {}) do if g == f then m.cblist[n][i] = function() end end end
+		end,
 		coop = api,
 		coop_main = { encode = encode, decode = decode, add_event_handler = function(n, f) m.events[n] = f end },
-		coop_levels_share = { up = function(n, g, s) m.ups[n] = { get = g, set = s } end, down = function(n, g, s) m.downs[n] = { get = g, set = s } end },
+		coop_srv_levels_share = { up = function(n, g, s) m.ups[n] = { get = g, set = s } end, down = function(n, g, s) m.downs[n] = { get = g, set = s } end },
+		-- the facade: the server layer answers in a split world (an active session with split levels), never in a group one
+		coop_mode = {
+			when_srv = function(fn)
+				if mode == "split" then
+					m.srv_ran = m.srv_ran + 1
+					fn()
+				end
+				return true
+			end,
+			decides_world = function() return role == "world" and mode ~= "none" end,
+			group_travels = function() return mode == "group" end,
+		},
 	}
 	if mode ~= "none" then env.coop_faction = { split_mode = function() return mode == "split" end } end
 	env._G = env
-	local f = assert(loadstring(SCRIPT, "=coop_scorcher.script"))
+	-- the Core's stock answers first (axr_main runs the scripts by name: coop_conditions_stock before coop_srv_scorcher)
+	local cenv = setmetatable({}, { __index = env })
+	local cf = assert(loadstring(STOCK, "=coop_conditions_stock.script"))
+	setfenv(cf, cenv)
+	cf()
+	env.coop_conditions_stock = cenv
+	cenv.on_game_start()
+	local f = assert(loadstring(SCRIPT, "=coop_srv_scorcher.script"))
 	setfenv(f, env)
 	f()
 	env.on_game_start()
@@ -506,7 +538,7 @@ local function machine(role, mode, faction)
 	return m
 end
 
--- coop_levels_share: up from a map server (its level is the bridge's), down to it
+-- coop_srv_levels_share: up from a map server (its level is the bridge's), down to it
 local function up(map, world)
 	local v = map.ups.scorcher and map.ups.scorcher.get()
 	if v then world.ups.scorcher.set(v, map.level) end
@@ -683,6 +715,13 @@ for _, mode in ipairs({ "group", "none" }) do
 	check(c.coop_split_mode() == false and c.coop_scorcher_ready() == true and c.coop_scorcher_can_off() == true
 		and c.coop_scorcher_can_on() == false and c.coop_scorcher_locked() == false and c.coop_actor_monolith() == false,
 		mode .. ": the conditions answer the stock (not split, ready, can off, cannot on, not locked, nobody is Monolith)")
+	local cs = x.env.coop_conditions_stock
+	check(x.srv_ran == 0 and x.cbs.save_state == nil and x.cbs.actor_on_update == nil and next(x.events) == nil and next(x.ups) == nil,
+		mode .. ": S4: nothing of the server's script ran (no when_srv, no callback, event or shared table)")
+	check(c.coop_split_mode == rawget(c, "coop_split_mode") and debug.getinfo(c.coop_split_mode, "S").source == "=coop_conditions_stock.script"
+		and debug.getinfo(fx.coop_scorcher_flipped, "S").source == "=coop_conditions_stock.script", mode .. ": S4: they are coop_conditions_stock's")
+	check(cs.dlg_off_offer_ok() == true and cs.dlg_can_offer_on() == false and cs.dlg_give_on() == nil and #x.given == 0,
+		mode .. ": S4: the dialogs' functions of coop_conditions_stock answer the stock")
 	x.infos[FLAG] = nil
 	fx.coop_scorcher_flipped(nil, nil, { "off" })
 	fx.coop_scorcher_refused()
@@ -692,14 +731,21 @@ for _, mode in ipairs({ "group", "none" }) do
 	check(x.env.dlg_off_offer_ok() == true and x.env.dlg_can_offer_on() == false, mode .. ": Sakharov offers as in the stock, Charon never")
 	x.infos[FLAG] = true
 	check(x.env.ending_ok("monolith") == true and x.env.ending_ok("freedom") == true, mode .. ": ending_ok is the stock rule (off) for every faction")
+	check(cs.ending_ok("monolith") == true and cs.ending_ok("freedom") == true, mode .. ": S4: so is coop_conditions_stock's")
 	x.infos[FLAG] = nil
 	check(x.env.ending_ok("monolith") == false and x.env.ending_ok("stalker") == false, mode .. ": scorcher on: no ending for anybody")
+	check(cs.ending_ok("monolith") == false and cs.ending_ok("stalker") == false, mode .. ": S4: the same in coop_conditions_stock")
 end
 
 -------------------------------------------------------------------------------
 section("ending_ok in split mode")
 -------------------------------------------------------------------------------
 local E = machine("world", "split")
+local Ecs = E.env.coop_conditions_stock
+check(E.srv_ran == 1 and Ecs.ending_ok == E.env.ending_ok and Ecs.dlg_can_offer_on == E.env.dlg_can_offer_on
+	and Ecs.dlg_give_on == E.env.dlg_give_on and Ecs.dlg_off_offer_ok == E.env.dlg_off_offer_ok
+	and debug.getinfo(E.env.xr_conditions.coop_split_mode, "S").source == "=coop_srv_scorcher.script",
+	"S4: split: the server's script put its condlist and dialog functions over the stock ones of coop_conditions_stock")
 E.infos[FLAG] = true
 check(E.env.ending_ok("monolith") == false and E.env.ending_ok("freedom") == true and E.env.ending_ok("dolg") == true, "off: every faction but Monolith")
 E.env.apply_flip(true)
@@ -914,15 +960,17 @@ for id in d:gmatch("<text>(.-)</text>") do if not has_string(id) then missing[#m
 check(#missing == 0, "every phrase text is in st_coop_news, both languages (" .. table.concat(missing, ",") .. ")")
 local probe = machine("client", "split", "monolith")
 local fns_ok = true
-for fn in d:gmatch("<precondition>coop_scorcher%.([%w_]+)</precondition>") do fns_ok = fns_ok and type(probe.env[fn]) == "function" end
-for fn in d:gmatch("<action>coop_scorcher%.([%w_]+)</action>") do fns_ok = fns_ok and type(probe.env[fn]) == "function" end
-check(fns_ok and d:find("coop_scorcher.dlg_can_offer_on", 1, true), "its precondition and action exist in coop_scorcher")
+local pcs = probe.env.coop_conditions_stock
+for fn in d:gmatch("<precondition>coop_conditions_stock%.([%w_]+)</precondition>") do fns_ok = fns_ok and type(pcs[fn]) == "function" end
+for fn in d:gmatch("<action>coop_conditions_stock%.([%w_]+)</action>") do fns_ok = fns_ok and type(pcs[fn]) == "function" end
+check(fns_ok and d:find("coop_conditions_stock.dlg_can_offer_on", 1, true) and not d:find("coop_srv_", 1, true),
+	"its precondition and action are coop_conditions_stock's (the Core names no server script)")
 local YAN = read_file("temp/stock_configs/configs/gameplay/dialogs_yantar.xml")
 local yx = fake_xml(YAN)
 xcbs.on_xml_read([[gameplay\dialogs_yantar.xml]], yx)
 local gated = 0
 for _, id in ipairs({ "yan_stalker_sakharov_bad_psi_helmet", "yan_stalker_sakharov_good_psi_helmet" }) do
-	for _, p in ipairs(yx:query("dialog[id=" .. id .. "] > precondition")) do if p.text == "coop_scorcher.dlg_off_offer_ok" then gated = gated + 1 end end
+	for _, p in ipairs(yx:query("dialog[id=" .. id .. "] > precondition")) do if p.text == "coop_conditions_stock.dlg_off_offer_ok" then gated = gated + 1 end end
 end
 check(gated == 2, "Sakharov's two helmet dialogs (they give turn_off_brain_scorcher) get the gate")
 xcbs.on_xml_read([[gameplay\dialogs_yantar.xml]], yx)

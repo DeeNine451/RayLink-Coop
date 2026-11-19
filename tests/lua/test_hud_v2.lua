@@ -1640,7 +1640,9 @@ do
 	}
 	H.object(503, vec(1, 0, 0))
 	local E = H.env
-	E.coop_levels = { elsewhere_text = function(id) return id == 1 and "on another map: Garbage" or "" end }
+	-- a server's level names, as the Core gets them (coop_quests_core.part "levels", step S4)
+	local levels = { elsewhere_text = function(id) return id == 1 and "on another map: Garbage" or "" end }
+	E.coop_quests_core = { part = function(name) return name == "levels" and levels or nil end }
 	local list = E.coop_core_hud.views(NOW)
 	local far, near
 	for _, v in ipairs(list) do

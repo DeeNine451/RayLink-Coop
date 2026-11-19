@@ -2,7 +2,7 @@
 -- talks "storyline business" only with a leader his own faction's chain holds; the readers of the chain keys read the
 -- talker's faction's keys; the change-faction lock is the player's own. The DXML gates (modxml_coop_storyline.script) are
 -- checked against the REAL dialog files (temp/gamma_ref, temp/stock_configs) through a stand-in of the documented DXML API
--- (tests/lua/support/harness_storyline.lua). Not shipped. Run: tools\test_lua.cmd storyline_dialogs
+-- (tests/lua/support/harness_storyline.lua). Not shipped. Run: tools\test_lua.cmd srv_storyline_dialogs
 dofile("tests/lua/support/harness_storyline.lua")
 
 local SULTAN, SID, PETRENKO, NOAH = "zat_b7_bandit_boss_sultan", "esc_m_trader", "bar_dolg_general_petrenko_stalker", "zat_b18_noah"
@@ -45,7 +45,7 @@ local function world(split, opts)
 		ticks(B, 2)
 		ticks(Hm, 2)
 	end
-	return Hm.env.coop_storyline
+	return Hm.env.coop_srv_storyline
 end
 
 local function chain(M, f, k) return pstor(M)[k .. "@" .. f] end
@@ -53,7 +53,7 @@ local function npc(M, h) return M.leader[h] end
 local function mirror() ticks(Hm, 2) end
 local function start_dlg(h) return "drx_sl_" .. h .. "_game_start_dialog_1" end
 local function meet_dlg(h) return "drx_sl_" .. h .. "_meet_dialog" end
-local function leader_ok(M, h, dlg) return M.env.coop_storyline.dlg_leader(M.actor, npc(M, h), dlg) end
+local function leader_ok(M, h, dlg) return M.env.coop_srv_storyline.dlg_leader(M.actor, npc(M, h), dlg) end
 
 local function last_refusal(M)
 	for i = #M.log, 1, -1 do
@@ -86,9 +86,9 @@ do
 		local raw = read(path):gsub("<!%-%-.-%-%->", "")
 		local want = {}
 		local n_meet, n_start = 0, 0
-		for id in raw:gmatch('<dialog id="(drx_sl_[%w_]-_meet_dialog)"') do want[id] = "coop_storyline.dlg_leader"; n_meet = n_meet + 1 end
-		for id in raw:gmatch('<dialog id="(drx_sl_[%w_]-_game_start_dialog_%d+)"') do want[id] = "coop_storyline.dlg_leader"; n_start = n_start + 1 end
-		want.drx_sl_change_faction_dialog = "coop_storyline.dlg_cf_free"
+		for id in raw:gmatch('<dialog id="(drx_sl_[%w_]-_meet_dialog)"') do want[id] = "coop_conditions_stock.dlg_leader"; n_meet = n_meet + 1 end
+		for id in raw:gmatch('<dialog id="(drx_sl_[%w_]-_game_start_dialog_%d+)"') do want[id] = "coop_conditions_stock.dlg_leader"; n_start = n_start + 1 end
+		want.drx_sl_change_faction_dialog = "coop_conditions_stock.dlg_cf_free"
 		local got, n_got = {}, 0
 		for _, ins in ipairs(xo.inserted) do
 			local id = ins.where.attr.id
@@ -106,7 +106,7 @@ do
 		local el = xo:query("dialog[id=" .. start_dlg(PETRENKO) .. "]")[1]
 		local has = {}
 		for _, k in ipairs(el.kids) do if k.name then has[#has + 1] = k.name .. "=" .. tostring(xo:getText(k)) end end
-		check(table.concat(has, ",") == "has_info=drx_sl_start_game_" .. PETRENKO .. ",has_info=drx_questlines_about_info,phrase_list=nil,precondition=coop_storyline.dlg_leader",
+		check(table.concat(has, ",") == "has_info=drx_sl_start_game_" .. PETRENKO .. ",has_info=drx_questlines_about_info,phrase_list=nil,precondition=coop_conditions_stock.dlg_leader",
 			"Petrenko's start dialog: its two has_info, its phrases, then the gate")
 		local again = #xo.inserted
 		cb([[gameplay\dialogs.xml]], xo)
@@ -159,7 +159,7 @@ do
 		and Hm.infos["drx_sl_start_game_" .. PETRENKO] == nil, "a second start is refused by the world; the info is not given back")
 	mirror()
 	check(leader_ok(A, x, meet_dlg(x)) == true, "anna: the meet dialog of her chain's new leader is open")
-	-- what the audience does for boris' machine: Duty's meet task is not in his list (coop_task_audience: a chain task to its faction)
+	-- what the audience does for boris' machine: Duty's meet task is not in his list (coop_srv_task_audience: a chain task to its faction)
 	B.tm.task_info["drx_sl_" .. x .. "_meet_task_1"] = nil
 	check(leader_ok(B, x, meet_dlg(x)) == false and leader_ok(Hm, x, meet_dlg(x)) == false, "boris and the host player: closed")
 	check(leader_ok(A, PETRENKO, start_dlg(PETRENKO)) == false, "anna: Petrenko's start dialog is closed now (her chain moved on)")
@@ -197,7 +197,7 @@ do
 	check(Hm.tm.task_info[T2] ~= nil and sl.owner_of_task(T2) == "stalker", "the host player's task at Sidorovich is the loners'")
 	Hm.tm.task_info[T2].stage = 254
 	check(Hm.env.dialogs.drx_sl_actor_has_finished_task(Hm.actor, npc(Hm, SID)) == true, "he is offered his own")
-	-- a client: the audience (coop_task_audience) keeps another faction's chain task out of his list; given that, the stock
+	-- a client: the audience (coop_srv_task_audience) keeps another faction's chain task out of his list; given that, the stock
 	-- lookup on his machine finds nothing of it
 	B.tm.task_info[T1] = nil
 	B.engine_tasks[T1] = nil
@@ -226,11 +226,11 @@ do
 	check(Hm.env.dialogs.drx_sl_is_endgame(Hm.actor) == true, "the loners at 10 of 10: the end")
 	A.infos.bar_deactivate_radar_done = nil
 	check(A.env.dialogs.drx_sl_is_endgame(A.actor) == false, "the Scorcher on: no ending (the stock rule without the pilot)")
-	A.env.coop_scorcher = { ending_ok = function(f) return f == "dolg" end }
-	check(A.env.dialogs.drx_sl_is_endgame(A.actor) == true, "with coop_scorcher: its ending_ok(her faction) decides")
-	Hm.env.coop_scorcher = { ending_ok = function(f) return f == "monolith" end }
+	A.env.coop_srv_scorcher = { ending_ok = function(f) return f == "dolg" end }
+	check(A.env.dialogs.drx_sl_is_endgame(A.actor) == true, "with coop_srv_scorcher: its ending_ok(her faction) decides")
+	Hm.env.coop_srv_scorcher = { ending_ok = function(f) return f == "monolith" end }
 	check(Hm.env.dialogs.drx_sl_is_endgame(Hm.actor) == false, "the host player: ending_ok(stalker) false, the info does not matter")
-	Hm.env.coop_scorcher, A.env.coop_scorcher = nil, nil
+	Hm.env.coop_srv_scorcher, A.env.coop_srv_scorcher = nil, nil
 	STRINGS["drx_sl_" .. PETRENKO .. "_start_game_1_endgame_1"] = "DUTY END"
 	STRINGS["drx_sl_" .. SID .. "_start_game_1_endgame_1"] = "LONER END"
 	check(A.env.dialogs.drx_sl_text_end_game(A.actor, npc(A, PETRENKO)) == "DUTY END", "anna's ending text is Duty's start leader's")
@@ -258,10 +258,10 @@ do
 	ticks(Hm, 4)
 	check(Hm.infos.drx_sl_on_cf_task == nil and Hm.storage_state.coop_storyline.cf_moved == true,
 		"the world keeps the info off: the XML <dont_has_info> locks nobody")
-	check(A.tm.task_info[CF] ~= nil and A.env.coop_storyline.dlg_cf_free(A.actor) == false, "anna (her cf task open): locked")
-	-- what the audience does for boris' machine (a cf task to its taker alone, coop_task_audience)
+	check(A.tm.task_info[CF] ~= nil and A.env.coop_srv_storyline.dlg_cf_free(A.actor) == false, "anna (her cf task open): locked")
+	-- what the audience does for boris' machine (a cf task to its taker alone, coop_srv_task_audience)
 	B.tm.task_info[CF] = nil
-	check(B.env.coop_storyline.dlg_cf_free(B.actor) == true, "boris: anna's task does not lock him")
+	check(B.env.coop_srv_storyline.dlg_cf_free(B.actor) == true, "boris: anna's task does not lock him")
 	check(sl.dlg_cf_free(Hm.actor) == true, "the host player: not locked by anna's task (taker #1)")
 	check(sl.may_take(CF2, 1) == false and sl.may_take(CF2, 2) == true and sl.may_take(CF2, 0) == true,
 		"authority twin may_take: a second cf task for anna no, for boris and the host yes")
@@ -286,7 +286,7 @@ do
 	check(Hm.infos.drx_sl_on_cf_task == true, "the world's lock stays (stock)")
 	local all = true
 	for _, M in ipairs({ Hm, A, B }) do
-		local g = M.env.coop_storyline
+		local g = M.env.coop_srv_storyline
 		all = all and g.dlg_leader(M.actor, npc(M, SULTAN), start_dlg(SULTAN)) == true and g.dlg_leader(M.actor, npc(M, NOAH), meet_dlg(NOAH)) == true
 			and g.dlg_cf_free(M.actor) == true and g.dlg_story_ll(M.actor) == true and g.dlg_story_ms(M.actor) == true and g.dlg_story_oa(M.actor) == true
 		check(M.env.dialogs.drx_sl_is_endgame == M.stock_fn.is_endgame and M.env.dialogs.drx_sl_text_end_game == M.stock_fn.end_text
@@ -300,10 +300,10 @@ end
 section("sandbox (not story mode) and no session: every gate true")
 do
 	world(true, { story = false })
-	check(A.env.coop_storyline.dlg_leader(A.actor, npc(A, SULTAN), start_dlg(SULTAN)) == true and A.env.coop_storyline.dlg_cf_free(A.actor) == true
+	check(A.env.coop_srv_storyline.dlg_leader(A.actor, npc(A, SULTAN), start_dlg(SULTAN)) == true and A.env.coop_srv_storyline.dlg_cf_free(A.actor) == true
 		and A.env.dialogs.drx_sl_is_endgame == A.stock_fn.is_endgame, "sandbox: true, nothing wrapped")
 	world(true, { active = false })
-	check(Hm.env.coop_storyline.dlg_leader(Hm.actor, npc(Hm, SULTAN), start_dlg(SULTAN)) == true and Hm.env.coop_storyline.dlg_story_ll(Hm.actor) == true,
+	check(Hm.env.coop_srv_storyline.dlg_leader(Hm.actor, npc(Hm, SULTAN), start_dlg(SULTAN)) == true and Hm.env.coop_srv_storyline.dlg_story_ll(Hm.actor) == true,
 		"no session: true")
 end
 

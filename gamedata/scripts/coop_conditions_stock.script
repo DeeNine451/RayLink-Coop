@@ -1,0 +1,206 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - the stock answers of the server's condlist functions and dialogs (gamedata\scripts\coop_conditions_stock.script),
+	step S4 of docs\plans\2026-11-18-two-modes.md, docs\MODES.md section 4 ("the co-op answers of the condition functions go to
+	the Core: they are the stock's answers").
+
+	The logic files, the dialog XML and coop_tasks name the functions of this script, never a server script (check_layers L3).
+	Here they answer what keeps the stock game: the co-op, single player, and a server process before its server layer answers.
+	A server script puts its own answers over them from coop_mode.when_srv (coop_srv_scorcher, coop_srv_storyline), and only
+	there: nothing of the server runs in the co-op.
+
+	Condlist functions (xr_conditions / xr_effects, put in at on_game_start of every process; the DLTX files
+	configs\scripts\**\mod_*_coop_scorcher.ltx keep the stock outcome in the first branch under a negated condition):
+		=coop_split_mode false  =coop_scorcher_ready true  =coop_scorcher_can_off true  =coop_scorcher_can_on false
+		=coop_scorcher_locked false  =coop_actor_monolith false  %=coop_scorcher_flipped% %=coop_scorcher_refused%
+		%=coop_scorcher_task_taken% %=coop_scorcher_task_done%: nothing
+	Dialogs (modxml_coop_scorcher, modxml_coop_storyline) and coop_tasks:
+		dlg_can_offer_on false, dlg_give_on nothing, dlg_off_offer_ok true   Charon's offer and Sakharov's "off" offer
+		ending_ok(faction)                     the stock ending rule: the Brain Scorcher is off (bar_deactivate_radar_done)
+		dlg_leader, dlg_cf_free, dlg_story_ll, dlg_story_ms, dlg_story_oa  true: the stock talk
+		client_may_write(key)                  coop_tasks host_on_var: a client never writes the world's story record
+		                                       (drx_sl_coop_story_*), every other shared key as the stock
+		may_take(task_id, peer)                coop_tasks: true
+	The stock chain back: the process that decides a world whose group travels together (the co-op host) gives the
+	stock its bare chain keys and its change-faction lock again at the first update, when the world was played with
+	per-faction chains once (a world of the hybrid of build 56 and older, docs\MODES.md section 7). The server never does it.
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, pairs, ipairs, pcall, tostring = type, pairs, ipairs, pcall, tostring
+local string_format = string.format
+
+local FLAG = "bar_deactivate_radar_done" -- the stock's mark that the Brain Scorcher is off
+local STORY_KEY = "drx_sl_coop_story_" -- + ll | ms | oa: the world's copy of a story's owner (coop_srv_storyline)
+local STORE = "coop_storyline" -- m_data: the per-faction chains of a world (coop_srv_storyline)
+local CF_INFO = "drx_sl_on_cf_task"
+local KEY_LIST = { "drx_sl_total_task_number", "drx_sl_current_task_number", "drx_sl_current_honcho", "drx_sl_current_task",
+	"drx_sl_start_task" }
+local FACTIONS = {
+	army = true, bandit = true, csky = true, dolg = true, ecolog = true, freedom = true, killer = true, monolith = true,
+	stalker = true, renegade = true, greh = true, isg = true,
+}
+
+local function mod(name)
+	local m = rawget(_G, name)
+	if m == nil then
+		local ok, r = pcall(function() return _G[name] end)
+		m = ok and r or nil
+	end
+	return type(m) == "table" and m or nil
+end
+
+local function call(f, ...)
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, ...)
+	return ok and v or nil
+end
+
+local function known(f) return type(f) == "string" and FACTIONS[f] == true end
+
+local function log(tag, fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("%s %s", tag, ok and line or tostring(fmt))
+end
+
+-------------------------------------------------------------------------------
+-- The Brain Scorcher: what the stock's logic files and dialogs ask
+-------------------------------------------------------------------------------
+local function scorcher_on()
+	local a = db and db.actor
+	if not a then return false end
+	return a:has_info(FLAG) ~= true
+end
+
+-- the stock rule of the ending: the Brain Scorcher is off, for every faction
+function ending_ok(faction) return not scorcher_on() end
+
+function dlg_can_offer_on(a, b) return false end
+function dlg_give_on(a, b) end
+function dlg_off_offer_ok(a, b) return true end
+
+local function install_condlists()
+	local xc = rawget(_G, "xr_conditions") or xr_conditions
+	local xe = rawget(_G, "xr_effects") or xr_effects
+	xc.coop_split_mode = function() return false end
+	xc.coop_scorcher_ready = function() return true end
+	xc.coop_scorcher_can_on = function() return false end
+	xc.coop_scorcher_can_off = function() return true end
+	xc.coop_scorcher_locked = function() return false end
+	xc.coop_actor_monolith = function() return false end
+	xe.coop_scorcher_flipped = function() end
+	xe.coop_scorcher_refused = function() end
+	xe.coop_scorcher_task_taken = function() end
+	xe.coop_scorcher_task_done = function() end
+end
+
+-------------------------------------------------------------------------------
+-- The storylines per faction: the dialog gates and coop_tasks' questions
+-------------------------------------------------------------------------------
+function dlg_leader(a, b, dialog_id) return true end
+function dlg_cf_free(a, b) return true end
+function dlg_story_ll(a, b) return true end
+function dlg_story_ms(a, b) return true end
+function dlg_story_oa(a, b) return true end
+
+function client_may_write(k)
+	if type(k) == "string" and k:sub(1, #STORY_KEY) == STORY_KEY then return false end -- the world's record, mirrored
+	return true
+end
+
+function may_take(id, peer) return true end
+
+-------------------------------------------------------------------------------
+-- The stock chain back (a world once played with per-faction chains, now by a group that travels together)
+-------------------------------------------------------------------------------
+local TAG = "[coop-storyline]" -- the lines of coop_srv_storyline, which wrote them before step S4
+
+local function store()
+	local asm = mod("alife_storage_manager")
+	local m = asm and call(asm.get_state)
+	local s = type(m) == "table" and m[STORE] or nil
+	if type(s) ~= "table" then return nil end
+	if type(s.chains) ~= "table" then s.chains = {} end
+	if type(s.owner) ~= "table" then s.owner = {} end
+	return s
+end
+
+local function world_faction()
+	local gs = mod("coop_game_settings")
+	local f = gs and call(gs.world_faction)
+	if known(f) then return f end
+	f = call(api and api.game and api.game.world_faction)
+	return known(f) and f or nil
+end
+
+local function raw_pstor()
+	local a = db and db.actor
+	local st = a and db.storage and db.storage[a:id()]
+	if not st then return nil end
+	if not st.pstor then st.pstor = {} end
+	return st.pstor
+end
+
+local function task_info()
+	local tm = mod("task_manager")
+	local m = tm and call(tm.get_task_manager)
+	local ok, ti = pcall(function() return m.task_info end)
+	return ok and type(ti) == "table" and ti or nil
+end
+
+-- the world faction's chain goes back to the bare keys the stock reads
+local function unmigrate()
+	local s = store()
+	if not (s and s.migrated) then return end
+	local w = world_faction()
+	local ps = raw_pstor()
+	if not (w and ps) then return end
+	for _, k in ipairs(KEY_LIST) do
+		local v = ps[k .. "@" .. w]
+		if v ~= nil and ps[k] == nil then ps[k] = v end
+		-- gone: the bare keys are the chain now; a later migration (per-faction chains again) takes them, not a stale copy
+		ps[k .. "@" .. w] = nil
+	end
+	s.migrated = false
+	s.chains[w] = nil
+	log(TAG, "no split levels: the %s chain is the world's chain again", w)
+end
+
+-- the stock lock comes back while a change-faction task is open
+local function cf_lock_restore()
+	local s = store()
+	if not (s and s.cf_moved) then return end
+	s.cf_moved = nil
+	for id in pairs(task_info() or {}) do
+		if type(id) == "string" and id:sub(1, 7) == "drx_sl_" and id:find("_cf_task_", 1, true) then
+			give_info(CF_INFO)
+			log(TAG, "no split levels: the change-faction lock is the world's again")
+			return
+		end
+	end
+end
+
+local function first_update()
+	if not (coop_mode.decides_world() and coop_mode.group_travels()) then return end
+	unmigrate()
+	cf_lock_restore()
+end
+
+-------------------------------------------------------------------------------
+-- Start
+-------------------------------------------------------------------------------
+local function step(what, f)
+	local ok, err = pcall(f)
+	if not ok then printf("! [coop_conditions_stock] %s failed: %s", what, tostring(err)) end
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5)
+function on_game_start()
+	step("condlist functions", install_condlists) -- every process, an exe without co-op too
+	if not api then return end
+	RegisterScriptCallback("actor_on_first_update", function()
+		local ok, err = pcall(first_update)
+		if not ok then log(TAG, "! first update: %s", tostring(err)) end
+	end)
+end

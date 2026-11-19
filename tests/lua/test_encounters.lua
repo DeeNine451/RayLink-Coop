@@ -451,8 +451,10 @@ do
 		env.xr_zones = { purge_arena_items = function(n) env.PURGED = n end }
 		env.xr_logic = { switch_to_section = function(_, _, s) env.SWITCHED = s end }
 		env.coop_quests_core = load_script(mine == 1 and W or Mk, "coop_quests_core")
-		env.coop_levels_share = load_script(mine == 1 and W or Mk, "coop_levels_share")
-		env.coop_levels_share.on_game_start()
+		env.coop_srv_levels_share = load_script(mine == 1 and W or Mk, "coop_srv_levels_share")
+		-- step S4: the share starts from coop_mode.when_srv: split levels, its server layer answers
+		env.coop_srv_levels_share.coop_mode = { when_srv = function(fn) fn() return true end }
+		env.coop_srv_levels_share.on_game_start()
 	end
 	stage(E, 1)
 	stage(F, 2)

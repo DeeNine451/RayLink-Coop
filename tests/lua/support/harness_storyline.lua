@@ -1,9 +1,11 @@
 -- Anomaly Coop test support: the machines of harness_faction.lua (a host and two clients, events between them) with
--- coop_storyline loaded and the stock DRX questlines code it relies on: the real bodies, copied with file and lines (the
+-- coop_srv_storyline (and the Core's stock answers, coop_conditions_stock) loaded and the stock DRX questlines code it relies on: the real bodies, copied with file and lines (the
 -- commented "old code" blocks of axr_task_manager left out). Globals: STORY, ALIVE, REL, LEADERS. Not shipped.
 dofile("tests/lua/support/harness_faction.lua")
 
-FACTION_SCRIPTS = { "coop_quests_core", "coop_reward_group", "coop_tasks", "coop_quests_news", "coop_faction", "coop_storyline" }
+-- coop_conditions_stock first, as axr_main runs the scripts by name; coop_srv_storyline starts from the facade's when_srv (harness_quests)
+FACTION_SCRIPTS = { "coop_conditions_stock", "coop_quests_core", "coop_reward_group", "coop_tasks", "coop_quests_news", "coop_faction",
+	"coop_srv_storyline" }
 STORY = true
 ALIVE = nil -- story id -> true: the leaders alive (nil: everybody)
 REL = {} -- REL[a .. "|" .. b] = relation (default 0)

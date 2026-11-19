@@ -1,8 +1,8 @@
 -- Anomaly Coop test (stage 4 of docs/plans/2026-11-16-storylines-per-faction.md): with split levels and story mode a main
 -- story (Living Legend, Mortal Sin, Operation Afterglow) belongs to the faction that started it; Hollow Boundaries is ISG's.
--- coop_storyline.owner_of_task answers for every lttz_* task, the middle dialogs are gated (DXML over the REAL stock
+-- coop_srv_storyline.owner_of_task answers for every lttz_* task, the middle dialogs are gated (DXML over the REAL stock
 -- dialogs_lostzone_*.xml), the players outside the owner's faction get one news line per world-changing step.
--- Not shipped. Run: tools\test_lua.cmd storyline_lttz
+-- Not shipped. Run: tools\test_lua.cmd srv_storyline_lttz
 dofile("tests/lua/support/harness_storyline.lua")
 
 local LL1, LL2, MS1 = "lttz_ll_find_doctor", "lttz_ll_turn_off_brain_scorcher", "lttz_ms_greh_envoy"
@@ -43,7 +43,7 @@ local function world(split, opts)
 		ticks(B, 2)
 		ticks(Hm, 2)
 	end
-	return Hm.env.coop_storyline
+	return Hm.env.coop_srv_storyline
 end
 
 local function give(peer, id) Hm.env.coop_tasks.run_as(peer, function() Hm.tm:give_task(id, 9) end) end
@@ -69,7 +69,7 @@ do
 		local n, wrong, faction_gated = 0, 0, 0
 		for _, ins in ipairs(xo.inserted) do
 			local id = ins.where.attr.id
-			if ins.xml ~= "<precondition>coop_storyline.dlg_story_" .. k .. "</precondition>" or gated[id] then wrong = wrong + 1 end
+			if ins.xml ~= "<precondition>coop_conditions_stock.dlg_story_" .. k .. "</precondition>" or gated[id] then wrong = wrong + 1 end
 			gated[id] = k
 			n = n + 1
 			for _, p in ipairs(xo:query("dialog[id=" .. id .. "] > precondition")) do
@@ -113,15 +113,15 @@ do
 	-- the clients read the owner from the world's mirror
 	ticks(Hm, 4)
 	check(pstor(A).drx_sl_coop_story_ll == "dolg" and pstor(B).drx_sl_coop_story_ll == "dolg", "mirrored to the clients")
-	check(A.env.coop_storyline.dlg_story_ll(A.actor) == true, "anna (Duty): the Doctor, Barkeep, ... talk to her")
-	check(B.env.coop_storyline.dlg_story_ll(B.actor) == false, "boris (bandit): closed")
+	check(A.env.coop_srv_storyline.dlg_story_ll(A.actor) == true, "anna (Duty): the Doctor, Barkeep, ... talk to her")
+	check(B.env.coop_srv_storyline.dlg_story_ll(B.actor) == false, "boris (bandit): closed")
 	check(sl.dlg_story_ll(Hm.actor) == false, "the host player (loner): closed")
-	check(A.env.coop_storyline.dlg_story_ms(B.actor) == true and B.env.coop_storyline.dlg_story_oa(B.actor) == true,
+	check(A.env.coop_srv_storyline.dlg_story_ms(B.actor) == true and B.env.coop_srv_storyline.dlg_story_oa(B.actor) == true,
 		"MS and OA (no owner): open")
-	check(Hm.env.coop_storyline.client_may_write("drx_sl_coop_story_ll") == false, "a client cannot write the mirror (coop_tvd)")
+	check(Hm.env.coop_srv_storyline.client_may_write("drx_sl_coop_story_ll") == false, "a client cannot write the mirror (coop_tvd)")
 	-- save / load
 	Hm.env.SendScriptCallback("save_state", Hm.storage_state)
-	local fresh = load_script(Hm, "coop_storyline")
+	local fresh = load_script(Hm, "coop_srv_storyline")
 	fresh.on_game_start()
 	for _, f in ipairs(Hm.callbacks.actor_on_first_update) do f() end
 	check(fresh.owner_of_task(LL1) == "dolg" and fresh.owner_of_task("lttz_ll_other") == "dolg", "a new Lua state knows the owner")
@@ -168,7 +168,7 @@ do
 	-- a reload does not repeat a step
 	local before = count_sent(Hm, "coop_sl_news")
 	Hm.env.SendScriptCallback("save_state", Hm.storage_state)
-	local fresh = load_script(Hm, "coop_storyline")
+	local fresh = load_script(Hm, "coop_srv_storyline")
 	fresh.on_game_start()
 	for _, f in ipairs(Hm.callbacks.actor_on_first_update) do f() end
 	ticks(Hm, 8)
@@ -192,14 +192,14 @@ do
 	Hm.infos.bar_deactivate_radar_done = true
 	ticks(Hm, 8)
 	check(sl.owner_of_task(LL1) == nil and sl.owner_of_task("lttz_hb_x") == nil, "no owner")
-	check(A.env.coop_storyline.dlg_story_ll(A.actor) == true and B.env.coop_storyline.dlg_story_ll(B.actor) == true
+	check(A.env.coop_srv_storyline.dlg_story_ll(A.actor) == true and B.env.coop_srv_storyline.dlg_story_ll(B.actor) == true
 		and sl.dlg_story_ll(Hm.actor) == true, "every middle dialog open")
 	check(count_sent(Hm, "coop_sl_news") == 0 and (Hm.storage_state.coop_storyline == nil), "no news, no record")
 	sl = world(true, { story = false })
 	Hm.infos.living_legend = true
 	give(1, LL1)
 	ticks(Hm, 8)
-	check(sl.owner_of_task(LL1) == nil and B.env.coop_storyline.dlg_story_ll(B.actor) == true, "sandbox: the same")
+	check(sl.owner_of_task(LL1) == nil and B.env.coop_srv_storyline.dlg_story_ll(B.actor) == true, "sandbox: the same")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

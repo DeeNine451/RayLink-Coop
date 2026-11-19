@@ -330,7 +330,7 @@ end
 -- Is this answer made over the far view: for a level this process does not lead (a world server for every level, the host
 -- of split levels for the others)? There the NPC is a stand-in of its ALife record, not a game object.
 local function over_far_view()
-	local far = qc.mod("coop_quests_far")
+	local far = qc.part("far") -- a server's far view (coop_srv_quests_far), nil in the co-op
 	if not (far and type(far.in_scope) == "function") then return false end
 	local ok, scope = pcall(far.in_scope)
 	return ok and scope ~= nil

@@ -1,5 +1,6 @@
+-- Сервер (srv): Выжигатель мозгов для двух сторон в мире с картами по серверам (docs/MODES.md)
 --[[
-	Anomaly Coop - the Brain Scorcher for two sides (gamedata\scripts\coop_scorcher.script)
+	Anomaly Coop - the Brain Scorcher for two sides (gamedata\scripts\coop_srv_scorcher.script, coop_scorcher before step S4)
 	Plan docs\plans\2026-11-16-storylines-per-faction.md section 4 (stage 5). Owner 2026-11-16: in a world with split levels one side
 	switches the Brain Scorcher off (the stock task, Sakharov), Monolith switches it back on (a task from Charon, the leader of
 	Monolith). A world without split levels, a sandbox and single player stay the stock game: every condition below answers what
@@ -21,11 +22,12 @@
 	    message never changes the state: there is no verb for it.
 
 	For other scripts:
-		coop_scorcher.ending_ok(faction) -> bool   the Scorcher is in the state that faction wants (Monolith ON, others OFF);
-		                                           outside split mode the stock rule (OFF)
-		coop_scorcher.state() -> { on, flips, last, locked }   a copy of what this machine knows
-		coop_scorcher.print_status()
-	The condlist functions (installed into xr_conditions / xr_effects at script start, in every mode):
+		coop_srv_scorcher.ending_ok(faction) -> bool   the Scorcher is in the state that faction wants (Monolith ON, others OFF);
+		                                               outside split mode the stock rule (OFF)
+		coop_srv_scorcher.state() -> { on, flips, last, locked }   a copy of what this machine knows
+		coop_srv_scorcher.print_status()
+	The condlist functions (put into xr_conditions / xr_effects from coop_mode.when_srv, over the stock answers that
+	coop_conditions_stock gives in every process; the dialogs' functions of coop_conditions_stock too):
 		=coop_split_mode  =coop_scorcher_can_on  =coop_scorcher_can_off  =coop_scorcher_ready  =coop_scorcher_locked
 		=coop_actor_monolith   %=coop_scorcher_flipped(on|off)%  %=coop_scorcher_refused%  %=coop_scorcher_task_taken%
 		%=coop_scorcher_task_done%
@@ -322,21 +324,6 @@ end
 function e_task_taken() if authority() then log("task %s taken", ON_TASK) end end
 function e_task_done() if authority() then log("task %s done", ON_TASK) end end
 
-local function install()
-	local xc = rawget(_G, "xr_conditions") or xr_conditions
-	local xe = rawget(_G, "xr_effects") or xr_effects
-	xc.coop_split_mode = function() return c_split_mode() end
-	xc.coop_scorcher_ready = function() return c_ready() end
-	xc.coop_scorcher_can_on = function() return c_can_on() end
-	xc.coop_scorcher_can_off = function() return c_can_off() end
-	xc.coop_scorcher_locked = function() return c_locked() end
-	xc.coop_actor_monolith = function() return c_actor_monolith() end
-	xe.coop_scorcher_flipped = function(a, n, p) e_flipped(p) end
-	xe.coop_scorcher_refused = function() e_refused() end
-	xe.coop_scorcher_task_taken = function() e_task_taken() end
-	xe.coop_scorcher_task_done = function() e_task_done() end
-end
-
 -------------------------------------------------------------------------------
 -- What the other scripts and the dialogs ask
 -------------------------------------------------------------------------------
@@ -413,27 +400,62 @@ local function step(what, f)
 	if not ok then printf("! [coop_scorcher] %s failed: %s", what, tostring(err)) end
 end
 
+-- Everything below runs from coop_mode.when_srv: in the co-op and in single player the stock answers of coop_conditions_stock stand.
 function on_game_start()
-	step("condlist functions", install) -- every mode: their answers keep the stock outside split mode
-	step("save", function()
-		RegisterScriptCallback("save_state", save_state)
-		RegisterScriptCallback("load_state", load_state)
-	end)
 	if not api then return end
-	step("share", function()
-		local share = rawget(_G, "coop_levels_share") or coop_levels_share
-		share.up(SHARE, up_get, on_report, 2000)
-		share.down(SHARE, down_get, on_down, 5000)
-	end)
-	step("events", function()
-		local cm = rawget(_G, "coop_main") or coop_main
-		cm.add_event_handler(EV, function(payload, from)
-			local ok, err = pcall(on_word, payload, from)
-			if not ok then stats.errors = stats.errors + 1 end
+	coop_mode.when_srv(function()
+		-- fn at the actor's first update, also when that was over before this process's server layer answered (the world
+		-- server's session starts after its world is up): then at the next update
+		local function at_first_update(fn)
+			local seen = false
+			local function late()
+				UnregisterScriptCallback("actor_on_update", late)
+				if not seen then fn() end
+			end
+			RegisterScriptCallback("actor_on_first_update", function()
+				seen = true
+				fn()
+			end)
+			RegisterScriptCallback("actor_on_update", late)
+		end
+
+		step("condlist functions", function()
+			local xc = rawget(_G, "xr_conditions") or xr_conditions
+			local xe = rawget(_G, "xr_effects") or xr_effects
+			xc.coop_split_mode = function() return c_split_mode() end
+			xc.coop_scorcher_ready = function() return c_ready() end
+			xc.coop_scorcher_can_on = function() return c_can_on() end
+			xc.coop_scorcher_can_off = function() return c_can_off() end
+			xc.coop_scorcher_locked = function() return c_locked() end
+			xc.coop_actor_monolith = function() return c_actor_monolith() end
+			xe.coop_scorcher_flipped = function(a, n, p) e_flipped(p) end
+			xe.coop_scorcher_refused = function() e_refused() end
+			xe.coop_scorcher_task_taken = function() e_task_taken() end
+			xe.coop_scorcher_task_done = function() e_task_done() end
+			-- the dialogs (modxml_coop_scorcher) and the storylines' ending name coop_conditions_stock's functions
+			local cs = rawget(_G, "coop_conditions_stock") or coop_conditions_stock
+			cs.dlg_can_offer_on, cs.dlg_give_on, cs.dlg_off_offer_ok = dlg_can_offer_on, dlg_give_on, dlg_off_offer_ok
+			cs.ending_ok = ending_ok
 		end)
-	end)
-	step("callbacks", function()
-		RegisterScriptCallback("actor_on_update", on_update)
-		RegisterScriptCallback("actor_on_first_update", function() step("re-arm", rearm) end)
+		step("save", function()
+			RegisterScriptCallback("save_state", save_state)
+			RegisterScriptCallback("load_state", load_state)
+		end)
+		step("share", function()
+			local share = coop_srv_levels_share
+			share.up(SHARE, up_get, on_report, 2000)
+			share.down(SHARE, down_get, on_down, 5000)
+		end)
+		step("events", function()
+			local cm = rawget(_G, "coop_main") or coop_main
+			cm.add_event_handler(EV, function(payload, from)
+				local ok, err = pcall(on_word, payload, from)
+				if not ok then stats.errors = stats.errors + 1 end
+			end)
+		end)
+		step("callbacks", function()
+			RegisterScriptCallback("actor_on_update", on_update)
+			at_first_update(function() step("re-arm", rearm) end)
+		end)
 	end)
 end

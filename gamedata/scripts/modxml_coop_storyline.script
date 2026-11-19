@@ -4,14 +4,15 @@
 	and call on_xml_read() at script start-up, before the engine reads the dialog files. Test: tests\lua\test_storyline_dialogs.lua.
 
 	Only ADDS one <precondition> to a dialog (DXML insertFromXMLString into the <dialog> element); nothing else of the XML
-	changes. The functions (coop_storyline) are true unless the world has split levels and story mode, so single player, a
+	changes. The functions (coop_conditions_stock: true; coop_srv_storyline's over them from coop_mode.when_srv) are true unless the
+	world has split levels and story mode, so single player, a
 	group world and sandbox talk as the stock does. The XML is built once per process, so the preconditions are always there.
 	  gameplay\dialogs.xml: every drx_sl_<H>_meet_dialog and drx_sl_<H>_game_start_dialog_<n> (found by their ids, not a
-	    list): coop_storyline.dlg_leader (the talker's faction's chain holds H); drx_sl_change_faction_dialog:
-	    coop_storyline.dlg_cf_free (the change-faction lock is the player's own; its stock <dont_has_info> stays).
+	    list): coop_conditions_stock.dlg_leader (the talker's faction's chain holds H); drx_sl_change_faction_dialog:
+	    coop_conditions_stock.dlg_cf_free (the change-faction lock is the player's own; its stock <dont_has_info> stays).
 	  gameplay\dialogs_lostzone_ll / _ms / _oa.xml: every dialog without a dialogs.actor_true_* precondition (the start and
 	    report dialogs of a faction leader have one) that gives an info or runs an action (it moves the story):
-	    coop_storyline.dlg_story_<ll|ms|oa> (the talker's faction owns that story). Greetings that change nothing stay open.
+	    coop_conditions_stock.dlg_story_<ll|ms|oa> (the talker's faction owns that story). Greetings that change nothing stay open.
 	Nothing happens on an exe without co-op.
 --]]
 
@@ -54,9 +55,9 @@ function gates_of(xml_file_name, xml_obj)
 		for _, d in ipairs(dialog_ids(xml_obj)) do
 			local id = d.id
 			if id:match("^drx_sl_.+_meet_dialog$") or id:match("^drx_sl_.+_game_start_dialog_%d+$") then
-				out[#out + 1] = { d = d, fn = "coop_storyline.dlg_leader" }
+				out[#out + 1] = { d = d, fn = "coop_conditions_stock.dlg_leader" }
 			elseif id == CF_DIALOG then
-				out[#out + 1] = { d = d, fn = "coop_storyline.dlg_cf_free" }
+				out[#out + 1] = { d = d, fn = "coop_conditions_stock.dlg_cf_free" }
 			end
 		end
 		return out
@@ -72,7 +73,7 @@ function gates_of(xml_file_name, xml_obj)
 		if not own then
 			local moves = #xml_obj:query("dialog[id=" .. d.id .. "] give_info") > 0
 				or #xml_obj:query("dialog[id=" .. d.id .. "] action") > 0
-			if moves then out[#out + 1] = { d = d, fn = "coop_storyline.dlg_story_" .. k } end
+			if moves then out[#out + 1] = { d = d, fn = "coop_conditions_stock.dlg_story_" .. k } end
 		end
 	end
 	return out

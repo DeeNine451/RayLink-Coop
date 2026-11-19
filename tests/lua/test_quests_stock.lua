@@ -55,7 +55,7 @@ local function fixture(name, set)
 			return name == "srv_world" and factions[char] or nil
 		end,
 	}
-	coop_storyline = {}
+	coop_conditions_stock = {} -- coop_tasks asks may_take of it (step S4: the server's storyline puts its own there)
 	actor.character_community = function() return foreign_community end
 	character_community = function(who) return who:character_community() end
 	IsStalker = function(o, cls) return cls == 123 or (o and o._kind == "stalker") end
@@ -170,7 +170,7 @@ local function check_issue(name)
 	check(not request_give(1), name .. ": issue rereads the claimant's placement during transfer")
 	rows[1].level = 6
 	check(request_give(1, true), name .. ": a placed claimant can take the engine task on the new map")
-	coop_storyline.may_take = function(id) return id ~= "prior_guard" end
+	coop_conditions_stock.may_take = function(id) return id ~= "prior_guard" end
 	check(not request_give(1, false, "prior_guard"), name .. ": earlier issue guards still apply")
 	local stats = coop_trust.status().task_top_10_take
 	check(stats and stats.failed == 3, name .. ": issue failures passed through trust")

@@ -490,8 +490,8 @@ local function rebind_living_fire()
 	if not fire.wrapped_hit then return end
 	C().swap_callback("npc_on_before_hit", fire.orig_hit, fire.wrapped_hit)
 	-- a coop_* wrapper is view: the hit relay of a map server's level does not find it by its domain
-	local far = C().mod("coop_quests_far")
-	if far then far.add_death_listener("npc_on_before_hit", fire.wrapped_hit) end
+	local qc = rawget(_G, "coop_quests_core") -- the Core keeps the list, a server's relay calls it (coop_srv_quests_far)
+	if qc and qc.add_death_listener then qc.add_death_listener("npc_on_before_hit", fire.wrapped_hit) end
 end
 
 local function on_kill_order()

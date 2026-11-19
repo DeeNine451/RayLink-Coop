@@ -117,6 +117,46 @@ function mod(name)
 end
 
 -------------------------------------------------------------------------------
+-- What the server's scripts hand in (step S4, docs\MODES.md section 4). The Core never names a server script (check_layers
+-- L3): a server script gives its part from coop_mode.when_srv, so in the co-op and in single player there is none, and
+-- every caller gives the stock answer without it. Registering below is the same in every process; only a server reads it.
+--   set_part(name, t) / part(name)      "far", "levels", "brain", "audience": that server script's functions, or nil
+--   share_up(name, get, set[, every])   a table a map server tells the world server: get() on a map server, set(value,
+--                                       level) on the world server; every: ms between two looks (the server's default)
+--   share_down(name, get, set[, every]) a table the world server tells the map servers: get() there, set(value) on one
+--   share() -> { up = share_up, down = share_down }                      the same two as one table (share.up(...))
+--   shared() -> { up = { [name] = { get, set, every } }, down = { ... } }   what the server's share carries
+--   add_death_listener(callback, f)     a coop script's handler for a death the world server hears from a map server
+--   death_listeners(callback) -> list   the handlers the server's death relay calls (coop_* are view, not by domain)
+-------------------------------------------------------------------------------
+local held = { parts = {}, up = {}, down = {}, deaths = {} }
+
+function set_part(name, t)
+	if type(name) ~= "string" then return end
+	held.parts[name] = type(t) == "table" and t or nil
+end
+
+function part(name) return held.parts[name] end
+
+function share_up(name, get, set, every) held.up[name] = { get = get, set = set, every = every } end
+function share_down(name, get, set, every) held.down[name] = { get = get, set = set, every = every } end
+function shared() return { up = held.up, down = held.down } end
+held.share = { up = share_up, down = share_down }
+function share() return held.share end
+
+function add_death_listener(callback, f)
+	local list = held.deaths[callback] or {}
+	held.deaths[callback] = list
+	list[#list + 1] = f
+end
+
+function death_listeners(callback)
+	local out = {}
+	for _, f in ipairs(held.deaths[callback] or {}) do out[#out + 1] = f end
+	return out
+end
+
+-------------------------------------------------------------------------------
 -- Nested codec: s<len>:<bytes> | n<number>; | T | F | { key value ... }
 -------------------------------------------------------------------------------
 local MAX_DEPTH = 8
@@ -272,6 +312,114 @@ function characters()
 	return out
 end
 
+-------------------------------------------------------------------------------
+-- What a record answers as a game object, { pos, lvid, gvid, id } (step S4: these were the methods of the stand-ins of the far view,
+-- coop_srv_quests_far, which a far body here asked in every mode). The far body below and the server's stand-ins ask it for what
+-- their own class has no method of. A method nobody needed yet answers nil and is logged once. A change (kill, info, relation, ...)
+-- is the far view's order to a map server: the server's stand-ins have their own; here (no far view) it changes nothing, as such an
+-- order never reached a map server before either.
+--   record_method(name)    the method of a record, or the logged nil one
+--   record_unknown(name)   the logged nil one (the server's item stand-ins)
+-------------------------------------------------------------------------------
+local record = {}
+local unknown_methods = { asked = {}, fns = {} }
+
+local function se_of(self) return alife_object(self[4]) end
+
+local function se_call(self, name, ...)
+	local se = se_of(self)
+	local f = se and se[name]
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, se, ...)
+	if ok then return v end
+	return nil
+end
+
+local function caller()
+	local info = debug.getinfo(3, "S")
+	local src = info and info.short_src or "?"
+	return src:match("([^\\/]+)%.script") or src
+end
+
+function record_unknown(name)
+	local f = unknown_methods.fns[name]
+	if f then return f end
+	f = function()
+		if not unknown_methods.asked[name] then
+			unknown_methods.asked[name] = true
+			printf("[coop] far: %s asked by %s", name, caller())
+		end
+		return nil
+	end
+	unknown_methods.fns[name] = f
+	return f
+end
+
+function record_method(name)
+	return rawget(record, name) or record_unknown(name)
+end
+
+function record:section() return se_call(self, "section_name") end
+function record:section_name() return se_call(self, "section_name") end
+function record:name() return se_call(self, "name") end
+function record:clsid() return se_call(self, "clsid") end
+function record:community() return se_call(self, "community") end
+function record:character_community() return se_call(self, "community") end
+function record:character_name() return se_call(self, "character_name") end
+function record:character_icon() return se_call(self, "character_icon") end
+function record:character_rank() return se_call(self, "rank") end
+function record:character_reputation() return se_call(self, "reputation") end
+function record:commander_id() return se_call(self, "commander_id") end
+function record:squad_members() return se_call(self, "squad_members") end
+function record:parent()
+	local se = se_of(self)
+	local pid = se and se.parent_id
+	return pid and pid ~= 65535 and body_for_character(pid) or nil
+end
+function record:alive()
+	local se = se_of(self)
+	if not se then return false end
+	local f = se.alive
+	if type(f) ~= "function" then return true end
+	local ok, v = pcall(f, se)
+	return not ok or v ~= false
+end
+function record:has_info(name)
+	local ok, v = pcall(function() return alife():has_info(self[4], name) end)
+	return ok and v == true
+end
+function record:dont_has_info(name) return not self:has_info(name) end
+function record:is_talking() return false end
+function record:is_stalker() return true end
+-- what the task scripts ask most, by a scan of tasks_*, task_functor and task_status_functor: a record has no answer to these, nil is the true one
+function record:active_item() return nil end -- a record knows no hand (the far view keeps the last one a hit said)
+function record:best_enemy() return nil end
+function record:best_weapon() return nil end
+function record:item_in_slot() return nil end
+function record:active_detector() return nil end
+function record:iterate_belt() end
+function record:condition() return 1 end
+function record:get_visual_name() return se_call(self, "get_visual_name") or se_call(self, "visual") end
+function record:see() return false end
+function record:direction() return vector():set(0, 0, 1) end
+function record:bone_position() return self[1] end
+function record:distance_to_sqr(o) return self[1]:distance_to_sqr(o) end
+function record:relation(who) return game_object and game_object.neutral or 1 end
+function record:money() return se_call(self, "money") or 0 end
+-- the changes: without a far view nothing carries them anywhere
+function record:kill(who) end
+function record:give_info_portion(name) return true end
+function record:disable_info_portion(name) end
+function record:set_relation(rel, who) end
+function record:force_set_goodwill(v, who) end
+function record:set_community_goodwill(comm, v) end
+function record:set_character_community(comm, rank, rep) end
+function record:set_health_ex(v) end
+function record:give_money(n) end
+function record:set_npc_position(pos) end
+function record:force_set_position(pos) end
+function record:hit(h) end
+
 -- A player on another level has no game object here. On the world server (and on every machine, each keeps the same registry) his
 -- record stands for him: the map server of his level reports his place every second and every item that changes hands. far_body is
 -- what the task code asks of a character, asked of those records. It also is a place for the stock create_item: { pos, lvid, gvid, id }.
@@ -282,13 +430,15 @@ function far_item_class:section() return self.item_section end
 function far_item_class:condition() return self.item_condition end
 function far_item_class:get_remaining_uses() return tonumber(ini_sys:r_float_ex(self.item_section, "max_uses")) or 1 end -- no record has them
 
--- What a record has no answer to goes where a stand-in of an NPC goes: coop_quests_far, a method nobody needed yet is logged once.
+-- What a record has no answer to goes where a stand-in of an NPC goes: the server's far view (part "far": its stand-ins change
+-- things by orders), else the record's answers above; a method nobody needed yet is logged once.
 local far_body_class = {}
 far_body_class.__index = function(_, k)
 	local m = rawget(far_body_class, k)
 	if m ~= nil then return m end
-	local far = rawget(_G, "coop_quests_far") or coop_quests_far
-	return far and far.fallback and far.fallback(k) or nil
+	local far = part("far")
+	if far and far.fallback then return far.fallback(k) end
+	return record_method(k)
 end
 function far_body_class:id() return self[4] end
 function far_body_class:position() return self[1] end
@@ -438,7 +588,7 @@ function avatar_obj(peer)
 end
 
 -------------------------------------------------------------------------------
--- The far view (coop_quests_far): what the stock reads of the level it stands on, for one call
+-- The far view (the server's part "far", coop_srv_quests_far): what the stock reads of the level it stands on, for one call
 -------------------------------------------------------------------------------
 -- Installed when this script loads: before tasks_* do, one of them keeps level.object_by_id in a local. Out of a scope they are the stock's.
 local far_view = nil
@@ -502,9 +652,9 @@ local function install_sim_view()
 	end
 end
 
-local function far_mod() return rawget(_G, "coop_quests_far") or coop_quests_far end
+local function far_mod() return part("far") end
 
--- fn on the level of a player (coop_quests_far.with_level_of); the world server's own level, or no split levels: fn as it is.
+-- fn on the level of a player (the far view's with_level_of); the world server's own level, or no split levels: fn as it is.
 function with_level_of(peer, fn, ...)
 	local far = far_mod()
 	if not far then return fn(...) end
@@ -688,12 +838,17 @@ function print_status()
 	for _ in pairs(actions) do n = n + 1 end
 	log("core", "host actions: %d registered, sent %d, run %d, refused %d | lua errors %d",
 		n, action_stats.out, action_stats.in_, action_stats.refused, errors)
-	for _, name in ipairs({ "coop_quests_offer", "coop_quests_party", "coop_quests_story", "coop_quests_missions", "coop_quests_pda", "coop_quests_news", "coop_quests_far" }) do
+	for _, name in ipairs({ "coop_quests_offer", "coop_quests_party", "coop_quests_story", "coop_quests_missions", "coop_quests_pda", "coop_quests_news" }) do
 		local m = rawget(_G, name)
 		if type(m) == "table" and type(m.print_status) == "function" then
 			local ok, err = pcall(m.print_status)
 			if not ok then report("core", name .. ".print_status", err) end
 		end
+	end
+	local far = part("far") -- a server's far view
+	if far and type(far.print_status) == "function" then
+		local ok, err = pcall(far.print_status)
+		if not ok then report("core", "far.print_status", err) end
 	end
 end
 

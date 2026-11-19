@@ -228,15 +228,16 @@ print("== quest_take: a task the player may not see")
 do
 	Hm.tm.task_info.secret_t = { id = "secret_t", stage = 0 }
 	Hm.env.save_var(Hm.actor, "secret_t_fetch", "secret_doc")
-	Hm.env.coop_task_audience = {
+	-- a server's task audience, as the Core gets it (coop_quests_core.part "audience", step S4)
+	Hm.env.coop_quests_core.set_part("audience", {
 		record = function(id) if id == "secret_t" then return { t = 999, inn = { [999] = true } } end end,
 		sees_character = function(id, c) if id == "secret_t" then return c == 999 end return true end,
-	}
+	})
 	Hm.give_item(Hm.actor, "secret_doc")
 	local before = trust_lines(Hm, "quest_take")
 	ask("take", { s = "secret_doc", n = 1 })
 	check(trust_lines(Hm, "quest_take") == before + 1, "a task out of his audience asks for it: logged")
-	Hm.env.coop_task_audience = nil
+	Hm.env.coop_quests_core.set_part("audience", nil)
 end
 
 print("== quest_take: refuse mode stops the take")

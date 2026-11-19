@@ -531,7 +531,10 @@ do
 	E.HIS_LEVEL = 2
 	E.level._coop_far_view = nil
 	E.coop_quests_core = load_script(H, "coop_quests_core") -- its far view stands over this level.name
-	E.coop_quests_far = load_script(H, "coop_quests_far")
+	E.coop_srv_quests_far = load_script(H, "coop_srv_quests_far")
+	-- step S4: the far view starts from coop_mode.when_srv; this world server's server layer answers (split levels)
+	E.coop_srv_quests_far.coop_mode = { when_srv = function(fn) fn() return true end }
+	E.coop_srv_quests_far.on_game_start()
 	local passes = {}
 	E.task_status_functor.hold_the_ground_task_status_functor = function(tsk)
 		passes[#passes + 1] = { E.level.name(), E.db.actor:id() }

@@ -1,6 +1,9 @@
+-- Сервер (srv): кто видит задание в мире с картами по серверам (docs/MODES.md)
 --[[
-	Anomaly Coop - who sees a task in a world with split levels (gamedata\scripts\coop_task_audience.script).
-	Plan docs\plans\2026-11-16-task-audience.md, section A. Test: tests\lua\test_task_audience.lua. Host (world server) only.
+	Anomaly Coop - who sees a task in a world with split levels (gamedata\scripts\coop_srv_task_audience.script, coop_task_audience
+	before step S4). Plan docs\plans\2026-11-16-task-audience.md, section A. Test: tests\lua\test_srv_task_audience.lua. World server
+	only. Its callbacks, its save and its part for the Core (coop_quests_core.part("audience"): coop_tasks, coop_quests_trust) come
+	from coop_mode.when_srv: in the co-op there is no part, and every task is everybody's.
 
 	In a split-levels world players may be in different factions. When a task is given it gets an AUDIENCE: the characters
 	who see it. Decided once, per character, kept for the task's life:
@@ -8,7 +11,7 @@
 	    relation_registry.community_relation(giver faction, true faction of X) + community_goodwill(giver faction, X)
 	    <= game_relations.ENEMIES (-1000, stock game_relations.script:34-36, 603). The taker is always in. A task with no giver,
 	    or a giver whose faction cannot be told (no object, a monster, an unknown community), gets NO record.
-	  - storyline task (drx_sl_*, lttz_*): in iff the character's true faction is the task's (coop_storyline.owner_of_task, else
+	  - storyline task (drx_sl_*, lttz_*): in iff the character's true faction is the task's (coop_srv_storyline.owner_of_task, else
 	    the taker's). The taker is in.
 	  - change-faction task (drx_sl_*_cf_task_*): the taker alone.
 	A character who joins later is judged at his first sync for the tasks that exist then; a faction change re-judges only
@@ -113,7 +116,7 @@ function classify(id)
 		return "story"
 	end
 	if id:find("^lttz_") then return "story" end
-	-- the Brain Scorcher pair (coop_scorcher.script): Monolith's own task, taken by a Monolith player
+	-- the Brain Scorcher pair (coop_srv_scorcher.script): Monolith's own task, taken by a Monolith player
 	if id:find("^coop_scorcher_") then return "story" end
 	return "side"
 end
@@ -253,7 +256,7 @@ function on_give(id, giver, taker)
 			return
 		end
 	elseif kind == "story" then
-		local sl = mod("coop_storyline")
+		local sl = mod("coop_srv_storyline")
 		local f = sl and call(sl.owner_of_task, id)
 		rec.sf = type(f) == "string" and f ~= "" and f or (rec.t and true_faction(rec.t)) or nil
 		if not rec.sf then
@@ -415,18 +418,6 @@ local function load_state(m_data)
 	need_push = next(aud) ~= nil
 end
 
-local function listen()
-	if listening then return end
-	listening = true
-	-- coop_faction declares it too: the second declaration is a warning with a stack traceback in every log (coop_route.declare)
-	local okr, route = pcall(function() return coop_route end)
-	if not (okr and type(route) == "table" and type(route.declare) == "function" and pcall(route.declare, CHANGED)) then
-		local add = rawget(_G, "AddScriptCallback") or AddScriptCallback
-		if type(add) == "function" then pcall(add, CHANGED) end
-	end
-	RegisterScriptCallback(CHANGED, on_faction_changed)
-end
-
 -- The engine's table is empty after a load (story::reset) and whenever a session starts: everything is pushed again on the
 -- first tick after a load and whenever this module goes from off to on (a session started again without a reload).
 local function actor_on_update()
@@ -457,13 +448,47 @@ end
 
 function on_game_start()
 	if not api then return end
-	RegisterScriptCallback("save_state", save_state)
-	RegisterScriptCallback("load_state", load_state)
-	RegisterScriptCallback("actor_on_update", actor_on_update)
-	-- coop_faction declares its callback in its own on_game_start: listen once the game runs, whatever the order of scripts
-	RegisterScriptCallback("actor_on_first_update", listen)
 	if not engine_ok() then
 		said_off = true
 		log("the engine has no coop.story_task_audience: every task is shown to everybody")
 	end
+	coop_mode.when_srv(function()
+		-- fn at the actor's first update, also when that was over before this process's server layer answered (the world
+		-- server's session starts after its world is up): then at the next update
+		local function at_first_update(fn)
+			local seen = false
+			local function late()
+				UnregisterScriptCallback("actor_on_update", late)
+				if not seen then fn() end
+			end
+			RegisterScriptCallback("actor_on_first_update", function()
+				seen = true
+				fn()
+			end)
+			RegisterScriptCallback("actor_on_update", late)
+		end
+
+		local function listen()
+			if listening then return end
+			listening = true
+			-- coop_faction declares it too: the second declaration is a warning with a stack traceback in every log (coop_route.declare)
+			local okr, route = pcall(function() return coop_route end)
+			if not (okr and type(route) == "table" and type(route.declare) == "function" and pcall(route.declare, CHANGED)) then
+				local add = rawget(_G, "AddScriptCallback") or AddScriptCallback
+				if type(add) == "function" then pcall(add, CHANGED) end
+			end
+			RegisterScriptCallback(CHANGED, on_faction_changed)
+		end
+
+		RegisterScriptCallback("save_state", save_state)
+		RegisterScriptCallback("load_state", load_state)
+		-- the world server loads its save before its session starts, and so before this: what that save brought
+		local asm = rawget(_G, "alife_storage_manager")
+		local m = asm and type(asm.get_state) == "function" and asm.get_state() or nil
+		if type(m) == "table" then load_state(m) end
+		RegisterScriptCallback("actor_on_update", actor_on_update)
+		-- coop_faction declares its callback in its own on_game_start: listen once the game runs, whatever the order of scripts
+		at_first_update(listen)
+		coop_quests_core.set_part("audience", coop_srv_task_audience)
+	end)
 end

@@ -236,7 +236,9 @@ local function machine(self_peer, opts)
 		}
 	end
 	env.coop_core_chat = { system = function(text) M.feed[#M.feed + 1] = text end }
-	env.coop_levels = { map_of = function(peer) return M.maps and M.maps[peer] or nil end }
+	-- a server's level names, as the Core gets them (coop_quests_core.part "levels", step S4)
+	local levels = { map_of = function(peer) return M.maps and M.maps[peer] or nil end }
+	env.coop_quests_core = { part = function(name) return name == "levels" and levels or nil end }
 	env.coop_hud_markers = {
 		add_source = function(name, fn, every) M.sources[name] = { fn = fn, every = every } return true end,
 	}

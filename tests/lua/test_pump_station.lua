@@ -76,7 +76,7 @@ local function stock_psd(M)
 	return psd
 end
 
-local SCRIPTS = { "coop_quests_core", "coop_levels_share", "coop_quests_far", "coop_tasks", "coop_quests_party" }
+local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_tasks", "coop_quests_party" }
 
 local function boot(M)
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end

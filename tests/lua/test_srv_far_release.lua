@@ -1,9 +1,10 @@
--- Split levels: a task's release of what a map server holds, by the ways coop_quests_far did not see: alife():release in the far view
+-- Split levels: a task's release of what a map server holds, by the ways coop_srv_quests_far did not see: alife():release in the far view
 -- (tasks_recover_item_on_corpse, utils_slht), safe_release_manager.release({ id = N }) (tasks_intercept_artifact, tasks_nta_stash,
--- tasks_veh_destroy), an item in a body the map server holds. Run: tools\test_lua.cmd far_release
+-- tasks_veh_destroy), an item in a body the map server holds. Step S4: coop_srv_quests_far starts from coop_mode.when_srv only;
+-- in the co-op it patches nothing, swaps nothing and gives the Core no far view. Run: tools\test_lua.cmd srv_far_release
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_levels_share", "coop_quests_far" }
+local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far" }
 local BRIDGE = 0x101
 local LEVEL_NAMES = { "l01_escape", "jupiter" }
 
@@ -108,6 +109,49 @@ Hm.env.alife_release(records[720])
 pump()
 check(has(Ms.srm_released, 720), "it is held with the body: the map server releases it")
 check(not has(Hm.sim_released, 720), "not the world server")
+
+print("== S4: the death relay calls the handlers the Core keeps (coop_quests_core.add_death_listener)")
+do
+	local heard = {}
+	Hm.env.coop_quests_core.add_death_listener("npc_on_death_callback", function(victim, killer)
+		heard[#heard + 1] = { victim = victim and victim:id(), far = victim and victim.far, killer = killer }
+	end)
+	Hm.env.IsMonster = function() return false end
+	rec(760, 2, false)
+	Hm.env.coop_srv_quests_far.on_death(760, 65535)
+	check(#heard == 1 and heard[1].victim == 760 and heard[1].far == true and heard[1].killer == nil,
+		"a death on the map server's level: the coop script's handler hears it, with a stand-in")
+	Hm.env.coop_srv_quests_far.on_death(760, 65535)
+	check(#heard == 1, "the same death twice is heard once")
+end
+
+print("== S4: the co-op host: the far view's script is there and does nothing")
+do
+	local C = machine("host", 0)
+	C.my_level = 1
+	world(C)
+	C.env.coop.levels.split = function() return false end
+	C.env.coop.is_map_server = function() return false end
+	local stock_release = function(se) end
+	C.env.alife_release = stock_release
+	local stock_alife = C.env.alife
+	for _, n in ipairs(SCRIPTS) do load_script(C, n) end
+	for _, n in ipairs(SCRIPTS) do
+		local m = C.env[n]
+		if m.on_game_start then m.on_game_start() end
+	end
+	fire(C, "actor_on_first_update")
+	tick(C)
+	local qc, far = C.env.coop_quests_core, C.env.coop_srv_quests_far
+	check(#C.srv_waiting == 2 and qc.part("far") == nil, "its when_srv and the share's wait; the Core has no far view")
+	check(C.env.alife_release == stock_release and C.env.alife == stock_alife and C.env.safe_release_manager.release ~= nil
+		and C.callbacks.actor_on_update == nil and C.handlers["quests.far_do"] == nil,
+		"nothing of the stock is wrapped, no callback, no event")
+	local ran = 0
+	check(qc.with_level_of(1, function(x) ran = ran + x return "same" end, 2) == "same" and ran == 2, "qc.with_level_of runs fn as it is")
+	check(far.with_level_of(1, function() return "here" end) == "here" and far.in_scope() == nil,
+		"and the far view itself opens no scope: it swaps no global without the server layer")
+end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

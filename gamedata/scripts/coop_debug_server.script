@@ -14,7 +14,8 @@
 
 	Where (coop_debug_cmds .where): ws - here. player_level - the authority of the player's level: here when this process leads it
 	(P.player(peer).here), else coop.dbg.run to the bridge of his level. target_level - the authority of the object's level: here, or
-	for kill / release the far order of coop_quests_far (quests.far_do, it retries and falls back to the record), else coop.dbg.run.
+	for kill / release the far order of the far view (coop_srv_quests_far: quests.far_do, it retries and falls back to the record), else
+	coop.dbg.run.
 	A squad or an object at a smart: the authority of the smart's level when players stand there, else the WS makes it offline.
 
 	Events (flat tables, coop_main.encode):
@@ -122,8 +123,14 @@ local function bridge_of_level(lid)
 	return nil
 end
 
+-- the server's far view (coop_quests_core.part "far", coop_srv_quests_far), nil in the co-op
+local function far_part()
+	local qc = rawget(_G, "coop_quests_core")
+	return qc and qc.part and qc.part("far") or nil
+end
+
 local function level_of_object(id)
-	local far = rawget(_G, "coop_quests_far") or coop_quests_far
+	local far = far_part()
 	if far and far.level_of_id then return call(far.level_of_id, id) end
 	return nil
 end
@@ -343,7 +350,7 @@ local function dispatch(c, id, a, peer, requester, by)
 		local bridge = bridge_of_level(lid)
 		if c.far then
 			-- a map server's object: kill and release go as the far order (quests.far_do); it falls back to the record
-			local far = rawget(_G, "coop_quests_far") or coop_quests_far
+			local far = far_part()
 			if not (far and far.order and far.order(a.t, c.far)) then return false, "failed" end
 			return true, { msg = fmt("%s %s ordered", id, tostring(a.t)) }
 		end

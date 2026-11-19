@@ -1,6 +1,10 @@
+-- Сервер (srv): своя цепочка сюжетных заданий DRX у каждой фракции в мире с картами по серверам (docs/MODES.md)
 --[[
-	Anomaly Coop - one DRX questlines chain per faction (gamedata\scripts\coop_storyline.script)
-	Plan: docs\plans\2026-11-16-storylines-per-faction.md, sections 1-2, stage 2.
+	Anomaly Coop - one DRX questlines chain per faction (gamedata\scripts\coop_srv_storyline.script, coop_storyline before step S4)
+	Plan: docs\plans\2026-11-16-storylines-per-faction.md, sections 1-2, stage 2. Its callbacks, events, wrappers and its writes into
+	the stock's globals and the save start from coop_mode.when_srv only. The dialog gates and coop_tasks' questions are functions
+	of coop_conditions_stock (the stock answers there); this script puts its own over them from when_srv. A world played without
+	per-faction chains gets the stock keys back in coop_conditions_stock (the co-op host's first update), not here.
 
 	"Chains on" = split mode (coop_faction.split_mode(): a live session with split levels) AND story mode (_g IsStoryMode).
 	Everything below is a no-op otherwise: single player, a group world (no split levels) and sandbox run the stock code,
@@ -40,21 +44,23 @@
 	    sender from the transport, uses HIS faction, checks the leader's claim and the task's owner, rate-limits, and refuses
 	    anything else with one log line.
 
-	For other scripts:
-		coop_storyline.chains_on() -> bool
-		coop_storyline.with_chain(faction, fn, ...) -> fn's results   (authority with chains on; else fn(...) as it is)
-		coop_storyline.owner_of_task(task_id) -> faction | nil          (authority with chains on; nil elsewhere)
-		coop_storyline.claim_of(honcho) -> faction | nil                (authority with chains on; nil elsewhere)
-		coop_storyline.has_chain(faction) -> bool                       (authority with chains on)
-		coop_storyline.setup_chain(faction) -> bool, cancel_chain(faction) -> bool   (authority with chains on)
-		coop_storyline.meet_random_honcho(faction)                      (authority, inside or outside with_chain)
-		coop_storyline.run_for_task(task_id, peer, fn, ...)             (authority: fn under the task's owner, else peer's faction)
-		coop_storyline.client_may_write(key) -> bool                    (authority: may a client's coop_tvd write this pstor key)
-		coop_storyline.may_take(task_id, peer) -> bool                  (authority: may this player take this task; for coop_tasks)
+	For other scripts (the server's; the Core asks coop_conditions_stock):
+		coop_srv_storyline.chains_on() -> bool
+		coop_srv_storyline.with_chain(faction, fn, ...) -> fn's results   (authority with chains on; else fn(...) as it is)
+		coop_srv_storyline.owner_of_task(task_id) -> faction | nil          (authority with chains on; nil elsewhere)
+		coop_srv_storyline.claim_of(honcho) -> faction | nil                (authority with chains on; nil elsewhere)
+		coop_srv_storyline.has_chain(faction) -> bool                       (authority with chains on)
+		coop_srv_storyline.setup_chain(faction) -> bool, cancel_chain(faction) -> bool   (authority with chains on)
+		coop_srv_storyline.meet_random_honcho(faction)                      (authority, inside or outside with_chain)
+		coop_srv_storyline.run_for_task(task_id, peer, fn, ...)             (authority: fn under the task's owner, else peer's faction)
+		coop_srv_storyline.client_may_write(key) -> bool                    (authority: may a client's coop_tvd write this pstor key)
+		coop_srv_storyline.may_take(task_id, peer) -> bool                  (authority: may this player take this task; for coop_tasks)
+	  coop_tasks asks the last two as coop_conditions_stock.client_may_write / may_take: these go over them from when_srv.
 	Stage 3 (dialog gates, readers) and 4 (main stories), see their sections below:
-		dlg_leader / dlg_cf_free / dlg_story_ll / dlg_story_ms / dlg_story_oa: DXML preconditions (modxml_coop_storyline)
+		dlg_leader / dlg_cf_free / dlg_story_ll / dlg_story_ms / dlg_story_oa: DXML preconditions (modxml_coop_storyline names
+		coop_conditions_stock's; these go over them from when_srv)
 		owner_of_task(lttz_ll_* / lttz_ms_* / lttz_oa_*) = the faction that started that story, lttz_hb_* = isg
-	Not here: the Brain Scorcher (stage 5, coop_scorcher: its ending_ok(faction) is used by the ending test when present).
+	Not here: the Brain Scorcher (stage 5, coop_srv_scorcher: its ending_ok(faction) is used by the ending test when present).
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
@@ -157,14 +163,17 @@ local function m_data()
 	return type(m) == "table" and m or nil
 end
 
+-- m[STORE] = s: the record goes into the save (from coop_mode.when_srv, on_game_start: nil in the co-op, which records nothing)
+local put_store = nil
+
 local function store(create)
 	local m = m_data()
 	if not m then return nil end
 	local s = m[STORE]
 	if type(s) ~= "table" then
-		if not create then return nil end
+		if not (create and put_store) then return nil end
 		s = {}
-		m[STORE] = s
+		put_store(m, s)
 	end
 	if type(s.chains) ~= "table" then s.chains = {} end
 	if type(s.owner) ~= "table" then s.owner = {} end
@@ -571,23 +580,7 @@ local function migrate(s)
 	end
 end
 
--- a world once played with split levels, now without: the world faction's chain goes back to the bare keys the stock reads
-local function unmigrate()
-	local s = store(false)
-	if not (s and s.migrated) then return end
-	local w = world_faction()
-	local ps = raw_pstor()
-	if not (w and ps) then return end
-	for _, k in ipairs(KEY_LIST) do
-		local v = ps[k .. "@" .. w]
-		if v ~= nil and ps[k] == nil then ps[k] = v end
-		-- gone: the bare keys are the chain now; a later migrate (split levels again) takes them, not a stale copy
-		ps[k .. "@" .. w] = nil
-	end
-	s.migrated = false
-	s.chains[w] = nil
-	log("no split levels: the %s chain is the world's chain again", w)
-end
+-- A world once played with split levels, now without: the stock keys come back in coop_conditions_stock (unmigrate there).
 
 local function ensure_chains()
 	local s = store(true)
@@ -699,33 +692,9 @@ local function send_req(t)
 end
 
 -- the stock dialog function on a client with its own chain read (the authority's mirror of "<key>@<own faction>") and no
--- chain write: the five keys and drx_sl_meet_honcho_* infos are swallowed, what the stock wanted is returned
-local function client_run(fn, ...)
-	local captured = {}
-	local prev_scope, prev_save, prev_dis = scope, _G.save_var, _G.disable_info
-	scope = { f = own_faction(), ro = true }
-	_G.save_var = function(obj, k, v)
-		if KEYS[k] and is_actor(obj) then
-			captured[k] = v
-			stats.dropped = stats.dropped + 1
-			return
-		end
-		return prev_save(obj, k, v)
-	end
-	_G.disable_info = function(info)
-		if type(info) == "string" and info:sub(1, 19) == "drx_sl_meet_honcho_" then
-			captured.info = info
-			return
-		end
-		return prev_dis(info)
-	end
-	fin_depth = fin_depth + 1
-	local res = { pcall(fn, ...) }
-	fin_depth = fin_depth - 1
-	scope, _G.save_var, _G.disable_info = prev_scope, prev_save, prev_dis
-	if not res[1] then error(res[2], 0) end
-	return captured
-end
+-- chain write: the five keys and drx_sl_meet_honcho_* infos are swallowed, what the stock wanted is returned.
+-- client_run(fn, ...) -> captured; it swaps the stock's save_var / disable_info, so it is made in on_game_start's when_srv
+local client_run = nil
 
 -------------------------------------------------------------------------------
 -- Authority: a client's request
@@ -956,9 +925,9 @@ local function finished_body(npc, is_sim, mine)
 	end
 end
 
--- the ending's Brain Scorcher rule: coop_scorcher.ending_ok(faction) when the pilot is there, else the stock info test
+-- the ending's Brain Scorcher rule: coop_srv_scorcher.ending_ok(faction) when the pilot is there, else the stock info test
 local function scorcher_ok(f)
-	local sc = mod("coop_scorcher")
+	local sc = mod("coop_srv_scorcher")
 	if sc and type(sc.ending_ok) == "function" and known(f) then
 		local ok, yes = pcall(sc.ending_ok, f)
 		return ok and yes == true
@@ -1007,20 +976,7 @@ local function cf_lock_tick(s)
 	end
 end
 
--- a world played without split levels again: the stock lock comes back while a cf task is open
-local function cf_lock_restore()
-	local s = store(false)
-	if not (s and s.cf_moved) then return end
-	s.cf_moved = nil
-	local ti = task_info() or {}
-	for id in pairs(ti) do
-		if type(id) == "string" and id:sub(1, 7) == "drx_sl_" and id:find("_cf_task_", 1, true) then
-			give_info(CF_INFO)
-			log("no split levels: the change-faction lock is the world's again")
-			return
-		end
-	end
-end
+-- A world played without split levels again: the stock lock comes back in coop_conditions_stock (cf_lock_restore there).
 
 -------------------------------------------------------------------------------
 -- Stage 4: a main story has an owner
@@ -1040,7 +996,7 @@ local function story_gate(k)
 end
 
 -- DXML preconditions of the middle dialogs of LL / MS / OA (modxml_coop_storyline): the story's owner's faction only.
--- Authority twin: coop_storyline.may_take refuses an lttz_* task to a player of another faction (a line for coop_tasks).
+-- Authority twin: coop_srv_storyline.may_take refuses an lttz_* task to a player of another faction (a line for coop_tasks).
 function dlg_story_ll(a, b) return story_gate("ll") end
 function dlg_story_ms(a, b) return story_gate("ms") end
 function dlg_story_oa(a, b) return story_gate("oa") end
@@ -1375,15 +1331,8 @@ local function wrap_task_callback()
 	end
 end
 
-local function install_vars()
-	local l, s = rawget(_G, "load_var"), rawget(_G, "save_var")
-	if type(l) ~= "function" or type(s) ~= "function" then
-		log("! load_var / save_var not found: the chains are not kept apart")
-		return
-	end
-	stock.load_var, stock.save_var = l, s
-	_G.load_var, _G.save_var = wrapped_load, wrapped_save
-end
+-- the global load_var / save_var become the chains' (made in on_game_start's when_srv: it writes the stock's globals)
+local install_vars = nil
 
 local function step(what, f)
 	local ok, err = pcall(f)
@@ -1407,23 +1356,10 @@ end
 -------------------------------------------------------------------------------
 -- Start
 -------------------------------------------------------------------------------
-local changed_registered = false
 local function first_update()
-	-- here, not in on_game_start: coop_faction declares the callback in its on_game_start (a callback registered before it is
-	-- declared is dropped by axr_main)
-	if not changed_registered then
-		changed_registered = true
-		RegisterScriptCallback("coop_faction_changed", function(...)
-			local ok, err = pcall(on_faction_changed, ...)
-			if not ok then log("! faction change: %s", tostring(err)) end
-		end)
-	end
 	if split_mode() and story() then
 		install()
 		next_tick = now() + FIRST_TICK_MS
-	elseif authority() and active() and not split_mode() then
-		unmigrate()
-		cf_lock_restore()
 	end
 end
 
@@ -1443,47 +1379,118 @@ local function save_state(m)
 	sweep()
 end
 
-local function register_events()
-	local cm = mod("coop_main")
-	if not (cm and cm.add_event_handler) then
-		log("! coop_main.add_event_handler not found: a client's chain requests are not handled")
-		return
-	end
-	cm.add_event_handler(EV_REQ, function(payload, from)
-		local ok, err = pcall(host_on_req, payload, from)
-		if not ok then
-			stats.errors = stats.errors + 1
-			log("! a chain request: %s", tostring(err))
-		end
-	end)
-	cm.add_event_handler(EV_NEWS, function(payload, from)
-		local ok, err = pcall(client_on_news, payload, from)
-		if not ok then log("! a news line: %s", tostring(err)) end
-	end)
-end
-
 function print_status()
 	log("chains on %s, chains %s | scoped %d, requests %d, refused %d, advanced %d, set up %d, migrated %d, client writes dropped %d, errors %d",
 		tostring(chains_on()), table.concat(chain_list(), ","), stats.scoped, stats.requests, stats.refused, stats.advanced,
 		stats.setups, stats.migrated, stats.dropped, stats.errors)
 end
 
+-- Everything that registers or writes the stock's globals and the save runs from coop_mode.when_srv: nothing of it in the co-op.
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop (W5)
 function on_game_start()
 	if not api then return end
-	step("events", register_events)
-	step("callbacks", function()
-		RegisterScriptCallback("actor_on_first_update", function()
-			local ok, err = pcall(first_update)
-			if not ok then log("! first update: %s", tostring(err)) end
-		end)
-		RegisterScriptCallback("actor_on_update", function()
-			local ok, err = pcall(on_update)
-			if not ok then
-				stats.errors = stats.errors + 1
-				log("! tick: %s", tostring(err))
+	coop_mode.when_srv(function()
+		-- fn at the actor's first update, also when that was over before this process's server layer answered (the world
+		-- server's session starts after its world is up): then at the next update
+		local function at_first_update(fn)
+			local seen = false
+			local function late()
+				UnregisterScriptCallback("actor_on_update", late)
+				if not seen then fn() end
 			end
+			RegisterScriptCallback("actor_on_first_update", function()
+				seen = true
+				fn()
+			end)
+			RegisterScriptCallback("actor_on_update", late)
+		end
+
+		put_store = function(m, s) m[STORE] = s end
+
+		client_run = function(fn, ...)
+			local captured = {}
+			local prev_scope, prev_save, prev_dis = scope, _G.save_var, _G.disable_info
+			scope = { f = own_faction(), ro = true }
+			_G.save_var = function(obj, k, v)
+				if KEYS[k] and is_actor(obj) then
+					captured[k] = v
+					stats.dropped = stats.dropped + 1
+					return
+				end
+				return prev_save(obj, k, v)
+			end
+			_G.disable_info = function(info)
+				if type(info) == "string" and info:sub(1, 19) == "drx_sl_meet_honcho_" then
+					captured.info = info
+					return
+				end
+				return prev_dis(info)
+			end
+			fin_depth = fin_depth + 1
+			local res = { pcall(fn, ...) }
+			fin_depth = fin_depth - 1
+			scope, _G.save_var, _G.disable_info = prev_scope, prev_save, prev_dis
+			if not res[1] then error(res[2], 0) end
+			return captured
+		end
+
+		install_vars = function()
+			local l, s = rawget(_G, "load_var"), rawget(_G, "save_var")
+			if type(l) ~= "function" or type(s) ~= "function" then
+				log("! load_var / save_var not found: the chains are not kept apart")
+				return
+			end
+			stock.load_var, stock.save_var = l, s
+			_G.load_var, _G.save_var = wrapped_load, wrapped_save
+		end
+
+		-- the dialog gates (modxml_coop_storyline) and coop_tasks' questions name coop_conditions_stock's functions
+		local cs = rawget(_G, "coop_conditions_stock") or coop_conditions_stock
+		cs.dlg_leader, cs.dlg_cf_free = dlg_leader, dlg_cf_free
+		cs.dlg_story_ll, cs.dlg_story_ms, cs.dlg_story_oa = dlg_story_ll, dlg_story_ms, dlg_story_oa
+		cs.client_may_write, cs.may_take = client_may_write, may_take
+
+		step("events", function()
+			local cm = mod("coop_main")
+			if not (cm and cm.add_event_handler) then
+				log("! coop_main.add_event_handler not found: a client's chain requests are not handled")
+				return
+			end
+			cm.add_event_handler(EV_REQ, function(payload, from)
+				local ok, err = pcall(host_on_req, payload, from)
+				if not ok then
+					stats.errors = stats.errors + 1
+					log("! a chain request: %s", tostring(err))
+				end
+			end)
+			cm.add_event_handler(EV_NEWS, function(payload, from)
+				local ok, err = pcall(client_on_news, payload, from)
+				if not ok then log("! a news line: %s", tostring(err)) end
+			end)
 		end)
-		RegisterScriptCallback("save_state", save_state)
+		step("callbacks", function()
+			local changed_registered = false
+			at_first_update(function()
+				-- here, not at once: coop_faction declares the callback in its on_game_start (a callback registered before it is
+				-- declared is dropped by axr_main)
+				if not changed_registered then
+					changed_registered = true
+					RegisterScriptCallback("coop_faction_changed", function(...)
+						local ok, err = pcall(on_faction_changed, ...)
+						if not ok then log("! faction change: %s", tostring(err)) end
+					end)
+				end
+				local ok, err = pcall(first_update)
+				if not ok then log("! first update: %s", tostring(err)) end
+			end)
+			RegisterScriptCallback("actor_on_update", function()
+				local ok, err = pcall(on_update)
+				if not ok then
+					stats.errors = stats.errors + 1
+					log("! tick: %s", tostring(err))
+				end
+			end)
+			RegisterScriptCallback("save_state", save_state)
+		end)
 	end)
 end

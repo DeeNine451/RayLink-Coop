@@ -784,10 +784,11 @@ print("== the leaders of a map server's level: into the save, onto a new map ser
 do
 	local function share_env(M)
 		M.share = { up = {}, down = {} }
-		M.env.coop_levels_share = {
+		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
+		M.env.coop_quests_core = { share = function() return {
 			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
 			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		}
+		} end }
 	end
 	local W = stand({ dedicated = true, env = share_env })
 	local H, Mk = W.H, W.Mk
@@ -915,10 +916,11 @@ print("== a new map server says nothing of its leaders before it sorted the save
 do
 	local function share_env(M)
 		M.share = { up = {}, down = {} }
-		M.env.coop_levels_share = {
+		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
+		M.env.coop_quests_core = { share = function() return {
 			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
 			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		}
+		} end }
 	end
 	local W = stand({ dedicated = true, env = share_env })
 	local H, Mk = W.H, W.Mk
@@ -940,10 +942,11 @@ print("== a map server just loaded: its squad's leader stands elsewhere and was 
 do
 	local function share_env(M)
 		M.share = { up = {}, down = {} }
-		M.env.coop_levels_share = {
+		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
+		M.env.coop_quests_core = { share = function() return {
 			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
 			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		}
+		} end }
 	end
 	local W = stand({ dedicated = true, env = share_env })
 	local H, Mk = W.H, W.Mk
@@ -1243,10 +1246,11 @@ print("== last leaders of a map server's level reach the save")
 do
 	local function share_env(M)
 		M.share = { up = {}, down = {} }
-		M.env.coop_levels_share = {
+		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
+		M.env.coop_quests_core = { share = function() return {
 			up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
 			down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-		}
+		} end }
 	end
 	local W = stand({ dedicated = true, env = share_env })
 	local H, Mk, B = W.H, W.Mk, W.B

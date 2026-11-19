@@ -50,8 +50,23 @@ Which layer answers (today's predicates, read only by the layer scripts):
   `coop.is_host()`. Until S2 a playing host of a split session (the hybrid) is answered by srv from the same predicates.
 - hostplay: active session and none of the above.
 - none: no active session, or no layer installed. The co-op layer is asked first.
-- A server player's machine knows `split()` only from its first LevelMap (S3 moves the mode into Welcome): until then it
-  is answered by hostplay, as today's code behaves.
+- A server player's machine knows `split()` from its Welcome (protocol 33 carries the session's mode; S4C: `coop_levels.cpp`
+  `split()` on a client is `world_session().session_mode() == SessionMode::Server`), not from its first LevelMap any more:
+  from the Welcome on it is answered by srv.
+- The C++ `Mode` answers (`coop_mode.h`, `srv/coop_srv_mode.cpp`) differ from this table in three cells, on purpose: a world
+  server answers `where(stranger)` = Joining (here: away) and `decider_of(unplaced player)` = This (here: other); a map
+  server answers `decider_of(joining player)` = This (here: other). The C++ choice makes `on_host_level(p)` exactly
+  `where(p) != Away` (review A-S4C F3). Nobody calls these C++ answers yet; S6 converts code against **this** Lua table and
+  settles the C++ one to it first (S6 unit A-S6-T).
+
+### Server parts in `coop_quests_core` (S4, A-S4ML; accepted by the lead 2026-11-19)
+
+`coop_quests_core.set_part(name, t)` / `part(name)` (`far`, `levels`, `brain`, `audience`), `share_up` / `share_down` /
+`share()` / `shared()` and `add_death_listener` / `death_listeners`: a server script puts itself there from inside
+`when_srv`; without a part the Core caller gives the co-op answer. This is the one sanctioned way the Core reaches the
+renamed server scripts. Rules: `set_part` is called only inside `when_srv` (L9 catches it at load); the Core never uses a
+part's presence as a mode test (`part("far") ~= nil` for "am I a server") - ask `coop_mode` instead. The guard does not yet
+catch that misuse (review A-S4ML B4, hostile h5/h6): guard round 8 adds it.
 
 ## 3. Delivery
 

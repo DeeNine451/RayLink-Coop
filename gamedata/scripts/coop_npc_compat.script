@@ -107,7 +107,7 @@ local REWRITES = {
 		{ 'if who:section() == "actor" then', "if coop_npc_is_player_id(who:id()) then" },
 	},
 	-- split levels: a smart of a level a map server leads is not online here, and the far view cannot reach a field of a C++ class. A squad
-	-- it holds did its first update there (coop_levels_brain): held there means it is loaded, or the task waits for it for ever.
+	-- it holds did its first update there (coop_srv_levels_brain): held there means it is loaded, or the task waits for it for ever.
 	tasks_fate = {
 		{ "smrt and smrt.online then", "smrt and coop_quests_core.online_of(smrt) then" },
 	},

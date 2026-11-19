@@ -1,13 +1,18 @@
+-- Сервер (srv): таблицы, которые сервер мира и серверы карт видят одинаково (docs/MODES.md)
 --[[
 	Anomaly Coop - split levels: tables of the stock and of the mods that the world server and a map server must see alike
-	(docs\SPLIT_LEVELS.md 7a). A process holds its Lua state alone and only the world server saves, so a table a map server writes never
-	reached the save, and a table the world server writes never reached a map server started before.
+	(docs\SPLIT_LEVELS.md 7a; gamedata\scripts\coop_srv_levels_share.script, coop_levels_share before step S4). A process holds its Lua
+	state alone and only the world server saves, so a table a map server writes never reached the save, and a table the world server
+	writes never reached a map server started before.
 
-		share.up(name, get, set[, every_ms])     get() on a map server, set(value, level) on the world server
-		share.down(name, get, set[, every_ms])   get() on the world server, set(value) on a map server
+		coop_quests_core.share_up(name, get, set[, every_ms])     get() on a map server, set(value, level) on the world server
+		coop_quests_core.share_down(name, get, set[, every_ms])   get() on the world server, set(value) on a map server
+		share.up / share.down                                     the same, for the server's scripts
 
-	get answers a table of strings, numbers and booleans (coop_quests_core.ser), or nil for nothing to tell yet. It is compared as a string
-	and goes when it changed, in parts: one event carries at most PART characters. A map server that starts gets every down table.
+	The Core keeps what is registered (it never names this script, check_layers L3); this script carries it, from
+	coop_mode.when_srv on: nothing of it runs in the co-op. get answers a table of strings, numbers and booleans
+	(coop_quests_core.ser), or nil for nothing to tell yet. It is compared as a string and goes when it changed, in parts: one event
+	carries at most PART characters. A map server that starts gets every down table.
 --]]
 
 local api = rawget(_G, "coop")
@@ -21,8 +26,9 @@ local MAX_PARTS = 64
 local HELLO = "__hello"
 local said_hello = false
 
-local ups, downs = {}, {}
 local parts = {} -- "from:name" -> { seq, n, got, list }
+-- what was sent of each registered table (its entry in coop_quests_core.shared(): a table registered again starts anew)
+local state = setmetatable({}, { __mode = "k" })
 
 local function qc() return coop_quests_core end
 local function levels() return api and api.levels end
@@ -32,12 +38,28 @@ local function split()
 end
 local function cm() return rawget(_G, "coop_main") or coop_main end
 
-function up(name, get, set, every)
-	ups[name] = { get = get, set = set, every = every or EVERY_MS, next = 0, sent = nil, seq = 0 }
+function up(name, get, set, every) qc().share_up(name, get, set, every) end
+function down(name, get, set, every) qc().share_down(name, get, set, every) end
+
+local function ups() return qc().shared().up end
+local function downs() return qc().shared().down end
+
+local function sent_up(e)
+	local s = state[e]
+	if not s then
+		s = { next = 0, sent = nil, seq = 0 }
+		state[e] = s
+	end
+	return s
 end
 
-function down(name, get, set, every)
-	downs[name] = { get = get, set = set, every = every or EVERY_MS, next = 0, sent = {}, seq = 0 }
+local function sent_down(e)
+	local s = state[e]
+	if not s then
+		s = { next = 0, sent = {}, seq = 0 }
+		state[e] = s
+	end
+	return s
 end
 
 local function send(name, seq, blob, target)
@@ -63,13 +85,14 @@ local function blob_of(e, name)
 end
 
 local function tick_up(now)
-	for name, e in pairs(ups) do
-		if now >= e.next then
-			e.next = now + e.every
+	for name, e in pairs(ups()) do
+		local s = sent_up(e)
+		if now >= s.next then
+			s.next = now + (e.every or EVERY_MS)
 			local blob = blob_of(e, name)
-			if blob and blob ~= e.sent then
-				e.seq = e.seq + 1
-				if send(name, e.seq, blob, 0) then e.sent = blob end
+			if blob and blob ~= s.sent then
+				s.seq = s.seq + 1
+				if send(name, s.seq, blob, 0) then s.sent = blob end
 			end
 		end
 	end
@@ -77,22 +100,23 @@ end
 
 local function tick_down(now)
 	local list = levels().map_servers()
-	for name, e in pairs(downs) do
+	for name, e in pairs(downs()) do
+		local s = sent_down(e)
 		local live = {}
 		for _, ms in ipairs(list) do live[ms.bridge] = true end
-		for bridge in pairs(e.sent) do
-			if not live[bridge] then e.sent[bridge] = nil end -- the next process on that bridge knows nothing
+		for bridge in pairs(s.sent) do
+			if not live[bridge] then s.sent[bridge] = nil end -- the next process on that bridge knows nothing
 		end
 		local fresh = false
-		for _, ms in ipairs(list) do fresh = fresh or e.sent[ms.bridge] == nil end
-		if now >= e.next or fresh then
-			e.next = now + e.every
+		for _, ms in ipairs(list) do fresh = fresh or s.sent[ms.bridge] == nil end
+		if now >= s.next or fresh then
+			s.next = now + (e.every or EVERY_MS)
 			local blob = blob_of(e, name)
 			if blob then
 				for _, ms in ipairs(list) do
-					if e.sent[ms.bridge] ~= blob then
-						e.seq = e.seq + 1
-						if send(name, e.seq, blob, ms.bridge) then e.sent[ms.bridge] = blob end
+					if s.sent[ms.bridge] ~= blob then
+						s.seq = s.seq + 1
+						if send(name, s.seq, blob, ms.bridge) then s.sent[ms.bridge] = blob end
 					end
 				end
 			end
@@ -116,13 +140,13 @@ local function on_part(payload, from)
 	local name = t.k
 	if world then
 		if from < 0x100 then return end
-		e = ups[name]
+		e = ups()[name]
 	elseif q.is_map_server() then
 		if from ~= 0 then return end
-		e = downs[name]
+		e = downs()[name]
 	end
 	if world and name == HELLO then
-		for _, d in pairs(downs) do d.sent[from] = nil end -- a new process on this bridge: it knows nothing
+		for _, d in pairs(downs()) do sent_down(d).sent[from] = nil end -- a new process on this bridge: it knows nothing
 		return
 	end
 	if not e then return end
@@ -153,7 +177,10 @@ end
 -- The host's move: this process stayed, the world server's Lua is new. What it was told is gone, a down table it sends by itself.
 local function on_world_back()
 	said_hello = false
-	for _, e in pairs(ups) do e.sent, e.next = nil, 0 end
+	for _, e in pairs(ups()) do
+		local s = sent_up(e)
+		s.sent, s.next = nil, 0
+	end
 end
 
 local function on_update()
@@ -175,7 +202,9 @@ function _tick() on_update() end
 
 function on_game_start()
 	if not api then return end
-	cm().add_event_handler(EV, on_part)
-	RegisterScriptCallback("actor_on_update", on_update)
-	RegisterScriptCallback("coop_world_back", on_world_back)
+	coop_mode.when_srv(function()
+		cm().add_event_handler(EV, on_part)
+		RegisterScriptCallback("actor_on_update", on_update)
+		RegisterScriptCallback("coop_world_back", on_world_back)
+	end)
 end

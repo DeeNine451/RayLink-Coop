@@ -1,5 +1,5 @@
--- Split levels: the far view of the world server (coop_quests_far), one scope for one call, and the orders it gives to a map server. Real
--- scripts over the stubs. Run: tools\test_lua.cmd far_view
+-- Split levels: the far view of the world server (coop_srv_quests_far), one scope for one call, and the orders it gives to a map server. Real
+-- scripts over the stubs. Run: tools\test_lua.cmd srv_far_view
 MODE = "host"
 dofile("tests/lua/support/stubs.lua")
 
@@ -61,10 +61,12 @@ level.object_by_id = function(id) return REAL[id] end
 level.name = function() return "l01_escape" end
 simulation_objects = { is_on_the_actor_level = function() return "stock" end }
 
+-- the facade (step S4): this is a world server, its server layer answers: when_srv runs at once
+coop_mode = { when_srv = function(fn) fn() return true end }
 load_script_file("coop_quests_core")
-load_script_file("coop_levels_share")
-load_script_file("coop_quests_far")
-local qc, far = coop_quests_core, coop_quests_far
+load_script_file("coop_srv_levels_share")
+load_script_file("coop_srv_quests_far")
+local qc, far = coop_quests_core, coop_srv_quests_far
 qc.on_game_start()
 far.on_game_start()
 local STOCK_ALIFE = alife

@@ -202,7 +202,8 @@ end
 -- Split levels: "on another map: <name>", nil for one who stands here.
 local function elsewhere_of(p)
 	if p.elsewhere ~= true then return nil end
-	local lv = rawget(_G, "coop_levels")
+	local qc = rawget(_G, "coop_quests_core")
+	local lv = qc and qc.part and qc.part("levels") -- a server's level names (coop_srv_levels)
 	local text = lv and lv.elsewhere_text and lv.elsewhere_text(p.id)
 	return text and text ~= "" and text or nil
 end

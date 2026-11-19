@@ -31,7 +31,7 @@
 	  world.snd  { s = path, x, y, z | nothing, v, q }        near the point, or everybody for a 2D sound
 	  world.cfx  { k = cam | uncam | pp | unpp | cpx | uncpx, n = name, i = id, l = loop }   everybody
 	  world.flare { i = object, on = 1 | 0 }                   its level: the smoke of an emission flare (its light is a lamp, coop_lamps)
-	A point is on the level of this process, or on the one a far view looks at (coop_quests_far): the cast names it. The hit effects of
+	A point is on the level of this process, or on the one a far view looks at (coop_srv_quests_far): the cast names it. The hit effects of
 	EFFECT_SCRIPTS are all points. "Everybody" stays for the group tasks of TASK_SCRIPTS, whatever level a player stands on.
 --]]
 
@@ -102,7 +102,8 @@ end
 
 -- The level a far view of the world server looks at, nil outside one: a task's point is on that level.
 local function far_level()
-	local far = rawget(_G, "coop_quests_far")
+	local qc = rawget(_G, "coop_quests_core")
+	local far = qc and qc.part and qc.part("far") -- a server's far view, nil in the co-op
 	local scope = far and far.in_scope and far.in_scope()
 	return scope and scope.id or nil
 end

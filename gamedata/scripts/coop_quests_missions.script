@@ -540,7 +540,7 @@ end
 
 -- A ceasefire is bought on the world server (the relay) and holds on every level: a map server gets the table.
 local function share_ceasefires()
-	local share = rawget(_G, "coop_levels_share") or coop_levels_share
+	local share = qc.share and qc.share() -- the Core keeps the tables, a server's share carries them (coop_srv_levels_share)
 	if not share then return end
 	local function data()
 		local m = qc.mod("xr_bribe")
@@ -663,7 +663,7 @@ end
 local TISSUE_NEED = "yan_ecolog_semenov_task_1_tissue_need"
 local TISSUE_COUNT = "yan_ecolog_semenov_task_1_tissue_count"
 
--- The world server's: the counter is in its actor's pstor. A kill on a map server's level comes by the death relay (coop_quests_far).
+-- The world server's: the counter is in its actor's pstor. A kill on a map server's level comes by the death relay (coop_srv_quests_far).
 local function monster_on_death(victim, killer)
 	if not (qc.is_host() and victim and killer) then return end
 	local ok, kid = pcall(function() return killer:id() end)
@@ -981,8 +981,8 @@ function on_game_start()
 	if not ok then qc.report(TAG, "guide map", err) end
 	ok, err = pcall(share_ceasefires)
 	if not ok then qc.report(TAG, "ceasefires", err) end
-	local far = rawget(_G, "coop_quests_far") or coop_quests_far
-	if far then far.add_death_listener("monster_on_death_callback", monster_on_death) end
+	-- a server's death relay calls it (coop_srv_quests_far); the Core keeps the list
+	if qc.add_death_listener then qc.add_death_listener("monster_on_death_callback", monster_on_death) end
 	RegisterScriptCallback("on_enemy_eval", on_enemy_eval)
 	RegisterScriptCallback("npc_on_hit_callback", on_npc_hit)
 	RegisterScriptCallback("monster_on_death_callback", monster_on_death)

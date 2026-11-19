@@ -958,10 +958,11 @@ do
 	W = { items = {}, holders = {}, next_id = 2000, moves = 0, infos = {}, talked = {}, created = {}, client_seen = {} }
 	local function share_stub(M)
 		M.ups, M.downs = {}, {}
-		M.env.coop_levels_share = {
+		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
+		M.env.coop_quests_core = { share = function() return {
 			up = function(n, get, set) M.ups[n] = { get = get, set = set } end,
 			down = function(n, get, set) M.downs[n] = { get = get, set = set } end,
-		}
+		} end }
 	end
 	-- the world server, on another level
 	local Wd = machine("host", 0, { [0] = 0, [1] = PROXY })

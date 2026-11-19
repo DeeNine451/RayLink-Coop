@@ -172,7 +172,7 @@ local function world(kind, overrides)
 	coop_npc_logic = { user_of = function(o) return o._user end }
 	coop_npc_players = { peer_of = function(id) return coop.peer_of_avatar(id) end }
 	coop_tasks = { run_as = function(peer, fn, ...) return fn(...) end }
-	coop_quests_far = { with_level_of = function(peer, fn, ...) return fn(...) end }
+	-- no far view: coop_quests_core.with_level_of runs fn as it is (a server would hand in its part "far", step S4)
 
 	-- xr_effects: the wish as the merged GAMMA file has it; goodwill recorded by character
 	GOODWILL = {}

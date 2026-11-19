@@ -1,12 +1,14 @@
 -- Round 5 (S2 of the round 4 review), Server: a counted quest effect a map server's own logic ran (its level's condlists) is noted
 -- on the world server too. A client's ask of the same thing is decided on the world server (quests.act "fx", coop_quests_story
 -- host_fx -> coop_quests_trust check_spawn), whose list never saw the map server's own run: a second copy could be asked for.
--- The map server passes the run on (coop_quests_far, event far_qnote), the world server notes it as its own run, from a map
+-- The map server passes the run on (coop_srv_quests_far, event far_qnote), the world server notes it as its own run, from a map
 -- server only. Machines: the world server (peer 0), a client (peer 1), the map server of his level (peer 0x101).
--- Run: tools\test_lua.cmd far_quest_spawns
+-- Step S4: coop_srv_quests_far starts from coop_mode.when_srv: the world server is a dedicated one (its server layer answers) and
+-- the map server is one; the client of this test is not a player of a server world (his machine never starts it).
+-- Run: tools\test_lua.cmd srv_far_quest_spawns
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_trust", "coop_quests_core", "coop_quests_trust", "coop_quests_far", "coop_quests_story" }
+local SCRIPTS = { "coop_trust", "coop_quests_core", "coop_quests_trust", "coop_srv_quests_far", "coop_quests_story" }
 local BRIDGE = 0x101
 
 local function world(M)
@@ -35,6 +37,7 @@ local Hm = machine("host", 0)
 local Cm = machine("client", 1)
 local Ms = machine("client", BRIDGE)
 Ms.env.coop.is_map_server = function() return true end
+Hm.env.coop.is_dedicated = function() return true end -- the world server (-coop_dedicated): its server layer answers
 world(Hm); world(Cm); world(Ms)
 Hm.players = { { id = 0, is_self = true, avatar_id = 0, nick = "host" }, { id = 1, is_self = false, avatar_id = 500, nick = "anna" } }
 Cm.players = { { id = 1, is_self = true, avatar_id = 0, nick = "anna" } }

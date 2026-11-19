@@ -92,13 +92,15 @@ local function engine(M, o)
 	E.coop.money_of = function() return 100 end
 	E.coop_mods_core = { teleport = spy(M, "teleports") }
 	M.orders = {}
-	E.coop_quests_far = {
+	-- a server's far view, as the Core gets it (coop_quests_core.part "far", step S4)
+	local far = {
 		level_of_id = function(id) return (M.obj_level or {})[id] or LEVEL_HOST end,
 		order = function(id, verb, a, b, c)
 			M.orders[#M.orders + 1] = { id = id, verb = verb, a = a, b = b, c = c }
 			return true
 		end,
 	}
+	E.coop_quests_core = { part = function(name) return name == "far" and far or nil end }
 	E.coop.levels = {
 		split = function() return o.dedicated == true or o.split == true end,
 		my_level = function() return o.my_level or (not o.dedicated and LEVEL_HOST or nil) end,

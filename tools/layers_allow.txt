@@ -1,4 +1,4 @@
-# ceiling: 2120
+# ceiling: 1895
 # Today's violations of the layer rules (tools/check_layers.py, docs/MODES.md section 5).
 # rule|path|code of the line, comments dropped, white space collapsed|count. The ceiling only goes down:
 # a migration step deletes lines here and lowers the ceiling in the same commit (python -I tools\check_layers.py
@@ -200,7 +200,6 @@ L1|engine/src/xrGame/coop/coop_levels.cpp|mapserver::reset();|1
 L1|engine/src/xrGame/coop/coop_levels.cpp|mapserver::server_frame();|1
 L1|engine/src/xrGame/coop/coop_levels.cpp|mapserver::server_on_map(g.view);|1
 L1|engine/src/xrGame/coop/coop_levels.cpp|mgr().is_host() ? "hosts" : (leads_my_level() ? "is a map server" : "mirrors"));|1
-L1|engine/src/xrGame/coop/coop_levels.cpp|return !is_world_server() || mapserver::host_incoming(from, type, lane, packet, size);|1
 L1|engine/src/xrGame/coop/coop_levels.cpp|return level_passes(type, split(), on_host_level(peer));|1
 L1|engine/src/xrGame/coop/coop_levels.cpp|return map_server_cap(players, u32(_max(0, g_coop_max_map_servers)));|1
 L1|engine/src/xrGame/coop/coop_levels.cpp|return mgr().is_host() ? g.host_split : game_split();|1
@@ -213,34 +212,10 @@ L1|engine/src/xrGame/coop/coop_levels.h|bool on_host_level(PeerId peer);|1
 L1|engine/src/xrGame/coop/coop_levels.h|bool split();|1
 L1|engine/src/xrGame/coop/coop_levels.h|extern int g_coop_mapserver_linger;|1
 L1|engine/src/xrGame/coop/coop_levels.h|extern int g_coop_max_map_servers;|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|case Phase::Hosting: return dedicated::on() ? dedicated_roles() : host_roles();|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|cfg.connect_timeout_ms = mapserver::kConnectTimeoutMs;|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|cfg.host_plays = !dedicated::on();|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|const dedicated::HostAutostart::Step step = g_auto.dedicated_host.tick(now, dedicated::world_wait(facts));|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|const dedicated::WorldFacts facts = join::host_world_facts();|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|dedicated::HostAutostart dedicated_host;|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|dedicated::frame();|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|dedicated::wait_text(step.reason), facts.level, facts.ready, facts.precache, facts.alife, facts.alife_actor, facts.client_actor,|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|dedicated::wait_text(step.reason), u32(g_auto.host_port));|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|else if (g_auto.host && !g_auto.host_done && !active() && dedicated::on())|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|g_auto.host_port = dedicated::args().port;|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|g_auto.map_server = mapserver::parsed_key();|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|if (!start_map_server(mapserver::key().port, mapserver::key().token))|1
 L1|engine/src/xrGame/coop/coop_manager.cpp|if (cmd_param("-coop_host", v))|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|if (dedicated::on() && op::find_token(Core.Params, operator_token))|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|if (dedicated::on())|3
-L1|engine/src/xrGame/coop/coop_manager.cpp|if (g_auto.host && !g_auto.host_done && !active() && dedicated::on() && dedicated::quitting())|1
 L1|engine/src/xrGame/coop/coop_manager.cpp|if (is_map_server())|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|if (step.act == dedicated::HostAutostart::Do::GiveUp)|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|if (step.act == dedicated::HostAutostart::Do::Try)|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|m_roles = roles_of(p);|1
 L1|engine/src/xrGame/coop/coop_manager.cpp|m_session.on_operator_command = [](PeerId from, const std::string& line) { dedicated::run_for(from, line); };|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|mapserver::install_client(m_world);|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|mapserver::install_server(m_session);|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|mapserver::server_session_over();|3
 L1|engine/src/xrGame/coop/coop_manager.cpp|return Core.Params && (strstr(Core.Params, "-coop_host") || strstr(Core.Params, "-coop_connect"));|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|world_server::format(world_server::Record::of_wait(dedicated::wait_code(step.reason), dedicated::wait_text(step.reason))).c_str());|1
-L1|engine/src/xrGame/coop/coop_manager.cpp|xr_sprintf(why, "gave up waiting for the world after %llu s: %s", step.waited_ms / 1000, dedicated::wait_text(step.reason));|1
 L1|engine/src/xrGame/coop/coop_manager.h|bool is_host() const { return has_role(ProcessRole::WorldServer); }|1
 L1|engine/src/xrGame/coop/coop_manager.h|extern ENGINE_API bool g_coop_dedicated;|1
 L1|engine/src/xrGame/coop/coop_manager.h|inline bool ghost_actor() { return is_map_server() || g_coop_dedicated; }|1
@@ -249,13 +224,6 @@ L1|engine/src/xrGame/coop/coop_manager.h|inline bool is_map_server() { return mg
 L1|engine/src/xrGame/coop/coop_manager.h|inline bool is_world_server() { return mgr().has_role(ProcessRole::WorldServer); }|1
 L1|engine/src/xrGame/coop/coop_money.cpp|const bool talking = dialog::host_lock_of(from) != kNoId || (levels::body_facts(join::proxy_of_peer(from), there) && there.talking);|1
 L1|engine/src/xrGame/coop/coop_money.cpp|if (is_map_server())|4
-L1|engine/src/xrGame/coop/coop_net.cpp|for (const PeerId bridge : mapserver::host_bridges())|1
-L1|engine/src/xrGame/coop/coop_net.cpp|if (!levels::passes_to(type, p.id))|1
-L1|engine/src/xrGame/coop/coop_net.cpp|if (!levels::split())|1
-L1|engine/src/xrGame/coop/coop_net.cpp|if (!mapserver::bridge_takes(type))|1
-L1|engine/src/xrGame/coop/coop_net.cpp|if (is_map_server() && !mapserver::map_server_sends(type))|1
-L1|engine/src/xrGame/coop/coop_net.cpp|if (is_world_server())|1
-L1|engine/src/xrGame/coop/coop_net.cpp|if (p.id != except && p.state == PeerState::Joined && levels::passes_to(type, p.id))|1
 L1|engine/src/xrGame/coop/coop_players.cpp|if (!levels::on_host_level(from))|1
 L1|engine/src/xrGame/coop/coop_players.cpp|if (ghost_actor())|1
 L1|engine/src/xrGame/coop/coop_requests.cpp|if (sync::host_peer_joining(p.id) || !levels::on_host_level(p.id))|1
@@ -309,7 +277,6 @@ L1|engine/src/xrGame/coop/coop_survival.cpp|return peer != kInvalidPeer && !leve
 L1|engine/src/xrGame/coop/coop_sync_api.cpp|const bool map_server = is_map_server();|1
 L1|engine/src/xrGame/coop/coop_sync_api.cpp|if (!is_map_server())|1
 L1|engine/src/xrGame/coop/coop_sync_api.cpp|if (bound && !sn::cast_reaches(level, levels::level_of_player(p.id), levels::on_host_level(p.id)))|1
-L1|engine/src/xrGame/coop/coop_worldstate.cpp|if (is_map_server() && world_up())|1
 L1|gamedata/scripts/coop_arena.script|ask_start()|1
 L1|gamedata/scripts/coop_arena.script|if authority() and fight then me = is_fighter(own_id()) and not P.is_map_server() end|1
 L1|gamedata/scripts/coop_arena.script|if authority() and not P.is_map_server() then return add_kit(own_id(), made) end|1
@@ -408,28 +375,7 @@ L1|gamedata/scripts/coop_loot_claim.script|if not leads() or type(from) ~= "numb
 L1|gamedata/scripts/coop_loot_claim.script|if qc.is_client() then|1
 L1|gamedata/scripts/coop_loot_claim.script|return from == 0 and qc.is_client()|1
 L1|gamedata/scripts/coop_loot_claim.script|return qc.is_host() or qc.is_map_server()|1
-L1|gamedata/scripts/coop_main.script|for _, ms in ipairs(api.levels.map_servers()) do|1
-L1|gamedata/scripts/coop_main.script|if api.is_map_server ~= nil and api.is_map_server() == true then|1
-L1|gamedata/scripts/coop_main.script|if map_server() then|1
-L1|gamedata/scripts/coop_main.script|if not (api and (api.is_host() or map_server())) then return end|1
-L1|gamedata/scripts/coop_main.script|if not (split_on() and self.started == true and not level_open(level.name())) then return update(self, ...) end|1
-L1|gamedata/scripts/coop_main.script|if not map_server() and (env_cl.s or env_cl.p) and tg >= env_cl.cover_at then|1
-L1|gamedata/scripts/coop_main.script|if not split_on() then return start(self, ...) end|1
-L1|gamedata/scripts/coop_main.script|if pm_mod and pm_mod.CPsiStormManager then schedule_around(pm_mod.CPsiStormManager, "psi_storm_duration", "finish") end|1
-L1|gamedata/scripts/coop_main.script|if sm_mod and sm_mod.CSurgeManager then schedule_around(sm_mod.CSurgeManager, "surge_time", "end_surge") end|1
-L1|gamedata/scripts/coop_main.script|if split and api.levels.map_servers then|1
-L1|gamedata/scripts/coop_main.script|if split_on() and not level_open(level.name()) then return end|1
-L1|gamedata/scripts/coop_main.script|if split_on() and not level_open(level.name()) then|1
-L1|gamedata/scripts/coop_main.script|l.bridge_of_player and l.bridge_of_player(from)|1
-L1|gamedata/scripts/coop_main.script|local bridge = api.is_host() and type(from) == "number" and from ~= 0 and l ~= nil and l.split ~= nil and l.split() == true and|1
-L1|gamedata/scripts/coop_main.script|local bridge = split_on() and l.bridge_of_player and l.bridge_of_player(peer)|1
-L1|gamedata/scripts/coop_main.script|local ghost = map_server()|1
-L1|gamedata/scripts/coop_main.script|local l = api and api.levels|1
-L1|gamedata/scripts/coop_main.script|local l = api.levels|4
-L1|gamedata/scripts/coop_main.script|local ms = map_server()|3
-L1|gamedata/scripts/coop_main.script|local name = not p.is_self and l.level_of_player and l.level_name and l.level_name(l.level_of_player(p.id))|1
-L1|gamedata/scripts/coop_main.script|local split = split_on()|1
-L1|gamedata/scripts/coop_main.script|return api ~= nil and api.is_map_server ~= nil and api.is_map_server() == true|1
+L1|gamedata/scripts/coop_main.script|local l = api.levels|1
 L1|gamedata/scripts/coop_main.script|split = l ~= nil and l.split ~= nil and l.split() == true, protocol = api.protocol and api.protocol() or 0, quests = list }|1
 L1|gamedata/scripts/coop_menu_char.script|if api and api.is_dedicated and api.is_dedicated() then return "faction_start" end|1
 L1|gamedata/scripts/coop_menu_char.script|if type(api.is_dedicated) == "function" and api.is_dedicated() == true then return true end|1
@@ -823,9 +769,6 @@ L2|engine/src/xrGame/coop/coop_monster_fx.cpp|if (!monster || !is_map_authority(
 L2|engine/src/xrGame/coop/coop_monster_fx.cpp|if (!object || !monster || !object->PPhysicsShell() || !is_map_authority())|1
 L2|engine/src/xrGame/coop/coop_monster_fx.cpp|if (!target || !monster || !is_map_authority() || !npc_ai::is_remote_player(target))|1
 L2|engine/src/xrGame/coop/coop_monster_fx.cpp|if (!world_up || !is_map_authority())|2
-L2|engine/src/xrGame/coop/coop_net.cpp|if (!is_map_authority())|3
-L2|engine/src/xrGame/coop/coop_net.cpp|if (mgr().is_client())|1
-L2|engine/src/xrGame/coop/coop_net.cpp|if (mgr().is_host() && mgr().session().local())|1
 L2|engine/src/xrGame/coop/coop_net.h|inline bool client() { return mgr().is_client(); }|1
 L2|engine/src/xrGame/coop/coop_net.h|inline bool host() { return is_map_authority(); }|1
 L2|engine/src/xrGame/coop/coop_net.h|inline bool live() { return mgr().is_host() || mgr().is_live_client(); }|1
@@ -1167,11 +1110,7 @@ L2|gamedata/scripts/coop_loot_claim.script|return qc.is_host() or qc.is_map_serv
 L2|gamedata/scripts/coop_main.script|function is_host() return api ~= nil and api.is_host() end|1
 L2|gamedata/scripts/coop_main.script|if api and api.is_host() then env_host.next_send = 0 end|1
 L2|gamedata/scripts/coop_main.script|if api and api.is_host() then|1
-L2|gamedata/scripts/coop_main.script|if api.is_host() then install_env_schedule() end|1
 L2|gamedata/scripts/coop_main.script|if api.is_host() then|1
-L2|gamedata/scripts/coop_main.script|if not (api and (api.is_host() or map_server())) then return end|1
-L2|gamedata/scripts/coop_main.script|if not (api and (api.is_host() or ms)) or type(from) ~= "number" then return end|2
-L2|gamedata/scripts/coop_main.script|local bridge = api.is_host() and type(from) == "number" and from ~= 0 and l ~= nil and l.split ~= nil and l.split() == true and|1
 L2|gamedata/scripts/coop_main.script|local role = not api and "no engine API" or api.is_host() and "host" or api.is_client() and "client" or "off"|1
 L2|gamedata/scripts/coop_main.script|return { role = ms and "mapserver" or api.is_host() and "host" or "client", level = level.name(), players = #(api.players() or {}),|1
 L2|gamedata/scripts/coop_menu.script|if is_operator(info) then|1
@@ -1472,60 +1411,28 @@ L3|engine/src/xrGame/coop/coop_levels.cpp|mapserver::print_status();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|mapserver::reset();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|mapserver::server_frame();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|mapserver::server_on_map(g.view);|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|return !is_world_server() || mapserver::host_incoming(from, type, lane, packet, size);|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|return level_passes(type, split(), on_host_level(peer));|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|return map_server_cap(players, u32(_max(0, g_coop_max_map_servers)));|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|row.state = u8(mapserver::host_state_of(level));|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_audit_now();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_client_frame();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_host_frame();|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_install_client(e);|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_install_server(s);|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_print_status();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_reset();|2
 L3|engine/src/xrGame/coop/coop_levels.h|#include "xrCoop/coop_levels_logic.h"|1
 L3|engine/src/xrGame/coop/coop_levels.h|#include "xrCoop/coop_levels_wire.h"|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|#include "../../xrEngine/coop_host_console.h"|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|#include "coop_dedicated.h"|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|#include "coop_mapserver.h"|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|#include "xrCoop/coop_operator.h"|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|#include "xrCoop/coop_steam_join.h"|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|#include "xrCoop/coop_world_server_rules.h"|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|case Phase::Hosting: return dedicated::on() ? dedicated_roles() : host_roles();|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|cfg.host_plays = !dedicated::on();|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|const bool own_key = address && op::loopback_literal(address) && op::find_token(Core.Params, operator_token);|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|const dedicated::HostAutostart::Step step = g_auto.dedicated_host.tick(now, dedicated::world_wait(facts));|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|coop_console::rl_line(world_server::format(world_server::Record::of_error("gave_up", why)).c_str());|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|coop_console::rl_line(world_server::format(world_server::Record::of_phase(world_server::Phase::Ready)).c_str());|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|coop_console::rl_line(world_server::format(world_server::Record::of_phase(world_server::Phase::Session)).c_str());|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|coop_console::rl_line(world_server::format(world_server::Record::of_ready(g_auto.host_port)).c_str());|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|coop_console::rl_line(|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|dedicated::frame();|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|dedicated::wait_text(step.reason), facts.level, facts.ready, facts.precache, facts.alife, facts.alife_actor, facts.client_actor,|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|dedicated::wait_text(step.reason), u32(g_auto.host_port));|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|else if (g_auto.host && !g_auto.host_done && !active() && dedicated::on())|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|g_auto.host_port = dedicated::args().port;|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|g_auto.map_server = mapserver::parsed_key();|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|if (!start_map_server(mapserver::key().port, mapserver::key().token))|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|if (!steam_join::parse_tunnel(text, tunnel))|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|if (dedicated::on() && op::find_token(Core.Params, operator_token))|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|if (dedicated::on())|3
-L3|engine/src/xrGame/coop/coop_manager.cpp|if (g_auto.host && !g_auto.host_done && !active() && dedicated::on() && dedicated::quitting())|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|m_session.on_operator_command = [](PeerId from, const std::string& line) { dedicated::run_for(from, line); };|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|mapserver::install_client(m_world);|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|mapserver::install_server(m_session);|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|mapserver::server_session_over();|3
 L3|engine/src/xrGame/coop/coop_manager.cpp|mapserver_stats_frame();|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|world_server::format(world_server::Record::of_wait(dedicated::wait_code(step.reason), dedicated::wait_text(step.reason))).c_str());|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|xr_sprintf(why, "gave up waiting for the world after %llu s: %s", step.waited_ms / 1000, dedicated::wait_text(step.reason));|1
+L3|engine/src/xrGame/coop/coop_mode.cpp|static const Layers all{{&srv::layer(), &hostplay::layer()}};|1
 L3|engine/src/xrGame/coop/coop_money.cpp|const bool talking = dialog::host_lock_of(from) != kNoId || (levels::body_facts(join::proxy_of_peer(from), there) && there.talking);|1
 L3|engine/src/xrGame/coop/coop_money.cpp|levels::up_money(peer, 0, false);|1
 L3|engine/src/xrGame/coop/coop_money.cpp|levels::up_money(peer, delta, trade);|1
 L3|engine/src/xrGame/coop/coop_monster_fx.cpp|#include "xrCoop/coop_local_link.h"|1
-L3|engine/src/xrGame/coop/coop_net.cpp|#include "coop_mapserver.h"|1
-L3|engine/src/xrGame/coop/coop_net.cpp|for (const PeerId bridge : mapserver::host_bridges())|1
-L3|engine/src/xrGame/coop/coop_net.cpp|if (!mapserver::bridge_takes(type))|1
-L3|engine/src/xrGame/coop/coop_net.cpp|if (is_map_server() && !mapserver::map_server_sends(type))|1
 L3|engine/src/xrGame/coop/coop_requests.cpp|if (!levels::online_at_server(id))|1
 L3|engine/src/xrGame/coop/coop_rest.cpp|const bool elsewhere = !obj && host_world_ready() && levels::body_facts(character, there);|1
 L3|engine/src/xrGame/coop/coop_rest.cpp|const bool elsewhere = !obj && levels::body_facts(c, there);|1
@@ -1550,29 +1457,7 @@ L3|engine/src/xrGame/coop/coop_survival.cpp|const auto& on = mapserver::trunk_pe
 L3|engine/src/xrGame/coop/coop_survival.cpp|for (const auto& it : mapserver::trunk_peers().on())|1
 L3|engine/src/xrGame/coop/coop_survival.cpp|levels::up_stash(character, stash == death::StashOutcome::GaveUp || death::host_items_on(character) != 0);|1
 L3|engine/src/xrGame/coop/coop_survival.cpp|return peer != kInvalidPeer && !levels::on_host_level(peer) ? mapserver::bridge_of(levels::level_of_player(peer)) : kInvalidPeer;|1
-L3|engine/src/xrGame/coop/coop_sync.cpp|levels::frame();|1
-L3|gamedata/scripts/coop_arena.script|local share = C().mod("coop_levels_share")|1
-L3|gamedata/scripts/coop_core_hud.script|local lv = rawget(_G, "coop_levels")|1
-L3|gamedata/scripts/coop_debug_server.script|local far = rawget(_G, "coop_quests_far") or coop_quests_far|2
-L3|gamedata/scripts/coop_encounters.script|local share = rawget(_G, "coop_levels_share") or coop_levels_share|1
-L3|gamedata/scripts/coop_hud_transition.script|local m = rawget(_G, "coop_levels")|1
 L3|gamedata/scripts/coop_menu_char.script|local d = module_of("coop_dedicated")|1
-L3|gamedata/scripts/coop_mods_nta.script|local far = C().mod("coop_quests_far")|1
-L3|gamedata/scripts/coop_npc_companions.script|local share = rawget(_G, "coop_levels_share") or coop_levels_share|1
-L3|gamedata/scripts/coop_quests_core.script|for _, name in ipairs({ "coop_quests_offer", "coop_quests_party", "coop_quests_story", "coop_quests_missions", "coop_quests_pda", "coop_quests_news", "coop_quests_far" }) do|1
-L3|gamedata/scripts/coop_quests_core.script|local far = rawget(_G, "coop_quests_far") or coop_quests_far|1
-L3|gamedata/scripts/coop_quests_core.script|local function far_mod() return rawget(_G, "coop_quests_far") or coop_quests_far end|1
-L3|gamedata/scripts/coop_quests_missions.script|local far = rawget(_G, "coop_quests_far") or coop_quests_far|1
-L3|gamedata/scripts/coop_quests_missions.script|local share = rawget(_G, "coop_levels_share") or coop_levels_share|1
-L3|gamedata/scripts/coop_quests_offer.script|local far = qc.mod("coop_quests_far")|1
-L3|gamedata/scripts/coop_quests_party.script|local far = qc.mod("coop_quests_far")|1
-L3|gamedata/scripts/coop_quests_party.script|local share = qc.mod("coop_levels_share")|1
-L3|gamedata/scripts/coop_quests_pda.script|local brain = qc.mod("coop_levels_brain")|1
-L3|gamedata/scripts/coop_quests_trust.script|local aud = core and core.mod("coop_task_audience")|1
-L3|gamedata/scripts/coop_tasks.script|local sl = rawget(_G, "coop_storyline")|3
-L3|gamedata/scripts/coop_world_fx.script|local far = rawget(_G, "coop_quests_far")|1
-L3|gamedata/scripts/modxml_coop_scorcher.script|<action>coop_scorcher.dlg_give_on</action>|1
-L3|gamedata/scripts/modxml_coop_scorcher.script|<precondition>coop_scorcher.dlg_can_offer_on</precondition>|1
 L4|engine/src/xrCoop/coop_levels_rules.h|bool plays = true;|1
 L4|engine/src/xrCoop/coop_load_barrier.h|bool server_ready_ = false;|1
 L4|engine/src/xrCoop/coop_load_barrier.h|bool wait_server_ = false;|1
@@ -1723,90 +1608,3 @@ L9|gamedata/scripts/coop_dedicated.script|if settings[key] == nil then config:w_
 L9|gamedata/scripts/coop_dedicated.script|local ok, r = pcall(gs.active)|1
 L9|gamedata/scripts/coop_dedicated.script|rawset(_G, "IsTestMode", function() return false end)|1
 L9|gamedata/scripts/coop_dedicated.script|return api ~= nil and type(api.is_dedicated) == "function" and api.is_dedicated() == true|1
-L9|gamedata/scripts/coop_levels_brain.script|RegisterScriptCallback("actor_on_update", on_update)|1
-L9|gamedata/scripts/coop_levels_brain.script|coop_main.add_event_handler(EV_CACHES, on_caches)|1
-L9|gamedata/scripts/coop_levels_brain.script|coop_main.add_event_handler(EV_ORDERS, on_orders)|1
-L9|gamedata/scripts/coop_levels_brain.script|coop_main.add_event_handler(EV_TARGETS, on_targets)|1
-L9|gamedata/scripts/coop_levels_share.script|RegisterScriptCallback("actor_on_update", on_update)|1
-L9|gamedata/scripts/coop_levels_share.script|RegisterScriptCallback("coop_world_back", on_world_back)|1
-L9|gamedata/scripts/coop_levels_share.script|cm().add_event_handler(EV, on_part)|1
-L9|gamedata/scripts/coop_levels_tables.script|RegisterScriptCallback("actor_on_first_update", patch_dao)|1
-L9|gamedata/scripts/coop_levels_tables.script|coop_main.add_event_handler(EV_DAO, on_dao)|1
-L9|gamedata/scripts/coop_levels_tables.script|da.actor_on_interaction = wrapped|1
-L9|gamedata/scripts/coop_levels_tables.script|da.clean_dynamic_anomalies_global = function(...)|1
-L9|gamedata/scripts/coop_levels_tables.script|da.last_surge_time = tonumber(t.g)|1
-L9|gamedata/scripts/coop_levels_tables.script|da.spawn_artefacts_on_level = function(...)|1
-L9|gamedata/scripts/coop_levels_tables.script|da.updated_anomaly_levels = all|1
-L9|gamedata/scripts/coop_levels_tables.script|da.updated_anomaly_levels = cut|1
-L9|gamedata/scripts/coop_levels_tables.script|da.updated_anomaly_levels[alife():level_name(lid)] = row|1
-L9|gamedata/scripts/coop_levels_tables.script|for name, row in pairs(cut) do all[name] = row end|1
-L9|gamedata/scripts/coop_levels_tables.script|local function mod(name) return qc().mod(name) end|1
-L9|gamedata/scripts/coop_levels_tables.script|share.down("guards", guards_get, guards_set, 15000)|1
-L9|gamedata/scripts/coop_levels_tables.script|share.down("logic", logic_get, logic_set)|1
-L9|gamedata/scripts/coop_levels_tables.script|share.up("artefacts", artefacts_get, artefacts_spent, 1000)|1
-L9|gamedata/scripts/coop_levels_tables.script|share.up("boxes", boxes_get, boxes_merge, 15000)|1
-L9|gamedata/scripts/coop_levels_tables.script|share.up("dao", dao_row, dao_merge, 5000)|1
-L9|gamedata/scripts/coop_levels_tables.script|share.up("trade", trade_rows, trade_merge, 10000)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("actor_on_first_update", patch_world_calls)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("actor_on_update", tick)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("coop_world_back", on_world_back)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("monster_on_before_hit", monster_on_before_hit)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("server_entity_on_unregister", on_unregister)|1
-L9|gamedata/scripts/coop_quests_far.script|RegisterScriptCallback("vehicle_on_death_callback", vehicle_died)|1
-L9|gamedata/scripts/coop_quests_far.script|_G.COnLuaBindFatalError = function(...)|1
-L9|gamedata/scripts/coop_quests_far.script|_G.CreateTimeEvent = cte|1
-L9|gamedata/scripts/coop_quests_far.script|_G.CreateTimeEvent = function(ev, act, timer, f, ...)|1
-L9|gamedata/scripts/coop_quests_far.script|_G.CreateTimeEvent = s.cte|2
-L9|gamedata/scripts/coop_quests_far.script|_G.alife = function() return s.sim_view end|1
-L9|gamedata/scripts/coop_quests_far.script|_G.alife = s.sim|2
-L9|gamedata/scripts/coop_quests_far.script|_G.alife = sim|1
-L9|gamedata/scripts/coop_quests_far.script|_G.alife_release = function(se, ...)|1
-L9|gamedata/scripts/coop_quests_far.script|_G.alife_release_id = function(id, ...)|1
-L9|gamedata/scripts/coop_quests_far.script|db.actor_inside_zones = inside_zones|1
-L9|gamedata/scripts/coop_quests_far.script|db.actor_inside_zones = s.inside_zones|2
-L9|gamedata/scripts/coop_quests_far.script|db.anomaly_by_name = anomalies|1
-L9|gamedata/scripts/coop_quests_far.script|db.anomaly_by_name = names_table(s, "a")|1
-L9|gamedata/scripts/coop_quests_far.script|db.anomaly_by_name = s.anomalies|2
-L9|gamedata/scripts/coop_quests_far.script|if type(s.inside_zones) == "table" then db.actor_inside_zones = inside_zones_view(s) end|1
-L9|gamedata/scripts/coop_quests_far.script|q.on("far_ack", on_ack, TAG)|1
-L9|gamedata/scripts/coop_quests_far.script|q.on("far_car", on_vehicle_death, TAG)|1
-L9|gamedata/scripts/coop_quests_far.script|q.on("far_do", on_do, TAG)|1
-L9|gamedata/scripts/coop_quests_far.script|q.on("far_hit", on_hit, TAG)|1
-L9|gamedata/scripts/coop_quests_far.script|share.down("hit_list", hit_list, function(t)|1
-L9|gamedata/scripts/coop_quests_far.script|share.up("names", names_tick, function(t, lid)|1
-L9|gamedata/scripts/coop_quests_far.script|share.up("zones_in", zones_in_tick, function(t, lid)|1
-L9|gamedata/scripts/coop_scorcher.script|RegisterScriptCallback("actor_on_first_update", function() step("re-arm", rearm) end)|1
-L9|gamedata/scripts/coop_scorcher.script|RegisterScriptCallback("actor_on_update", on_update)|1
-L9|gamedata/scripts/coop_scorcher.script|RegisterScriptCallback("load_state", load_state)|1
-L9|gamedata/scripts/coop_scorcher.script|RegisterScriptCallback("save_state", save_state)|1
-L9|gamedata/scripts/coop_scorcher.script|cm.add_event_handler(EV, function(payload, from)|1
-L9|gamedata/scripts/coop_scorcher.script|local ok, err = pcall(f)|1
-L9|gamedata/scripts/coop_scorcher.script|xc.coop_actor_monolith = function() return c_actor_monolith() end|1
-L9|gamedata/scripts/coop_scorcher.script|xc.coop_scorcher_can_off = function() return c_can_off() end|1
-L9|gamedata/scripts/coop_scorcher.script|xc.coop_scorcher_can_on = function() return c_can_on() end|1
-L9|gamedata/scripts/coop_scorcher.script|xc.coop_scorcher_locked = function() return c_locked() end|1
-L9|gamedata/scripts/coop_scorcher.script|xc.coop_scorcher_ready = function() return c_ready() end|1
-L9|gamedata/scripts/coop_scorcher.script|xc.coop_split_mode = function() return c_split_mode() end|1
-L9|gamedata/scripts/coop_scorcher.script|xe.coop_scorcher_flipped = function(a, n, p) e_flipped(p) end|1
-L9|gamedata/scripts/coop_scorcher.script|xe.coop_scorcher_refused = function() e_refused() end|1
-L9|gamedata/scripts/coop_scorcher.script|xe.coop_scorcher_task_done = function() e_task_done() end|1
-L9|gamedata/scripts/coop_scorcher.script|xe.coop_scorcher_task_taken = function() e_task_taken() end|1
-L9|gamedata/scripts/coop_storyline.script|RegisterScriptCallback("actor_on_first_update", function()|1
-L9|gamedata/scripts/coop_storyline.script|RegisterScriptCallback("actor_on_update", function()|1
-L9|gamedata/scripts/coop_storyline.script|RegisterScriptCallback("coop_faction_changed", function(...)|1
-L9|gamedata/scripts/coop_storyline.script|RegisterScriptCallback("save_state", save_state)|1
-L9|gamedata/scripts/coop_storyline.script|_G.disable_info = function(info)|1
-L9|gamedata/scripts/coop_storyline.script|_G.load_var, _G.save_var = wrapped_load, wrapped_save|1
-L9|gamedata/scripts/coop_storyline.script|_G.save_var = function(obj, k, v)|1
-L9|gamedata/scripts/coop_storyline.script|cm.add_event_handler(EV_NEWS, function(payload, from)|1
-L9|gamedata/scripts/coop_storyline.script|cm.add_event_handler(EV_REQ, function(payload, from)|1
-L9|gamedata/scripts/coop_storyline.script|if not (cm and cm.add_event_handler) then|1
-L9|gamedata/scripts/coop_storyline.script|local ok, err = pcall(f)|1
-L9|gamedata/scripts/coop_storyline.script|m[STORE] = s|1
-L9|gamedata/scripts/coop_storyline.script|scope, _G.save_var, _G.disable_info = prev_scope, prev_save, prev_dis|1
-L9|gamedata/scripts/coop_task_audience.script|RegisterScriptCallback("actor_on_first_update", listen)|1
-L9|gamedata/scripts/coop_task_audience.script|RegisterScriptCallback("actor_on_update", actor_on_update)|1
-L9|gamedata/scripts/coop_task_audience.script|RegisterScriptCallback("load_state", load_state)|1
-L9|gamedata/scripts/coop_task_audience.script|RegisterScriptCallback("save_state", save_state)|1
-L9|gamedata/scripts/coop_task_audience.script|RegisterScriptCallback(CHANGED, on_faction_changed)|1

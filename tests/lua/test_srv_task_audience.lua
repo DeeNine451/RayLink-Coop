@@ -1,11 +1,13 @@
--- A task's audience in a split-levels world (docs\plans\2026-11-16-task-audience.md A, C): coop_task_audience decides who sees a
+-- A task's audience in a split-levels world (docs\plans\2026-11-16-task-audience.md A, C): coop_srv_task_audience decides who sees a
 -- task when it is given, coop_tasks sends its states, lists and news only to them (and to the map servers' bridges), refuses
 -- the requests of the others and shares its rewards only among them. Without split levels, or on an engine without the
--- filter, everything is as before.
--- Run: tools\test_lua.cmd task_audience
+-- filter, everything is as before. Step S4: it starts from coop_mode.when_srv (the harness' facade runs it on a server machine),
+-- hands itself to coop_tasks and coop_quests_trust as coop_quests_core.part("audience"), and does nothing in the co-op; coop_tasks
+-- asks may_take of coop_conditions_stock (a server's storyline puts its own there).
+-- Run: tools\test_lua.cmd srv_task_audience
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_reward_group", "coop_tasks", "coop_task_audience" }
+local SCRIPTS = { "coop_reward_group", "coop_tasks", "coop_srv_task_audience" }
 local BRIDGE = 0x101
 
 local W = {
@@ -99,7 +101,9 @@ load_script(Hm, "coop_quests_core")
 for _, n in ipairs(SCRIPTS) do load_script(Hm, n) end
 for _, n in ipairs(SCRIPTS) do e[n].on_game_start() end
 fire(Hm, "actor_on_first_update")
-local CT, AUD = e.coop_tasks, e.coop_task_audience
+local CT, AUD = e.coop_tasks, e.coop_srv_task_audience
+check(e.coop_quests_core.part("audience") == AUD, "S4: a server machine hands the audience to the Core (coop_quests_core.part)")
+check(CT.task_audience() == AUD, "S4: coop_tasks finds it there")
 
 -- CGameTaskManager::UpdateTasks (as test_tasks_sync.lua)
 local function engine_check()
@@ -260,11 +264,11 @@ do
 	local r = AUD.record("drx_sl_bar_task_1")
 	check(r and r.k == "story" and r.sf == "dolg", "the taker's true faction")
 	check(r and r.inn[500] and r.inn[501] and r.out[509], "dolg in (A, B), stalker D out")
-	e.coop_storyline = { owner_of_task = function(id) return id == "lttz_hb_task" and "stalker" or nil end }
+	e.coop_srv_storyline = { owner_of_task = function(id) return id == "lttz_hb_task" and "stalker" or nil end }
 	give(1, "lttz_hb_task", nil)
 	r = AUD.record("lttz_hb_task")
-	check(r and r.sf == "stalker" and r.inn[509] and r.inn[500] and r.out[501], "coop_storyline's owner: stalkers and the taker")
-	e.coop_storyline = nil
+	check(r and r.sf == "stalker" and r.inn[509] and r.inn[500] and r.out[501], "coop_srv_storyline's owner: stalkers and the taker")
+	e.coop_srv_storyline = nil
 	give(1, CF, nil)
 	r = AUD.record(CF)
 	check(r and r.k == "cf" and r.inn[500] and r.out[501] and r.out[509], "a cf task: its taker alone")
@@ -306,7 +310,7 @@ do
 	-- the storyline side says who may take a task at all (a main story of another faction, a second change-faction task): the
 	-- world asks it before the give, whatever the player's dialog let through
 	local asked = {}
-	Hm.env.coop_storyline = { may_take = function(id, peer)
+	Hm.env.coop_conditions_stock = { may_take = function(id, peer)
 		asked[#asked + 1] = { id = id, peer = peer }
 		return not (id == "t_gated" and peer == 1)
 	end }
@@ -318,7 +322,7 @@ do
 	check(#asked == 2 and asked[1].peer == 1 and asked[2].peer == 2 and asked[2].id == "t_gated",
 		"the world asks for every give, with the sender taken from the transport")
 	Hm.tm.task_info.t_gated = nil
-	Hm.env.coop_storyline = nil
+	Hm.env.coop_conditions_stock = nil
 	tq(H.encode({ op = "complete", i = "t_side1" }), 1)
 	a = last_to("coop_tl", 1)
 	check(a and a.d == true and a.r == nil, "a turn-in: the task is not there for him")
@@ -590,10 +594,10 @@ do
 end
 
 -- ---------------------------------------------------------------- D2: the engine's give
-print("== D2: a give through the engine (host_on_task_give) asks coop_storyline.may_take for its player")
+print("== D2: a give through the engine (host_on_task_give) asks coop_conditions_stock.may_take for its player")
 do
 	local asked = {}
-	e.coop_storyline = { may_take = function(id, peer)
+	e.coop_conditions_stock = { may_take = function(id, peer)
 		asked[#asked + 1] = { id = id, peer = peer }
 		return not (id == "t_eng" and peer == 1)
 	end }
@@ -609,10 +613,10 @@ do
 	check(Hm.tm.task_info.t_eng ~= nil and AUD.record("t_eng") and AUD.record("t_eng").t == 501, "the same id for B: given")
 	finish_task("t_eng")
 	-- a script's give with nobody to attribute it to is not the storyline's to refuse
-	e.coop_storyline.may_take = function() return false end
+	e.coop_conditions_stock.may_take = function() return false end
 	Hm.tm:give_task("t_eng", 700)
 	check(Hm.tm.task_info.t_eng ~= nil, "a script's give for nobody is not refused")
-	e.coop_storyline = nil
+	e.coop_conditions_stock = nil
 end
 
 -- ---------------------------------------------------------------- D5 (audience side)
@@ -641,6 +645,57 @@ do
 	local n = W.eng_calls
 	tick(Hm)
 	check(W.eng_calls == n, "once")
+end
+
+-- ---------------------------------------------------------------- S4: the co-op, a world server's late start
+print("== S4: in the co-op the audience registers nothing and coop_tasks sees none")
+do
+	local C = machine("host", 0)
+	local ce = C.env
+	C.players = { { id = 1, avatar_id = 500 } }
+	ce.coop.levels = { split = function() return false end, my_level = function() return 7 end, map_servers = function() return {} end }
+	ce.coop.is_dedicated = function() return false end
+	ce.coop.is_map_server = function() return false end
+	ce.coop.story_task_audience = function() return true end
+	load_script(C, "coop_quests_core")
+	for _, n in ipairs(SCRIPTS) do load_script(C, n) end
+	local before = {}
+	for name, list in pairs(C.callbacks) do before[name] = #list end
+	ce.coop_srv_task_audience.on_game_start()
+	local added = 0
+	for name, list in pairs(C.callbacks) do added = added + #list - (before[name] or 0) end
+	check(added == 0 and #C.srv_waiting == 1, "the co-op host: no callback, no save, no load; its when_srv waits for ever")
+	check(ce.coop_quests_core.part("audience") == nil, "no part for the Core")
+	ce.coop_tasks.on_game_start()
+	check(ce.coop_tasks.task_audience() == nil, "coop_tasks: no audience, every task is everybody's")
+	tick(C)
+	check(#C.srv_waiting == 1, "a frame of the co-op runs nothing of it")
+end
+
+print("== S4: a world server whose save was loaded before its session reads that save when the server layer answers")
+do
+	local S = machine("host", 0)
+	local se = S.env
+	local on = false -- the session: the world server starts it after its world is up
+	se.coop.is_active = function() return on end
+	se.coop.is_dedicated = function() return true end
+	se.coop.levels = { split = function() return on end, my_level = function() return 7 end, map_servers = function() return {} end }
+	se.coop.story_task_audience = function() return true end
+	se.coop_faction = { split_mode = function() return on end, faction_of_character = function() return nil end }
+	-- the save as alife_storage_manager holds it after CALifeStorageManager_load (load_state was sent before this registered)
+	local m_data = { coop_task_audience = { t_saved = { k = "side", gf = "bandit", t = 500, i = { 500 }, o = {} } } }
+	se.alife_storage_manager = { get_state = function() return m_data end }
+	load_script(S, "coop_quests_core")
+	for _, n in ipairs(SCRIPTS) do load_script(S, n) end
+	se.coop_srv_task_audience.on_game_start()
+	check(#S.srv_waiting == 1 and S.callbacks.load_state == nil, "before the session: waiting, nothing registered")
+	on = true
+	tick(S) -- the facade's first actor_on_update after the session started
+	local A2 = se.coop_srv_task_audience
+	check(#S.srv_waiting == 0 and #(S.callbacks.load_state or {}) == 1, "the session up: registered")
+	check(A2.record("t_saved") ~= nil and A2.record("t_saved").inn[500] == true, "the record of the save is there")
+	tick(S)
+	check(type(S.callbacks.coop_faction_changed) == "table", "the first update was over: listening from the next update")
 end
 
 print(string.format("\n%d passed, %d failed", PASSES, FAILS))

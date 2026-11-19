@@ -1,9 +1,9 @@
 -- Split levels: a player on a map server's level and the tasks of the world server: the far view at its entry points, the death relay, the
 -- actions that go to the map server, a map server is no player. Real scripts over the quests harness: the host (world server, level 1),
--- a client on level 2, the map server of level 2. Run: tools\test_lua.cmd far_tasks
+-- a client on level 2, the map server of level 2. Run: tools\test_lua.cmd srv_far_tasks
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_levels_share", "coop_quests_far", "coop_tasks", "coop_quests_offer", "coop_quests_party",
+local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_tasks", "coop_quests_offer", "coop_quests_party",
 	"coop_quests_story", "coop_quests_missions", "coop_quests_pda" }
 local BRIDGE = 0x101
 local LEVEL_NAMES = { "l01_escape", "k00_marsh" }
@@ -333,7 +333,7 @@ Hm.tm.task_info.away_task = nil
 Hm.engine_tasks.away_task = nil
 
 print("== the death relay")
-local far = Hm.env.coop_quests_far
+local far = Hm.env.coop_srv_quests_far
 local counted, level_ran = 0, 0
 local function host_handler(victim, killer) counted = counted + 1 end
 Hm.env.coop_route = { domain_handlers = function(cb, d) return cb == "monster_on_death_callback" and d == "host" and { host_handler } or {} end }
@@ -395,7 +395,7 @@ check(Ms.env.xr_bribe._local_M_DATA.stalker == nil, "a player's shot ends it the
 check(Hm.env.xr_bribe._local_M_DATA.stalker == nil, "and in the save")
 
 print("== orders on the map server")
-local ms_far = Ms.env.coop_quests_far
+local ms_far = Ms.env.coop_srv_quests_far
 local killed = 0
 Ms.ObjMT.kill = function(self, who) killed = killed + 1 end
 local held = far.orders_held()
@@ -415,7 +415,7 @@ check(far.orders_held() == held + 1, "an NPC not online there yet: the order wai
 Ms.new_obj(701, "stalker_far", vec(300, 0, 300), { _stalker = true })
 killed = 0
 NOW = NOW + 4000
-Hm.env.coop_quests_far._tick()
+Hm.env.coop_srv_quests_far._tick()
 pump()
 check(killed == 1 and far.orders_held() == held, "it came online: the next try finds it")
 
@@ -494,7 +494,7 @@ shooter.active_item = function() return { section = function() return "wpn_axe" 
 Hm.env.coop_route = { domain_handlers = function(cb) return {} end }
 fire(Ms, "monster_on_before_hit", Ms.objects[722], { power = 1, type = 1, draftsman = shooter }, 1)
 pump()
-local player_far = Hm.env.coop_quests_far.object(500)
+local player_far = Hm.env.coop_srv_quests_far.object(500)
 check(player_far:active_item() and player_far:active_item():section() == "wpn_axe", "nta_utils.is_axe reads it from the stand-in")
 Hm.tm.task_info.simulation_task_vengence_amplified = nil
 

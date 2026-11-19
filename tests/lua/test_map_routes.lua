@@ -56,7 +56,7 @@ check(runs_on_map_server("monster_on_update", "xcv_phantoms"), "phantoms")
 check(runs_on_map_server("time_event", "xcv_phantoms_fix"), "phantoms: the release of offline squads")
 
 print("== a wrapper of a world handler keeps its domain")
-check(coop_native.route("actor_on_interaction", "coop_levels_tables") == "host", "drx_da_main's handler in a wrapper: world server only, one roll")
+check(coop_native.route("actor_on_interaction", "coop_srv_levels_tables") == "host", "drx_da_main's handler in a wrapper: world server only, one roll")
 -- Dynamic Anomalies' modifiers of an anomaly's hit (drx_da_main.actor_on_before_hit: the flash mine) run once for each
 -- player: the host's own by drx_da_main's handler (host), a client's by coop_quests_story.client_before_hit, which calls the
 -- same table. Build 53 made the handler "owner" too: the flash mine ran twice for every hit of a client.
@@ -68,7 +68,7 @@ for _, cb in ipairs({ "npc_on_before_hit", "monster_on_before_hit" }) do
 	check(domain_on_map_server(cb, "coop_npc_compat") == "level", cb .. "@coop_npc_compat runs where grok_bo's handler ran in build 51")
 	check(not coop_native.runs_here(domain_on_map_server(cb, "coop_npc_compat"), false), cb .. "@coop_npc_compat: never on a client")
 end
-check(domain_on_map_server("actor_on_interaction", "coop_levels_tables") == "host", "and not on a map server")
+check(domain_on_map_server("actor_on_interaction", "coop_srv_levels_tables") == "host", "and not on a map server")
 -- what a player's search starts runs where the body or the box is: the timers of these two stay at the authority of the level
 check(domain_on_map_server("time_event", "guaranteed_loot") == "level", "the check of guaranteed_loot's search on a map server")
 check(domain_on_map_server("time_event", "zz_treasure_manager_pba_less_artys") == "level", "the clean of PBA's less artefacts on a map server")

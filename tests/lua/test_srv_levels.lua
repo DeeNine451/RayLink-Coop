@@ -1,10 +1,11 @@
--- Server map labels, moved from test_levels.lua after removal of the story gates.
+-- Server map labels, moved from test_levels.lua after removal of the story gates. gamedata\scripts\coop_srv_levels.script (coop_levels
+-- before step S4): the Core asks them through coop_quests_core.part("levels"), which the script hands in from coop_mode.when_srv.
 local passes, fails = 0, 0
 local function check(ok, what)
 	if ok then passes = passes + 1 else fails = fails + 1; print("FAIL " .. what) end
 end
 
-local path = "gamedata/scripts/coop_levels.script"
+local path = "gamedata/scripts/coop_srv_levels.script"
 local names = { [1] = "l01_escape", [2] = "l02_garbage", [7] = "l13u_warlab" }
 local players = { [2] = 2, [3] = 1 }
 local tr = { l01_escape = "Cordon", l02_garbage = "Garbage", l13u_warlab = "Warlab",
@@ -35,6 +36,17 @@ check(labels.elsewhere_text(3) == "" and labels.elsewhere_text(4) == "", "no HUD
 coop.levels.my_level = false
 check(labels.name() == "Cordon", "level.name fallback")
 check(labels.gate == nil and labels.notice == nil and labels.evaluate == nil, "story gates are absent")
+
+-- step S4: the part for the Core comes from coop_mode.when_srv only
+local waiting, parts = {}, {}
+labels.coop_srv_levels = labels -- the module's own global name, as the engine loads it
+labels.coop_mode = { when_srv = function(fn) waiting[#waiting + 1] = fn return true end }
+labels.coop_quests_core = { set_part = function(name, t) parts[name] = t end }
+labels.on_game_start()
+check(#waiting == 1 and parts.levels == nil, "the co-op: when_srv waits, the Core has no level names (nobody stands elsewhere)")
+waiting[1]()
+check(parts.levels == labels and parts.levels.elsewhere_text(2) == "On another map: Garbage",
+	"the server layer answers: the Core gets the level names (coop_quests_core.part \"levels\")")
 
 print(string.format("%d passed, %d failed", passes, fails))
 os.exit(fails == 0 and 0 or 1)

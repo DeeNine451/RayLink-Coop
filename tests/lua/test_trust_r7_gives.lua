@@ -126,10 +126,11 @@ local function offered_at(npc)
 	Cm.env.dialogs.text_npc_has_task(Cm.actor, npc)
 end
 local function server(on)
+	-- (the server's part "far" of coop_quests_core, step S4)
 	if on then
-		Hm.env.coop_quests_far = { in_scope = function() return {} end, with_level_of = function(peer, fn, ...) return fn(...) end }
+		Hm.env.coop_quests_core.set_part("far", { in_scope = function() return {} end, with_level_of = function(peer, fn, ...) return fn(...) end })
 	else
-		Hm.env.coop_quests_far = nil
+		Hm.env.coop_quests_core.set_part("far", nil)
 	end
 end
 local MODES = { { default = "log" }, { default = "refuse" } }

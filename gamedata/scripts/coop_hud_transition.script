@@ -263,10 +263,10 @@ local function dist_text(d)
 	return string_format(tr("st_coop_transition_row_dist", "%d m"), math_floor(d + 0.5))
 end
 
+-- A server's level names (coop_quests_core.part "levels", coop_srv_levels); nil in the co-op, where nobody is on another map.
 local function levels_module()
-	local m = rawget(_G, "coop_levels")
-	if type(m) == "table" then return m end
-	local ok, v = pcall(function() return coop_levels end) -- loads the script
+	local qc = rawget(_G, "coop_quests_core")
+	local ok, v = pcall(function() return qc and qc.part and qc.part("levels") end)
 	return ok and type(v) == "table" and v or nil
 end
 

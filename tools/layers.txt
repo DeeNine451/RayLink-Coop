@@ -63,26 +63,16 @@ hostplay engine/src/xrCoop/hostplay/**
 # --- scripts --------------------------------------------------------------------------------------------------------
 srv gamedata/scripts/coop_srv_*.script
 hostplay gamedata/scripts/coop_hostplay_*.script
-# the 9 server scripts (docs/MODES.md section 6; renamed to coop_srv_* in S4)
+# the server script not yet under coop_mode.when_srv (S4: the other 8 are coop_srv_* now; coop_dedicated waits for A-S4D)
 srv gamedata/scripts/coop_dedicated.script
-srv gamedata/scripts/coop_levels.script
-srv gamedata/scripts/coop_levels_brain.script
-srv gamedata/scripts/coop_levels_share.script
-srv gamedata/scripts/coop_levels_tables.script
-srv gamedata/scripts/coop_quests_far.script
-srv gamedata/scripts/coop_task_audience.script
-srv gamedata/scripts/coop_storyline.script
-srv gamedata/scripts/coop_scorcher.script
 
 # --- gate only: until step S4 the 9 server scripts also run in the co-op process (coop_scorcher.script:417 installs
 # condlist functions in every mode, coop_storyline.script:1472-1486 registers actor_on_update in every process), so a
-# change to them needs both stands (critique H4, docs/MODES.md rule 8). Remove these rows in S4.
+# change to them needs both stands (critique H4, docs/MODES.md rule 8). S4 removed the rows of the 8 renamed scripts;
+# coop_dedicated's goes with A-S4D.
 gate-core gamedata/scripts/coop_dedicated.script
-gate-core gamedata/scripts/coop_levels.script
-gate-core gamedata/scripts/coop_levels_brain.script
-gate-core gamedata/scripts/coop_levels_share.script
-gate-core gamedata/scripts/coop_levels_tables.script
-gate-core gamedata/scripts/coop_quests_far.script
-gate-core gamedata/scripts/coop_task_audience.script
-gate-core gamedata/scripts/coop_storyline.script
-gate-core gamedata/scripts/coop_scorcher.script
+
+# --- gate only (S4 review A-S4C B2): both layers' boot and mode_of run in every process (the switchboard asks the
+# server layer first on every co-op host start), so a change to either needs both stands
+gate-core engine/src/xrGame/coop/srv/coop_srv_mode.cpp
+gate-core engine/src/xrGame/coop/hostplay/coop_hostplay_mode.cpp

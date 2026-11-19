@@ -49,7 +49,7 @@
 	  list goes to every player (npc.comp_items), so what one gave another can take; F2-32b reads is_group_companion.
 	Split levels (docs\SPLIT_LEVELS.md 7a): leaders[] and the stock's table are the business of the process that leads the squad's level.
 	  A map server's actor is a ghost: a companion with no leader here goes to the nearest player (follows). Its leaders go up into the
-	  world server's save and down onto a new map server (coop_levels_share). A squad claimed by a task on a map server's level goes there
+	  world server's save and down onto a new map server (coop_srv_levels_share). A squad claimed by a task on a map server's level goes there
 	  (npc.comp_adopt, with the stock's marks, which the world server writes itself where the stock has no live NPC to write them on, and the
 	  logic of a companion). The host's level change takes only his own squads
 	  (companion_squad_can_teleport). A leader who goes to another level: the authority lets the squad go, the world server teleports it
@@ -152,7 +152,7 @@ local installed = false
 local host_on = false
 local orig = {}
 local leaders = {} -- host: squad id -> proxy id (host numbering) of the client that leads it
-local far = {} -- world server: level id -> { squad id -> proxy id }: what the map servers lead, for the save (coop_levels_share)
+local far = {} -- world server: level id -> { squad id -> proxy id }: what the map servers lead, for the save (coop_srv_levels_share)
 local last_leader = {} -- host: squad id -> who led it when a story's line let it go (0: the world server's player): he gets it back
 local far_last = {} -- world server: level id -> last_leader of that map server, for the save
 local down_heard = false -- map server: it took the leaders of its level from the world server
@@ -1598,7 +1598,7 @@ local function patch_dismiss()
 	end
 end
 
--- Who leads what, between the processes (coop_levels_share): the squads of a map server's level are its own, the save is the world
+-- Who leads what, between the processes (coop_srv_levels_share): the squads of a map server's level are its own, the save is the world
 -- server's. Up: what this map server leads. Down: all of it, a new map server takes the squads of its level, once: what it changed
 -- after that is newer than what the world server has heard.
 local function leaders_here()
@@ -1890,7 +1890,8 @@ function on_game_start()
 	P.on(EV_RECALL, on_recall, nil, TAG)
 	P.on(EV_BRING, host_on_bring, "host", TAG) -- with split levels the world server passes it to the map server of his level
 	pcall(wrap_fft)
-	local share = rawget(_G, "coop_levels_share") or coop_levels_share
+	local qc = rawget(_G, "coop_quests_core") -- the Core keeps the tables, a server's share carries them
+	local share = qc and qc.share and qc.share()
 	if share then
 		share.up("comp_leaders", leaders_here, leaders_heard)
 		share.down("comp_leaders", all_leaders, leaders_given)
