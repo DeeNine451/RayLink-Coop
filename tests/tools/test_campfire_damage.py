@@ -26,6 +26,7 @@ def definition(source, signature):
 @pytest.fixture(scope="function")
 def campfire_runner(work):
     game = ROOT / "engine/src/xrGame"
+    rules = game.parent / "xrCoop"
     custom = (game / "CustomZone.cpp").read_text(encoding="utf-8-sig")
     fire = (game / "ZoneCampfire.cpp").read_text(encoding="utf-8-sig")
     overrides = [name for name in ("SwitchZoneState", "OnStateSwitch")
@@ -47,13 +48,13 @@ def campfire_runner(work):
         command = work / "compile.cmd"
         command.write_text(
             f'@echo off\ncall "{vcvars}" >nul\nif errorlevel 1 exit /b 1\n'
-            f'cl /nologo /EHsc /std:c++17 /Od /utf-8 "{fixture}" /Fe"{runner}"\n'
+            f'cl /nologo /EHsc /std:c++17 /Od /utf-8 /I"{rules}" "{fixture}" /Fe"{runner}"\n'
             'exit /b %ERRORLEVEL%\n', encoding="utf-8")
         build = ["cmd", "/d", "/c", str(command)]
     else:
         compiler = shutil.which("c++")
         assert compiler, "C++17 compiler required for this regression"
-        build = [compiler, "-std=c++17", str(fixture), "-o", str(runner)]
+        build = [compiler, "-std=c++17", "-I", str(rules), str(fixture), "-o", str(runner)]
     result = subprocess.run(build, cwd=work, capture_output=True, text=True, errors="replace", timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     return runner
@@ -70,6 +71,7 @@ HARNESS = r'''
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include "coop_hits.h"
 using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
@@ -86,6 +88,9 @@ bool is_mirror() { return mirror; }
 namespace objects {
 bool zone_switch_blocked(CCustomZone*) { return mirror; }
 int on_zone_state(CCustomZone*, u8) { if (active && !mirror) ++relayed_states; return 0; }
+u32 zone_blowout_start(u32 elapsed, u32 blast_ms) {
+    return hits::zone_blowout_start(elapsed, blast_ms);
+}
 // Existing ownership contract: local actor 0, player proxy 10, NPC 20.
 bool zone_hit_blocked(CCustomZone*, u16 target) {
     return active && (mirror ? target != 0 : target == 10);
@@ -106,6 +111,7 @@ public:
     EZoneState m_eZoneState = eZoneStateIdle;
     int m_iStateTime = 0, m_iPreviousStateTime = 0;
     int m_StateTime[5] = {0, 1, 2, 1, 0};
+    u32 m_dwBlowoutExplosionTime = 0;
     Flags m_zone_flags;
     bool m_bBlowoutOnce = false;
     u32 m_owner_id = u32(-1);
@@ -126,12 +132,14 @@ public:
     }
     // Scheduler boundary. The phase methods and CreateHit below come from the engine unchanged.
     void tick() {
+        m_iPreviousStateTime = m_iStateTime;
         ++m_iStateTime;
         switch (m_eZoneState) {
         case eZoneStateIdle: CheckForAwaking(); break;
         case eZoneStateAwaking: AwakingState(); break;
         case eZoneStateBlowout:
-            if (m_iStateTime == 1) {
+            if (m_dwBlowoutExplosionTime >= u32(m_iPreviousStateTime) &&
+                m_dwBlowoutExplosionTime < u32(m_iStateTime)) {
                 for (u16 target : {0, 10, 20})
                     CreateHit(target, ID(), {}, 0.5f, 0, {}, 0, ALife::burn);
             }

@@ -190,6 +190,11 @@ struct Manager {
 Manager& mgr() { return manager; }
 bool is_live_mirror() { return !host; }
 bool is_map_authority() { return host; }
+struct Mode {
+    bool decides_world() const { return host; }
+    bool leads_level() const { return host; }
+};
+Mode mode() { return {}; }
 u16 quant(float n) { return u16(std::lround(n * 65535.f)); }
 float dequant(u16 n) { return n / 65535.f; }
 bool same_str(const shared_str& a, const char* b) { return a == shared_str(b); }

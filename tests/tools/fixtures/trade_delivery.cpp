@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "../../../engine/src/xrCoop/coop_trade_permit.h" // G6-3: the permit rules the host deal reads
 using u8 = uint8_t; using u16 = uint16_t; using u32 = uint32_t; using u64 = uint64_t;
 using s64 = int64_t; using PeerId = uint16_t;
 template<class T> using xr_vector = std::vector<T>;
@@ -66,7 +67,7 @@ std::map<u16, CInventoryItem> items;
 std::map<u16, u16> server_parents;
 u16 reject_item = kNoId;
 u32 move_calls = 0, money_changes = 0;
-u64 g_host_items = 0;
+u64 g_host_items = 0, g_permit_deals = 0;
 u32 player_balance = 10000;
 CObject* find_object(u16 id) {
     if (id == player.id) return &player;
@@ -99,6 +100,9 @@ void move_item(u16 from, u16 to, u16 id) {
     if (id == reject_item) { reject_item=kNoId; return; }
     if (server_parent(id) == kNoId) server_parents[id]=to;
 }
+namespace trade_permit = coop::trade_permit;
+// G6-3: no trading-computer permit in these deals; the stock talk and reach decide (coop_trade.cpp permit_verdict)
+trade_permit::Verdict permit_verdict(PeerId, CInventoryOwner*, u16) { return trade_permit::Verdict::None; }
 #include "trade_host.inc"
 void add(u16 id, u16 owner, const char* section="wpn_sil_9mm") {
     auto& i=items[id]; i.id=id; i.parent=owner; i.section=section; server_parents[id]=owner;
@@ -231,7 +235,27 @@ void run(const std::string& mode){
     }
 }
 }
+namespace request_test {
+using xr_string = std::string;
+enum class Reason;
+struct Fvector;
+Reason admitted_move(u16 item, u16 src, u16 dst, const Fvector* drop_pos, xr_string& refused);
+
+bool is_map_authority();
+struct Mode {
+    bool decides_world() const { return is_map_authority(); }
+    bool leads_level() const { return is_map_authority(); }
+};
+Mode mode() { return {}; }
+}
 #include "request_move_fixture.h"
+namespace request_test {
+// These gifts have no container rule. Keep the real ownership checks and rollback.
+Reason admitted_move(u16 item, u16 src, u16 dst, const Fvector* drop_pos, xr_string&)
+{
+    return apply_move(item, src, dst, drop_pos);
+}
+}
 int main(int argc,char** argv){
     require(argc==2,"scenario required");std::string mode=argv[1];
     if(mode.find("gift-")==0) request_test::run(mode);

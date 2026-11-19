@@ -932,9 +932,29 @@ def publish_github(tmp_path, **env):
         (fake_bin / name).write_text(FAKE_TOOL.format(name=name, calls=calls.as_posix()), encoding="utf-8",
                                      newline="\n")
     run_env = {k: v for k, v in os.environ.items() if k not in ("BUILD", "OWNER", "VISIBILITY", "SKIP_LAUNCHER")}
-    run_env.update(PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""), SKIP_LAUNCHER="1", **env)
-    done = subprocess.run([bash, str(project / "tools" / "publish_github.sh")], capture_output=True, text=True,
+    # 2026-11-20: Git Bash puts its own /mingw64/bin and /usr/bin in front of a PATH it gets from Windows, so the fakes
+    # lost to the real git and gh; tmp_path lies inside this repository, so the real git fetched into its .git. Now the
+    # fakes go first INSIDE bash, the script runs only after bash proves git, gh and python are the fakes (exit 97 =
+    # refused, the test fails), and every real tool is cut off from the network and from this repository anyway.
+    posix_bin = fake_bin.as_posix()
+    if re.match(r"^[A-Za-z]:/", posix_bin):
+        posix_bin = "/" + posix_bin[0].lower() + posix_bin[2:]
+    script = (project / "tools" / "publish_github.sh").as_posix()
+    if re.match(r"^[A-Za-z]:/", script):
+        script = "/" + script[0].lower() + script[2:]
+    (tmp_path / "ghcfg").mkdir(exist_ok=True)
+    run_env.update(PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""), SKIP_LAUNCHER="1",
+                   GIT_ALLOW_PROTOCOL="file", GIT_CEILING_DIRECTORIES=str(tmp_path), GIT_TERMINAL_PROMPT="0",
+                   GH_HOST="github.invalid", GH_TOKEN="invalid", GITHUB_TOKEN="invalid",
+                   GH_CONFIG_DIR=str(tmp_path / "ghcfg"), **env)
+    guard = (f'export PATH="{posix_bin}:$PATH"; hash -r; '
+             f'for t in git gh python; do case "$(command -v "$t")" in "{posix_bin}/"*) ;; '
+             f'*) echo "FAKE-NOT-FIRST $t $(command -v "$t")"; exit 97;; esac; done; exec bash "$1"')
+    done = subprocess.run([bash, "-c", guard, "guard", script], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", env=run_env, cwd=tmp_path, timeout=120)
+    if done.returncode == 97:
+        pytest.fail("the fake git/gh/python are not first on PATH inside bash: refused to run the publish script\n"
+                    + done.stdout + done.stderr)
     lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
     return done.returncode, done.stdout + done.stderr, lines
 
