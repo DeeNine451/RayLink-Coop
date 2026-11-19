@@ -1,0 +1,19 @@
+-- Server (srv): Useful Idiots companion state goes from the map authority to the world save (docs/MODES.md).
+local SNAPSHOT_MS = 250
+
+local function gather()
+	return coop_npc_idiots.capture_states()
+end
+
+local function receive(rows, source_level)
+	if source_level ~= nil then coop_npc_idiots.receive_states(rows) end
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		if not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
+		local share = coop_quests_core.share()
+		share.up("idiots_state", gather, receive, SNAPSHOT_MS)
+		share.down("idiots_templates", coop_npc_idiots.saved_templates, coop_npc_idiots.receive_templates)
+	end)
+end

@@ -20,6 +20,9 @@
 	Outside a session coop_idiots_player_id(id) is id == 0: single player behaves exactly like the mod.
 
 	For other scripts / status: coop_npc_idiots.state = { installed, applied, file, why }
+
+	G12-2: the point key runs through the stock trigger. The receiving level resolves the selected companions.
+	The save keeps Useful Idiots' own NPC records and stores player templates under character IDs.
 --]]
 
 local tostring, type, ipairs, pcall = tostring, type, ipairs, pcall
@@ -206,3 +209,314 @@ end
 
 local ok, err = pcall(install)
 if not ok then log("! install: %s", tostring(err)) end
+
+local POINT, TEMPLATE = "idiots_point", "idiots_template"
+local TEMPLATES = "coop_idiots_templates"
+local MAX_IDS, MAX_COORD = 128, 100000
+local npc, beh, mdata
+local installed = false
+
+local function C() return coop_mods_core end
+
+local function valid_id(id, min)
+	return type(id) == "number" and id >= min and id < 65535 and id % 1 == 0
+end
+
+local function templates(create)
+	local m = alife_storage_manager.get_state()
+	if type(m[TEMPLATES]) ~= "table" and create then m[TEMPLATES] = {} end
+	return type(m[TEMPLATES]) == "table" and m[TEMPLATES] or nil
+end
+
+function saved_templates()
+	return npc and templates(false) or nil
+end
+
+function receive_templates(rows)
+	if npc and type(rows) == "table" then alife_storage_manager.get_state()[TEMPLATES] = rows end
+end
+
+local function copy_template(saved)
+	local out = dup_table(npc.DEFAULT_STATE)
+	if type(saved) == "table" then
+		for g, actions in pairs(out) do
+			local row = saved[g]
+			if type(row) == "table" then
+				for a in pairs(actions) do
+					if type(row[a]) == "boolean" then actions[a] = row[a] end
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function template_of(owner)
+	local rows = templates(false)
+	return copy_template(rows and rows[owner])
+end
+
+-- The same change to a template that NPC.setState(nil, ...) makes, without its walk of the UI's companion list.
+local function set_template_state(template, group, action, enabled)
+	local states = template[group]
+	if npc.ACTIONS_KEYED[group].cycle then
+		if enabled then
+			for other in pairs(states) do states[other] = other == action end
+		end
+	else
+		states[action] = enabled
+	end
+end
+
+local function sender_character(from)
+	for _, player in ipairs(C().players()) do
+		if player.id == from then return player.avatar_id end
+	end
+end
+
+local function on_template(t, from)
+	local owner = sender_character(from)
+	local good = npc and valid_id(owner, 1) and type(t.group) == "string" and type(t.action) == "string"
+		and type(t.enabled) == "boolean" and npc.isStateful(t.group, t.action)
+	if not coop_trust.pass("idiots_template_args", good, "peer %d: invalid personal template change", from) or not good then return end
+	local value = template_of(owner)
+	set_template_state(value, t.group, t.action, t.enabled)
+	templates(true)[owner] = value
+end
+
+local function send_template(group, action, enabled)
+	C().to_host(TEMPLATE, { group = group, action = action, enabled = enabled })
+end
+
+-- Iterate the actual squads and online objects, independent of who the UI's current actor is.
+function capture_states()
+	if not (mdata and npc and beh and C().active() and coop_mode.leads_here()) then return nil end
+	local rows = {}
+	local squads = axr_companions and axr_companions.companion_squads
+	for _, squad in pairs(squads or {}) do
+		if squad and squad.squad_members and not axr_task_manager.hostages_by_id[squad:commander_id()] then
+			for member in squad:squad_members() do
+				local id = member.id
+				local obj = level.object_by_id(id)
+				if obj and db.storage[id] and npc.isCompanion(obj) then
+					local host_id = C().hid(id)
+					if valid_id(host_id, 1) then
+						local storage = {}
+						beh.saveStorage(id, storage)
+						rows[host_id] = { states = npc.getAllStates(obj), beh = storage[id] }
+					end
+				end
+			end
+		end
+	end
+	return rows
+end
+
+local function merge_rows(data, rows)
+	data.companionStates = data.companionStates or {}
+	data.beh = data.beh or {}
+	for id, row in pairs(rows or {}) do
+		if valid_id(id, 1) and type(row) == "table" and type(row.states) == "table" then
+			data.companionStates[id] = row.states
+			data.beh[id] = type(row.beh) == "table" and row.beh or nil
+		end
+	end
+end
+
+function receive_states(rows)
+	if mdata and type(rows) == "table" then merge_rows(mdata.initStorage(), rows) end
+end
+
+local function wrap_callback(name, key, make)
+	local wrapped, orig = C().wrap(mdata, key, "idiots." .. key, make)
+	if wrapped then C().swap_callback(name, orig, mdata[key]) end
+end
+
+local function install_storage()
+	if not (mdata and npc and beh) then return end
+	wrap_callback("save_state", "onSaveState", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			if not coop_mode.decides_world() then return end
+			local data = mdata.initStorage()
+			if coop_mode.actor_is_player() then
+				data.globalState = copy_template(npc.GLOBAL_STATE)
+				templates(true)[0] = data.globalState
+			end
+			data.sharedItems = npc.LOOT_SHARED_ITEMS
+			data.sharingNPCs = npc.LOOT_SHARING_NPCS
+			merge_rows(data, capture_states())
+		end
+	end)
+	wrap_callback("load_state", "onLoadState", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			if coop_mode.is_player_mirror() then
+				npc.GLOBAL_STATE = template_of(C().hid(0))
+				return
+			end
+			npc.GLOBAL_STATE = copy_template()
+			if coop_mode.actor_is_player() then
+				local rows = templates(false)
+				if rows and rows[0] then mdata.initStorage().globalState = copy_template(rows[0]) end
+			end
+			return orig(...)
+		end
+	end)
+	wrap_callback("npc_on_net_spawn", "onNpcSpawn", function(orig)
+		return function(obj, ...)
+			if not C().active() then return orig(obj, ...) end
+			if not coop_mode.leads_here() then return end
+			local owner = coop_npc_companions.owner_character(obj)
+			if owner == nil or (owner == 0 and coop_mode.actor_is_player()) then return orig(obj, ...) end
+			local previous = npc.GLOBAL_STATE
+			npc.GLOBAL_STATE = template_of(owner)
+			local success, e = pcall(orig, obj, ...)
+			npc.GLOBAL_STATE = previous
+			if not success then error(e, 0) end
+		end
+	end)
+	C().wrap(npc, "setState", "idiots.personal_template", function(orig)
+		return function(obj, group, action, enabled, ...)
+			if obj or not C().active() or not coop_mode.is_player_mirror() or not npc.isStateful(group, action) then
+				return orig(obj, group, action, enabled, ...)
+			end
+			local before = npc.GLOBAL_STATE[group][action]
+			orig(obj, group, action, enabled, ...)
+			local after = npc.GLOBAL_STATE[group][action]
+			if before ~= after then send_template(group, action, after) end
+		end
+	end)
+	C().set_limit(TEMPLATE, 16, 8)
+	C().on(TEMPLATE, on_template, "world")
+end
+
+local function coordinate(x)
+	return type(x) == "number" and x >= -MAX_COORD and x <= MAX_COORD
+end
+
+local function parse_ids(value)
+	if type(value) ~= "string" or #value == 0 or #value > MAX_IDS * 6 then return nil end
+	local ids, seen = {}, {}
+	for word in value:gmatch("[^,]+") do
+		local id = word:match("^%d+$") and tonumber(word)
+		if not valid_id(id, 1) or seen[id] or #ids == MAX_IDS then return nil end
+		ids[#ids + 1], seen[id] = id, true
+	end
+	if table.concat(ids, ",") ~= value then return nil end
+	return ids
+end
+
+local function on_point(t, from)
+	local ids = parse_ids(t.ids)
+	local good = ids and coordinate(t.x) and coordinate(t.y) and coordinate(t.z)
+		and type(t.autoWait) == "boolean" and type(t.autoGuard) == "boolean"
+	if not coop_trust.pass("idiots_point_args", good, "peer %d: invalid point command", from) or not good then return false end
+	local actor = C().avatar(from)
+	local owner = actor and C().hid(actor:id())
+	local targets = {}
+	for _, id in ipairs(ids) do
+		local lid = C().lid(id)
+		local obj = lid and level.object_by_id(lid)
+		local storage = lid and db.storage[lid]
+		local ready = storage and storage[storage.enemy and "combat" or "beh"]
+		if ready and npc.isCompanion(obj) and coop_npc_companions.owner_character(obj) == owner then
+			targets[#targets + 1] = obj
+		end
+	end
+	local owned = valid_id(owner, 0) and actor:alive() and #targets == #ids
+	-- Even in log mode there is no valid game target for a stale or foreign selection.
+	if not coop_trust.pass("idiots_point_owner", owned, "peer %d: point command has a missing or foreign companion", from)
+		or not owned then return false end
+	local pos = vector():set(t.x, t.y, t.z)
+	for _, obj in ipairs(targets) do
+		npc.moveToPoint(obj, pos)
+		if t.autoWait then npc.setState(obj, "movement", "wait", true) end
+		if t.autoGuard then npc.setState(obj, "combat", "guard", true) end
+	end
+	return true
+end
+
+local function local_point(keys)
+	local companions = npc.getCompanions()
+	local selected = #companions == 1 and companions or table.keys(npc.SELECTED_IDS)
+	local list = #selected > 0 and selected or companions
+	local pos = level.get_target_pos()
+	if not pos or #list == 0 or #list > MAX_IDS then return end
+	local ids = {}
+	for i, obj in ipairs(list) do
+		local id = C().hid(type(obj) == "number" and obj or obj:id())
+		if not valid_id(id, 1) then return end
+		ids[i] = id
+	end
+	local t = { ids = table.concat(ids, ","), x = pos.x, y = pos.y, z = pos.z,
+		autoWait = not not ui_mcm.get("idiots/options/autoWait"),
+		autoGuard = not not ui_mcm.get("idiots/options/autoGuard") }
+	local mirror = coop_mode.is_player_mirror()
+	local accepted
+	if mirror then
+		accepted = C().to_host(POINT, t)
+	elseif coop_mode.leads_here() and coop_mode.actor_is_player() then
+		accepted = on_point(t, C().self_peer())
+	end
+	if not accepted then return end
+	if #selected == 0 then
+		if t.autoWait then
+			set_template_state(npc.GLOBAL_STATE, "movement", "wait", true)
+			if mirror then send_template("movement", "wait", true) end
+		end
+		if t.autoGuard then
+			set_template_state(npc.GLOBAL_STATE, "combat", "guard", true)
+			if mirror then send_template("combat", "guard", true) end
+		end
+	end
+	if #selected > 0 then
+		keys.showMessage("st_idiots_move_point_message", #selected)
+	else
+		keys.showMessage("st_idiots_move_all_point_message")
+	end
+	if ui_mcm.get("idiots/options/autoDeselect") then npc.SELECTED_IDS = {} end
+	if gesture and gesture.play_stuff then gesture.play_stuff("gesture_sound", "point_forward", "anm_point", true, true) end
+	keys.playParticle(pos)
+end
+
+local function install_keys()
+	local keys = C().mod("idiots_keybinds")
+	if not (keys and npc) then return end
+	local wrapped = C().wrap(keys, "checkKeybind", "idiots.point_trigger", function(orig)
+		return function(event, dik, group, action)
+			local trigger = orig(event, dik, group, action)
+			if not trigger or group ~= "point" or action ~= "move" or not C().active()
+				or not (coop_mode.is_player_mirror() or coop_mode.leads_here() and coop_mode.actor_is_player()) then return trigger end
+			local_point(keys)
+			return false -- the stock move branch has been served, keep testing the other bindings
+		end
+	end)
+	if not wrapped then return end
+	-- The companion adapter also has a raw on_key_press bridge for the stock game.
+	-- Suppress its Useful Idiots path even when its callback runs before the mod's trigger.
+	C().wrap(coop_npc_players, "send", "idiots.legacy_point", function(orig)
+		return function(name, ...)
+			if name == "npc.comp_go" and C().active() and coop_mode.is_player_mirror() then return false end
+			return orig(name, ...)
+		end
+	end)
+	C().set_limit(POINT, 8, 4)
+	C().on(POINT, on_point, "host")
+end
+
+local function start_step(name, f)
+	local success, e = pcall(f)
+	if not success then log("! %s: %s", name, tostring(e)) end
+end
+
+function on_game_start()
+	if installed or not rawget(_G, "coop") then return end
+	installed = true
+	start_step("storage", function()
+		mdata = C().mod("a_idiots_mdata")
+		npc, beh = package.loaded["illish.lib.npc"], package.loaded["illish.lib.beh"]
+		install_storage()
+	end)
+	start_step("point key", install_keys)
+end
