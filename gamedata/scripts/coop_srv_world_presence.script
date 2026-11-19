@@ -1,0 +1,80 @@
+-- Сервер (srv): присутствие игроков для очистки инвентаря и выбора целей отрядов (docs/MODES.md).
+
+local function level_of(se)
+	local vertex = se.m_game_vertex_id
+	local graph = game_graph()
+	if vertex and graph:valid_vertex_id(vertex) then
+		return graph:vertex(vertex):level_id()
+	end
+end
+
+local function player_on(se, standing_only)
+	local level_id = level_of(se)
+	if level_id == nil then return false end
+	for _, player in ipairs(coop_mods_core.players()) do
+		-- The engine roster omits transport bridges and the world server's ghost.
+		if player.level == level_id and player.avatar_id
+			and (not standing_only or coop_npc_players.standing(player.avatar_id)) then
+			return true
+		end
+	end
+	return false
+end
+
+local function start_step(name, install)
+	local ok, err = pcall(install)
+	if not ok then coop_mods_core.report("srv_world_presence", name, err) end
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		if not coop_mode.decides_world() then return end
+		local core = coop_mods_core
+
+		start_step("release_npc_inventory", function()
+			local cleaner = core.mod("release_npc_inventory")
+			if not cleaner then return end
+			core.wrap(cleaner, "clean_npc_inv", "srv_world_presence.npc_cleanup", function(original)
+				return function(npc, ...)
+					if core.active() then
+						-- The transfer registry must be checked on the parent before the stock code visits its children.
+						local levels = coop.levels
+						if not npc or not levels or not levels.online_at_server
+							or levels.online_at_server(npc.id) or player_on(npc, false) then return end
+					end
+					return original(npc, ...)
+				end
+			end)
+		end)
+
+		start_step("target_prior", function()
+			local prior = core.mod("target_prior")
+			local objects = core.mod("simulation_objects")
+			if not core.fn(prior, "is_on_the_same_level") or not core.fn(objects, "evaluate_prior") then return end
+
+			-- GAMMA uses this helper in the actor and smart-terrain branches too. Replace only the
+			-- ghost-to-choosing-squad comparison during a squad-target evaluation.
+			local choosing_squad
+			core.wrap(prior, "is_on_the_same_level", "srv_world_presence.target_gate", function(original)
+				return function(first, second, ...)
+					if choosing_squad and first and first.id == 0 and second and second.id == choosing_squad then
+						return player_on(second, true)
+					end
+					return original(first, second, ...)
+				end
+			end)
+			core.wrap(objects, "evaluate_prior", "srv_world_presence.target_prior", function(original)
+				return function(target, squad, ...)
+					local previous = choosing_squad
+					local group = core.active() and target:clsid() == clsid.online_offline_group_s
+					if not group and not previous then return original(target, squad, ...) end
+					choosing_squad = group and squad.id or nil
+					local ok, value = pcall(original, target, squad, ...)
+					choosing_squad = previous
+					if not ok then error(value, 0) end
+					return value
+				end
+			end)
+		end)
+	end)
+end
