@@ -1,0 +1,351 @@
+-- Core: the map authority describes squads and NPC assignments; the player draws the PDA view.
+-- Co-op: the host owns the map and uses the same facts locally. Clients request its current map facts.
+-- Server: the world forwards requests; the map authority answers with the facts of the requester's map.
+-- Inventory, Milspec progress, goodwill and Kill Tracker filters are read only on the player's machine.
+
+local REQUEST, RESPONSE = "pda_marks_q", "pda_marks_r"
+local POLL_MS, REQUEST_MS = 500, 3000
+local MAX_TOKEN = 2147483647
+local services = {
+	special = { "ui_pda2_special_location", "st_ui_pda_legend_special" },
+	trader = { "ui_pda2_trader_location", "st_ui_pda_legend_trader" },
+	mechanic = { "ui_pda2_mechanic_location", "st_ui_pda_legend_mechanic" },
+	guider = { "ui_pda2_scout_location", "st_ui_pda_legend_scout" },
+	barman = { "ui_pda2_barman_location", "st_ui_pda_legend_barman" },
+	quest_npc = { "ui_pda2_quest_npc_location", "st_ui_pda_legend_vip" },
+	medic = { "ui_pda2_medic_location", "st_ui_pda_legend_medic" },
+	companion = { "ui_pda2_companion_location", "st_ui_pda_companion" },
+}
+local tracker_styles = {
+	"deadbody_location_whtx", "deadbody_location_skul", "deadbody_location_sdot",
+	"deadbody_location_mdot", "deadbody_location_ldot",
+}
+
+local squads, assignments = {}, {} -- local authority numbering
+local drawn, tracker_drawn = {}, {} -- local view numbering
+local mil, mil_patch, warfare_module, tracker
+local map_name, snapshot, snapshot_at, request_token, next_poll, next_request = nil, nil, 0, 0, 0, 0
+local tried_xml, started
+
+local function C() return coop_mods_core end
+
+local function integer(value, min, max)
+	return type(value) == "number" and value >= min and value <= max and value % 1 == 0
+end
+
+local function valid_id(id) return integer(id, 0, 65534) end
+
+local function remove_spot(id, name)
+	if name and level.map_has_object_spot(id, name) ~= 0 then level.map_remove_object_spot(id, name) end
+end
+
+local function clear_old_service(id)
+	for _, spec in pairs(services) do remove_spot(id, spec[1]) end
+end
+
+local function alias(base)
+	if not base then return end
+	local xml = modxml_coop_pda_marks
+	if not xml then return end
+	local name = xml.spot_type(base)
+	if not name and not tried_xml and CScriptXmlInit then
+		tried_xml = true
+		local ok, err = pcall(function() CScriptXmlInit():ParseFile("map_spots.xml") end)
+		if not ok then C().report("pda_marks", "map XML", err) end
+		name = xml.spot_type(base)
+	end
+	if name and coop.spot_is_local(name) then return name end
+end
+
+local function put_spot(id, name, hint, previous)
+	if level.map_has_object_spot(id, name) == 0 then
+		level.map_add_object_spot(id, name, hint)
+	elseif not previous or previous[1] ~= name or previous[2] ~= hint then
+		level.map_change_spot_hint(id, name, hint)
+	end
+end
+
+local function in_map(sim, graph, se, name)
+	local vertex = se and se.m_game_vertex_id
+	return vertex and graph:valid_vertex_id(vertex) and sim:level_name(graph:vertex(vertex):level_id()) == name
+end
+
+local function read_facts(name)
+	local sim, graph = alife(), game_graph()
+	local facts = { map = name, squads = {}, services = {} }
+	if not (sim and graph) then return facts end
+	for id, role in pairs(assignments) do
+		local net_id = C().hid(id)
+		if valid_id(net_id) and in_map(sim, graph, sim:object(id), name) then facts.services[net_id] = role end
+	end
+	for id in pairs(squads) do
+		local squad = sim:object(id)
+		local net_id = C().hid(id)
+		if valid_id(net_id) and in_map(sim, graph, squad, name) then
+			local leader = squad:commander_id()
+			local commander = C().hid(leader)
+			if valid_id(commander) then
+				local faction = squad.player_id
+				local row = { commander = commander, faction = faction, community = squad:get_squad_community(),
+					monster = not not is_squad_monster[faction], members = {} }
+				for member in squad:squad_members() do
+					local member_id = member.id
+					local se = member_id ~= leader and sim:object(member_id)
+					local net_member = se and se.online and C().hid(member_id)
+					if valid_id(net_member) then row.members[#row.members + 1] = net_member end
+				end
+				facts.squads[net_id] = row
+			end
+		end
+	end
+	return facts
+end
+
+local function local_id(id)
+	if not valid_id(id) then return end
+	local result = C().lid(id)
+	if valid_id(result) then return result end
+end
+
+local function render(facts)
+	local wanted, service_visible = {}, {}
+	for hid, role in pairs(facts.services) do
+		local id, spec = local_id(hid), services[role]
+		if id and spec then
+			remove_spot(id, spec[1]) -- remove a shared copy before applying the local relation filter
+			local npc = level.object_by_id(id)
+			local name = alias(spec[1])
+			if name and npc and npc:alive() and npc:general_goodwill(db.actor) > -1000 then
+				wanted[id] = { name, spec[2] }
+				service_visible[hid] = role ~= "companion"
+			end
+		end
+	end
+	if mil then
+		local debug_view = DEV_DEBUG and dbg_map_hud
+		local pda = db.actor:item_in_slot(8)
+		for hid, row in pairs(facts.squads) do
+			local id, commander = local_id(hid), local_id(row.commander)
+			local base = warfare_module.squad_icons[row.faction]
+			if id and commander and not service_visible[row.commander] then
+				local visible = debug_view or (pda and not row.monster and mil.actor_pda_can_see_mapspot(row.faction))
+				local name = visible and alias(base or (debug_view and "warfare_mutant_spot"))
+				-- Mirrors may have the commander before the ALife squad object.
+				local target = alife_object(id) and id or (level.object_by_id(commander) and commander)
+				if name and target and not wanted[target] then
+					local hint = game.translate_string(row.community or row.faction or "")
+					wanted[target] = { name, hint }
+					if mil_patch.show_squadmate_mapspots then
+						local faction = mil.validated_faction(row.community, true) or "stalker"
+						local member_type = alias("squadmate_" .. faction .. "_spot")
+						if member_type then
+							for _, member in ipairs(row.members) do
+								local lid = local_id(member)
+								if lid and level.object_by_id(lid) and not wanted[lid] then wanted[lid] = { member_type, hint } end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	for id, old in pairs(drawn) do
+		if not wanted[id] or wanted[id][1] ~= old[1] then remove_spot(id, old[1]) end
+	end
+	for id, spot in pairs(wanted) do put_spot(id, spot[1], spot[2], drawn[id]) end
+	drawn = wanted
+end
+
+local function reply(t, peer)
+	local valid = integer(t.token, 1, MAX_TOKEN)
+	if not coop_trust.pass("pda_marks_request", valid, "invalid PDA snapshot token from peer %s", tostring(peer)) then return end
+	if not coop_mode.leads_here() then return end
+	local facts = read_facts(level.name())
+	facts.token = valid and t.token or 0
+	local payload = C().ser(facts)
+	if payload then C().send_big(RESPONSE, payload, peer) end
+end
+
+local function receive(payload)
+	if not coop_mode.is_player_mirror() then return end
+	local facts = C().deser(payload)
+	if type(facts) ~= "table" or facts.token ~= request_token or facts.map ~= level.name() or facts.map ~= map_name
+		or type(facts.squads) ~= "table" or type(facts.services) ~= "table" then return end
+	snapshot, snapshot_at = facts, time_global()
+	if db.actor then render(facts) end
+end
+
+local function install_squads()
+	mil_patch = C().mod("zzz_sim_squad_scripted_milpda")
+	if not mil_patch then return end
+	local pda, warfare_spots = C().mod("item_milpda"), C().mod("sim_squad_warfare")
+	local module = C().mod("sim_squad_scripted")
+	if not (pda and warfare_spots and module and type(warfare_spots.squad_icons) == "table") then return end
+	local class = module.sim_squad_scripted
+	local wrapped = C().wrap(class, "show", "pda_marks.squad.show", function(orig)
+		return function(self, ...)
+			if not C().active() then return orig(self, ...) end
+			if not coop_mode.leads_here() then return end
+			local role = assignments[self:commander_id()]
+			if self.show_disabled or (self.registered_with_warfare and role and role ~= "companion") then
+				return self:hide()
+			end
+			if self.registered_with_warfare then
+				squads[self.id] = nil
+				return orig(self, ...)
+			end
+			squads[self.id] = true
+		end
+	end)
+	if not wrapped then return end
+	mil, warfare_module = pda, warfare_spots
+	for _, method in ipairs({ "hide", "on_unregister" }) do
+		C().wrap(class, method, "pda_marks.squad." .. method, function(orig)
+			return function(self, ...)
+				if C().active() then squads[self.id] = nil end
+				return orig(self, ...)
+			end
+		end)
+	end
+end
+
+local function pick(npc, st, section, key, default)
+	local list = st.ini:r_string_to_condlist(st.section_logic, key) or st.ini:r_string_to_condlist(section, key)
+	if not list then return default end
+	return xr_logic.pick_section_from_condlist(db.actor, npc, list)
+end
+
+local function install_services()
+	local generic = C().mod("stalker_generic")
+	if not generic then return end
+	C().wrap(generic, "reset_show_spot", "pda_marks.npc.reset_show_spot", function(orig)
+		return function(npc, scheme, st, section, ...)
+			if not C().active() then return orig(npc, scheme, st, section, ...) end
+			local id = npc:id()
+			clear_old_service(id)
+			if not coop_mode.leads_here() then return end
+			local se = alife_object(id)
+			if not se then assignments[id] = nil; return end
+			local role = pick(npc, st, section, "level_spot")
+			assignments[id] = services[role] and role or nil
+			local show = pick(npc, st, section, "show_spot", "true")
+			se:visible_for_map(show == "true")
+		end
+	end)
+	C().wrap(generic, "remove_level_spot", "pda_marks.npc.remove_level_spot", function(orig)
+		return function(id, ...)
+			if not C().active() then return orig(id, ...) end
+			assignments[id] = nil
+			clear_old_service(id)
+		end
+	end)
+end
+
+local function clear_old_tracker(id)
+	for _, base in ipairs(tracker_styles) do remove_spot(id, base) end
+end
+
+local function clear_tracker(id)
+	local old = tracker_drawn[id]
+	if old then remove_spot(id, old.name); tracker_drawn[id] = nil end
+	clear_old_tracker(id)
+end
+
+local function install_tracker()
+	local mod = C().mod("ish_kill_tracker")
+	if not mod then return end
+	local pda = C().mod("item_milpda")
+	local monitor = C().mod("utils_catspaw_taskmonitor")
+	if not (pda and pda.actor_can_see_killspots and mod.killspot_icon and mod.tracked_kill) then return end
+	local is_task_target = monitor and monitor.is_id_task_target
+	C().wrap(mod, "add_body_dot", "pda_marks.tracker.add_body_dot", function(orig)
+		return function(id, text, ...)
+			if not C().active() then return orig(id, text, ...) end
+			if not valid_id(id) then return end
+			local body = mod.tracked_bodies[id]
+			if not (body and db.actor and coop_mode.actor_is_player() and pda.actor_can_see_killspots()
+				and mod.tracked_kill(id) and not (is_task_target and is_task_target(id))) then
+				clear_tracker(id)
+				return
+			end
+			clear_old_tracker(id)
+			body.icon = body.icon or mod.killspot_icon(id)
+			local name = alias(body.icon) or alias(mod.default_style)
+			local old = tracker_drawn[id]
+			if old and old.name ~= name then remove_spot(id, old.name); tracker_drawn[id] = nil end
+			if name then
+				put_spot(id, name, text or "")
+				tracker_drawn[id] = { name = name, body = body }
+			end
+		end
+	end)
+	C().wrap(mod, "remove_dot", "pda_marks.tracker.remove_dot", function(orig)
+		return function(id, ...)
+			if not C().active() then return orig(id, ...) end
+			if not valid_id(id) then return end
+			clear_tracker(id)
+			local body = mod.tracked_bodies[id]
+			if body then body.icon = nil end
+		end
+	end)
+	C().wrap(mod, "clean_slate", "pda_marks.tracker.clean_slate", function(orig)
+		return function(...)
+			if not C().active() then return orig(...) end
+			for id in pairs(tracker_drawn) do clear_tracker(id) end
+			for id in pairs(mod.tracked_bodies) do if valid_id(id) then clear_tracker(id) end end
+			mod.tracked_bodies = {}
+		end
+	end)
+	-- The original context menu also deletes stock body marks on this path.
+	local wrapped, original = C().wrap(mod, "map_spot_menu_property_clicked", "pda_marks.tracker.menu_click", function(orig)
+		return function(ui, id, name, prop, ...)
+			if C().active() and prop == "deadbody" then return end
+			return orig(ui, id, name, prop, ...)
+		end
+	end)
+	if wrapped then C().swap_callback("map_spot_menu_property_clicked", original, mod.map_spot_menu_property_clicked) end
+	tracker = mod
+end
+
+local function update()
+	if not C().active() or not db.actor or not coop_mode.actor_is_player() then return end
+	local name, now = level.name(), time_global()
+	if name ~= map_name then
+		map_name, snapshot, next_request, next_poll = name, nil, 0, 0
+	end
+	if now < next_poll then return end
+	next_poll = now + POLL_MS
+	if coop_mode.leads_here() then
+		render(read_facts(name))
+	else
+		if snapshot and now - snapshot_at > 4 * REQUEST_MS then snapshot = nil end
+		render(snapshot or { squads = {}, services = {} })
+		if now >= next_request then
+			next_request = now + REQUEST_MS
+			request_token = request_token % MAX_TOKEN + 1
+			C().to_host(REQUEST, { token = request_token })
+		end
+	end
+	if tracker then
+		for id, old in pairs(tracker_drawn) do
+			if tracker.tracked_bodies[id] ~= old.body then clear_tracker(id) end
+		end
+	end
+end
+
+local function install_delivery()
+	C().set_limit(REQUEST, 2, 1)
+	C().on(REQUEST, reply, "host")
+	C().on_big(RESPONSE, receive, "player")
+	RegisterScriptCallback("actor_on_update", update)
+end
+
+function on_game_start()
+	local api = rawget(_G, "coop")
+	if started or not (api and api.spot_is_local) then return end
+	started = true
+	for _, step in ipairs({ install_squads, install_services, install_tracker, install_delivery }) do
+		local ok, err = pcall(step)
+		if not ok then printf("[coop-pda-marks] ! startup: %s", tostring(err)) end
+	end
+end

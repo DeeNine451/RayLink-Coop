@@ -1,0 +1,75 @@
+-- Map-spot aliases for the per-player PDA view. Keep the original artwork and map attributes.
+local FILES = {
+	[ [[ui\map_spots.xml]] ] = true,
+	[ [[ui\map_spots_16.xml]] ] = true,
+	[ [[ui\map_spots_21.xml]] ] = true,
+	[ [[ui\map_spots_219.xml]] ] = true,
+}
+
+local aliases = {}
+
+function spot_type(original)
+	return aliases[original]
+end
+
+local function is_map_location(xml, node)
+	for _, child in ipairs(node.kids or {}) do
+		local name = xml:getElementName(child)
+		if name == "level_map" or name == "mini_map" or name == "global_map" then return true end
+	end
+	return false
+end
+
+local function copy_node(node)
+	local copy = { el = node.el }
+	if node.kids then
+		copy.kids = {}
+		for i, child in ipairs(node.kids) do copy.kids[i] = copy_node(child) end
+	end
+	return copy
+end
+
+local function add_aliases(xml)
+	local root = xml:getRoot()
+	local originals, defined = {}, {}
+	for _, node in ipairs(root.kids or {}) do
+		local name = xml:getElementName(node)
+		if name then
+			defined[name] = true
+			if name:match("^[%w_%-]+$") and name:sub(1, 5) ~= "coop_" and is_map_location(xml, node) then
+				originals[name] = originals[name] or node
+			end
+		end
+	end
+	-- Kill Tracker also accepts arbitrary map-spot IDs for forced styles, including PAW sets.
+	local added = {}
+	for name, node in pairs(originals) do
+		local alias = "coop_pda_" .. name
+		if not defined[alias] then
+			local copy = copy_node(node)
+			copy.el = "<" .. alias .. node.el:sub(#name + 2)
+			if xml:insertElement(copy, root) then added[name] = alias end
+		else
+			added[name] = alias
+		end
+	end
+	aliases = added
+end
+
+local function on_read(path, xml)
+	if not FILES[path] then return end
+	local ok, err = pcall(add_aliases, xml)
+	if not ok then printf("[coop-pda-marks] ! map spot aliases: %s", tostring(err)) end
+end
+
+local function after_mods(path)
+	if not FILES[path] then return end
+	-- DXML walks its callback list with ipairs. Queue the alias pass at its tail, after the
+	-- Milspec/PAW includes and other map-spot edits, including on the first document.
+	RegisterScriptCallback("on_xml_read", on_read)
+end
+
+function on_xml_read()
+	local api = rawget(_G, "coop")
+	if api and api.spot_is_local then RegisterScriptCallback("on_xml_read", after_mods) end
+end
