@@ -1,0 +1,303 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+--[[
+	Anomaly Coop - who gets the credit of an action (gamedata\scripts\coop_credit.script), Dev 57 G9-1 (TZ R19).
+
+	The stock credits ONE player: db.actor, AC_ID == 0. In a session the process that leads a map (the co-op host, a map
+	server) sees every other player as a stalker proxy, so stock credit code pays the host's own player or nobody, and a
+	player's machine, which mirrors the deaths, may count the same kill again. These helpers name the player behind an
+	object, guard one event against a second credit and carry a player's share to his own machine. Nothing here asks the
+	mode: the facade coop_mode answers about a player or about this process's own actor.
+
+	API (call as coop_credit.x(...)):
+		who(obj_or_id) -> character, peer | nil
+			The player behind a game object, a server object (its id field) or an id in THIS process's numbering: his
+			character id (the object's id; 0 for this process's own actor) and his peer. nil for an NPC (a companion too:
+			its owner is coop_reputation.responsible_character's business), for an unknown or invalid id and for a ghost
+			actor (a world server's or a map server's own actor: coop_mode.actor_is_player() is false). Outside a session
+			(single player) only the actor is a player: who(0) -> 0, 0.
+		once(key, kind, ttl_ms) -> true the first time (kind and ttl_ms optional)
+			A one-shot guard for one event. key: the victim (id, game object, server object) or a string of 1..128
+			characters; kind: the event's name, 1..64 characters ("heli_box"); the guard is "<victim id>:<kind>". It holds
+			ttl_ms (default 10 minutes, at most an hour: ids of released objects come back) in a ledger of at most 1024
+			keys, the oldest goes first. An invalid key answers false: nothing is credited for it. Not saved.
+		to_owner(character, verb, t) -> bool
+			Event "mods.<verb>" with the flat table t (coop_main.encode, at most 15000 bytes) to the machine of that
+			character's player (coop_mods_core.to_peer). The co-op host's own player is peer 0: the engine hands the event
+			back to the host's Lua, so on_owner runs there too. Held while his character has no peer here (he left, he
+			reconnects) or he is still joining (coop_mode.where); retried every second, dropped after 10 minutes, at most
+			32 waiting per character and 256 in all (the oldest goes). true: sent or held. false: no session, an invalid
+			character / verb / table, a payload over one event, character 0 when this process's actor is a ghost, or the
+			character of this player's own machine (a client asking for himself: he is already where the owner is).
+		on_owner(verb, f) -> bool
+			f(t, from) for to_owner's verb on the player's own machine (coop_mods_core.on(verb, f, "player")): it runs only
+			for an event of the world (from == 0; what a map server tells a player comes through the world), on a client
+			and on the co-op host's process.
+		held_count([character]) -> number   messages waiting (for one character, or in all)
+		print_status()                       coop_status: sent, held, delivered late, dropped
+	Reward context for the callers (existing globals, not wrapped here): coop_tasks.with_character(id, fn, ...) and
+	coop_tasks.personal_character() run and name personal effects of a character; coop_reputation.responsible_character(obj)
+	names the player (or the companion's owner) responsible for an object; coop_reputation.for_actor(obj, fn, ...) runs fn
+	for him on the process that decides it.
+	Used by coop_reputation (G9-1: the heli box, Warfare's support money) and the units G9-2..G9-6.
+	Wire: no event of its own (the callers' verbs, each with its own prefix). Saved keys: none. Security: a payload from
+	the network is never logged or formatted here; ids are whole numbers 0..65534.
+--]]
+
+local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
+
+local type, tonumber, tostring, pairs, ipairs, pcall = type, tonumber, tostring, pairs, ipairs, pcall
+
+local MAX_ID = 65535 -- ids are u16, 65535 is "none"
+local LEDGER_MAX = 1024
+local LEDGER_TTL = 600000 -- ms
+local LEDGER_TTL_MAX = 3600000
+local HOLD_MS = 600000
+local HOLD_PER = 32
+local HOLD_ALL = 256
+local RETRY_MS = 1000
+local MAX_PAYLOAD = 15000 -- coop_mods_core's limit for one event
+local VERB_MAX = 48 -- "mods." + verb within the engine's 64 characters
+
+stats = { sent = 0, held = 0, late = 0, dropped = 0, refused = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string.format, fmt, ...)
+	printf("[coop-credit] %s", ok and line or tostring(fmt))
+end
+
+local function session()
+	return coop_npc_players.active() == true
+end
+
+local function whole(v)
+	if type(v) ~= "number" or v ~= v or v < 0 or v >= MAX_ID or v % 1 ~= 0 then return nil end
+	return v
+end
+
+-- The id of a number, a game object (id()) or a server object (id field); nil when there is none.
+local function id_of(x)
+	local t = type(x)
+	if t == "number" then return whole(x) end
+	if t ~= "table" and t ~= "userdata" then return nil end
+	local ok, v = pcall(function()
+		local f = x.id
+		if type(f) == "function" then return x:id() end
+		return f
+	end)
+	return ok and whole(v) or nil
+end
+
+-------------------------------------------------------------------------------
+-- who
+-------------------------------------------------------------------------------
+function who(obj_or_id)
+	local id = id_of(obj_or_id)
+	if id == nil then return nil end
+	if id == 0 then
+		if not session() then return 0, 0 end
+		if not coop_mode.actor_is_player() then return nil end -- a server's ghost is nobody's character
+		local peer = coop_npc_players.self_peer()
+		return 0, peer
+	end
+	if not session() then return nil end
+	local peer = coop_npc_players.peer_of(id)
+	if type(peer) ~= "number" then return nil end
+	return id, peer
+end
+
+-------------------------------------------------------------------------------
+-- once: a bounded ledger of events already credited
+-------------------------------------------------------------------------------
+local ledger = {} -- key -> { at = expiry ms, n = serial }
+local queue, q_head, q_tail = {}, 1, 0 -- serials in the order they came: { k, n }
+local ledger_size, serial = 0, 0
+
+local function key_of(key, kind)
+	local k
+	if type(key) == "string" then
+		if #key == 0 or #key > 128 then return nil end
+		k = key
+	else
+		local id = id_of(key)
+		if id == nil then return nil end
+		k = tostring(id)
+	end
+	if kind ~= nil then
+		if type(kind) ~= "string" or #kind == 0 or #kind > 64 then return nil end
+		k = k .. ":" .. kind
+	end
+	return k
+end
+
+local function pop()
+	local e = queue[q_head]
+	queue[q_head] = nil
+	q_head = q_head + 1
+	if e and ledger[e[1]] and ledger[e[1]].n == e[2] then
+		ledger[e[1]] = nil
+		ledger_size = ledger_size - 1
+	end
+end
+
+-- the queue keeps one entry per insert: rebuild it from the live keys when stale entries pile up
+local function compact()
+	local live = {}
+	for i = q_head, q_tail do
+		local e = queue[i]
+		if e and ledger[e[1]] and ledger[e[1]].n == e[2] then live[#live + 1] = e end
+	end
+	queue, q_head, q_tail = live, 1, #live
+end
+
+function once(key, kind, ttl_ms)
+	local k = key_of(key, kind)
+	if k == nil then return false end
+	local ttl = tonumber(ttl_ms)
+	if not ttl or ttl ~= ttl or ttl <= 0 then ttl = LEDGER_TTL end
+	if ttl > LEDGER_TTL_MAX then ttl = LEDGER_TTL_MAX end
+	local now = time_global()
+	local e = ledger[k]
+	if e and e.at > now then return false end
+	serial = serial + 1
+	if not e then ledger_size = ledger_size + 1 end
+	ledger[k] = { at = now + ttl, n = serial }
+	q_tail = q_tail + 1
+	queue[q_tail] = { k, serial }
+	while ledger_size > LEDGER_MAX and q_head <= q_tail do pop() end
+	if q_tail - q_head > 4 * LEDGER_MAX then compact() end
+	return true
+end
+
+-------------------------------------------------------------------------------
+-- to_owner / on_owner
+-------------------------------------------------------------------------------
+local held = {} -- character -> { { verb, t, at }, ... } in the order they came
+local held_all = 0
+local next_try = 0
+
+local function verb_ok(verb)
+	return type(verb) == "string" and #verb > 0 and #verb <= VERB_MAX and verb:find("^[%w_]+$") ~= nil
+end
+
+-- His peer now, or nil: no player with that character here (yet)
+local function peer_of_character(character)
+	if character == 0 then return coop_npc_players.self_peer() end
+	local peer = coop_npc_players.peer_of(character)
+	return type(peer) == "number" and peer or nil
+end
+
+local function try_send(character, verb, t)
+	local peer = peer_of_character(character)
+	if peer == nil or peer < 0 or coop_mode.where(peer) == "joining" then return false end
+	return coop_mods_core.to_peer(peer, verb, t) == true
+end
+
+local function drop_oldest(list)
+	table.remove(list, 1)
+	held_all = held_all - 1
+	stats.dropped = stats.dropped + 1
+end
+
+local function hold(character, verb, t)
+	local list = held[character]
+	if not list then
+		list = {}
+		held[character] = list
+	end
+	if #list >= HOLD_PER then drop_oldest(list) end
+	if held_all >= HOLD_ALL then
+		-- the oldest of all goes
+		local oldest, at
+		for c, l in pairs(held) do
+			if l[1] and (at == nil or l[1][3] < at) then oldest, at = c, l[1][3] end
+		end
+		if oldest ~= nil then drop_oldest(held[oldest]) end
+	end
+	list[#list + 1] = { verb, t, time_global() }
+	held_all = held_all + 1
+	stats.held = stats.held + 1
+end
+
+local function payload_fits(t)
+	local cm = rawget(_G, "coop_main") or coop_main
+	if not (type(cm) == "table" and type(cm.encode) == "function") then return false end
+	local ok, s = pcall(cm.encode, t)
+	return ok and type(s) == "string" and #s <= MAX_PAYLOAD
+end
+
+function to_owner(character, verb, t)
+	character = whole(character)
+	if character == nil or not verb_ok(verb) or type(t) ~= "table" or not session() then
+		stats.refused = stats.refused + 1
+		return false
+	end
+	if character == 0 and not coop_mode.actor_is_player() then
+		stats.refused = stats.refused + 1
+		return false -- a ghost's character: nobody ever owns it
+	end
+	local peer = peer_of_character(character)
+	if peer ~= nil and peer ~= 0 and peer == coop_npc_players.self_peer() then
+		stats.refused = stats.refused + 1
+		return false -- this player's own machine: the caller is already where the owner is
+	end
+	if not payload_fits(t) then
+		stats.refused = stats.refused + 1
+		log("! %s not sent to character %d: over one event", verb, character)
+		return false
+	end
+	local list = held[character]
+	if not (list and list[1]) and try_send(character, verb, t) then -- the waiting ones go first, in order
+		stats.sent = stats.sent + 1
+		return true
+	end
+	hold(character, verb, t)
+	return true
+end
+
+local function flush(now)
+	for character, list in pairs(held) do
+		while list[1] and now - list[1][3] > HOLD_MS do drop_oldest(list) end
+		while list[1] and try_send(character, list[1][1], list[1][2]) do
+			table.remove(list, 1)
+			held_all = held_all - 1
+			stats.late = stats.late + 1
+		end
+		if not list[1] then held[character] = nil end
+	end
+end
+
+function held_count(character)
+	if character == nil then return held_all end
+	local list = held[character]
+	return list and #list or 0
+end
+
+function on_owner(verb, f)
+	if not verb_ok(verb) or type(f) ~= "function" then return false end
+	return coop_mods_core.on(verb, f, "player") == true
+end
+
+-------------------------------------------------------------------------------
+-- Status, game start
+-------------------------------------------------------------------------------
+function print_status()
+	log("sent %d, held %d (waiting %d), delivered late %d, dropped %d, refused %d; once ledger %d",
+		stats.sent, stats.held, held_all, stats.late, stats.dropped, stats.refused, ledger_size)
+end
+
+local function actor_on_update()
+	if held_all == 0 then return end
+	local now = time_global()
+	if now < next_try then return end
+	next_try = now + RETRY_MS
+	if not session() then return end
+	local ok, e = pcall(flush, now)
+	if not ok then log("! flush: %s", tostring(e)) end
+end
+
+function on_game_start()
+	if not api then return end -- an exe without co-op: nothing is ever held
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	local ok, e = pcall(function() coop_mods_core.status_line("credit", print_status) end)
+	if not ok then log("! status line: %s", tostring(e)) end
+end

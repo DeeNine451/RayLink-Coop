@@ -170,6 +170,32 @@ local function install_death()
 	end
 end
 
+-- u01:1 (Dev 57 G9-1): a player's machine mirrors a mutant's death too, and there the killer is its own player (the engine
+-- maps his proxy to the actor, id 0) or another player's character: the stock death handler counts killed_monsters again on
+-- top of the credit the deciding process already sent him (its proxy's count goes to him through for_actor). On a mirror
+-- (coop_mode.is_player_mirror) that count alone is dropped; the rest of the death handler runs as before.
+local function install_monster_death()
+	local monster = bind_monster
+	local class = monster and monster.generic_object_binder
+	local original = class and class.death_callback
+	if type(original) ~= "function" then return end
+	class.death_callback = function(self, ...)
+		if not (coop_npc_players.active() and coop_mode.is_player_mirror()) then return original(self, ...) end
+		local gs = game_statistics
+		local count, npc_count = gs.increment_statistic, gs.increment_npc_statistic
+		gs.increment_statistic = function(name, ...)
+			if name ~= "killed_monsters" then return count(name, ...) end
+		end
+		gs.increment_npc_statistic = function(npc, name, ...)
+			if name ~= "killed_monsters" then return npc_count(npc, name, ...) end
+		end
+		local result = { pcall(original, self, ...) }
+		gs.increment_statistic, gs.increment_npc_statistic = count, npc_count
+		if not result[1] then error(result[2], 0) end
+		return unpack(result, 2)
+	end
+end
+
 local function install_heli()
 	local heli = bind_heli
 	local class = heli and heli.heli_binder
@@ -194,12 +220,101 @@ local function install_heli()
 	end
 end
 
+-- s34:1 (Dev 57 G9-1): the stock drops the helicopter's black box (mlr_utils.death_heli) only for its own actor's lethal hit
+-- (enemy_id == AC_ID); a player's proxy only gets the statistic. Wrapped around install_heli's wrapper: what reaches the stock
+-- body (the deciding process: the co-op host, a map server) drops the box for a player's lethal hit too; the box is one per
+-- helicopter (coop_credit.once), the stock's own drop included. A mirror creates nothing: the box is the decider's object.
+local function install_heli_box()
+	local heli = bind_heli
+	local class = heli and heli.heli_binder
+	local inner = class and class.on_hit
+	if type(inner) ~= "function" then return end
+	class.on_hit = function(self, ...)
+		local mlr = mlr_utils
+		local drop = mlr and mlr.death_heli
+		if type(drop) ~= "function" or not coop_npc_players.active() then return inner(self, ...) end
+		local gs = game_statistics
+		local npc_count = gs.increment_npc_statistic
+		local function box(obj, enemy_id)
+			if obj == nil or coop_mode.is_player_mirror() then return end
+			if coop_credit.once(obj, "heli_box") then return drop(obj, enemy_id) end
+		end
+		mlr.death_heli = box
+		gs.increment_npc_statistic = function(npc, name, ...)
+			if name == "helicopters_downed" and coop_credit.who(npc) ~= nil then box(self.object, npc:id()) end
+			return npc_count(npc, name, ...)
+		end
+		local result = { pcall(inner, self, ...) }
+		mlr.death_heli, gs.increment_npc_statistic = drop, npc_count
+		if not result[1] then error(result[2], 0) end
+		return unpack(result, 2)
+	end
+end
+
+-- s38:1 (Dev 57 G9-1): Warfare's support reward (sim_squad_warfare.squad_on_npc_death) pays only the stock actor
+-- (killer.id == AC_ID): db.actor:give_money and the shared warfare.actor_influence_points.
+-- The rule of the shared Warfare in a session: Warfare is ONE campaign for the whole group - one warfare.actor_faction and one
+-- pool of influence. A kill by any player's character (coop_credit.who) of a member of a squad registered with Warfare whose
+-- faction is an enemy of warfare.actor_faction pays the stock amount (actor_support_reward_money + the victim's rank *
+-- actor_support_enemy_rank_weight, whole roubles) to that player's character through the world's ledger
+-- (coop.money_grant_to: also while he is away) and adds actor_support_reward_influence to the shared pool, once per death
+-- (coop_credit.once), exactly as the stock does for its actor. Only the process that decides the world pays
+-- (coop_mode.decides_world: the co-op host, the world server - a map server's ALife death reaches the world server with the
+-- killer's id). The stock body still pays its own actor: the co-op host's player; a server's ghost kills nobody.
+local function pay_support(squad, npc, killer)
+	if not (squad and squad.registered_with_warfare and npc and killer) then return end
+	local character = coop_credit.who(killer)
+	if character == nil or character == 0 then return end -- nobody's, or the stock's own actor (paid above)
+	local wf = warfare
+	local opts = warfare_options and warfare_options.options
+	if not (wf and opts) then return end
+	if game_relations.is_factions_enemies(squad:get_squad_community(), wf.actor_faction) ~= true then return end
+	if not coop_credit.once(npc, "warfare_support", 60000) then return end
+	local rank = tonumber(npc:rank()) or 0
+	local money = math.floor((tonumber(opts.actor_support_reward_money) or 0)
+		+ rank * (tonumber(opts.actor_support_enemy_rank_weight) or 0))
+	local api = rawget(_G, "coop")
+	local grant = api and api.money_grant_to
+	if money > 0 and type(grant) == "function" then
+		local ok, added, why = pcall(grant, character, money)
+		if not (ok and added) then
+			printf("[coop-credit] ! warfare support %d RU for character %d not paid: %s", money, character,
+				tostring(ok and why or added))
+		end
+	end
+	wf.actor_influence_points = (tonumber(wf.actor_influence_points) or 0) + (tonumber(opts.actor_support_reward_influence) or 0)
+end
+
+local function install_warfare()
+	local sw = sim_squad_warfare
+	local original = sw and sw.squad_on_npc_death
+	if type(original) ~= "function" then return end
+	local function support(squad, npc, killer, ...)
+		local result = { pcall(original, squad, npc, killer, ...) }
+		if not result[1] then error(result[2], 0) end
+		if coop_npc_players.active() and coop_mode.decides_world() then
+			local ok, e = pcall(pay_support, squad, npc, killer)
+			if not ok then printf("[coop-credit] ! warfare support: %s", tostring(e)) end
+		end
+		return unpack(result, 2)
+	end
+	sw.squad_on_npc_death = support
+	-- warfare.on_game_start registers the module's function by value: in file order it registers this one; if it already ran,
+	-- the registered stock one is replaced (its resetter unregisters sw.squad_on_npc_death, which is this one)
+	coop_mods_core.swap_callback("squad_on_npc_death", original, support)
+end
+
 function on_game_start()
 	if installed then return end
 	installed = true
 	install_death()
 	install_relations()
 	install_heli()
+	-- Dev 57 G9-1: a failed step must not stop the statistic redirect below
+	for _, step in ipairs({ install_heli_box, install_monster_death, install_warfare }) do
+		local ok, e = pcall(step)
+		if not ok then printf("[coop-credit] ! install: %s", tostring(e)) end
+	end
 	local gs = game_statistics
 	local original = gs and gs.increment_npc_statistic
 	if type(original) == "function" then
