@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- RayLink, a server world (S5, A-S6J): the PDA feed says where another player went. {nick} and {level} are filled in by the engine
+     (srv/coop_srv_join.cpp feed_show); keep both, no other placeholder is read. -->
+<string_table>
+	<string id="st_srv_feed_caption">
+		<text>Partners</text>
+	</string>
+	<string id="st_srv_feed_went">
+		<text>{nick} went to {level}</text>
+	</string>
+	<string id="st_srv_feed_came">
+		<text>{nick} came from {level}</text>
+	</string>
+</string_table>

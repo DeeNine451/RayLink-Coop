@@ -17,7 +17,7 @@
 |---|---|
 | `coop.is_active()`, `is_host()`, `is_client()`, `is_live()` | есть ли сессия; эта машина хост; клиент; в мире (хост или клиент после загрузки) |
 | `coop.self_id()` | свой id игрока: хост — 0, клиенты — 1..7 |
-| `coop.players()` | `{ {id, nick, avatar_id, rtt, loss, is_self}, ... }`; `rtt` мс, `loss` 0..1 — потери пакетов по оценке транспорта (у себя 0; у клиента числа есть только у хоста, id 0; сетевой график — `coop_hud_netgraph`) |
+| `coop.players()` | `{ {id, nick, avatar_id, rtt, loss, is_self}, ... }`; `rtt` мс, `loss` 0..1 — потери пакетов по оценке транспорта (у себя 0; у клиента числа есть только у хоста, id 0; сетевой график — `coop_hud_netgraph`); `mstate` (F5-SEAT-1) — 16 бит флагов движения его последнего снимка (присед, медленный шаг, спринт, прыжок, падение) там, где его тело у этой машины (свой актёр, пока он игрок; чужое тело — после первого снимка); иначе поля нет (сервер мира) |
 | `coop.avatar_of(peer)`, `coop.peer_of_avatar(id)` | персонаж игрока и обратно, в нумерации этой машины |
 | `coop.owners_known()` | клиент уже знает, кто играет каким персонажем |
 | `coop.to_host_id(id)`, `coop.to_local_id(id)` | перевод id объекта между нумерацией хоста и своей (у клиента меняются местами 0 и id его персонажа) |
@@ -28,7 +28,7 @@
 | `coop.talk_holder(npc)` | хост: кто сейчас говорит с NPC |
 | `coop.levels.talking(peer)` | СМ: игрок на карте Mk держит замок разговора, по `LevelBodyFacts`, запись старше 5 с даёт `false` |
 | `coop.protocol()` | версия сетевого протокола этого exe, для строки `[coop] context` в логе |
-| `coop.session_info()`, `coop.host(port)`, `coop.connect(addr)`, `coop.disconnect()`, `coop.host_when_ready(port)` | меню коопа |
+| `coop.session_info()`, `coop.host(port)`, `coop.connect(addr)`, `coop.disconnect()`, `coop.host_when_ready(port)` | меню коопа; `session_info().max_players` — места сессии, число режима (Кооп 8, Сервер 16): у хоста из его конфига, у клиента из Welcome; `nil` вне сессии и до Welcome (F5-SEAT-1) |
 
 ### 1.2 Деньги (F2 T1, T6b)
 Баланс игрока хранит хост. `coop.money_give(peer, n)` — свои деньги другому игроку (хост проверяет). У хоста:

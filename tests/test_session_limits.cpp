@@ -2108,13 +2108,13 @@ TEST(limits_client_capacity_counts_only_seats_that_play)
 	CHECK_EQ(limits::client_capacity(1, true), uint32_t(0));
 	CHECK_EQ(limits::client_capacity(0, false), uint32_t(0));
 	CHECK_EQ(limits::client_capacity(kMaxPlayers, true), kMaxPlayers - 1);
-	// Owner 2026-11-13: 8 players on a world server are 8 clients. The slot ids are 0 .. kMaxPeerSlots - 1: seat 0 and the
+	// F5-SEAT-1: the wire's 16 seats on a server are 16 clients. The slot ids are 0 .. kMaxPeerSlots - 1: seat 0 and the
 	// client slots 1 .. kMaxPlayers; every peer check of the wire layouts and the game is `peer < kMaxPeerSlots`.
-	CHECK_EQ(kMaxPlayers, uint32_t(8));
+	CHECK_EQ(kMaxPlayers, uint32_t(16));
 	CHECK_EQ(kMaxPeerSlots, kMaxPlayers + 1);
 	CHECK_EQ(limits::kMaxClientSlots, kMaxPlayers);
-	CHECK_EQ(limits::client_capacity(kMaxPlayers, false), uint32_t(8));
-	CHECK_EQ(limits::client_capacity(kMaxPlayers, true), uint32_t(7)); // an ordinary host stays the host + 7
+	CHECK_EQ(limits::client_capacity(kMaxPlayers, false), uint32_t(16));
+	CHECK_EQ(limits::client_capacity(8, true), uint32_t(7)); // co-op's 8 seats stay the host + 7
 	CHECK_EQ(limits::client_capacity(100, false), limits::kMaxClientSlots);
 	CHECK_EQ(limits::client_capacity(100, true), limits::kMaxClientSlots);
 }
@@ -2184,9 +2184,10 @@ TEST(limits_session_with_a_playing_host_seat_counts_it)
 
 TEST(limits_world_server_full_house)
 {
-	// The default max_players (kMaxPlayers = 8) on a world server: 8 playing clients, the 9th is refused (owner 2026-11-13).
+	// A world server with 8 seats: 8 playing clients, the 9th is refused (owner 2026-11-13; the server's 16: tests/test_seats.cpp).
 	Node host("server", 38223);
 	host.cfg.host_plays = false;
+	host.cfg.max_players = 8;
 	std::vector<std::unique_ptr<Node>> clients;
 	for (uint32_t i = 0; i < 9; ++i)
 		clients.emplace_back(new Node("C" + std::to_string(i), 38223));
@@ -2205,7 +2206,7 @@ TEST(limits_world_server_full_house)
 		CHECK(!mapserver::is_bridge(s));
 		for (uint32_t k = 1; k <= mapserver::kMaxBridges; ++k)
 			CHECK(s != mapserver::bridge_peer(k));
-		CHECK_EQ(clients[i]->welcome.max_players, kMaxPlayers);
+		CHECK_EQ(clients[i]->welcome.max_players, uint32_t(8));
 	}
 	CHECK_EQ(slots.size(), size_t(8));
 	CHECK(slots.count(PeerId(8)) == 1); // slots 1 .. 8
@@ -2217,8 +2218,9 @@ TEST(limits_world_server_full_house)
 
 TEST(limits_ordinary_host_full_house_stays_host_plus_seven)
 {
-	// An ordinary host (its seat plays) with the default max_players: 7 clients, the 8th is refused; no client has slot 8.
+	// A co-op host (its seat plays) with co-op's 8 seats: 7 clients, the 8th is refused; no client has slot 8.
 	Node host("Boss", 38224);
+	host.cfg.max_players = 8;
 	std::vector<std::unique_ptr<Node>> clients;
 	for (uint32_t i = 0; i < 8; ++i)
 		clients.emplace_back(new Node("C" + std::to_string(i), 38224));
@@ -2228,5 +2230,5 @@ TEST(limits_ordinary_host_full_house_stays_host_plus_seven)
 	CHECK(clients.back()->rejected);
 	CHECK(clients.back()->reject.reason == RejectReason::SessionFull);
 	for (size_t i = 0; i < 7; ++i)
-		CHECK(clients[i]->welcome.slot >= 1 && clients[i]->welcome.slot < kMaxPlayers);
+		CHECK(clients[i]->welcome.slot >= 1 && clients[i]->welcome.slot < PeerId(8));
 }

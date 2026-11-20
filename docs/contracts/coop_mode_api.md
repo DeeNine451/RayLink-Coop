@@ -13,6 +13,10 @@ section 4: on a world server `when_srv` functions run at load. Every other proce
 a co-op client, a map server and a server player before their session: "none"). The facade (`coop_mode.script`), the
 hostplay layer and the answer sets of the tests did not change.
 
+Changed 2026-11-20 (A-S6-IF, through the lead's brief): **section 7**, the answers the S6 groups ask: in Lua `hook`,
+`facts_of`, `far`, `share_up`, `share_down` (and three optional layer fields); in C++ `Mode::level()` / `LevelSide` and the
+world-side `Mode` members, plus two process hooks of `Layer`. Nothing before section 7 changed in behaviour.
+
 ## 1. Rules for callers
 
 - Call as a global module, `coop_mode.x(...)`. **No new `local`** for it (L7: `coop_tasks` 197/200, `coop_npc_companions` 181).
@@ -197,3 +201,103 @@ over `runs_of(tests)`. Verified text: `temp/s4l/make_mirror.py` (`patch_sets`).
 Neither layer script is reached by the Core (`check_layers.core_reach`). `layers_allow.txt`: 6 entries of
 `coop_mods_core.script` are stale (the old relay and publish): `check_layers: OK (4617 files, ceiling 2335, used 2329)`
 at 2026-11-18 18:52; `--write-allow` drops them (the other executors' work moves `used` too).
+
+## 7. The S6 answers (A-S6-IF, build 57, 2026-11-20)
+
+The answers the S6 groups ask (`temp/b58/s6_map/README.md`, "New answers this map needs"). Frozen names: the C++ members and
+types below, the Lua calls `hook`, `facts_of`, `far`, `share_up`, `share_down`, the layer fields `hook`, `facts_of`, `far`,
+and the hook names of 7.3. Each has an answer in every process kind; the tests: `tests/test_mode_s6_answers.cpp` (C++, one test
+per kind: the fake's answers and the real mode's answer read from its source; none's runs), `tests/lua/test_mode_s6_facade.lua`
+(Lua, one part per kind over the real layer scripts).
+
+### 7.1 C++ (`engine/src/xrCoop/coop_mode.h`)
+
+`Mode::level()` → `LevelSide*`: the side of a level that a process leads apart from its world. Only a map server has one
+(`srv/coop_srv_mode.cpp` `MapLevelSide`); every other kind answers `nullptr` and the Core does the thing in its own books. The
+Core asks `if (LevelSide* l = mode().level()) { l->...; } else { /* its own books */ }`. Ids are this process's numbering.
+
+| hook | `LevelSide` member | the map server's answer (the function it replaces) |
+|---|---|---|
+| H-MONEY | `level_money_change(peer, delta, trade)` | `levels::up_money` first (a change of 0 asks the world for his balance), then its kept balance (never below 0; a change of 0 keeps no entry) — `coop_money.cpp` `host_adjust` / `host_send_balance` |
+| | `level_balance(peer, out)` → bool | the kept balance; false and 0 when the world named none — `host_balance`, `l_money_of` |
+| | `level_balance_heard(peer, balance)` | the world's word (`coop_trunk.cpp` `money::server_balance`) |
+| H-ITEMTELL | `level_item_tell(id, section, blob)` | `items::level_item_tell` (the Core's ItemState to its players; never route that function back through this one) |
+| H-TENT | `level_tent_limit(world_tents, limit)` → bool | `world_tents >= limit` (the Core counts `world_tents_of(key)`: the limit is counted in the world copy) |
+| | `level_tent_placed(tent, character)` | `levels::up_tent` (the Core skips `host_set` and the `placed` callback) |
+| | `level_tent_packed(tent)` → bool | true: the world's sweep rolls the camp back (the Core skips `host_source_lost`) |
+| | `level_in_world(character)` → bool | `join::host_player_in_world` |
+| H-DEATHMARK | `level_marker(m)` | the `coop_death_marker` Lua callback with `m` as it is (`map_server_marker`) |
+| H-TRUNKPEER | `level_character_of(peer)` → id / 0xffff; `level_peer_of(character)` → peer / kInvalidPeer | `mapserver::trunk_peers().on()` |
+| H-ENTITYUP | `level_entity_up(EntityUp kind, id, other)` | Spawned `levels::up_spawned(id)`, Released `levels::xfer_on_released(id)`, Parent `levels::up_parent(id, other)`, Died `levels::up_died(id, other)`; the ALife's thread may call it |
+
+`Mode` members (a "not mine" answer by default, which `NoneMode` keeps; every mode of the two layers writes its own):
+
+| member | none (default) | co-op host | co-op client | world server | map server | server player |
+|---|---|---|---|---|---|---|
+| `level()` | nullptr | nullptr | nullptr | nullptr | its `MapLevelSide` | nullptr |
+| H-REACH `reaches(peer, type)` | true | true | true | `levels::passes_to(type, peer)` | `levels::passes_to` (true for its peers) | true |
+| `deliver_links(type, payload, lane)` (A-S5S) | nothing | the host player's link | nothing | the bridges that take `type` (queued while one loads) | its link up to the world | nothing |
+| P-B `led_elsewhere(peer)` | false | false | false | the map server of his map is connected | false | false |
+| P-B `to_level_of(peer, type, payload, lane)` → sent | false | false | false | to that map server's bridge: true; none: false | false | false |
+| H-JOIN `join_from_bridge(from, type)` | false | false | false | `mapserver::is_bridge(from)` | false | false |
+| H-JOIN `join_save(from, proxy)` | false | false | false | split and his map not its own: the place to his map's server if it is there, true | false | false |
+| H-JOIN `level_ready(level)` | true | true | true | `mapserver::host_ready(level)` | true | true |
+| H-JOIN `on_world_live()` | nothing | nothing | nothing | nothing | `world::host_scan_proxies()` | nothing |
+| H-LOADTEXT `load_text(screen_level, world_up)` | nullptr | nullptr | nullptr | nullptr | `"st_coop_load_server"` when `!world_up` and the level is not the world server's | the same |
+| H-GHOSTSAID `ghost_said(s)` | false | false | false | false | `ghost::about_actor(s)` | false |
+
+`group_travels()` (README row): already a `Mode` answer since S4. The client rows of `where()`: already answered (co-op
+client Here, a server player's peer 0 Away).
+
+The process's hooks (`Layer`, asked through the switchboard `coop::place_ghost(objects)` / `coop::console_line(line)` of
+`coop_mode.cpp`, the server's layer first): the world server loads its world and has its console **before its session**,
+when `mode()` is still none, so these two are not `Mode` members.
+
+| hook | the server's layer | the co-op's layer, none |
+|---|---|---|
+| H-JOIN `place_ghost(objects)` → taken | a map server loading its world: the ghost at its key's vertex (a world without that place stops the session; true either way); `-coop_dedicated`: `dedicated::place_ghost` (FATAL without a service level), true | false (the Core's role swap) |
+| H-SAY `console_line(line)` | `-coop_dedicated`: the window gets the line its log level hides, the running operator's command gets it back | nothing |
+
+### 7.2 Lua (`coop_mode.*`)
+
+| call | co-op host / client | world server (from its start) | map server | server player | none |
+|---|---|---|---|---|---|
+| F-HOOK `hook(name)` → function / nil | nil | the server's function (7.3) | same | same | nil |
+| F-BODY `facts_of(peer)` → `{ talking, partner }` / nil | nil | `talking` = `coop.levels.talking(peer)` (nil: the engine lacks it), `partner` = `coop.levels.talk_partner(peer)` or false (nil: the engine lacks it) | nil | nil | nil |
+| F-FAR `far()` → view | the stub | `coop_srv_quests_far` (a function it lacks: the stub's) | same | same | the stub |
+| F-SHARE `share_up` / `share_down(name, get, set[, every])` → kept | kept by `coop_quests_core`, carried by nobody | kept, carried by `coop_srv_levels_share` | same | same | kept |
+
+- `facts_of` is F-BODY under its C++ twin's name: `body_facts` is an L1 word of the guard in a Core Lua line. A caller writes
+  `local f = coop_mode.facts_of(peer); return f == nil or f.talking ~= false` where it read `l.talking(peer)` before.
+  `talking` is a boolean or nil, `partner` a whole id 1..65534, false or nil; anything else from a layer is dropped.
+- `hook(name)`: ask it when the function is needed, never keep it at load (on a map server and a server player the srv layer
+  answers only in the session). A layer answer that is not a function or nil is logged (`! hook answer`) and nil.
+- `far()` always returns a table with `in_scope() → nil`, `level_of_id() → nil`, `order() → false`, `fallback() → nil`,
+  `with_level_of(peer, fn, ...)`, `with_target(id, peer, what, fn, ...)`, `at_home(fn, ...)` → `fn(...)`, `object() → nil`,
+  `note_fail`, `print_status` (nothing) and `add_death_listener(callback, f)`. The stub's `add_death_listener` keeps `f` in
+  `coop_quests_core` (where the server's death relay reads it, whenever its layer comes to answer) and registers nothing
+  stock: the caller registers its stock callback itself, as today. (The README's "= RegisterScriptCallback" is not taken: the
+  callers keep their own registration, which would then run twice in the co-op, and the server's view keeps the relay list
+  only, so a map server would lose its stock callback if the caller dropped its own.)
+- `share_up` / `share_down` keep the table in every process because a map server's scripts register at `on_game_start`,
+  before its layer answers. False: a name that is not a non-empty string, `get` / `set` not functions, `every` not a number >= 0.
+- Layer fields `hook(name)`, `facts_of(peer)`, `far()` are optional: a layer without them (the test sets of
+  `tests/lua/support/mode_*.lua`) is answered as none answers.
+
+### 7.3 The hook names (F-HOOK)
+
+| name | the srv answer | was |
+|---|---|---|
+| `storyline.may_take` | `coop_srv_storyline.may_take` | `coop_storyline.may_take` |
+| `storyline.client_may_write` | `coop_srv_storyline.client_may_write` | |
+| `task_audience.sees_character` | `coop_srv_task_audience.sees_character` | `coop_task_audience` |
+| `brain.caches_now` | `coop_srv_levels_brain.caches_now` | `coop_levels_brain` |
+| `world.creator` | `coop_game_settings.creator` (Core since A-S4D) | `coop_dedicated.creator` |
+| `levels.elsewhere_text` | `coop_srv_levels.elsewhere_text` | `coop_levels` |
+| `levels.far_place` | `coop.levels.far_place` | `api.levels.far_place` |
+| `levels.module` | a function that returns the module `coop_srv_levels` | `rawget(_G, "coop_levels")` |
+| `levels.level_of_player` | `coop.levels.level_of_player` | `coop.levels.level_of_player` |
+| `context` | a function → `{ role = "mapserver" / "host" / "client", split = true }` | `coop_main` `context_now` |
+
+A function is looked up when it is asked: nil when its script or function is not there. A hook name in a Core line is a
+string argument: the guard reads no string, so `coop_mode.hook("levels.level_of_player")` is no L1.

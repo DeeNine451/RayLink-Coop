@@ -178,14 +178,14 @@ TEST(levels_wire_map_roundtrip)
 
 TEST(levels_wire_map_limits)
 {
-	// a row per slot id: seat 0 and the client slots 1 .. 8 (a world server's 8 clients, owner 2026-11-13)
-	std::vector<std::vector<uint8_t>> nine, ten;
-	for (uint32_t p = 0; p < 9; ++p)
-		nine.push_back(player_row(p, 1, 0));
-	ten = nine;
-	ten.push_back(player_row(1, 1, 0));
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, nine, {})), std::string("read")); // kMaxPeerSlots rows
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, ten, {})), std::string("refused"));
+	// a row per slot id: seat 0 and the client slots 1 .. 16 (a server's 16 clients, F5-SEAT-1)
+	std::vector<std::vector<uint8_t>> all_slots, one_more;
+	for (uint32_t p = 0; p < kMaxPeerSlots; ++p)
+		all_slots.push_back(player_row(p, 1, 0));
+	one_more = all_slots;
+	one_more.push_back(player_row(1, 1, 0));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, all_slots, {})), std::string("read")); // kMaxPeerSlots rows
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, one_more, {})), std::string("refused"));
 
 	std::vector<std::vector<uint8_t>> servers8, servers9;
 	for (uint16_t l = 0; l < 9; ++l)
@@ -210,27 +210,27 @@ TEST(levels_wire_map_limits)
 	// The writer keeps to the same limits by refusing: a map over one is not written, not cut down to a shorter one that
 	// reads as a whole map (a player missing from it would be taken for gone).
 	LevelMapMsg at_limit;
-	for (uint32_t p = 0; p < 9; ++p)
+	for (uint32_t p = 0; p < kMaxPeerSlots; ++p)
 		at_limit.players.push_back({p, 1, 1, 500, 1000});
 	for (uint16_t l = 0; l < 8; ++l)
 		at_limit.servers.push_back({l, uint8_t(LevelMapMsg::MapServerProcess), 1});
 	for (uint16_t l = 0; l < 128; ++l)
 		at_limit.gates.push_back({l, 1, ""});
-	check_write_at_limit("LevelMap with 9 players, 8 servers, 128 gates", at_limit);
+	check_write_at_limit("LevelMap with 17 players, 8 servers, 128 gates", at_limit);
 
-	LevelMapMsg ten_players = at_limit;
-	ten_players.players.push_back({0, 1, 1, 500, 1000});
-	check_write_refused("LevelMap with 10 players", ten_players);
+	LevelMapMsg over_players = at_limit;
+	over_players.players.push_back({0, 1, 1, 500, 1000});
+	check_write_refused("LevelMap with 18 players", over_players);
 	LevelMapMsg nine_servers = at_limit;
 	nine_servers.servers.push_back({8, LevelMapMsg::MapServerProcess, 1});
 	check_write_refused("LevelMap with 9 servers", nine_servers);
 	LevelMapMsg many_gates = at_limit;
 	many_gates.gates.push_back({128, 1, ""});
 	check_write_refused("LevelMap with 129 gates", many_gates);
-	LevelMapMsg twelve;
-	for (uint32_t p = 0; p < 12; ++p)
-		twelve.players.push_back({p % 8, 1, 1, 500, 1000});
-	check_write_refused("LevelMap with 12 players", twelve);
+	LevelMapMsg twenty;
+	for (uint32_t p = 0; p < 20; ++p)
+		twenty.players.push_back({p % 8, 1, 1, 500, 1000});
+	check_write_refused("LevelMap with 20 players", twenty);
 }
 
 TEST(levels_wire_map_bad_rows)
@@ -243,10 +243,11 @@ TEST(levels_wire_map_bad_rows)
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(4, {}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0x80, {}, {})), std::string("refused"));
 
-	// players: a peer is a slot (< kMaxPeerSlots: slot 8 is a world server's 8th client), listed once; in the world or not
+	// players: a peer is a slot (< kMaxPeerSlots: slot 16 is a server's 16th client), listed once; in the world or not
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {ok_player}, {})), std::string("read"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(8, 4, 0)}, {})), std::string("read"));
-	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(9, 4, 0)}, {})), std::string("refused"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(16, 4, 0)}, {})), std::string("read"));
+	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(17, 4, 0)}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {ok_player, ok_player}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 2)}, {})), std::string("refused"));
 	CHECK_EQ(refused<LevelMapMsg>(map_bytes(0, {player_row(1, 4, 1)}, {})), std::string("read"));
@@ -847,7 +848,8 @@ TEST(levels_wire_tunnel_roundtrip_and_refusals)
 	// the peer is a session slot; for everybody on the map it is not looked at
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 7)), std::string("read"));
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 8)), std::string("read")); // a world server's 8th client
-	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 9)), std::string("refused"));
+	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 16)), std::string("read")); // a server's 16th client
+	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, 17)), std::string("refused"));
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(0, uint16_t(Msg::PlayerState), 4, kInvalidPeer)), std::string("refused"));
 	CHECK_EQ(refused<TunnelMsg>(tunnel_bytes(TunnelMsg::AllOnMap, uint16_t(Msg::PlayerState), 4, kInvalidPeer)),
 	    std::string("read"));
@@ -970,24 +972,24 @@ TEST(levels_wire_load_wait_roundtrip_and_limits)
 		}
 		return w;
 	};
-	// a row per slot id: seat 0 and the client slots 1 .. 8 (a world server's 8 clients)
-	std::vector<WaitRow> nine, ten;
-	for (uint32_t p = 0; p < 9; ++p)
-		nine.push_back(WaitRow{p, 1});
-	ten = nine;
-	ten.push_back(WaitRow{1, 1});
-	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 9, nine)), std::string("read")); // everybody in the session
-	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 10, ten)), std::string("refused"));
-	// the writer: a row of every slot is the most there is; a tenth is not cut away (a player missing from the list would
+	// a row per slot id: seat 0 and the client slots 1 .. 16 (a server's 16 clients, F5-SEAT-1)
+	std::vector<WaitRow> all_slots, one_more;
+	for (uint32_t p = 0; p < kMaxPeerSlots; ++p)
+		all_slots.push_back(WaitRow{p, 1});
+	one_more = all_slots;
+	one_more.push_back(WaitRow{1, 1});
+	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, uint8_t(kMaxPeerSlots), all_slots)), std::string("read")); // everybody in the session
+	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, uint8_t(kMaxPeerSlots + 1), one_more)), std::string("refused"));
+	// the writer: a row of every slot is the most there is; one more is not cut away (a player missing from the list would
 	// be taken for not waited for)
 	LoadWaitMsg every_player;
 	every_player.level = 8;
-	for (uint32_t p = 0; p < 9; ++p)
+	for (uint32_t p = 0; p < kMaxPeerSlots; ++p)
 		every_player.rows.push_back({p, 1});
-	check_write_at_limit("LoadWait with a row for each of 9 slots", every_player);
-	LoadWaitMsg ten_rows = every_player;
-	ten_rows.rows.push_back({0, 1});
-	check_write_refused("LoadWait with 10 rows", ten_rows);
+	check_write_at_limit("LoadWait with a row for each of 17 slots", every_player);
+	LoadWaitMsg over_rows = every_player;
+	over_rows.rows.push_back({0, 1});
+	check_write_refused("LoadWait with 18 rows", over_rows);
 	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 3, {{1, 1}})), std::string("refused")); // count over the bytes
 	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(6, 0, {})), std::string("refused")); // a state nobody knows
 	Writer bad_reason;
@@ -1004,7 +1006,8 @@ TEST(levels_wire_load_wait_roundtrip_and_limits)
 		CHECK_EQ(std::string("wait state ") + std::to_string(state) + " " + refused<LoadWaitMsg>(wait_bytes(state, 0, {})),
 		    std::string("wait state ") + std::to_string(state) + (want ? " read" : " refused"));
 	}
-	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 1, {{9, 1}})), std::string("refused")); // not a slot
+	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 1, {{17, 1}})), std::string("refused")); // not a slot
+	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 1, {{16, 1}})), std::string("read")); // a server's 16th client (F5-SEAT-1)
 	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 1, {{8, 1}})), std::string("read")); // a world server's 8th client
 	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 2, {{3, 1}, {3, 0}})), std::string("refused")); // twice
 	CHECK_EQ(refused<LoadWaitMsg>(wait_bytes(1, 1, {{3, 2}})), std::string("refused")); // ready is 0 or 1

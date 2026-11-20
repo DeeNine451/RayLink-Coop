@@ -451,7 +451,7 @@ TEST(operator_keeps_his_place_among_eight_clients)
 {
 	const op::Token tok = token_of(12);
 	Node host("server", 38225);
-	host.cfg.host_plays = false; // max_players: the default kMaxPlayers
+	host.cfg.host_plays = false; // max_players: the test Node's 8 (test_main.cpp; a world server's mode says 16)
 	SessionSrv(host.s).arm_operator(tok);
 	std::string err;
 	REQUIRE(host.host(&err));

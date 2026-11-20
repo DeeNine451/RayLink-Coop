@@ -844,7 +844,7 @@ TEST(transition_state_refuses_nonsense)
 		CHECK(!back.read(r)); // more rows than slots
 	}
 	{
-		// a row per slot id: seat 0 and a world server's 8 clients (owner 2026-11-13)
+		// a row per slot id: seat 0 and a server's 16 clients (F5-SEAT-1)
 		StateMsg m = sample_state();
 		m.rows.clear();
 		for (uint32_t i = 0; i < kMaxPeerSlots; ++i)
@@ -854,8 +854,8 @@ TEST(transition_state_refuses_nonsense)
 		Reader r = reader_of(w);
 		StateMsg back;
 		REQUIRE(back.read(r));
-		REQUIRE(back.rows.size() == 9);
-		CHECK_EQ(back.rows[8].id, uint32_t(108));
+		REQUIRE(back.rows.size() == 17);
+		CHECK_EQ(back.rows[16].id, uint32_t(116));
 	}
 	{
 		StateMsg m = sample_state();

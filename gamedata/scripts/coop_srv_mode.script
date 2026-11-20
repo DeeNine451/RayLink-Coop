@@ -129,6 +129,72 @@ local function main()
 	return type(m) == "table" and m or nil
 end
 
+-------------------------------------------------------------------------------
+-- A-S6-IF (S6): the answers the S6 groups ask (docs\contracts\coop_mode_api.md section 7)
+-------------------------------------------------------------------------------
+-- a script module by name, loaded through _G when it is not yet (nil when there is none)
+local function mod(name)
+	local m = rawget(_G, name)
+	if m == nil then
+		local ok, v = pcall(function() return _G[name] end)
+		m = ok and v or nil
+	end
+	return type(m) == "table" and m or nil
+end
+
+-- F-HOOK: the server's functions a Core caller asks by name, looked up when asked (a script loaded later is found)
+local HOOK_OF_SCRIPT = {
+	["storyline.may_take"] = { "coop_srv_storyline", "may_take" },
+	["storyline.client_may_write"] = { "coop_srv_storyline", "client_may_write" },
+	["task_audience.sees_character"] = { "coop_srv_task_audience", "sees_character" },
+	["brain.caches_now"] = { "coop_srv_levels_brain", "caches_now" },
+	["levels.elsewhere_text"] = { "coop_srv_levels", "elsewhere_text" },
+	["world.creator"] = { "coop_game_settings", "creator" }, -- the record's creator (A-S4D moved it out of coop_dedicated)
+}
+local HOOK_OF_ENGINE = { -- coop.levels.*
+	["levels.level_of_player"] = "level_of_player",
+	["levels.far_place"] = "far_place",
+}
+local HOOK_MADE = {
+	-- the server's level names and gates (coop_srv_levels: name, elsewhere, map_of, ...)
+	["levels.module"] = function() return mod("coop_srv_levels") end,
+	-- the launcher's error context: the role and the split of this process
+	["context"] = function()
+		return { role = map_server() and "mapserver" or world_server() and "host" or "client", split = true }
+	end,
+}
+
+local function hook(name)
+	local made = HOOK_MADE[name]
+	if made then return made end
+	local at = HOOK_OF_SCRIPT[name]
+	if at then
+		local m = mod(at[1])
+		local f = m and m[at[2]]
+		return type(f) == "function" and f or nil
+	end
+	local fn = HOOK_OF_ENGINE[name]
+	local l = fn and levels()
+	local f = l and l[fn]
+	return type(f) == "function" and f or nil
+end
+
+-- F-BODY: the world server hears of a player's body from the map server of his map (LevelBodyFacts): whether he holds a
+-- dialog, and with whom (false: nobody; nil: this engine does not name the partner). A map server and a player's machine
+-- read the body itself.
+local function facts_of(peer)
+	if not world_server() then return nil end
+	local l = levels()
+	if not l then return nil end
+	local talking, partner = nil, nil
+	if type(l.talking) == "function" then talking = call(l.talking, peer) == true end
+	if type(l.talk_partner) == "function" then partner = tonumber(call(l.talk_partner, peer)) or false end
+	return { talking = talking, partner = partner }
+end
+
+-- F-FAR: the far view of the server (coop_srv_quests_far); nil: its script is not there, the facade's stub answers
+local function far() return mod("coop_srv_quests_far") end
+
 local function level_request(name, payload, from)
 	if map_server() then
 		-- only the world server passes a request on, with the player in it
@@ -167,6 +233,9 @@ LAYER = {
 	from_level = from_level,
 	publish_to = publish_to,
 	level_request = level_request,
+	hook = hook,
+	facts_of = facts_of,
+	far = far,
 }
 
 local function started()

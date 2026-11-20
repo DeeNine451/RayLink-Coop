@@ -897,7 +897,7 @@ TEST(avatar_list_roundtrip)
 	CHECK(back.owners[1].avatar == 1205 && back.owners[1].peer == PeerId(1));
 	CHECK(back.owners[2].avatar == 7 && back.owners[2].peer == PeerId(3));
 
-	// Every slot id: seat 0 and the client slots 1 .. 8 (a world server's 8 clients; owner 2026-11-13).
+	// Every slot id: seat 0 and the client slots 1 .. 16 (a server's 16 clients; F5-SEAT-1).
 	AvatarListMsg full;
 	for (PeerId p = 0; p < kMaxPeerSlots; ++p)
 		full.owners.push_back({uint16_t(p == kHostPeer ? 0 : 60000 + p), p});
@@ -906,8 +906,8 @@ TEST(avatar_list_roundtrip)
 	AvatarListMsg full2;
 	Reader rf(wf.ptr(), wf.size());
 	CHECK(full2.read(rf));
-	CHECK_EQ(full2.owners.size(), size_t(9));
-	CHECK(uint32_t(full2.owners.back().avatar) == 60008u && full2.owners.back().peer == PeerId(8));
+	CHECK_EQ(full2.owners.size(), size_t(17));
+	CHECK(uint32_t(full2.owners.back().avatar) == 60016u && full2.owners.back().peer == PeerId(16));
 	// A world server's table: its seat plays nothing, 8 clients
 	AvatarListMsg eight;
 	for (PeerId p = 1; p <= 8; ++p)

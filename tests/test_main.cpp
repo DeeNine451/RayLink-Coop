@@ -58,6 +58,9 @@ Node::Node(const std::string& nick, uint16_t port)
 	cfg.nick = nick;
 	cfg.connect_timeout_ms = 5000;
 	cfg.peer_timeout_ms = 15000;
+	// F5-SEAT-1: SessionConfig::max_players has no default (the mode's start says it). A test's host has the 8 seats the default
+	// gave before; a test of another number says it (tests/test_seats.cpp: the server's 16).
+	cfg.max_players = 8;
 
 	s.set_log([this](const char* line) { log.emplace_back(line); });
 	s.on_peer_joined = [this](const coop::PeerInfo& p) { joined.push_back(p); };

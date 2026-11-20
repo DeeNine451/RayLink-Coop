@@ -416,7 +416,7 @@ TEST(rest_state_message_malformed)
 TEST(rest_state_message_writes_at_most_a_session)
 {
 	StateMsg in;
-	for (uint16_t i = 0; i < 12; ++i)
+	for (uint16_t i = 0; i < uint16_t(coop::kMaxPlayers + 4); ++i) // F5-SEAT-1: more than the 16 seats
 		in.entries.push_back(entry(i, State::Awake, 0));
 	coop::Writer w;
 	write_state(w, in);
@@ -888,11 +888,11 @@ TEST(rest_group_present_duplicates_and_bound)
 	Group b;
 	std::vector<Seen> many;
 	for (int i = 0; i < int(coop::kMaxPlayers) + 3; ++i)
-		many.push_back(seen(uint16_t(20 - i))); // 20 down to 10
+		many.push_back(seen(uint16_t(20 - i))); // 20 down to 2 (F5-SEAT-1: kMaxPlayers 16)
 	b.tick(many, false, 0);
 	const std::vector<Entry> e = b.entries();
 	REQUIRE(e.size() == size_t(coop::kMaxPlayers));
-	CHECK_EQ(int(e.front().character), 10);
+	CHECK_EQ(int(e.front().character), 2);
 	CHECK_EQ(int(e.back().character), 17);
 }
 

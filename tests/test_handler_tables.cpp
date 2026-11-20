@@ -8,7 +8,7 @@
 //   - the server tables hold ClientOnly, Either and TrunkOnly types only, the client tables HostOnly and Either types only;
 //   - an Either type is in both: in one only, the other side drops it (no handler) where it used to run;
 //   - a type is registered by one module only per side (one handler per type, the last would win silently);
-//   - a file that defines one table defines the other.
+//   - a file that defines one table defines the other (a module split over files by design pairs as one: kSplitModules).
 // The test reads the sources: every Msg::X inside the body of a function named ...install_server / ...install_client
 // counts as a registration of X there (keep handler logic in named functions, out of the bodies). F3a T7 edits these
 // tables by hand when it moves modules onto the link: this test keeps the split honest.
@@ -224,15 +224,28 @@ const char* sender_name(MsgSender s)
 	return "?";
 }
 
+// F5 (docs/VEHICLES.md section 16): the vehicles module is written by several units, each in its own file of one header
+// (coop_vehicles.h): the decider's install_server in coop_vehicles_seat.cpp, a player's install_client in
+// coop_vehicles_client.cpp. Its files pair as one module.
+const char* const kSplitModules[] = {"coop_vehicles_"};
+
+std::string module_of(const std::string& file)
+{
+	for (const char* m : kSplitModules)
+		if (file.compare(0, std::strlen(m), m) == 0)
+			return std::string(m, std::strlen(m) - 1) + "_*.cpp";
+	return file;
+}
+
 // The rules of the header above over the tables found. Empty: the split is honest.
 std::vector<std::string> table_problems(const std::vector<Table>& tables)
 {
 	std::vector<std::string> problems;
 	std::map<uint16_t, std::vector<std::string>> by_side[2]; // [server?1:0][type] -> where
-	std::map<std::string, std::set<std::string>> pairs; // file -> table names, prefix + side
+	std::map<std::string, std::set<std::string>> pairs; // file (or split module) -> table names, prefix + side
 	for (const Table& t : tables)
 	{
-		pairs[t.file].insert(t.function);
+		pairs[module_of(t.file)].insert(t.function);
 		for (uint16_t type : t.types)
 		{
 			by_side[t.server ? 1 : 0][type].push_back(t.file + " " + t.function);
@@ -327,6 +340,12 @@ TEST(handler_tables_checker_catches_mistakes)
 	expect_problem(table_problems(m), "ReqSpawn registered twice in the server tables");
 	expect_problem(table_problems(m), "defines equip_install_server without equip_install_client");
 	expect_problem(parse, "Msg::NoSuchThing is no game message");
+	// the tables of a module split over files by design pair across them (kSplitModules); another file still pairs alone
+	Table seat{"coop_vehicles_seat.cpp", "install_server", true, {}}, client{"coop_vehicles_client.cpp", "install_client", false, {}};
+	CHECK(table_problems({seat, client}).empty());
+	expect_problem(table_problems({seat}), "coop_vehicles_*.cpp defines install_server without install_client");
+	Table lone{"coop_rest.cpp", "install_server", true, {}};
+	expect_problem(table_problems({seat, client, lone}), "coop_rest.cpp defines install_server without install_client");
 }
 
 // The real tables of the game modules.

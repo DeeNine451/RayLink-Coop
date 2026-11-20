@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Anomaly Coop - vehicles for players (F5, docs/VEHICLES.md): the HUD lines of a player's machine, engine/src/xrGame/coop/coop_vehicles_client.cpp and coop_events.cpp. st_coop_f5_vehicles_refused_<reason> by the decider's refusal (coop_vehicle_rules.h refusal_name), st_coop_f5_vehicles_released_<reason> by its release; st_coop_f5_vehicles_refused is the line for a refusal on this machine. F5-VEH-5 adds the passengers' lines. -->
+<string_table>
+	<string id="st_coop_f5_vehicles_refused">
+		<text>Сейчас в машину не сесть</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_no_car">
+		<text>Этой машины здесь уже нет</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_unsupported">
+		<text>Эту машину в кооперативе водить нельзя</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_destroyed">
+		<text>Машина разбита</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_dead">
+		<text>Вы мертвы</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_wounded">
+		<text>Вы ранены и не можете сесть</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_already_seated">
+		<text>Вы уже сидите в машине</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_carrying">
+		<text>Сначала положите тело</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_locked">
+		<text>Машина заперта</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_no_such_seat">
+		<text>В машине нет такого места</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_seat_taken">
+		<text>Это место занято</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_full">
+		<text>В машине нет свободных мест</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_not_seated">
+		<text>Вы не сидите в этой машине</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_exit_locked">
+		<text>Двери заперты</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_no_character">
+		<text>Вас ещё нет на этой карте</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_too_soon">
+		<text>Не так быстро</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_too_far">
+		<text>Машина слишком далеко</text>
+	</string>
+	<string id="st_coop_f5_vehicles_no_answer">
+		<text>Нет ответа насчёт машины (сервер карты, возможно, ещё запускается)</text>
+	</string>
+	<string id="st_coop_f5_vehicles_passenger">
+		<text>Места пассажиров пока недоступны</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_wounded">
+		<text>Вы ранены и выпали из машины</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_left_level">
+		<text>Вы вышли из машины: группа уходит с карты</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_car_destroyed">
+		<text>Машина разбита</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_car_gone">
+		<text>Машины больше нет</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_script">
+		<text>Вас высадили из машины</text>
+	</string>
+</string_table>

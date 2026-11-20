@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Anomaly Coop - vehicles for players (F5, docs/VEHICLES.md): the HUD lines of a player's machine, engine/src/xrGame/coop/coop_vehicles_client.cpp and coop_events.cpp. st_coop_f5_vehicles_refused_<reason> by the decider's refusal (coop_vehicle_rules.h refusal_name), st_coop_f5_vehicles_released_<reason> by its release; st_coop_f5_vehicles_refused is the line for a refusal on this machine. F5-VEH-5 adds the passengers' lines. -->
+<string_table>
+	<string id="st_coop_f5_vehicles_refused">
+		<text>Cannot get into the vehicle now</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_no_car">
+		<text>This vehicle is not here any more</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_unsupported">
+		<text>This vehicle cannot be driven in co-op</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_destroyed">
+		<text>The vehicle is wrecked</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_dead">
+		<text>You are dead</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_wounded">
+		<text>Wounded: you cannot get in</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_already_seated">
+		<text>You already sit in a vehicle</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_carrying">
+		<text>Put the body down first</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_locked">
+		<text>The vehicle is locked</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_no_such_seat">
+		<text>The vehicle has no such seat</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_seat_taken">
+		<text>Somebody sits there</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_full">
+		<text>The vehicle is full</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_not_seated">
+		<text>You do not sit in this vehicle</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_exit_locked">
+		<text>The doors are locked</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_no_character">
+		<text>You are not on this level yet</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_too_soon">
+		<text>Not so fast</text>
+	</string>
+	<string id="st_coop_f5_vehicles_refused_too_far">
+		<text>The vehicle is too far away</text>
+	</string>
+	<string id="st_coop_f5_vehicles_no_answer">
+		<text>No answer about the vehicle (the level's server may be starting)</text>
+	</string>
+	<string id="st_coop_f5_vehicles_passenger">
+		<text>Passenger seats are not available yet</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_wounded">
+		<text>Wounded: you fell out of the vehicle</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_left_level">
+		<text>Out of the vehicle: the group leaves the level</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_car_destroyed">
+		<text>The vehicle is wrecked</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_car_gone">
+		<text>The vehicle is gone</text>
+	</string>
+	<string id="st_coop_f5_vehicles_released_script">
+		<text>You were taken out of the vehicle</text>
+	</string>
+</string_table>

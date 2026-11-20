@@ -277,7 +277,7 @@ TEST(handshake_accepted)
 
 	CHECK_EQ(cl.welcome.slot, PeerId(1));
 	CHECK_EQ(cl.welcome.host_nick, std::string("Boss"));
-	CHECK_EQ(cl.welcome.max_players, kMaxPlayers);
+	CHECK_EQ(cl.welcome.max_players, host.cfg.max_players); // F5-SEAT-1: the seats its mode said (the tests' Node: 8)
 	CHECK(cl.welcome.session_token != 0);
 	CHECK_EQ(cl.s.self(), PeerId(1));
 

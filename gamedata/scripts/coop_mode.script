@@ -21,6 +21,18 @@
 		seat_plays(peer)     the seat of that peer plays a character (seat 0: is the host's seat a player)
 		group_travels()      the group moves between maps together
 		from_level(from)    the transport sender is a registered map-server bridge on the active Server world
+		facts_of(peer)       { talking = bool|nil, partner = id|false|nil }: what the map server of that player's map
+		                     reported of his body, where it is reported to this process (the world server); nil: the
+		                     body is read here, or nobody reports it (F-BODY, A-S6-IF; the C++ twin is Mode::facts_of)
+		hook(name)           a function of the server's scripts by its name (the list: docs\contracts\coop_mode_api.md
+		                     section 7), or nil: the co-op and single player have none. Asked when it is needed, never kept
+		far()                the far view (the server's coop_srv_quests_far, which looks at the maps of other processes),
+		                     or the stub of the co-op and single player: no scope, everything runs here. Always a table
+		                     with in_scope level_of_id order fallback with_level_of with_target at_home object note_fail
+		                     print_status add_death_listener (a function the layer's view lacks is the stub's)
+		share_up(name, get, set[, every])    a table a map server tells the world server (F-SHARE): kept by
+		share_down(name, get, set[, every])  coop_quests_core in every process, carried by the server's share
+		                     (coop_srv_levels_share) only; nothing carries it in the co-op. True when kept
 	Delivery:
 		on_level_request(name, fn[, door])  a player's request to the logic of the map he stands on, event `name`:
 		                     fn(payload, from, relayed) runs on the process that leads that map, `from` = the player;
@@ -51,6 +63,8 @@ local ACTIONS = { here = true, pass = true, drop = true }
 -- every function a layer has (applies() says whether it answers now)
 local FIELDS = { "applies", "where", "decider", "actor_is_player", "decides_world", "leads_here", "is_player_mirror",
 	"seat_plays", "group_travels", "from_level", "publish_to", "level_request" }
+-- A-S6-IF: functions a layer may have; a layer without one is answered as none answers (a layer table of the tests)
+local OPTIONAL = { hook = true, facts_of = true, far = true }
 
 local function log(fmt, ...)
 	local ok, line = pcall(string_format, fmt, ...)
@@ -88,6 +102,39 @@ local NONE = {
 	publish_to = function() return nil end,
 	-- nothing arrives without a session; whatever does is this process's own business
 	level_request = function(name, payload, from) return "here", payload, from, false end,
+	-- A-S6-IF: no server's script, no body reported from elsewhere, no far view (the stub below)
+	hook = function() return nil end,
+	facts_of = function() return nil end,
+	far = function() return nil end,
+}
+
+-- The far view of the co-op and of single player (F-FAR): every place is this process's, nothing is ordered from afar.
+local function core_quests()
+	local q = rawget(_G, "coop_quests_core")
+	if q == nil then
+		local ok, v = pcall(function() return coop_quests_core end)
+		q = ok and v or nil
+	end
+	return type(q) == "table" and q or nil
+end
+
+local FAR_STUB = {
+	in_scope = function() return nil end, -- no other map is looked at
+	level_of_id = function() return nil end,
+	order = function() return false end, -- nothing ordered on another map
+	fallback = function() return nil end,
+	with_level_of = function(peer, fn, ...) return fn(...) end,
+	with_target = function(id, peer, what, fn, ...) return fn(...) end,
+	at_home = function(fn, ...) return fn(...) end,
+	object = function() return nil end,
+	note_fail = function() end,
+	print_status = function() end,
+	-- the Core keeps the handlers (coop_quests_core.add_death_listener) in every process: a server's death relay reads them
+	-- whenever its layer comes to answer; the caller registers its stock callback itself
+	add_death_listener = function(callback, f)
+		local q = core_quests()
+		if q and type(q.add_death_listener) == "function" then q.add_death_listener(callback, f) end
+	end,
 }
 
 -------------------------------------------------------------------------------
@@ -136,6 +183,7 @@ end
 -- layer.k(...) of the layer that answers; on an error the answer of "none"
 local function ask(k, ...)
 	local layer = current()
+	if OPTIONAL[k] and type(layer[k]) ~= "function" then return NONE[k](...) end
 	local ok, a, b, c, d = pcall(layer[k], ...)
 	if ok then return a, b, c, d end
 	fault(layer.name .. "." .. k, a)
@@ -212,6 +260,77 @@ function from_level(from)
 	-- Transport PeerId is uint32_t; 0 is the world seat and 0xffffffff is reserved.
 	return from ~= nil and from > 0 and from < 0xffffffff and ask("from_level", from) == true
 end
+
+-------------------------------------------------------------------------------
+-- A-S6-IF (S6): the answers the S6 groups ask (docs\contracts\coop_mode_api.md section 7)
+-------------------------------------------------------------------------------
+local function object_id(v)
+	return type(v) == "number" and v == v and v > 0 and v < 65535 and v % 1 == 0
+end
+
+-- F-BODY: a fresh table of the two facts, each checked; nil when the layer reports nothing
+function facts_of(peer)
+	peer = peer_of(peer)
+	if not peer then return nil end
+	local t = ask("facts_of", peer)
+	if t == nil then return nil end
+	if type(t) ~= "table" then
+		fault("facts_of answer", t)
+		return nil
+	end
+	local talking = t.talking
+	if talking ~= nil and type(talking) ~= "boolean" then talking = nil end
+	local partner = t.partner
+	if partner ~= false and not object_id(partner) then partner = nil end
+	return { talking = talking, partner = partner }
+end
+
+-- F-HOOK
+function hook(name)
+	if type(name) ~= "string" or name == "" then return nil end
+	local f = ask("hook", name)
+	if f == nil or type(f) == "function" then return f end
+	fault("hook answer", name)
+	return nil
+end
+
+-- F-FAR: the layer's view, any function it lacks taken from the stub (one wrapper per view)
+local far_views = setmetatable({}, { __mode = "k" })
+function far()
+	local v = ask("far")
+	if type(v) ~= "table" then
+		if v ~= nil then fault("far answer", v) end
+		return FAR_STUB
+	end
+	local w = far_views[v]
+	if not w then
+		w = setmetatable({}, { __index = function(_, k)
+			local f = v[k]
+			if f == nil then return FAR_STUB[k] end
+			return f
+		end })
+		far_views[v] = w
+	end
+	return w
+end
+
+-- F-SHARE: kept by the Core in every process (a map server registers before its layer answers); the server's share carries it
+local function share(direction, name, get, set, every)
+	if type(name) ~= "string" or name == "" or type(get) ~= "function" or type(set) ~= "function" then return false end
+	if every ~= nil and not (type(every) == "number" and every >= 0) then return false end
+	local q = core_quests()
+	local keep = q and q[direction]
+	if type(keep) ~= "function" then return false end
+	local ok, e = pcall(keep, name, get, set, every)
+	if not ok then
+		fault(direction, e)
+		return false
+	end
+	return true
+end
+
+function share_up(name, get, set, every) return share("share_up", name, get, set, every) end
+function share_down(name, get, set, every) return share("share_down", name, get, set, every) end
 
 -------------------------------------------------------------------------------
 -- Delivery

@@ -92,12 +92,12 @@ TEST(debug_state_round_trip)
 	StateMsg full;
 	full.on = true;
 	full.source = Source::LaunchKey;
-	for (PeerId p = 0; p < kMaxPeerSlots; ++p) // seat 0 and the client slots 1 .. 8 (a world server's 8 clients)
+	for (PeerId p = 0; p < kMaxPeerSlots; ++p) // seat 0 and the client slots 1 .. 16 (a server's 16 clients, F5-SEAT-1)
 		full.rows.push_back({p, kFlagsAll});
 	StateMsg full_back;
 	REQUIRE(reads(bytes_of(full), full_back));
-	CHECK_EQ(full_back.rows.size(), size_t(9));
-	CHECK_EQ(full_back.flags_of(8), kFlagsAll);
+	CHECK_EQ(full_back.rows.size(), size_t(17));
+	CHECK_EQ(full_back.flags_of(16), kFlagsAll);
 	CHECK(full_back.source == Source::LaunchKey);
 }
 
@@ -130,13 +130,14 @@ TEST(debug_state_refuses_malformed)
 	CHECK(!reads(raw(1, 1, 1, 1, {{1, 0xFF}}), out));
 	CHECK(!reads(raw(1, 1, 1, 1, {{kMaxPeerSlots, 1}}), out)); // no player slot
 	CHECK(reads(raw(1, 1, 1, 1, {{8, 1}}), out)); // slot 8: a world server's 8th client
+	CHECK(reads(raw(1, 1, 1, 1, {{16, 1}}), out)); // slot 16: a server's 16th client (F5-SEAT-1)
 	CHECK(!reads(raw(1, 1, 1, 1, {{kInvalidPeer, 1}}), out));
 	CHECK(!reads(raw(1, 1, 1, 2, {{2, 1}, {2, 2}}), out)); // one row per player
 	// n > kMaxPeerSlots, with the rows there or not
-	std::vector<std::pair<uint32_t, uint8_t>> ten;
-	for (uint32_t p = 0; p < 10; ++p)
-		ten.push_back(std::make_pair(p % kMaxPeerSlots, uint8_t(1)));
-	CHECK(!reads(raw(1, 1, 1, 10, ten), out));
+	std::vector<std::pair<uint32_t, uint8_t>> over; // F5-SEAT-1: one row more than the 17 slots
+	for (uint32_t p = 0; p < kMaxPeerSlots + 1; ++p)
+		over.push_back(std::make_pair(p % kMaxPeerSlots, uint8_t(1)));
+	CHECK(!reads(raw(1, 1, 1, kMaxPeerSlots + 1, over), out));
 	CHECK(!reads(raw(1, 1, 1, uint64_t(1) << 40, {}), out));
 	// what the reader says no to leaves nothing half-read behind for a caller that ignores the answer
 	StateMsg keep;

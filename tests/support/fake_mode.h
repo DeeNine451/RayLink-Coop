@@ -14,13 +14,23 @@
 // or names one set: t::FakeMode m(t::mode_case("map_server")). MODE_CASES(X) lists the six names (X-macro). What the fake answers is
 // what the real modes answer (hostplay/coop_hostplay_mode.cpp, srv/coop_srv_mode.cpp, NoneMode; tests/test_mode_answers.cpp checks
 // the rows of the real files against these). deliver / stream / up are recorded when the process kind sends them at all.
+//
+// A-S6-IF (S6): the hooks of the S6 groups answer per kind too (tests/test_mode_s6_answers.cpp checks them, and the real modes'
+// answers from their sources). A map server has a level side (m.side(): it records what it was told and keeps its own book of
+// balances; m.side().trunk[peer] = character is its table of the level's players). The world server's level answers come from the
+// spots and from what the test says of the map servers: m.bridge(peer) (that peer is a map server's bridge), m.level_up(level)
+// (the map server of that level is up), m.map_down(peer) (nobody leads the map of that player now). m.world_level(level): the level
+// the world server stands on, as a player's loading screen sees it.
 #pragma once
 
+#include "coop_ghost_rules.h"
 #include "coop_mode.h"
 #include "coop_roles.h"
+#include "coop_scope.h"
 
 #include <cstring>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace t
@@ -48,31 +58,41 @@ struct ModeCase
 	coop::Decider decider_self, decider_here, decider_elsewhere, decider_joining, decider_stranger;
 	bool delivers; // deliver / stream reach somebody
 	bool sends_up; // up reaches whoever decides for it
+	// A-S6-IF (S6)
+	bool has_level_side = false; // level() is a LevelSide (a map server)
+	bool level_filter = false; // the players of other maps: reaches, led_elsewhere, to_level_of, join_save, join_from_bridge, level_ready
+	bool delivers_links = false; // deliver_links reaches a link (the host player, the bridges, a map server's world)
+	bool server_loading_line = false; // load_text names the map server of the level
+	bool level_ghost = false; // ghost_said and on_world_live are the level's (its actor is a ghost on a map it leads)
 };
 
 inline const std::vector<ModeCase>& mode_cases()
 {
 	using coop::Decider;
 	using coop::Where;
+	// the last five of a row (A-S6-IF): has_level_side, level_filter, delivers_links, server_loading_line, level_ghost
 	static const std::vector<ModeCase> cases = {
 		// the co-op host plays, everybody stands on his one map; he decides for every character
 		{"coop_host", {true, true, true, true, coop::host_roles()}, Where::Here, Where::Here, Where::Here, Where::Joining, Where::Here,
-			Decider::This, Decider::This, Decider::This, Decider::This, Decider::Nobody, true, true},
+			Decider::This, Decider::This, Decider::This, Decider::This, Decider::Nobody, true, true, false, false, true, false, false},
 		// a co-op client: everybody on the host's map, the host decides
 		{"coop_client", {true, false, false, true, coop::client_roles()}, Where::Here, Where::Here, Where::Here, Where::Here, Where::Here,
-			Decider::Other, Decider::Other, Decider::Other, Decider::Other, Decider::Nobody, false, true},
+			Decider::Other, Decider::Other, Decider::Other, Decider::Other, Decider::Nobody, false, true, false, false, false, false, false},
 		// the world server: no map of a player, its seat a ghost; a map server decides for a placed player, it for one not placed yet
 		{"world_server", {false, true, false, false, coop::dedicated_roles()}, Where::Away, Where::Away, Where::Away, Where::Joining,
-			Where::Joining, Decider::Nobody, Decider::Other, Decider::Other, Decider::This, Decider::Nobody, true, false},
+			Where::Joining, Decider::Nobody, Decider::Other, Decider::Other, Decider::This, Decider::Nobody, true, false, false, true, true,
+			false, false},
 		// a map server: leads its map, its actor a ghost; the world server decides the world
 		{"map_server", {false, false, true, false, coop::map_server_roles()}, Where::Away, Where::Here, Where::Away, Where::Joining,
-			Where::Away, Decider::Nobody, Decider::This, Decider::Other, Decider::This, Decider::Nobody, true, true},
+			Where::Away, Decider::Nobody, Decider::This, Decider::Other, Decider::This, Decider::Nobody, true, true, true, false, true, true,
+			true},
 		// a player of a server world: his map's server decides, the world server's seat is nobody's character
 		{"server_client", {true, false, false, false, coop::client_roles()}, Where::Here, Where::Here, Where::Away, Where::Here,
-			Where::Away, Decider::Other, Decider::Other, Decider::Other, Decider::Other, Decider::Nobody, false, true},
+			Where::Away, Decider::Other, Decider::Other, Decider::Other, Decider::Other, Decider::Nobody, false, true, false, false, false,
+			true, false},
 		// no session: single player
 		{"none", coop::kNoSessionAnswers, Where::Away, Where::Away, Where::Away, Where::Away, Where::Away, Decider::Nobody,
-			Decider::Nobody, Decider::Nobody, Decider::Nobody, Decider::Nobody, false, false},
+			Decider::Nobody, Decider::Nobody, Decider::Nobody, Decider::Nobody, false, false, false, false, false, false, false},
 	};
 	return cases;
 }
@@ -86,6 +106,71 @@ inline const ModeCase& mode_case(const char* name)
 	return mode_cases().back();
 }
 
+// A map server's side of its level as the fake has it (A-S6-IF): what the Core told it, and a book of balances as the real one keeps.
+class FakeLevelSide final : public coop::LevelSide
+{
+public:
+	struct Money
+	{
+		coop::PeerId peer;
+		int64_t delta;
+		bool trade;
+	};
+	struct Up
+	{
+		coop::EntityUp kind;
+		uint16_t id, other;
+	};
+
+	void level_money_change(coop::PeerId peer, int64_t delta, bool trade) override
+	{
+		money_up.push_back({peer, delta, trade});
+		if (!delta)
+			return;
+		uint32_t& b = balances[peer];
+		const int64_t next = int64_t(b) + delta;
+		b = next < 0 ? 0u : uint32_t(next);
+	}
+	bool level_balance(coop::PeerId peer, uint32_t& out) const override
+	{
+		const auto it = balances.find(peer);
+		out = it == balances.end() ? 0u : it->second;
+		return it != balances.end();
+	}
+	void level_balance_heard(coop::PeerId peer, uint32_t balance) override { balances[peer] = balance; }
+	void level_item_tell(uint16_t id, const std::string&, const std::vector<uint8_t>&) override { items_told.push_back(id); }
+	bool level_tent_limit(size_t world_tents, size_t limit) const override { return world_tents >= limit; }
+	void level_tent_placed(uint16_t tent, uint16_t) override { tents_up.push_back(tent); }
+	bool level_tent_packed(uint16_t tent) override
+	{
+		tents_packed.push_back(tent);
+		return true;
+	}
+	bool level_in_world(uint16_t character) const override { return in_world.count(character) != 0; }
+	void level_marker(const coop::death::Marker&) override { ++markers; }
+	uint16_t level_character_of(coop::PeerId peer) const override
+	{
+		const auto it = trunk.find(peer);
+		return it == trunk.end() ? uint16_t(0xffff) : it->second;
+	}
+	coop::PeerId level_peer_of(uint16_t character) const override
+	{
+		for (const auto& it : trunk)
+			if (it.second == character)
+				return it.first;
+		return coop::kInvalidPeer;
+	}
+	void level_entity_up(coop::EntityUp kind, uint16_t id, uint16_t other) override { ups.push_back({kind, id, other}); }
+
+	std::map<coop::PeerId, uint16_t> trunk; // the level's players: peer -> character
+	std::set<uint16_t> in_world; // characters whose join on the level is over
+	std::map<coop::PeerId, uint32_t> balances;
+	std::vector<Money> money_up;
+	std::vector<uint16_t> items_told, tents_up, tents_packed;
+	std::vector<Up> ups;
+	int markers = 0;
+};
+
 class FakeMode final : public coop::ModeWithAnswers
 {
 public:
@@ -96,6 +181,12 @@ public:
 		coop::PeerId except;
 		bool stream;
 	};
+	struct Link
+	{
+		coop::PeerId to; // to_level_of: the player; deliver_links: kInvalidPeer
+		coop::Msg type;
+		coop::Lane lane;
+	};
 
 	explicit FakeMode(const ModeCase& c) : coop::ModeWithAnswers(c.answers), m_case(c) {}
 
@@ -103,6 +194,12 @@ public:
 	void place(coop::PeerId peer, Spot spot) { m_spots[peer] = spot; }
 	// character (this process's numbering) is the character of peer; 0 is this process's own actor unless placed otherwise.
 	void character(uint16_t id, coop::PeerId peer) { m_characters[id] = peer; }
+	// A-S6-IF: what the world server knows of the map servers, and the level a loading screen sees the world server on.
+	void bridge(coop::PeerId peer) { m_bridges.insert(peer); }
+	void level_up(uint16_t level) { m_ready.insert(level); }
+	void map_down(coop::PeerId peer) { m_down.insert(peer); }
+	void world_level(uint16_t level) { m_world_level = level; }
+	FakeLevelSide& side() { return m_side; }
 
 	const char* name() const override { return m_case.name; }
 	coop::Where where(coop::PeerId peer) const override
@@ -159,9 +256,50 @@ public:
 	bool takes_own_ids() const override { return false; }
 	uint16_t own_free_id() override { return 0xffff; }
 
+	// A-S6-IF (S6), as the real modes answer (srv/coop_srv_mode.cpp, hostplay/coop_hostplay_mode.cpp, Mode's defaults for none)
+	coop::LevelSide* level() override { return m_case.has_level_side ? &m_side : nullptr; }
+	bool reaches(coop::PeerId peer, coop::Msg type) const override
+	{
+		return !m_case.level_filter || coop::level_passes(type, true, spot_of(peer) != Spot::Elsewhere);
+	}
+	void deliver_links(coop::Msg type, const coop::Writer&, coop::Lane lane) override
+	{
+		if (m_case.delivers_links)
+			linked.push_back({coop::kInvalidPeer, type, lane});
+	}
+	bool led_elsewhere(coop::PeerId peer) const override
+	{
+		return m_case.level_filter && spot_of(peer) == Spot::Elsewhere && !m_down.count(peer);
+	}
+	bool to_level_of(coop::PeerId peer, coop::Msg type, const coop::Writer&, coop::Lane lane) override
+	{
+		if (!led_elsewhere(peer))
+			return false;
+		to_levels.push_back({peer, type, lane});
+		return true;
+	}
+	bool join_from_bridge(coop::PeerId from, coop::Msg) override { return m_case.level_filter && m_bridges.count(from) != 0; }
+	bool join_save(coop::PeerId from, CSE_ALifeHumanStalker&) override
+	{
+		return m_case.level_filter && spot_of(from) == Spot::Elsewhere;
+	}
+	bool level_ready(uint16_t level) const override { return !m_case.level_filter || m_ready.count(level) != 0; }
+	void on_world_live() override
+	{
+		if (m_case.level_ghost)
+			++lives;
+	}
+	const char* load_text(uint16_t screen_level, bool world_up) const override
+	{
+		return m_case.server_loading_line && !world_up && screen_level != m_world_level ? "st_coop_load_server" : nullptr;
+	}
+	bool ghost_said(const coop::ghost::Said& s) const override { return m_case.level_ghost && coop::ghost::about_actor(s); }
+
 	std::vector<Sent> delivered; // deliver and stream, when this kind delivers
 	std::vector<Sent> sent_up; // up, when this kind sends up
-	int installs = 0, frames = 0, overs = 0;
+	std::vector<Link> linked; // deliver_links, when this kind has links
+	std::vector<Link> to_levels; // to_level_of that went to another process
+	int installs = 0, frames = 0, overs = 0, lives = 0;
 
 private:
 	Spot spot_of(coop::PeerId peer) const
@@ -173,5 +311,9 @@ private:
 	ModeCase m_case;
 	std::map<coop::PeerId, Spot> m_spots;
 	std::map<uint16_t, coop::PeerId> m_characters;
+	std::set<coop::PeerId> m_bridges, m_down;
+	std::set<uint16_t> m_ready;
+	uint16_t m_world_level = 0xffff;
+	FakeLevelSide m_side;
 };
 } // namespace t
