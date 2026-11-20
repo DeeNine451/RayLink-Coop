@@ -238,7 +238,8 @@ catch {
 }
 finally {
     foreach ($p in @($c, $a, $gameHost)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
-    Start-Sleep -Seconds 3
+    # a game of 10+ GB takes longer than a few seconds to go after Stop-Process: wait for it, not a fixed pause
+    foreach ($p in @($c, $a, $gameHost)) { if ($p) { [void]$p.WaitForExit(30000) } }
     Get-Process -Name 'AnomalyCoop*' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($Stand, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host "! left running: $($_.Id), stopped"; Stop-Process -Id $_.Id -Force }
     foreach ($pair in @(@($hostLog, 'host'), @($logA, 'a'), @($logC, 'c'))) {
         if ($pair[0] -and (Test-Path -LiteralPath $pair[0])) { Copy-Item -LiteralPath $pair[0] -Destination (Join-Path $OutDir "${Tag}_hybrid_$($pair[1]).log") -Force }
