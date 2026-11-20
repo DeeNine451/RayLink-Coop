@@ -20,34 +20,7 @@ stock engine/src/**
 core engine/src/xrGame/coop/**
 core engine/src/xrCoop/**
 
-# --- engine: Сервер (27 files: 11 SERVER, 3 MAPSERVER, 13 SPLIT) ---------------------------------------------------
-srv engine/src/xrCoop/coop_dedicated_rules.h
-srv engine/src/xrCoop/coop_operator.h
-srv engine/src/xrCoop/coop_world_server_rules.h
-srv engine/src/xrCoop/coop_world_stage.h
-srv engine/src/xrCoop/coop_xfer_journal.h
-srv engine/src/xrGame/coop/coop_dedicated.cpp
-srv engine/src/xrGame/coop/coop_dedicated.h
-srv engine/src/xrGame/coop/coop_levels_alife.cpp
-srv engine/src/xrGame/coop/coop_levels_map.h
-srv engine/src/xrEngine/coop_host_console.cpp
-srv engine/src/xrEngine/coop_host_console.h
-srv engine/src/xrCoop/coop_ghost_rules.h
-srv engine/src/xrCoop/coop_xfer_holder.h
-srv engine/src/xrGame/coop/coop_mapserver_stats.cpp
-srv engine/src/xrCoop/coop_level_hash.h
-srv engine/src/xrCoop/coop_levels_dynamic.h
-srv engine/src/xrCoop/coop_levels_keeper.h
-srv engine/src/xrCoop/coop_levels_logic.h
-srv engine/src/xrCoop/coop_levels_wire.h
-srv engine/src/xrCoop/coop_mapserver_rules.h
-srv engine/src/xrCoop/coop_scope.h
-srv engine/src/xrCoop/coop_xfer.h
-srv engine/src/xrCoop/coop_xfer_base.h
-srv engine/src/xrGame/coop/coop_levels_xfer.cpp
-srv engine/src/xrGame/coop/coop_mapserver.cpp
-srv engine/src/xrGame/coop/coop_mapserver.h
-srv engine/src/xrGame/coop/coop_trunk.cpp
+# --- engine: Сервер (folders of step S4) ---------------------------------------------------
 # the folders of step S4
 srv engine/src/xrGame/coop/srv/**
 srv engine/src/xrCoop/srv/**

@@ -1,7 +1,7 @@
 // S6 network migration: preserve the authority and receiver for each process kind.
 #include "test_util.h"
 #include "coop_calls.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_load_barrier.h"
 #include "coop_newchar.h"
 #include "coop_routes.h"

@@ -7,7 +7,7 @@
 // - the server functions behind them ask no mode any more: each is reached only through the server mode whose process has it, and
 //   that mode's answer is written in its own class (srv/coop_srv_mode.cpp); the co-op's answers are the empty ones;
 // - the frame of a map server waits for its world's Welcome as before, the stats of a server's process run from the server's boot;
-// - the server's console names (srv_*, the old coop_* names as synonyms) and the Lua table srv.* (the coop.* copies stay until A-S8).
+// - the server's console names and the Lua table srv.*.
 // GameObject's hook drops `|| g_coop_headless`: in every build of this game g_dedicated_server is set only with g_coop_headless
 // (xrEngine/x_ray.cpp), so `!g_dedicated_server || g_coop_headless` is always true; mode_hooks_dedicated_means_headless keeps that so.
 #include "test_util.h"
@@ -279,7 +279,7 @@ TEST(mode_hooks_dedicated_means_headless)
 TEST(mode_hooks_server_functions_ask_no_mode)
 {
 	const std::string src = engine_src();
-	const std::string xfer = code_of(read_text(src + "/xrGame/coop/coop_levels_xfer.cpp"));
+	const std::string xfer = code_of(read_text(src + "/xrGame/coop/srv/coop_levels_xfer.cpp"));
 	REQUIRE(!xfer.empty());
 	const char* const words[] = {"is_map_server", "is_world_server", "is_host(", "is_client(", "has_role", "split()", "dedicated"};
 	for (const char* fn : {"bool\\s+logic_may_update", "bool\\s+online_at_server", "void\\s+xfer_scheduled",
@@ -298,13 +298,13 @@ TEST(mode_hooks_server_functions_ask_no_mode)
 	const std::string lua_online = collapse(body_of(levels, R"(int\s+l_online_at_server)"));
 	CHECK(has(lua_online, "mode().online_elsewhere(u16(id))"));
 	CHECK(!calls(lua_online, "online_at_server"));
-	const std::string map = code_of(read_text(src + "/xrGame/coop/coop_mapserver.cpp"));
+	const std::string map = code_of(read_text(src + "/xrGame/coop/srv/coop_mapserver.cpp"));
 	CHECK(!has(body_of(map, R"(void\s+host_frame)"), "is_host("));
 	const std::string serve = body_of(map, R"(void\s+server_frame)");
 	CHECK(!has(serve, "is_map_server"));
 	// a map server's frame waits for its world's Welcome, as levels::frame did before (its frame times count from there)
 	CHECK(has(collapse(serve).substr(0, 40), "if (!levels::split()) return;"));
-	const std::string stats = code_of(read_text(src + "/xrGame/coop/coop_mapserver_stats.cpp"));
+	const std::string stats = code_of(read_text(src + "/xrGame/coop/srv/coop_mapserver_stats.cpp"));
 	CHECK(!has(body_of(stats, R"(void\s+mapserver_stats_frame)"), "g_coop_headless"));
 	const std::string manager = code_of(read_text(src + "/xrGame/coop/coop_manager.cpp"));
 	REQUIRE(!manager.empty());
@@ -345,8 +345,7 @@ TEST(mode_hooks_each_mode_answers_its_own)
 	CHECK(!has(coop, "mapserver_stats"));
 }
 
-// docs/MODES.md section 6: the server's console names srv_*, the old coop_* ones are synonyms of the same setting for one dev build
-// (A-S8 removes them); the bounds are today's.
+// docs/MODES.md section 6: A-S8 retires the old levels commands. Check the command handlers and machine settings too.
 TEST(mode_hooks_srv_console_names)
 {
 	const std::string code = code_of(read_text(engine_src() + "/xrGame/coop/srv/coop_srv_console.cpp"));
@@ -377,21 +376,36 @@ TEST(mode_hooks_srv_console_names)
 			CHECK_EQ(it->second.cls, std::string(name.rfind("srv_", 0) == 0 ? "CCC_Integer" : "CCC_SrvOldName"));
 			CHECK_EQ(it->second.rest, s.second);
 		}
-	for (const char* what : {"levels_status", "levels_audit"})
+	const std::map<std::string, std::string> commands = {
+		{"levels_status", "CCC_SrvLevelsStatus"},
+		{"levels_audit", "CCC_SrvLevelsAudit"},
+	};
+	for (const auto& cmd : commands)
 	{
-		const auto now = cmds.find(std::string("srv_") + what);
-		const auto old = cmds.find(std::string("coop_") + what);
-		REQUIRE(now != cmds.end() && old != cmds.end());
-		CHECK_EQ(now->second.cls, old->second.cls);
-		CHECK(now->second.rest.empty() && old->second.rest.empty());
+		const auto now = cmds.find("srv_" + cmd.first);
+		REQUIRE(now != cmds.end());
+		CHECK_EQ(now->second.cls, cmd.second);
+		CHECK(now->second.rest.empty());
+		CHECK_EQ(cmds.count("coop_" + cmd.first), size_t(0));
 	}
 	const auto netstats = cmds.find("srv_netstats");
 	REQUIRE(netstats != cmds.end());
 	CHECK_EQ(netstats->second.cls, std::string("CCC_SrvNetStats"));
 	CHECK(netstats->second.rest.empty());
-	CHECK_EQ(cmds.size(), size_t(11));
+	CHECK_EQ(cmds.size(), size_t(9));
 	CHECK(has(collapse(body_of(code, R"(void\s+Execute)")), "levels::print_status();"));
 	CHECK(calls(code, "levels\\s*::\\s*xfer_audit_now"));
+}
+
+TEST(mode_hooks_srv_stand_uses_canonical_console_names)
+{
+	const std::string stand = engine_src() + "/../../tools/stand/";
+	for (const char* scenario : {"base_server.ps1", "carry_server.ps1", "phantoms_server.ps1"})
+	{
+		const std::string source = read_text(stand + scenario);
+		CHECK(has(source, "'srv_levels_status'"));
+		CHECK(!has(source, "'coop_levels_status'"));
+	}
 }
 
 // The server's commands and table are registered where the Core's are, through the switchboard (the one place of the Core that names

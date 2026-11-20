@@ -123,7 +123,7 @@ TEST(s6_integration_coop_my_level_is_the_guarded_getter)
 // overflow; capped_balance gives a delta beyond +-UINT32_MAX the same result, so an honest report changes nothing.
 TEST(s6_integration_level_money_report_is_bounded)
 {
-	const std::string xfer = engine_file("xrGame/coop/coop_levels_xfer.cpp");
+	const std::string xfer = engine_file("xrGame/coop/srv/coop_levels_xfer.cpp");
 	REQUIRE(!xfer.empty());
 	const size_t start = xfer.find("case Head::Money:");
 	REQUIRE(start != std::string::npos);

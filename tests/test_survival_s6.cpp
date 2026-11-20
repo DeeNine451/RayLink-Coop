@@ -59,7 +59,7 @@ TEST(survival_s6_map_stash_completion_keeps_the_queued_report_order)
 	const auto survival = source("coop_survival.cpp");
 	const auto frame = function(survival, "void frame()");
 	const auto stash = function(survival, "void level_stash_frame()");
-	const auto transfer = function(source("coop_levels_xfer.cpp"), "void up_stash(");
+	const auto transfer = function(source("srv/coop_levels_xfer.cpp"), "void up_stash(");
 	const auto level_branch = frame.find("else if (mode().level())");
 	const auto finish = frame.find("level_stash_frame()");
 	const auto local = frame.find("local_actor()");
@@ -77,7 +77,7 @@ TEST(survival_s6_map_checkpoint_facts_stay_in_body_report_order)
 	const auto scan = function(sources, "void map_server_scan(");
 	const auto footing = function(sources, "void map_server_footing(");
 	const auto status = function(sources, "void print_status()");
-	const auto report = function(source("coop_levels_xfer.cpp"), "void client_body(");
+	const auto report = function(source("srv/coop_levels_xfer.cpp"), "void client_body(");
 	CHECK(sources.find("coop_mapserver.h") == std::string::npos);
 	CHECK(scan.find("level_peer_of(") != std::string::npos);
 	CHECK(footing.find("is_map_server()") == std::string::npos);

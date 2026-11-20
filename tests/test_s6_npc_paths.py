@@ -40,7 +40,7 @@ def fixture(source):
     events = source("coop_events.cpp")
     level_mode = source("srv/coop_srv_mode.cpp")
     dispatch = definitions(level_mode, "void level_entity_up(", indent="\t")
-    xfer = source("coop_levels_xfer.cpp")
+    xfer = source("srv/coop_levels_xfer.cpp")
     parts = {
         "OBSERVER": definitions(source("coop_alife.cpp"), "float observer_distance("),
         "APPLY": definitions(entities, "struct ApplyGuard", "bool client_applying("),

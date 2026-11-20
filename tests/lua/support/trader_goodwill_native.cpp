@@ -2,7 +2,7 @@
 #include "coop_wire.h"
 #include "coop_protocol.h"
 #include "coop_limits.h"
-#include "coop_ghost_rules.h"
+#include "srv/coop_ghost_rules.h"
 #include "coop_fight_fact.h" // INTEG-C: host_on_relation_request reads a fight fact
 #include <algorithm>
 #include <fstream>

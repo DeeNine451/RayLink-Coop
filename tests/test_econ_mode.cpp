@@ -120,7 +120,7 @@ TEST(econ_level_balance_changes_and_requests_go_through_the_level_side)
 	                  "return adjust(peer, delta, why, trade ? Source::Trade : Source::Grant);");
 	check_guard(code, "void host_send_balance(PeerId peer) { if (LevelSide* side = mode().level()) { "
 	                  "side->level_money_change(peer, 0, false);");
-	check_guard(econ_source("coop_trunk.cpp"), "if (p.level == key().level) side->level_balance_heard(p.peer, p.money);");
+	check_guard(econ_source("srv/coop_trunk.cpp"), "if (p.level == key().level) side->level_balance_heard(p.peer, p.money);");
 }
 
 TEST(econ_item_tell_keeps_the_item_state_broadcast_as_a_terminal_callback)
@@ -132,7 +132,7 @@ TEST(econ_item_tell_keeps_the_item_state_broadcast_as_a_terminal_callback)
 	const std::regex broadcast(R"(net::host_broadcast\s*\()");
 	CHECK_EQ(std::distance(std::sregex_iterator(tell.begin(), tell.end(), broadcast), std::sregex_iterator()), 1);
 
-	const std::string loot = econ_source("coop_levels_xfer.cpp", "void client_loot(");
+	const std::string loot = econ_source("srv/coop_levels_xfer.cpp", "void client_loot(");
 	check_guard(loot, "items::level_item_tell(it->first, section, blob);");
 	const std::regex callback(R"(items::level_item_tell\s*\()");
 	CHECK_EQ(std::distance(std::sregex_iterator(loot.begin(), loot.end(), callback), std::sregex_iterator()), 1);

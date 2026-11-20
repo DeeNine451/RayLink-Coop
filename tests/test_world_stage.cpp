@@ -2,7 +2,7 @@
 // native.md section 4.2, stage 5): what the game and the launcher write, what the world server reads, and what it refuses.
 #include "test_util.h"
 
-#include "coop_world_stage.h"
+#include "srv/coop_world_stage.h"
 
 #include <string>
 

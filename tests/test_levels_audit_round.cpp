@@ -1,7 +1,7 @@
 // Server-only ownership audit: a round is proved by one full book from each challenged bridge.
 #include "test_util.h"
 
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_world_gate.h"
 #include "srv/coop_levels_audit.h"
 #include "srv/coop_session_srv.h"
@@ -306,7 +306,7 @@ TEST(levels_audit_round_transport_disconnect_clears_the_challenged_bridge_slot)
 TEST(levels_audit_round_xfer_hooks)
 {
 	const auto path = std::filesystem::path(__FILE__).parent_path().parent_path()
-	    / "engine/src/xrGame/coop/coop_levels_xfer.cpp";
+	    / "engine/src/xrGame/coop/srv/coop_levels_xfer.cpp";
 	std::ifstream in(path, std::ios::binary);
 	REQUIRE(in.is_open());
 	std::ostringstream source;

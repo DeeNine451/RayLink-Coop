@@ -26,7 +26,7 @@
 | Что это | хост играет сам, все игроки на его карте | сервер мира отдельным процессом без игрока (консоль) и серверы карт, по одному на карту с игроками. Игроки на разных картах |
 | Кто решает за игрока | процесс хоста: карта игрока загружена у него | сервер мира; карты игрока у него нет, факты о карте сообщает сервер карты |
 | Кто запускает | **только игра**: меню «Хост» (`coop_menu.script:2132-2151`), `-coop_host` (хост Steam), «Играть» в лаунчере для кооп-мира (`-coop_world_auto <мир>`) | **только лаунчер**: «Запустить сервер» / «Создать мир» (`backend.rs:822-850`, `server_spawn` в `launch/mod.rs:118-131`) |
-| Процесс | `AnomalyCoopDX11AVX.exe` | сервер мира `RayLinkServer.exe -coop_dedicated …`; серверы карт `-coop_mapserver <карта>` запускает сам сервер мира тем же exe (`coop_mapserver.cpp:292`) |
+| Процесс | `AnomalyCoopDX11AVX.exe` | сервер мира `RayLinkServer.exe -coop_dedicated …`; серверы карт `-coop_mapserver <карта>` запускает сам сервер мира тем же exe (`xrGame/coop/srv/coop_mapserver.cpp:292`) |
 | Как входит игрок | `-coop_connect`, приглашение Steam | «Войти в мир» в лаунчере (`world_enter`, `backend.rs:736`) |
 | Steam | да | нет (раздел 8) |
 | Сохранения | у хоста, актор сейва — персонаж хоста | у сервера мира, актор сейва — «призрак» сервера на `fake_start` (`coop_dedicated.script:156-160`) |
@@ -85,7 +85,7 @@
 | 4 | Новые строки с `is_host()`, `is_client()`, `is_map_authority()`. Старые только убывают | у кооп-хоста `is_world_server()` и `is_map_authority()` истинны (`coop_roles.h:32-35`), поэтому серверная правка под ними попадает в кооп: `41701d82` (`coop_items.cpp`) |
 | 5 | Аргумент или поле по умолчанию, которое несёт факт режима или карты (в имени `level`, `split`, `host`, `here`, `plays`, `server`, `elsewhere`) | `coop_mirror.h:41` `flag_of_this_level = true` (R1, сборка 52, 10 вылетов кооп-клиентов); `coop_routes.h:789` `leads_level = false`. Оба убираются на шаге S1 |
 | 6 | Состояние, которое заполняет только один режим. Steam | — |
-| 7 | Ссылаться на файл, модуль или функцию слоя режима (`#include "srv/…"`, `coop_srv_x.fn`). Режимы не называют друг друга. Сток и Ядро доходят до кода `srv` только через `mode()` | хуки в стоке зовут серверные функции напрямую, и кооп спасает только ранний `return` внутри них (`coop_levels_xfer.cpp:1116-1119,1156-1159,1256-1258,1293-1296,1363`; critique H5) |
+| 7 | Ссылаться на файл, модуль или функцию слоя режима (`#include "srv/…"`, `coop_srv_x.fn`). Режимы не называют друг друга. Сток и Ядро доходят до кода `srv` только через `mode()` | хуки в стоке зовут серверные функции напрямую, и кооп спасает только ранний `return` внутри них (`xrGame/coop/srv/coop_levels_xfer.cpp:1116-1119,1156-1159,1256-1258,1293-1296,1363`; critique H5) |
 
 ### Что считается правкой Ядра (правило 8)
 
@@ -169,13 +169,13 @@
   сами.
 - Класс `Session` (`coop_session.h`) остаётся Ядром. Мосты, виртуальный хост и токен оператора уходят в серверное
   расширение (`SessionSrv`), LocalLink — в кооп-расширение (critique H10). S4 (A-S4S) сделал сам вид
-  `srv::SessionSrv` (`xrCoop/srv/coop_session_srv.h`), через него ходит `coop_mapserver.cpp`. Тела членов пока в
+  `srv::SessionSrv` (`xrCoop/srv/coop_session_srv.h`), через него ходит `xrGame/coop/srv/coop_mapserver.cpp`. Тела членов пока в
   `Session`: их ещё зовут напрямую `coop_trunk`, `coop_levels_xfer`, `coop_levels`, `coop_join`, `coop_manager`,
   `srv/coop_srv_mode` и тесты. Перенос тел — задание A-S4Sb.
 - Карта сервера получила свой шаг неба `level_sky_frame` (`coop_worldstate.cpp`). Он в Ядре, но нужен только серверу
   карты, поэтому переезжает в srv на шаге S5 (A-S5W).
-- `xrCoop/coop_scope.h:216-268` (`scope_of`, `reaches_every_level`, `level_passes`) — серверная семантика, уходит в `srv`.
-  `xrCoop/coop_world_server_rules.h` — договор лаунчер ↔ сервер, тоже `srv`.
+- `xrCoop/srv/coop_scope.h:216-268` (`scope_of`, `reaches_every_level`, `level_passes`) — серверная семантика, уходит в `srv`.
+  `xrCoop/srv/coop_world_server_rules.h` — договор лаунчер ↔ сервер, тоже `srv`.
 
 ### Lua: `gamedata/scripts/coop_mode.script` (фасад, Ядро)
 
@@ -295,7 +295,7 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
 Правила третьего ревью (2026-11-18, четвёртый круг: C1-C4, C6-C8) добавляют на дереве того дня 12 строк, которых нет в
 списке (10 L9, 1 L9C, 1 L3): L9 в серверных скриптах `gate-core` (функции, которые зовутся при загрузке по цепочке: `coop_dedicated.script`
 `new_world_settings()` пишет `config:w_value`, `step()` в `coop_scorcher` / `coop_storyline` зовёт `pcall(f)`, …), L9C
-`coop_host_console.cpp` (`OutputQueue g_queue` строится конструктором в каждом процессе), L3 `coop_quests_core.script`
+`xrGame/coop/srv/coop_host_console.cpp` (`OutputQueue g_queue` строится конструктором в каждом процессе), L3 `coop_quests_core.script`
 (таблица имён модулей с `"coop_quests_far"`). Это правильные находки, а не ложные тревоги: список пересчитывает ведущая
 (`python -I tools\check_layers.py --write-allow --reset-ceiling` после просмотра добавленных строк).
 
@@ -349,11 +349,11 @@ L1/L2, а новые предикаты и псевдонимы (L1 +134), ин�
   числе строкой таблицы рассылки — C6; строка C++ `lua_getglobal(L, "coop_dedicated")`, конфиг
   `<precondition>coop_x.fn</precondition>`), в нём определён глобал, который Ядро объявляет `extern`, член (функция или
   статическое поле, C8) класса, который определяют только Ядро и сток, или класса, объявленного в уже достигнутом файле
-  (`Book::may_run` из серверного `coop_operator.h`, C11), или в нём статический инициализатор с вызовом или конструктором
+  (`Book::may_run` из серверного `xrCoop/srv/coop_operator.h`, C11), или в нём статический инициализатор с вызовом или конструктором
   (работает в каждом процессе, C7). Дальше — **до неподвижной точки**: всё, что включает, зовёт или называет уже
   достигнутый файл (и файлы `gate-core` / `srv_entry.txt`), тоже достигнуто. На 2026-11-18 это 37 из 38 файлов
   `srv`/`hostplay` (последний, `coop_levels_tables.script`, — `gate-core`): **только-серверных файлов для ворот сегодня
-  нет**. `coop_levels_keeper.h` достигнут через `coop_levels_xfer.cpp` (его `marked()` держит `online_at_server()`
+  нет**. `xrCoop/srv/coop_levels_keeper.h` достигнут через `xrGame/coop/srv/coop_levels_xfer.cpp` (его `marked()` держит `online_at_server()`
   молчащим у кооп-хоста, а её зовёт сток), `coop_xfer*.h` — через него же. Так и должно быть до S4: этот код сегодня
   работает и в кооп-процессе.
 
@@ -597,7 +597,7 @@ gates: FAIL (3)
 | Пространства имён | `coop::` | `coop::hostplay::` | `coop::srv::`; старые `coop::levels`, `coop::mapserver`, `coop::dedicated` остаются | переименовывать старое не нужно |
 | Скрипты | `coop_<область>.script` | `coop_hostplay_<область>.script` | `coop_srv_<область>.script` | метка — всегда **второе** слово, поэтому `coop_core_*` и `coop_quests_party` меткой не читаются. Правило маршрута `coop_* = view` (`coop_route.ltx:66`) работает без изменений: самый длинный префикс |
 | 9 серверных скриптов | | | `coop_dedicated` → `coop_srv_dedicated`, так же `levels`, `levels_brain`, `levels_share`, `levels_tables`, `quests_far`, `task_audience`, `storyline`, `scorcher` | ответ на слова владельца «coop_… в режиме сервера переименовывать». Вместе с именем меняется путь в `coop_npc_compat.script:229-235` |
-| Процесс | | `AnomalyCoopDX11AVX.exe` | `RayLinkServer.exe`, только из лаунчера | серверы карт наследуют имя родителя (`coop_mapserver.cpp:292`), не проверено вживую |
+| Процесс | | `AnomalyCoopDX11AVX.exe` | `RayLinkServer.exe`, только из лаунчера | серверы карт наследуют имя родителя (`xrGame/coop/srv/coop_mapserver.cpp:292`), не проверено вживую |
 | Ключи командной строки | `-coop_host`, `-coop_connect` | | `-coop_dedicated`, `-coop_mapserver`, `-coop_operator`, `-coop_new`, `-coop_load(_hex)`, `-coop_stage`, `-coop_hidden` | **не меняются**: договор с лаунчером (`worlds/command.rs:126-141`) |
 | Консольные команды | `coop_status`, `coop_debug…` | `coop_host`, `coop_connect`, `coop_disconnect` | `srv_levels_status`, `srv_levels_audit`, `srv_max_map_servers`, `srv_mapserver_linger`, `srv_map_servers_rev` (сегодня `coop_levels_*`, `coop_levels.cpp:613-619`) | старые имена — синонимы на одну dev-сборку; скрипты стенда меняются в том же шаге |
 | Настройки мира `c|…` | `c|coop_*` | `c|coop_*` | **новые** только-серверные — `c|srv_*` | существующие ключи не переименовываются (правило 10) |
@@ -613,7 +613,7 @@ gates: FAIL (3)
 Убрано (шаг S2 плана):
 
 - **Гибрид**: `xrCoop/coop_soft_move.h`, мягкий переход и `host_alone_*` в `coop_join.cpp`, «доска» разделённого
-  перехода в `coop_transition.h`, `host_stop_for_move` … `host_launch_now` в `coop_mapserver.cpp:708-808`, строка
+  перехода в `coop_transition.h`, `host_stop_for_move` … `host_launch_now` в `xrGame/coop/srv/coop_mapserver.cpp:708-808`, строка
   `HostProcess`, `led_by_host_process`, `xfer_host_carry_over`, `host_clock_ahead_now`, `rides_with_host`.
 - **«Сюжетные карты вместе»**: `story_together`, `configs/coop_levels_together.ltx`, тексты `better_together`.
 - **Запуск сервера из игры**: `coop_world_server.cpp/.h`, `coop_world_wait.script`, `coop_world_stage_file.script`,
@@ -628,7 +628,7 @@ gates: FAIL (3)
 | Мир | Что будет | На чём держится |
 |---|---|---|
 | Кооп-мир | без изменений | — |
-| Мир, сохранённый в гибриде | **открывается как кооп-мир** сегодняшним кодом. Отдельная «свёртка журнала» не нужна | журнал передач `0xC0C0` возобновляется только при `split()` (`coop_levels.cpp:547,556`), в коопе он игнорируется, а новый не пишется (`coop_levels_xfer.cpp:1035,1043-1065`); объекты остаются в последнем переданном состоянии по одному разу (`coop_levels_xfer.cpp:23-24`); игрок, чей персонаж стоит на другой карте, переносится к хосту при входе (`coop_join.cpp:673-689`). Вживую не проверялось — проверка в шаге S2 на мире, сохранённом сборкой 56 |
+| Мир, сохранённый в гибриде | **открывается как кооп-мир** сегодняшним кодом. Отдельная «свёртка журнала» не нужна | журнал передач `0xC0C0` возобновляется только при `split()` (`coop_levels.cpp:547,556`), в коопе он игнорируется, а новый не пишется (`xrGame/coop/srv/coop_levels_xfer.cpp:1035,1043-1065`); объекты остаются в последнем переданном состоянии по одному разу (`xrGame/coop/srv/coop_levels_xfer.cpp:23-24`); игрок, чей персонаж стоит на другой карте, переносится к хосту при входе (`coop_join.cpp:673-689`). Вживую не проверялось — проверка в шаге S2 на мире, сохранённом сборкой 56 |
 | Серверный мир, созданный лаунчером | без изменений, запускается из лаунчера | ключ `c|coop_world_server` |
 | Серверный мир, созданный из игры | запускается из лаунчера («Запустить сервер»): в записи тот же ключ | `coop_dedicated.script:126-134` писал его и раньше |
 | Серверный мир в меню игры | не открывается; сообщение «Этот мир работает как сервер. Запустите его в лаунчере RayLink, раздел Миры» (`st_srv_world_from_launcher`) | замена `ContinueSplit` |
@@ -643,7 +643,7 @@ gates: FAIL (3)
 | Где | Что |
 |---|---|
 | Лаунчер (репозиторий лаунчера, список изменений для его владельца) | `backend.rs:780-781`: ветка, которая отправляет игру хоста Steam в готовый сервер мира (`enter_world`), убирается. Хост Steam всегда хостит кооп. `launch/mod.rs:95-97,111`: `enter_world` больше не передаёт переменные Steam. Сервер (`server_spawn`) уже фильтрует их (`launch/mod.rs:130`) |
-| Движок | `x_ray.cpp:985-1011` поднимает Steam только если лаунчер задал `RAYLINK_STEAM_API`; после правки лаунчера в серверном режиме он не задан. Дополнительно: `coop_mapserver.cpp:301` получает отфильтрованное окружение вместо `nullptr` (тот же фильтр, что `coop_world_server_rules.h:569`); окно приглашения и `steam_invite_*` (`coop_manager.cpp:920-948`) уезжают в `hostplay` |
+| Движок | `x_ray.cpp:985-1011` поднимает Steam только если лаунчер задал `RAYLINK_STEAM_API`; после правки лаунчера в серверном режиме он не задан. Дополнительно: `xrGame/coop/srv/coop_mapserver.cpp:301` получает отфильтрованное окружение вместо `nullptr` (тот же фильтр, что `xrCoop/srv/coop_world_server_rules.h:569`); окно приглашения и `steam_invite_*` (`coop_manager.cpp:920-948`) уезжают в `hostplay` |
 | Проверка | L8: слово Steam вне `hostplay` и `x_ray.cpp` — ошибка |
 
 Опрос приглашения Steam (`coop_manager.cpp:133-160,666-689`) остаётся в игровом процессе: так стартует кооп-клиент.

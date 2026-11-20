@@ -4,7 +4,7 @@
 // test on every cell.
 #include "test_util.h"
 #include "coop_protocol.h"
-#include "coop_scope.h"
+#include "srv/coop_scope.h"
 
 #include <algorithm>
 #include <cstring>

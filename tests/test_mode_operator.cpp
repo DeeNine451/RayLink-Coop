@@ -2,7 +2,7 @@
 // player of a server world has a world server to send it to: his mode checks the line (op::allowed) and sends it; every other
 // process kind answers Unreachable. The Core (coop_debug.cpp) keeps its three lines and validates nothing itself.
 #include "test_util.h"
-#include "coop_operator.h"
+#include "srv/coop_operator.h"
 #include "support/fake_mode.h"
 
 #include <fstream>

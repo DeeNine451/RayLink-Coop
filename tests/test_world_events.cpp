@@ -1,6 +1,6 @@
 #include "test_util.h"
 
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 #include "srv/coop_session_srv.h"
 
 // The game header's other declarations use X-Ray types supplied by its PCH.

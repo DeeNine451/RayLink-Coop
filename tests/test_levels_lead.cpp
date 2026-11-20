@@ -4,10 +4,10 @@
 // real Holder of the transfer core.
 #include "test_util.h"
 
-#include "coop_levels_keeper.h"
+#include "srv/coop_levels_keeper.h"
 #include "coop_levels_rules.h"
 #include "coop_roles.h"
-#include "coop_scope.h"
+#include "srv/coop_scope.h"
 
 #include <vector>
 

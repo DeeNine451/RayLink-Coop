@@ -3,9 +3,9 @@
 // the save a new map server may not start from.
 #include "test_util.h"
 
-#include "coop_levels_logic.h"
-#include "coop_levels_wire.h"
-#include "../engine/src/xrGame/coop/coop_levels_map.h" // pure: the rows of the world server's LevelMap
+#include "srv/coop_levels_logic.h"
+#include "srv/coop_levels_wire.h"
+#include "../engine/src/xrGame/coop/srv/coop_levels_map.h" // pure: the rows of the world server's LevelMap
 
 #include <string>
 #include <vector>

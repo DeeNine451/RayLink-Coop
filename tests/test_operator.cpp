@@ -5,7 +5,7 @@
 #include "test_util.h"
 #include "coop_debug_rules.h"
 #include "coop_limits.h"
-#include "coop_operator.h"
+#include "srv/coop_operator.h"
 #include "srv/coop_session_srv.h"
 
 #include <cstring>

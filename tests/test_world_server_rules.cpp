@@ -3,9 +3,9 @@
 // its saves go. Plus what of the dedicated host's own rules this needs (coop_dedicated_rules.h: console_plan's output, wait_code).
 #include "test_util.h"
 
-#include "coop_dedicated_rules.h"
-#include "coop_operator.h"
-#include "coop_world_server_rules.h"
+#include "srv/coop_dedicated_rules.h"
+#include "srv/coop_operator.h"
+#include "srv/coop_world_server_rules.h"
 
 #include <string>
 #include <vector>

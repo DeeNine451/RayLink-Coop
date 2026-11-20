@@ -11,7 +11,7 @@
 // - The other kinds (a co-op client, the world server, a server player) and none (single player) answer Disconnected.
 // - The real modes' answers and the server's and the Core's lines, read from their sources (the engine files cannot run here).
 #include "test_util.h"
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 #include "coop_mode.h"
 #include "coop_vehicle_drive_rules.h"
 #include "srv/coop_srv_departure_rules.h"
@@ -377,7 +377,7 @@ TEST(vehicle_departure_real_answers)
 // fact of each one who comes; the answer reads that book.
 TEST(vehicle_departure_server_lines)
 {
-	const std::string trunk = dep_code(dep_file("engine/src/xrGame/coop/coop_trunk.cpp"));
+	const std::string trunk = dep_code(dep_file("engine/src/xrGame/coop/srv/coop_trunk.cpp"));
 	REQUIRE(!trunk.empty());
 	CHECK(dep_has(trunk, "#include \"xrCoop/srv/coop_srv_departure_rules.h\""));
 	const std::string on_map = dep_function(trunk, R"(void server_on_map)");

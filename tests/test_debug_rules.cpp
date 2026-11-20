@@ -4,8 +4,8 @@
 #include "test_util.h"
 #include "coop_debug_rules.h"
 #include "coop_local_link.h"
-#include "coop_mapserver_rules.h"
-#include "coop_scope.h"
+#include "srv/coop_mapserver_rules.h"
+#include "srv/coop_scope.h"
 #include "coop_world_gate.h"
 
 #include <cstring>

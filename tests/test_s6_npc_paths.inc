@@ -2,7 +2,7 @@
 // ALife storage and logging are local. Routing, queue writes, and the spawn handler come from production.
 #include "test_util.h"
 #include "support/fake_mode.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_mirror.h"
 
 #include <algorithm>

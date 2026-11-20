@@ -82,7 +82,7 @@ try {
     Write-Host ("server alive {0} s after the request: {1}{2}" -f $AfterS, (-not $server.HasExited), $(if ($server.HasExited) { ', exit code ' + $server.ExitCode + (' (0x{0:X8})' -f $server.ExitCode) } else { '' }))
     if (-not $server.HasExited) {
         # the server's own console: its offer counters
-        foreach ($line in @('coop_checkpoint_status', 'coop_levels_status')) { $in.WriteLine($line); Start-Sleep -Seconds 4 }
+        foreach ($line in @('coop_checkpoint_status', 'srv_levels_status')) { $in.WriteLine($line); Start-Sleep -Seconds 4 }
     }
 }
 finally {

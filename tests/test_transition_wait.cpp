@@ -9,7 +9,7 @@
 // player, and the order of LoadWait / epoch / save on a real session that the host's "go" relies on).
 #include "test_util.h"
 
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_limits.h"
 #include "coop_local_link.h"
 #include "coop_session.h"

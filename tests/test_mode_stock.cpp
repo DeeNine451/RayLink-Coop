@@ -1,5 +1,5 @@
 #include "test_util.h"
-#include "coop_dedicated_rules.h"
+#include "srv/coop_dedicated_rules.h"
 #include "support/fake_mode.h"
 
 #include <fstream>

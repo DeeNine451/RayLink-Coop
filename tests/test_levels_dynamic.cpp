@@ -4,7 +4,7 @@
 // linger and a short one for the others, no linger at all when the machine is short of memory.
 #include "test_util.h"
 
-#include "coop_levels_dynamic.h"
+#include "srv/coop_levels_dynamic.h"
 
 #include <vector>
 

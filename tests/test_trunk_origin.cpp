@@ -14,7 +14,7 @@
 // no copy of its own of what that map server spawned (coop_entities.cpp host_spawn_from_leader: EchoOf on the deferred spawn). A
 // co-op host never writes 2: the co-op path reads 0 and 1 as before.
 #include "test_util.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_mirror.h"
 #include "coop_protocol.h"
 

@@ -1,7 +1,7 @@
 // Anomaly Coop unit tests: what a map server's logic says of "the actor" goes to the players of its level (xrCoop/coop_ghost_rules.h).
 #include "test_util.h"
 
-#include "coop_ghost_rules.h"
+#include "srv/coop_ghost_rules.h"
 
 #include <vector>
 

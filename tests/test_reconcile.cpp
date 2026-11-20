@@ -9,7 +9,7 @@
 #include "coop_protocol.h"
 #include "coop_reconcile.h"
 #include "coop_rules.h"
-#include "coop_scope.h"
+#include "srv/coop_scope.h"
 #include "coop_world_gate.h"
 
 #include <algorithm>

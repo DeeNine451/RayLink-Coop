@@ -5,7 +5,7 @@
 // none: a session that hosts nothing takes nothing, and a token given to it before it hosts is no token after. Ports 38641+n.
 #include "test_util.h"
 
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 #include "srv/coop_session_srv.h"
 
 #include <array>

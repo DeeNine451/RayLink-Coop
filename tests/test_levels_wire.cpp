@@ -3,9 +3,9 @@
 // is cut, and what a reader bounds (counts, ids, enums, floats, strings) is refused at the limit and accepted at the last
 // good value.
 #include "test_util.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_protocol.h"
-#include "coop_xfer.h" // the core's ops: every one has its wire value (levels_wire_xfer_ops_*)
+#include "srv/coop_xfer.h" // the core's ops: every one has its wire value (levels_wire_xfer_ops_*)
 
 #include <cmath>
 #include <limits>

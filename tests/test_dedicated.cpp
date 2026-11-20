@@ -2,7 +2,7 @@
 // save -coop_load last means, what a line of the console window is and which lines of the log it shows.
 #include "test_util.h"
 
-#include "coop_dedicated_rules.h"
+#include "srv/coop_dedicated_rules.h"
 #include "coop_protocol.h"
 #include "coop_roles.h"
 

@@ -2,8 +2,8 @@
 // stage 1, xrCoop/coop_dedicated_rules.h).
 #include "test_util.h"
 
-#include "coop_dedicated_rules.h"
-#include "coop_world_server_rules.h"
+#include "srv/coop_dedicated_rules.h"
+#include "srv/coop_world_server_rules.h"
 
 #include <cstring>
 #include <string>

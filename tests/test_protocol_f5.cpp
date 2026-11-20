@@ -11,8 +11,8 @@
 //           to a map server or to a player of another level.
 #include "test_util.h"
 #include "coop_protocol.h"
-#include "coop_scope.h"
-#include "coop_mapserver_rules.h"
+#include "srv/coop_scope.h"
+#include "srv/coop_mapserver_rules.h"
 #include "coop_world_gate.h"
 
 #include <algorithm>

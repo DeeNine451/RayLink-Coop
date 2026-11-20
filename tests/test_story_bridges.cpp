@@ -16,7 +16,7 @@
 
 #include "support/fake_mode.h"
 
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 #include "coop_roles.h"
 #include "coop_task_audience.h"
 #include "srv/coop_session_srv.h"

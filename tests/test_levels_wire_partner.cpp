@@ -4,7 +4,7 @@
 // `talking`: u16 partner, the NPC of his talk lock there (dialog::host_lock_of) in the world server's numbering, 0xffff none. The
 // world server keeps a partner only while he talks (kept_partner); Lua reads it as coop.levels.talk_partner(peer).
 #include "test_util.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 
 #include <cstdint>
 #include <vector>

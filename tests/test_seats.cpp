@@ -5,8 +5,8 @@
 // 16 points. Real Sessions over 127.0.0.1, ports 38901+n.
 #include "test_util.h"
 #include "coop_limits.h"
-#include "coop_mapserver_rules.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_mapserver_rules.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_debug_rules.h"
 #include "coop_transition.h"
 #include "coop_rest_rules.h"

@@ -2,7 +2,7 @@
 // -coop_mapserver, the fsgame of a map server, who may connect as one, which message goes where, and who stands on its level.
 #include "test_util.h"
 
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 
 #include <string>
 #include <vector>

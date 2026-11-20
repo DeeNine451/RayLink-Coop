@@ -5,7 +5,7 @@
 // talks to the host's process alone and his session has no idea that a map server exists.
 #include "test_util.h"
 
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 #include "srv/coop_session_srv.h"
 
 #include <chrono>

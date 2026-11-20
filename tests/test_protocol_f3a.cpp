@@ -3,7 +3,7 @@
 // receipt), what each needs of a world (wgate::need_of), the client rows of the two a player sends, the Hello of
 // protocol 11 and the version itself. The formats: test_levels_wire.cpp; the scopes: test_scope.cpp.
 #include "test_util.h"
-#include "coop_levels_wire.h"
+#include "srv/coop_levels_wire.h"
 #include "coop_limits.h"
 #include "coop_protocol.h"
 #include "coop_revive_hold.h"

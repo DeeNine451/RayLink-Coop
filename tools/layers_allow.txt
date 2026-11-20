@@ -130,26 +130,26 @@ L2|gamedata/scripts/coop_npc_players.script|function is_host()|1
 L2|gamedata/scripts/coop_npc_players.script|function is_world_server()|1
 L2|gamedata/scripts/coop_quests_core.script|function is_host() return active() and api.is_host() == true end|1
 L2|gamedata/scripts/coop_testplan.script|local ready = a.is_active() and ((a.is_client() and a.is_live()) or a.is_host())|1
-L3|engine/src/xrCoop/coop_newchar.h|#include "coop_world_stage.h"|1
-L3|engine/src/xrCoop/coop_reconcile.h|#include "coop_level_hash.h"|1
+L3|engine/src/xrCoop/coop_newchar.h|#include "srv/coop_world_stage.h"|1
+L3|engine/src/xrCoop/coop_reconcile.h|#include "srv/coop_level_hash.h"|1
 L3|engine/src/xrCoop/coop_reconcile.h|const uint64_t a = xfer::mix64(uint64_t(uint32_t(community)) + 0x2545F4914F6CDD1Dull);|1
 L3|engine/src/xrCoop/coop_reconcile.h|const uint64_t b = xfer::mix64(a ^ ((uint64_t(uint32_t(rank)) << 32) | uint32_t(reputation)));|1
 L3|engine/src/xrCoop/coop_reconcile.h|it = xfer::bucket_of(it->first) == bucket ? m_repairs.erase(it) : std::next(it);|1
 L3|engine/src/xrCoop/coop_reconcile.h|sum += xfer::entry_hash(entry_of(r));|1
 L3|engine/src/xrCoop/coop_reconcile.h|sum += xfer::mix64(uint64_t(id) + 0x632BE59BD9B4E019ull);|1
 L3|engine/src/xrCoop/coop_session.h|#include "coop_local_link.h"|1
-L3|engine/src/xrEngine/x_ray.cpp|#include "../xrCoop/coop_dedicated_rules.h"|1
-L3|engine/src/xrEngine/x_ray.cpp|#include "../xrCoop/coop_operator.h"|1
-L3|engine/src/xrEngine/x_ray.cpp|#include "coop_host_console.h"|1
-L3|engine/src/xrGame/Level.cpp|#include "xrCoop/coop_operator.h"|1
+L3|engine/src/xrEngine/x_ray.cpp|#include "../xrCoop/srv/coop_dedicated_rules.h"|1
+L3|engine/src/xrEngine/x_ray.cpp|#include "../xrCoop/srv/coop_operator.h"|1
+L3|engine/src/xrEngine/x_ray.cpp|#include "../xrGame/coop/srv/coop_host_console.h"|1
+L3|engine/src/xrGame/Level.cpp|#include "xrCoop/srv/coop_operator.h"|1
 L3|engine/src/xrGame/coop/coop_alife.cpp|return levels::xfer_stock_rules(id) ? SwitchVote::Default : SwitchVote::Offline;|1
-L3|engine/src/xrGame/coop/coop_console.cpp|#include "coop_dedicated.h"|1
+L3|engine/src/xrGame/coop/coop_console.cpp|#include "srv/coop_dedicated.h"|1
 L3|engine/src/xrGame/coop/coop_console.cpp|dedicated::register_console();|1
 L3|engine/src/xrGame/coop/coop_console.cpp|mapserver_stats_register_console();|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|#include "coop_dedicated.h"|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|#include "coop_levels_map.h"|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|#include "coop_mapserver.h"|1
-L3|engine/src/xrGame/coop/coop_levels.cpp|#include "xrCoop/coop_scope.h"|1
+L3|engine/src/xrGame/coop/coop_levels.cpp|#include "srv/coop_dedicated.h"|1
+L3|engine/src/xrGame/coop/coop_levels.cpp|#include "srv/coop_levels_map.h"|1
+L3|engine/src/xrGame/coop/coop_levels.cpp|#include "srv/coop_mapserver.h"|1
+L3|engine/src/xrGame/coop/coop_levels.cpp|#include "xrCoop/srv/coop_scope.h"|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|bool game_split() { return dedicated::on(); }|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|const MoveVerdict verdict = decide_move(gate, new_server, mapserver::host_slots(), host_map_cap(peer), stop);|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|const PeerId bridge = arg_whole(L, 1, double(0xfffe), id) ? holder_of(u16(id)) : kInvalidPeer;|1
@@ -182,19 +182,19 @@ L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_client_frame();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_host_frame();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_print_status();|1
 L3|engine/src/xrGame/coop/coop_levels.cpp|xfer_reset();|2
-L3|engine/src/xrGame/coop/coop_levels.h|#include "xrCoop/coop_levels_logic.h"|1
-L3|engine/src/xrGame/coop/coop_levels.h|#include "xrCoop/coop_levels_wire.h"|1
-L3|engine/src/xrGame/coop/coop_manager.cpp|#include "xrCoop/coop_operator.h"|1
+L3|engine/src/xrGame/coop/coop_levels.h|#include "xrCoop/srv/coop_levels_logic.h"|1
+L3|engine/src/xrGame/coop/coop_levels.h|#include "xrCoop/srv/coop_levels_wire.h"|1
+L3|engine/src/xrGame/coop/coop_manager.cpp|#include "xrCoop/srv/coop_operator.h"|1
 L3|engine/src/xrGame/coop/coop_manager.cpp|const bool own_key = address && op::loopback_literal(address) && op::find_token(Core.Params, operator_token);|1
 L3|engine/src/xrGame/coop/coop_mode.cpp|static const Layers all{{&srv::layer(), &hostplay::layer()}};|1
 L3|engine/src/xrGame/coop/coop_requests.cpp|if (!levels::online_at_server(id))|1
-L3|engine/src/xrGame/coop/coop_script.cpp|#include "xrCoop/coop_mapserver_rules.h"|1
-L3|engine/src/xrGame/coop/coop_script.cpp|#include "xrCoop/coop_operator.h"|1
+L3|engine/src/xrGame/coop/coop_script.cpp|#include "xrCoop/srv/coop_mapserver_rules.h"|1
+L3|engine/src/xrGame/coop/coop_script.cpp|#include "xrCoop/srv/coop_operator.h"|1
 L3|engine/src/xrGame/coop/coop_script.cpp|const bool to_map_server = host && target > 0 && mapserver::is_bridge(PeerId(target));|1
 L3|engine/src/xrGame/coop/coop_script.cpp|else if (mgr().session().peer(PeerId(o.target)) || mapserver::is_bridge(PeerId(o.target)))|1
 L3|engine/src/xrGame/coop/coop_script.cpp|if (!op::allowed(line))|1
 L3|engine/src/xrGame/coop/coop_script.cpp|if (t < -1 || (t > lua_Number(kMaxPlayers) && !mapserver::is_bridge(PeerId(t))))|1
-L3|engine/src/xrGame/coop/coop_story.cpp|#include "xrCoop/coop_ghost_rules.h"|1
+L3|engine/src/xrGame/coop/coop_story.cpp|#include "xrCoop/srv/coop_ghost_rules.h"|1
 L3|engine/src/xrGame/coop/coop_survival.cpp|levels::up_stash(character, stash == death::StashOutcome::GaveUp || death::host_items_on(character) != 0);|1
 L4|engine/src/xrCoop/coop_newchar.h|constexpr bool point_usable(bool valid, bool on_host_level, bool own_levels = kOwnLevels)|1
 L4|engine/src/xrCoop/coop_session.h|bool host_plays = true;|1
@@ -256,10 +256,10 @@ L5|engine/src/xrServerEntities/object_factory_register.cpp|extern ENGINE_API boo
 L5|engine/src/xrServerEntities/object_factory_register.cpp|if (!g_dedicated_server || g_coop_headless)|1
 L5|engine/src/xrServerEntities/object_factory_script.cpp|extern ENGINE_API bool g_coop_headless;|1
 L5|engine/src/xrServerEntities/object_factory_script.cpp|if (!g_dedicated_server || g_coop_headless)|1
-L8|engine/src/xrCoop/coop_world_server_rules.h|constexpr char kSteamEnvPrefix[] = "RAYLINK_STEAM_";|1
+L8|engine/src/xrCoop/srv/coop_world_server_rules.h|constexpr char kSteamEnvPrefix[] = "RAYLINK_STEAM_";|1
 L8|gamedata/scripts/coop_menu.script|api.steam_invite()|1
 L8|gamedata/scripts/coop_menu.script|function UICoopMenu:OnSteamInvite()|1
 L8|gamedata/scripts/coop_menu.script|self.invite = action("btn_steam_invite", "st_coop_menu_btn_steam_invite", B.field_x)|1
 L8|gamedata/scripts/coop_menu.script|self:AddCallback("btn_steam_invite", E, self.OnSteamInvite, self)|1
 L8|gamedata/scripts/coop_menu.script|set_control(self.invite, active and api.is_host() and type(api.steam_invite_ready) == "function" and api.steam_invite_ready() == true, true)|1
-L9C|engine/src/xrEngine/coop_host_console.cpp|coop::world_server::OutputQueue g_queue;|1
+L9C|engine/src/xrGame/coop/srv/coop_host_console.cpp|coop::world_server::OutputQueue g_queue;|1

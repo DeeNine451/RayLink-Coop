@@ -46,7 +46,7 @@
 // are small (3-10 objects, 10-49 operations).
 #include "test_util.h"
 
-#include "coop_xfer.h"
+#include "srv/coop_xfer.h"
 
 #include <algorithm>
 #include <atomic>

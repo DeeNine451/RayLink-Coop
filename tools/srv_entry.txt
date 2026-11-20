@@ -1,5 +1,5 @@
 # Server entry points that stock hooks and Ядро reach today (critique H5, temp/modes/map-engine.md 2.6).
-# Each keeps the co-op process safe only by an early return inside it (coop_levels_xfer.cpp:1116-1119, 1156-1159,
+# Each keeps the co-op process safe only by an early return inside it (xrGame/coop/srv/coop_levels_xfer.cpp:1116-1119, 1156-1159,
 # 1256-1258, 1293-1296, 1363; coop_levels.cpp:544-548). Until step S4 makes the hooks call mode():
 #   - a call from a stock file is L5, a call from an Ядро file is L3 (tools/check_layers.py);
 #   - a change to the file that defines one counts as an Ядро change for tools/check_gates.py.

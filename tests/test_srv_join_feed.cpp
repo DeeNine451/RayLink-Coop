@@ -409,8 +409,8 @@ TEST(srv_join_coop_has_none_of_it)
 	CHECK(!sj_has(install, "LevelMove"));
 	CHECK(sj_has(install, "Msg::JoinRequest"));
 	CHECK(sj_has(install, "Msg::WorldLoaded"));
-	for (const char* word : {"mapserver::", "dedicated::", "is_map_server", "levels::split", "on_host_level", "\"coop_dedicated.h\"",
-	         "\"coop_mapserver.h\"", "host_on_level_move", "host_serve_map_server", "host_world_facts"})
+	for (const char* word : {"mapserver::", "dedicated::", "is_map_server", "levels::split", "on_host_level", "coop_dedicated.h",
+	         "coop_mapserver.h", "host_on_level_move", "host_serve_map_server", "host_world_facts"})
 		CHECK(!sj_has(join, word));
 	const std::string header = sj_engine("xrGame/coop/coop_join.h");
 	REQUIRE(!header.empty());

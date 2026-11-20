@@ -5,7 +5,7 @@
 // its resolution after a load or a lost map server, the auditor and its healing, the level hash.
 #include "test_util.h"
 
-#include "coop_xfer.h"
+#include "srv/coop_xfer.h"
 
 #include <algorithm>
 #include <cstdint>

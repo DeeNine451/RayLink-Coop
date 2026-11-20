@@ -27,11 +27,11 @@
 // (tests/test_vehicle_departure.cpp checks the real modes' answers against these).
 #pragma once
 
-#include "coop_ghost_rules.h"
+#include "srv/coop_ghost_rules.h"
 #include "coop_mode.h"
-#include "coop_operator.h"
+#include "srv/coop_operator.h"
 #include "coop_roles.h"
-#include "coop_scope.h"
+#include "srv/coop_scope.h"
 
 #include <cstring>
 #include <map>

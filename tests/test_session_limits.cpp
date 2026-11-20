@@ -3,7 +3,7 @@
 // Real Sessions over 127.0.0.1 in one process. Ports 37100+n (test_net.cpp uses 37000+n).
 #include "test_util.h"
 #include "coop_limits.h"
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 
 #include <enet/enet.h>
 

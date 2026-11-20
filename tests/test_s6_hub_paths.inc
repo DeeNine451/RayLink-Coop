@@ -2,7 +2,7 @@
 #include "test_util.h"
 #include "support/fake_mode.h"
 #include "coop_limits.h"
-#include "coop_mapserver_rules.h"
+#include "srv/coop_mapserver_rules.h"
 #include "coop_roster.h"
 #include "../engine/src/xrGame/coop/coop_net.h"
 

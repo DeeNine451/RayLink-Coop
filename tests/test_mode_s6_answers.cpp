@@ -11,8 +11,8 @@
 //   co-op's has none.
 #include "test_util.h"
 #include "coop_mode.h"
-#include "coop_ghost_rules.h"
-#include "coop_scope.h"
+#include "srv/coop_ghost_rules.h"
+#include "srv/coop_scope.h"
 #include "coop_wire.h"
 #include "support/fake_mode.h"
 
