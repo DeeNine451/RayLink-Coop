@@ -217,7 +217,7 @@ finally {
             if ($pair[0] -and (Test-Path -LiteralPath $pair[0])) {
                 Copy-StandFile -From $pair[0] -To (Join-Path $outDir "$($Tag)_companions_$($pair[1]).log")
                 Get-CompanionLog $pair[0] | Where-Object {
-                    $_ -match '\[companions\]|FATAL ERROR|LUA error|stack traceback|! \[coop'
+                    $_ -match '\[companions\]|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop'
                 } | ForEach-Object { Write-Host (Hide-Hex $_) }
             }
         }

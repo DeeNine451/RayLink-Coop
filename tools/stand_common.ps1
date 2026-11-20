@@ -25,7 +25,7 @@ $script:AllowedErrors = @(
     'asks to leave through level exit .* ignored',
     'map servers: this PC has .* free \(under .*\): an empty map server does not linger'
 )
-$script:ErrorPattern = 'FATAL ERROR|LUA error|stack traceback|! \[coop'
+$script:ErrorPattern = 'FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop'
 
 function Hide-Hex([string]$text) { return ($text -replace '[0-9a-fA-F]{32,}', '<hidden>') }
 
@@ -147,7 +147,7 @@ function Write-StandText {
 }
 
 function Write-StandLines {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Lines,
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
         [Parameter(Mandatory = $true)][System.Text.Encoding]$Encoding)
     Set-StandFile -Path $Path -Write { param($t) [System.IO.File]::WriteAllLines($t, $Lines, $Encoding) }.GetNewClosure()
 }

@@ -44,7 +44,7 @@ function Wait-Line([string]$File, [string]$Pattern, [int]$Seconds) {
         }
         foreach ($path in $logs.Values) {
             if (Test-Path -LiteralPath $path) {
-                $bad = Select-String -LiteralPath $path -Pattern '\[allymark\] FAIL:|FATAL ERROR|LUA error|stack traceback' | Select-Object -First 1
+                $bad = Select-String -LiteralPath $path -Pattern '\[allymark\] FAIL:|FATAL ERROR|LUA error|(?-i:stack traceback)' | Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }
         }

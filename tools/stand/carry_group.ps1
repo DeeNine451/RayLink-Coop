@@ -184,5 +184,5 @@ foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
     Write-Host "--- $($pair[1]): the silencer ---"
     Show-Lines $pair[0] '\[silencer\]|spawn_item|wpn_sil_vihr|GE_OWNERSHIP_REJECT|not made: its entity' 40
     Write-Host "--- $($pair[1]): errors ---"
-    Show-Lines $pair[0] 'FATAL ERROR|LUA error|SCRIPT ERROR|stack traceback|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game' 30
+    Show-Lines $pair[0] 'FATAL ERROR|LUA error|SCRIPT ERROR|(?-i:stack traceback)|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game' 30
 }

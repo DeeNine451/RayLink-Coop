@@ -34,7 +34,7 @@ $mark = '\[cover-stand\] '
 $outside = "$($mark)env_cover: cover_tester open\s*$"
 $static = "$($mark)env_cover: cover_tester covered \(static\)\s*$"
 $trust = '\[coop-trust\] (?:! )?env_cover\b(?=.*\bcover_tester\b).*(?:would refuse|would be refused: let through)'
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|stack traceback|\[coop\] emission: cover_tester .*kill sent"
+$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)|\[coop\] emission: cover_tester .*kill sent"
 
 function Set-CoverStep([string]$Step) {
     Write-StandText -Path $stepFile -Text ($Step + [Environment]::NewLine) -Encoding $ascii

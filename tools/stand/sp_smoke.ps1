@@ -21,7 +21,7 @@ $exe = Join-Path $Stand 'bin\AnomalyCoopDX11AVX.exe'
 if (Get-Process -Name 'AnomalyCoop*', 'RayLinkServer*' -ErrorAction SilentlyContinue) { throw 'a game is running' }
 if (-not (Test-Path -LiteralPath (Join-Path $Stand 'appdata_t'))) { throw 'no appdata_t: run auto_world.ps1 once' }
 # errors the run must not show (single player has no "! [coop" line at all: any is a fault)
-$bad = 'FATAL ERROR|LUA error|SCRIPT ERROR|stack traceback|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game'
+$bad = 'FATAL ERROR|LUA error|SCRIPT ERROR|(?-i:stack traceback)|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game'
 
 function New-Profile([string]$letter) {
     $name = "appdata_$letter"

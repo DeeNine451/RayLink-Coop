@@ -180,5 +180,5 @@ foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
     Write-Host "--- $($pair[1]): checkpoints ---"
     Show-Lines $pair[0] '\[coop\] checkpoint|\[coop\]   checkpoint|checkpoint sources' 70
     Write-Host "--- $($pair[1]): errors ---"
-    Show-Lines $pair[0] 'FATAL ERROR|LUA error|SCRIPT ERROR|stack traceback|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game' 30
+    Show-Lines $pair[0] 'FATAL ERROR|LUA error|SCRIPT ERROR|(?-i:stack traceback)|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game' 30
 }

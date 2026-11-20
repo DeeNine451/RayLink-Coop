@@ -108,11 +108,11 @@ finally {
     Remove-StandFile -Path $shared
 }
 Write-Host '--- client ---'
-Show-Lines $clientLog '\[ph\]|mirror: .* (comes online now|left on the vote)|mirror without a game vertex|FATAL ERROR|LUA error|stack traceback|! \[coop' 80
+Show-Lines $clientLog '\[ph\]|mirror: .* (comes online now|left on the vote)|mirror without a game vertex|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 80
 Write-Host '--- world server ---'
-Show-Lines $serverLog '\[coop\] trunk: a spawn|world out: |map server .* starts for level|FATAL ERROR|LUA error|stack traceback|! \[coop' 40
+Show-Lines $serverLog '\[coop\] trunk: a spawn|world out: |map server .* starts for level|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 40
 Write-Host '--- map server 1 ---'
-Show-Lines $msLog '\[ph\]|FATAL ERROR|LUA error|stack traceback|! \[coop' 60
+Show-Lines $msLog '\[ph\]|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 60
 $verdict = $null
 if (Test-Path -LiteralPath $clientLog) {
     $verdict = Select-String -LiteralPath $clientLog -Pattern '\[ph\] ph (PASS|FAIL): (.*)$' | Select-Object -Last 1

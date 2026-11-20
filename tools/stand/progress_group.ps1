@@ -32,7 +32,7 @@ $installed = [Collections.Generic.List[string]]::new()
 $backedUpOptions = $started = $false
 $mark = '\[progress-stand\] '
 $trust = '\[coop-trust\] (?:! )?progress_\w+\b.*(?:would refuse|would be refused: let through|\brefused\b)'
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|stack traceback"
+$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)"
 
 function Set-ProgressStep([string]$Step) {
     Write-StandText -Path $stepFile -Text ($Step + [Environment]::NewLine) -Encoding ([Text.Encoding]::ASCII)

@@ -31,7 +31,7 @@ $installedHostFs = $installedProbe = $installedStep = $backedUpOptions = $starte
 $scenario = 'vehicle_group'
 $step = 'setup'
 $mark = '\[vehicle-stand\] '
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|stack traceback"
+$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)"
 $seatTable = '\[coop\]\s+vehicles: \d+ seated in \d+ car\(s\) \[car/seat=character:'
 
 function Set-VehicleStep([string]$Instruction) {

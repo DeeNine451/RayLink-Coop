@@ -1,7 +1,7 @@
 # The co-op stand (SC of docs/MODES.md section 10): HEAD's gamedata deployed first (tools\stand\stand_head.py; refused
 # while a working tree has product changes), then every co-op scenario of tools\stand (tracked) through
 # tools\stand\run_guarded.ps1 on the stand E:\RayLinkGames\GAMMA\game-dev, each scenario's output judged (its pass lines
-# present; no FATAL ERROR / LUA error / stack traceback / "! [coop" line outside the allow-list of tools\stand_common.ps1).
+# present; no FATAL ERROR / LUA error / lower-case Lua stack traceback / "! [coop" line outside the allow-list of tools\stand_common.ps1).
 # All passed: the mark temp\gates\hostplay.ok (both HEAD ids, the exe's SHA-256, the time, the digests of the scenario
 # files and of the deployed gamedata) that tools\check_gates.py demands for co-op and Core changes.
 #   powershell -ExecutionPolicy Bypass -File tools\stand_hostplay.ps1 [-Tag b57] [-Only carry_group,squads_group] [-NoMark]

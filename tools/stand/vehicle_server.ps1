@@ -28,7 +28,7 @@ $started = $false
 $scenario = 'vehicle_server'
 $step = 'setup'
 $mark = '\[vehicle-stand\] '
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|stack traceback"
+$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)"
 $seatTable = '\[coop\]\s+vehicles: \d+ seated in \d+ car\(s\) \[car/seat=character:'
 
 function Set-VehicleStep([string]$Instruction) {

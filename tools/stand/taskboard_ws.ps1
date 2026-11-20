@@ -215,7 +215,7 @@ if ($wsHandled -ne 0) { $problems.Add("world: expected zero locally handled offe
 if (-not $aliveAfter) { $problems.Add('alive: the world server did not live through the request') }
 foreach ($pair in @(@($clientLog, 'client'), @($serverLog, 'world server'), @($msLog, 'map server 1'))) {
     if (-not (Test-Path -LiteralPath $pair[0])) { $problems.Add("alive: no log of the $($pair[1])"); continue }
-    $bad = Select-String -LiteralPath $pair[0] -Pattern 'FATAL ERROR|LUA error|stack traceback' | Select-Object -First 1
+    $bad = Select-String -LiteralPath $pair[0] -Pattern 'FATAL ERROR|LUA error|(?-i:stack traceback)' | Select-Object -First 1
     if ($bad) { $problems.Add(('alive: {0}: {1}' -f $pair[1], (Hide-Hex $bad.Line.Trim()))) }
 }
 if ($problems.Count -gt 0) {

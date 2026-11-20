@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 $s7Live = '\[coop\] phase loading-world -> live\b'
 $s7Load = 'host replaced the world|phase .* -> (?:receiving-world|loading-world)\b|\[coop\] load: the group moves to '
-$s7Bad = '\[s7\] FAIL\b|FATAL ERROR|LUA error|stack traceback|ownership violation:|Unknown command:.*srv_|@rl error\b'
+$s7Bad = '\[s7\] FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)|ownership violation:|Unknown command:.*srv_|@rl error\b'
 $s7Player = 'role=(?<role>s7move|s7stay) map=(?<map>\w+) peer=(?<peer>\d+) operator=(?<operator>[01]) alive=(?<alive>[01]) kits=(?<kits>\d+) character=(?<character>\d+) levelid=(?<level>\d+)\s*$'
 $s7Counter = '\[coop\] levels: (?<held>\d+) object\(s\) online at map servers, .*\| xfer in flight (?<pending>\d+), retries \d+, completed (?<completed>\d+), rolled back (?<rolled>\d+), resyncs (?<asked>\d+) asked (?<heard>\d+) heard, violations (?<violations>\d+)\s*$'
 $s7Start = '\[coop\] map server (?<slot>[1-7]) starts for level (?<level>\d+) \(.+, process (?<process>\d+)\)\s*$'

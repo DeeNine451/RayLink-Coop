@@ -100,8 +100,8 @@ finally {
     Remove-StandFile -Path $probe
 }
 Write-Host '--- client ---'
-Show-Lines $clientLog '\[cs\]|\[coop\] (my state|restored my|arrival|health |load:)|kept .* for the load|player data kept|\[pdata\] restored|did not take the host|session reset|FATAL ERROR|LUA error|stack traceback|! \[coop' 80
+Show-Lines $clientLog '\[cs\]|\[coop\] (my state|restored my|arrival|health |load:)|kept .* for the load|player data kept|\[pdata\] restored|did not take the host|session reset|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 80
 Write-Host '--- world server ---'
-Show-Lines $serverLog '\[coop\] checkpoint|\[coop\]   checkpoint|checkpoint sources|body report|FATAL ERROR|LUA error|stack traceback|! \[coop' 80
+Show-Lines $serverLog '\[coop\] checkpoint|\[coop\]   checkpoint|checkpoint sources|body report|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 80
 Write-Host '--- map server 1 ---'
-Show-Lines $msLog '\[base\]|checkpoint sources|FATAL ERROR|LUA error|stack traceback|! \[coop' 50
+Show-Lines $msLog '\[base\]|checkpoint sources|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 50

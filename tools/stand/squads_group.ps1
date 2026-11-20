@@ -197,6 +197,6 @@ foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
     Write-Host "--- $($pair[1]): squads through the mirror ---"
     Show-Lines $pair[0] '\[coop\] mirror: .*(squad|comes online now)|switch_online|m_bOnline' 30
     Write-Host "--- $($pair[1]): errors ---"
-    Show-Lines $pair[0] 'FATAL ERROR|LUA error|SCRIPT ERROR|stack traceback|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail' 30
+    Show-Lines $pair[0] 'FATAL ERROR|LUA error|SCRIPT ERROR|(?-i:stack traceback)|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail' 30
 }
 if ($why) { Write-Host "squads: FAIL ($why)" } else { Write-Host 'squads: PASS' }

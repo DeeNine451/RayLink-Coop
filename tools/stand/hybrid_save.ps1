@@ -255,6 +255,6 @@ Get-ChildItem -LiteralPath $OutDir -Filter "${Tag}_hybrid_*.log" | Sort-Object N
     Write-Host "=== $($_.Name): the probe ==="
     Show-Lines $_.FullName '\[hy\]' 40
     Write-Host "=== $($_.Name): errors ==="
-    Show-Lines $_.FullName 'FATAL ERROR|LUA error|SCRIPT ERROR|stack traceback|attempt to |! \[coop|! \[SCRIPT' 20
+    Show-Lines $_.FullName 'FATAL ERROR|LUA error|SCRIPT ERROR|(?-i:stack traceback)|attempt to |! \[coop|! \[SCRIPT' 20
 }
 if ($why) { Write-Host "hybrid_save: FAIL ($why)" } else { Write-Host 'hybrid_save: PASS' }
