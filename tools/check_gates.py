@@ -153,11 +153,11 @@ DEPLOY_SKIP_EXT = frozenset({".bak", ".tmp", ".log", ".orig"})
 SCENARIOS = {
     # guard round 8 (the review of round 7, R7): companions_group (F5-CMP-1) and phantoms_server (S3) were in no runner
     "hostplay": ("carry_group", "base_group", "sil_group", "squads_group", "sp_smoke", "companions_group", "cover_group",
-                 "vehicle_group"),
+                 "vehicle_group", "progress_group"),
     "srv": (
         "ded_check", "base_server", "carry_server", "taskboard_ws", "phantoms_server",
         "allymark_server", "companions_server", "weather_server", "cover_server",
-        "ms_crash_server", "save_handover_server", "creator10_server", "feed_server", "vehicle_server",
+        "ms_crash_server", "save_handover_server", "creator10_server", "feed_server", "vehicle_server", "progress_server",
     ),
 }
 
@@ -797,10 +797,20 @@ def lua_runner_stale(root: pathlib.Path) -> Optional[str]:
     return None
 
 
+def native_python_failure(root: pathlib.Path) -> Optional[str]:
+    """Run the isolated native receiver checks before certifying the full test run."""
+    rel = "tests/test_story_worldstate.py"
+    try:
+        done = subprocess.run([sys.executable, "-I", str(root / rel)], cwd=root, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"{rel} could not complete ({error})"
+    return f"{rel} failed ({done.returncode})" if done.returncode else None
+
+
 def tests_mark(root: pathlib.Path, marks: pathlib.Path, command: str, state_file: Optional[pathlib.Path],
                native: Optional[int], lua: Optional[int]) -> int:
     """begin: drop the old tests.ok, print the state (both HEADs, dirty) for `write`. write: tests.ok when both suites
-    passed (native, lua 0), the tree was clean before and after and neither HEAD moved."""
+    and the isolated native Python checks passed, the tree was clean and neither HEAD moved."""
     mark = marks / f"{TESTS}.ok"
     if command == "begin":
         if mark.exists():
@@ -834,6 +844,13 @@ def tests_mark(root: pathlib.Path, marks: pathlib.Path, command: str, state_file
             why.append(f"{key} moved during the run ({short(before.get(key))} -> {short(now[key])})")
     if why:
         print("gates: no tests.ok: " + "; ".join(why))
+        return 1
+    native_failure = native_python_failure(root)
+    if native_failure:
+        print(f"gates: no tests.ok: {native_failure}")
+        return 1
+    if tests_state(root) != now:
+        print("gates: no tests.ok: the tree changed during the native Python checks")
         return 1
     marks.mkdir(parents=True, exist_ok=True)
     lines = [f"mode={TESTS}", f"mod_head={now['mod_head']}", f"engine_head={now['engine_head']}",

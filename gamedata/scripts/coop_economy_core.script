@@ -11,7 +11,6 @@
 		                                          network input); tables, strings, numbers, booleans, CTime
 		coop_economy_core.players()              { {id, nick, avatar_id, is_self, obj, pos}, ... } on this machine
 		coop_economy_core.far_players(center, radius, except_peer) -> { nick, ... } not within radius
-		coop_economy_core.split_levels()         true when every player walks his own map (nothing is gathered then)
 	Events of the group are named "economy.<what>"; payloads are coop_main.encode tables.
 --]]
 
@@ -75,19 +74,13 @@ end
 function engine() return api end
 function in_session() return api ~= nil and api.is_active() end
 function is_host() return api ~= nil and api.is_active() and api.is_host() end
-function is_client() return api ~= nil and api.is_active() and api.is_client() end
-function is_map_server() return api ~= nil and api.is_active() and api.is_map_server ~= nil and api.is_map_server() == true end
+-- The dedicated world already answers the facade while it loads its save. Economy work needs the session too.
+function owns_world() return in_session() and coop_mode.decides_world() end
+-- Both a player's mirror and a map authority receive world state from the keeper.
+function follows_world() return in_session() and not coop_mode.decides_world() end
 -- Host, or a client that finished loading the host's world.
 function live() return api ~= nil and api.is_active() and api.is_live() end
 function self_id() return api and api.self_id() or -1 end
--- Split levels (the game rule coop_split_levels): every player walks his own map, so nobody has to be gathered for a
--- travel and the positions of two players are not comparable. False without the engine side (coop.levels).
-function split_levels()
-	local l = api and api.levels
-	if type(l) ~= "table" or type(l.split) ~= "function" then return false end
-	local ok, v = pcall(l.split)
-	return ok and v == true
-end
 
 -------------------------------------------------------------------------------
 -- Logging and messages
@@ -197,6 +190,7 @@ end
 
 -- The world server with split levels: the bridges of its map servers (coop.levels.map_servers), the peers it reaches them by.
 -- A map server is in no players() row. Empty anywhere else.
+-- SE relays must exclude the sender and send a smaller batch to map servers than to players.
 function bridges()
 	local out = {}
 	local l = api and api.levels
@@ -228,6 +222,11 @@ function on(name, func)
 	cm.add_event_handler(PREFIX .. name, function(payload, from)
 		func(coop_main.decode(payload), tonumber(from) or -1, payload)
 	end)
+end
+
+-- Required wire checks still record failures when trust is in log mode.
+function event_ok(name, valid, fmt, ...)
+	return (not coop_trust or coop_trust.pass(name, valid, fmt, ...)) and valid
 end
 
 -------------------------------------------------------------------------------
@@ -281,7 +280,7 @@ function players()
 		end
 		if e.obj then
 			e.pos = copy_vec(e.obj:position())
-		elseif e.avatar_id and api.is_host() then
+		elseif e.avatar_id and coop_mode.decides_world() then
 			e.pos = position_of_id(e.avatar_id) -- a client's ALife copy is frozen: offline = unknown there
 		end
 		out[#out + 1] = e
@@ -359,6 +358,9 @@ function int(v, lo, hi)
 	if v == nil or v ~= math_floor(v) then return nil end
 	return v
 end
+
+-- Player slots on the wire (coop_protocol.h kMaxPeerSlots), including the host's seat.
+function player_id(v) return int(v, 0, 16) end
 
 -- Short identifier-like string, or nil.
 function word(v, max_len)

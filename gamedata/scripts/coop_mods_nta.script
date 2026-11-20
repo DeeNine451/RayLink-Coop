@@ -35,6 +35,7 @@ local api = rawget(_G, "coop")
 local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
 
 local function C() return coop_mods_core end
+local function world_active() return C().active() and coop_mode.decides_world() end
 local function log(fmt, ...) C().log("nta", fmt, ...) end
 local function qc() return coop_quests_core end
 
@@ -119,14 +120,14 @@ end
 local function install_helpers(nu)
 	C().wrap(nu, "actor_in_range", "nta_utils.actor_in_range", function(orig)
 		return function(vec, dist, ...)
-			if not (coop_mode.decides_world() and vec and tonumber(dist)) then return orig(vec, dist, ...) end
+			if not (world_active() and vec and tonumber(dist)) then return orig(vec, dist, ...) end
 			local _, d = nearest_standing(vec)
 			return d < dist * dist
 		end
 	end)
 	C().wrap(nu, "entity_in_range", "nta_utils.entity_in_range", function(orig)
 		return function(id, dist, vec, ...)
-			if vec or not (coop_mode.decides_world() and tonumber(dist)) then return orig(id, dist, vec, ...) end
+			if vec or not (world_active() and tonumber(dist)) then return orig(id, dist, vec, ...) end
 			local se = alife_object(id)
 			if not se then return false end
 			local ok, cid = pcall(function() return se.commander_id and se:commander_id() end)
@@ -153,7 +154,7 @@ local function install_helpers(nu)
 	-- rewrites their handlers) pass the killer: his hand decides, not the host's.
 	C().wrap(nu, "is_axe", "nta_utils.is_axe", function(orig)
 		return function(who, ...)
-			if not (coop_mode.decides_world() and who) then return orig() end
+			if not (world_active() and who) then return orig() end
 			local ok, r = C().as_player(who, orig)
 			if not ok then
 				C().report("nta", "is_axe", r)
@@ -185,7 +186,7 @@ end
 
 local function party_functor(name, orig)
 	return function(tsk, task_id, ...)
-		if not (coop_mode.decides_world() and tsk ~= nil) or C().identity_peer() then return orig(tsk, task_id, ...) end
+		if not (world_active() and tsk ~= nil) or C().identity_peer() then return orig(tsk, task_id, ...) end
 		local pre = tsk.stage
 		local held, failed = false, false
 		pass_stage = pre
@@ -268,7 +269,7 @@ local function group_functor(name, orig)
 	local before = BEFORE_PASS[name]
 	if not before then return party end
 	return function(tsk, task_id, ...)
-		if coop_mode.decides_world() and tsk ~= nil and not C().identity_peer() and before(tsk, task_id, orig) then return nil end
+		if world_active() and tsk ~= nil and not C().identity_peer() and before(tsk, task_id, orig) then return nil end
 		return party(tsk, task_id, ...)
 	end
 end
@@ -292,9 +293,9 @@ end
 local function teleport_wrapper(label, dest_of, forced_from)
 	return function(orig)
 		return function(...)
-			if coop_mode.decides_world() and pass_stage and pass_stage >= forced_from then return end
+			if world_active() and pass_stage and pass_stage >= forced_from then return end
 			local peer = C().identity_peer()
-			if not (coop_mode.decides_world() and peer and peer ~= C().self_peer()) then return orig(...) end
+			if not (world_active() and peer and peer ~= C().self_peer()) then return orig(...) end
 			local ok, dest = pcall(dest_of, orig)
 			if ok and dest then
 				C().teleport(peer, dest)
@@ -329,7 +330,7 @@ local function install_teleports()
 		C().wrap(by, "spawn", "tasks_baba_yaga.spawn", function(orig)
 			return function(...)
 				local r = orig(...)
-				if coop_mode.decides_world() then CreateTimeEvent("coop_mods_nta", "baba_pull", 0, pull_from_artefact) end
+				if world_active() then CreateTimeEvent("coop_mods_nta", "baba_pull", 0, pull_from_artefact) end
 				return r
 			end
 		end)
@@ -417,7 +418,7 @@ local function install_mirage()
 	-- circle nobody is hit (the stock would blast a player at his camp); the loop goes on, for the group that comes back.
 	C().wrap(mi, "start_explosions_loop", "tasks_mirage.start_explosions_loop", function(orig)
 		return function()
-			if not coop_mode.decides_world() then return orig() end
+			if not world_active() then return orig() end
 			local who = mirage_player()
 			if who then
 				local ok, e = C().as_player(who, orig)
@@ -476,7 +477,7 @@ local function install_living_fire()
 			-- Registered as a callback, this wrapper would run on clients (coop_* scripts are view): the mod's
 			-- script is host-only there.
 			if C().world_client() then return end
-			if coop_mode.decides_world() and s_hit then
+			if world_active() and s_hit then
 				local id = remote_drafts(s_hit)
 				if id then
 					-- The handler compares the draftsman with AC_ID: inside the call that name is this player. Not a rewrite of
@@ -503,7 +504,7 @@ local function install_living_fire()
 			local peer = C().identity_peer()
 			local who = C().identity_obj()
 			-- Stage 25's timer: no hit says who. The stock takes the host wherever he is.
-			if coop_mode.decides_world() and not peer and not fire.in_hit then
+			if world_active() and not peer and not fire.in_hit then
 				local se = get_story_se_object(PROMETHEUS_SID)
 				local d
 				if se then who, d = nearest_standing(se.position) end
@@ -511,7 +512,7 @@ local function install_living_fire()
 				if who:id() == db.actor:id() then return orig(...) end
 				peer = C().peer_of(who:id())
 			end
-			if not (coop_mode.decides_world() and peer and who and peer ~= C().self_peer()) then return orig(...) end
+			if not (world_active() and peer and who and peer ~= C().self_peer()) then return orig(...) end
 			st.revenge = st.revenge + 1
 			local id = who:id()
 			CreateTimeEvent("coop_mods_nta", "revenge_" .. tostring(id), 2, function()
@@ -534,7 +535,7 @@ local function install_living_fire()
 	C().wrap(lf, "set_x18_military_relation", "tasks_the_living_fire.set_x18_military_relation", function(orig)
 		return function(...)
 			local r = orig(...)
-			if coop_mode.decides_world() then
+			if world_active() then
 				for _, p in ipairs(others_here()) do C().as_player(p.obj, orig, ...) end
 			end
 			return r
@@ -544,7 +545,7 @@ local function install_living_fire()
 	C().wrap(lf, "earthquake_effect", "tasks_the_living_fire.earthquake_effect", function(orig)
 		return function(...)
 			local r = orig(...)
-			if coop_mode.decides_world() then
+			if world_active() then
 				C().fx_sound([[new_tasks_addon\blowout_boom_02_old]])
 				C().fx_sound([[new_tasks_addon\earthquake_old]])
 				C().fx_cam([[camera_effects\earthquake.anm]], QUAKE_CAM, true)
@@ -696,7 +697,7 @@ local function install_skyfall()
 	C().wrap(sky, "is_enemies_with_military", "tasks_skyfall.is_enemies_with_military", function(orig)
 		return function(...)
 			if orig(...) then return true end
-			if C().identity_peer() or not coop_mode.decides_world() then return false end
+			if C().identity_peer() or not world_active() then return false end
 			for _, p in ipairs(others_here()) do
 				local ok, r = C().as_player(p.obj, orig, ...)
 				if ok and r then return true end
@@ -722,7 +723,7 @@ local function install_mystery()
 	if not (mots and nu) then return end
 	C().wrap(mots, "spawn_garbage_ghost", "tasks_mystery_of_the_swamps.spawn_garbage_ghost", function(orig)
 		return function(args, ...)
-			if not (coop_mode.decides_world() and type(args) == "table" and args.bonk_actor) then return orig(args, ...) end
+			if not (world_active() and type(args) == "table" and args.bonk_actor) then return orig(args, ...) end
 			local cfg = C().mod("mystery_of_the_swamps_configs")
 			local spot = cfg and cfg.garbage_ghost_configs and cfg.garbage_ghost_configs[1]
 			local timer = nu.set_timeout
@@ -752,7 +753,7 @@ local function install_monolith()
 		mono.orig = orig
 		return function(...)
 			if C().world_client() then return end -- registered from here this wrapper would run on clients
-			if not coop_mode.decides_world() then return orig(...) end
+			if not world_active() then return orig(...) end
 			local now = time_global()
 			if now < mono.next then return end
 			mono.next = now + POLL_INV_MS
@@ -792,13 +793,13 @@ local function install_factions()
 	if uo then
 		C().wrap(uo, "is_from_duty", "tasks_urgent_orders.is_from_duty", function(orig)
 			return function(...)
-				if not coop_mode.decides_world() then return orig(...) end
+				if not world_active() then return orig(...) end
 				return urgent_side() == "dolg"
 			end
 		end)
 		C().wrap(uo, "is_from_army", "tasks_urgent_orders.is_from_army", function(orig)
 			return function(...)
-				if not coop_mode.decides_world() then return orig(...) end
+				if not world_active() then return orig(...) end
 				return urgent_side() == "army"
 			end
 		end)
@@ -807,7 +808,7 @@ local function install_factions()
 	C().wrap(dlg, "actor_true_isg", "dialogs.actor_true_isg", function(orig)
 		return function(...)
 			local r = orig(...)
-			if not r and coop_mode.decides_world() and any_of_faction("isg") then return true end
+			if not r and world_active() and any_of_faction("isg") then return true end
 			return r
 		end
 	end)
@@ -815,7 +816,7 @@ local function install_factions()
 	C().wrap(xe, "lttz_set_squad_enemy_to_actor", "xr_effects.lttz_set_squad_enemy_to_actor", function(orig)
 		return function(...)
 			local r = orig(...)
-			if coop_mode.decides_world() then
+			if world_active() then
 				for _, p in ipairs(others_here()) do C().as_player(p.obj, orig, ...) end
 			end
 			return r
@@ -827,13 +828,13 @@ local function install_factions()
 	C().wrap(u, "valid_faction_actor", "utils_slht.valid_faction_actor", function(orig)
 		return function(...)
 			if orig(...) then return true end
-			return coop_mode.decides_world() and (has_alife_info("hidden_threat_start") or any_of_faction("army"))
+			return world_active() and (has_alife_info("hidden_threat_start") or any_of_faction("army"))
 		end
 	end)
 	C().wrap(u, "actor_in_smart", "utils_slht.actor_in_smart", function(orig)
 		return function(smart, dist, ...)
 			if orig(smart, dist, ...) then return true end
-			if not coop_mode.decides_world() then return false end
+			if not world_active() then return false end
 			local se = SIMBOARD.smarts_by_names[smart]
 			local _, d = nearest_standing(se.position)
 			local r = dist or 5
@@ -872,7 +873,7 @@ end
 
 -- Hidden Threat starts at a rank, read on db.actor: an army client who reaches it starts it the stock way.
 local function hidden_threat_rank()
-	if not coop_mode.decides_world() or has_alife_info("hidden_threat_start") or has_alife_info("hidden_threat_disabled") then return end
+	if not world_active() or has_alife_info("hidden_threat_start") or has_alife_info("hidden_threat_disabled") then return end
 	local ht, u = C().mod("hidden_threat"), C().mod("utils_slht")
 	local rank = ht and u and C().find_local(ht, "cond_rank")
 	if type(rank) ~= "number" then return end
@@ -931,7 +932,7 @@ local function late_install()
 end
 
 local function actor_on_update()
-	if coop_mode.decides_world() then poll_players() end
+	if world_active() then poll_players() end
 	late_install()
 end
 

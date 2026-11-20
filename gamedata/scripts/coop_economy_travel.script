@@ -212,7 +212,7 @@ function group_teleport(dest, heading, origin, radius, kind)
 	if radius ~= OFFER and (radius or 0) <= 0 then return false end
 	local t = make_payload(dest, heading, origin, radius, kind)
 	stats.sent = stats.sent + 1
-	if core.is_host() then
+	if core.owns_world() then
 		core.send_clients("tp", t)
 	else
 		core.send("tp", t, 0)
@@ -397,7 +397,7 @@ end
 -- with split levels a whole rejoin. While the click runs, a level change to his own map is what the stock does for an online point.
 local function with_trip_on_map(f, ...)
 	local change = rawget(_G, "ChangeLevel")
-	if not (core.is_client() and type(change) == "function") then return f(...) end
+	if not (core.follows_world() and type(change) == "function") then return f(...) end
 	_G.ChangeLevel = function(pos, lvid, gvid, dir, anim)
 		if on_this_map({ m_game_vertex_id = gvid }, level_name()) then return db.actor:set_actor_position(pos) end
 		return change(pos, lvid, gvid, dir, anim)
@@ -463,7 +463,7 @@ end
 local function routed_by_npc_group(npc)
 	local nl = rawget(_G, "coop_npc_logic")
 	if not (nl and type(nl.deliver) == "function") then return false end
-	if core.is_client() then return true end
+	if core.follows_world() then return true end
 	local ok, r = pcall(function() return npc ~= nil and nl.is_replicated(npc:id()) == true end)
 	return ok and r == true
 end
@@ -514,7 +514,7 @@ local function patch_routes()
 		local r = orig(m1, m2, no_msg, ...)
 		if not applying_route and core.live() and type(m1) == "string" and type(m2) == "string" and core.others_count() > 0 then
 			stats.routes_out = stats.routes_out + 1
-			if core.is_host() then
+			if core.owns_world() then
 				core.send_clients("route", { a = m1, b = m2 })
 			else
 				core.send("route", { a = m1, b = m2 }, 0)
@@ -539,7 +539,7 @@ end
 local function on_route(t, from)
 	local a, b = core.word(t.a, 32), core.word(t.b, 32)
 	if not (a and b and orig_open_route) then return end
-	if core.is_host() then
+	if core.owns_world() then
 		if from <= 0 then return end
 		open_route_local(a, b)
 		core.send_clients("route", { a = a, b = b }, from)
@@ -553,7 +553,7 @@ end
 
 local function register_events()
 	core.on("tp", function(t, from)
-		if core.is_host() then
+		if core.owns_world() then
 			if from > 0 then host_on_tp(t, from) end
 		elseif from == 0 then
 			local p = read_tp(t)
@@ -608,7 +608,7 @@ local function find_smarts(tsmarts, here)
 end
 
 local function visit_tick()
-	if not (core.is_client() and core.live() and db.actor) or core.is_map_server() then return end -- a map server's actor is a ghost
+	if not (coop_mode.is_player_mirror() and core.live() and db.actor) then return end
 	local now = core.now()
 	if now < visits.next_at then return end
 	visits.next_at = now + VISIT_EVERY_MS
@@ -644,7 +644,7 @@ end
 -- player alone on his own machine travels as in single player (the host with nobody else in the session).
 local function before_fast_travel(trip)
 	if type(trip) ~= "table" or not core.live() then return end
-	if not (core.is_client() or core.others_count() > 0) then return end
+	if not (core.follows_world() or core.others_count() > 0) then return end
 	if group.travel_takes_time() then return end
 	trip.notime = true
 end

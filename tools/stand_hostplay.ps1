@@ -25,7 +25,11 @@ $scenarios = @(
     @{ Name = 'sp_smoke'; Script = 'sp_smoke.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('sp_smoke: PASS'); Bad = @('sp_smoke: FAIL') },
     @{ Name = 'companions_group'; Script = 'companions_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('companions_group: PASS'); Bad = @('companions_group: FAIL') },
     @{ Name = 'cover_group'; Script = 'cover_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^cover_group: PASS$'); Bad = @('^cover_group: FAIL\b') },
-    @{ Name = 'vehicle_group'; Script = 'vehicle_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^vehicle_group: PASS$'); Bad = @('^vehicle_group: FAIL\b') }
+    @{ Name = 'vehicle_group'; Script = 'vehicle_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^vehicle_group: PASS$'); Bad = @('^vehicle_group: FAIL\b') },
+    @{ Name = 'progress_group'; Script = 'progress_group.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Bad = @('^progress_group: FAIL\b'); Pass = @(
+        '\[progress-stand\] client walked 15 steps, 300\.0 m', '\[progress-stand\] client searched id=\d+ xp=',
+        '\[progress-stand\] keeper facts .*step_m=(?:[1-9]\d*\.\d|0\.[1-9]) corpse_search=[1-9]\d* rank=veteran', '(?m)^progress_group: PASS$'
+    ) }
 )
 $code = Invoke-Stand -Mode 'hostplay' -Scenarios $scenarios -Tag $Tag -Stand $Stand -Only $Only -NoMark:$NoMark
 exit $code

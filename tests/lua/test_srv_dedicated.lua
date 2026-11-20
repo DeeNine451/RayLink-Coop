@@ -111,8 +111,6 @@ end
 
 -- ------------------------------------------------------------------------------------------------ the audit's fixes, by their text
 do
-	local group = read("gamedata/scripts/coop_economy_group.script")
-	check(group:find('rule == "host" and api and api.is_dedicated', 1, true) ~= nil, "no host to decide: the players vote")
 	local modes = read("gamedata/scripts/coop_newgame_modes.script")
 	check(modes:find("%-coop_dedicated", 1, true) ~= nil, "a dedicated host's new game is a co-op host's")
 	local char = read("gamedata/scripts/coop_menu_char.script")

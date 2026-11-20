@@ -157,6 +157,17 @@ recent = true
 trade(704)
 check(trades[704] == false and recent_calls == 2, "local trade with a confirmed conversation caches the decision")
 
+local oso = 600
+map.new_obj(oso, "osoznanie", vec(1, 0, 0))
+map.env.get_story_object_id = function() return oso end
+map.env.level.patrol_path_exists = function() return false end
+local trust = load_script(map, "coop_quests_trust")
+player_level = 3
+check(mq.is_far_peer(PLAYER) and map.env.coop_mode.facts_of(PLAYER) == nil,
+	"the map sees a far player and lacks his conversation facts")
+local allowed, why = trust.oso_verdict(PLAYER, "walk")
+check(allowed == false and why:find("no talk", 1, true), "the map server refuses a far player's unconfirmed Osoznanie conversation")
+
 api.levels.my_level = function() return 1 end
 api.levels.level_of_player = function() return 2 end
 api.levels.bridge_of_player = function() end

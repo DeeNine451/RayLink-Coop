@@ -107,6 +107,8 @@ local function server_map_change()
 	SELF = 1
 	flags = {}
 	coop.world_epoch = function() return 42 end
+	coop.levels = { split = function() return true end }
+	modes.live(coop_mode, load_script)
 	load_script("coop_main")
 	load_script("coop_economy_core")
 	load_script("coop_economy_mdata").on_game_start()

@@ -75,6 +75,7 @@ TEST(srv_session_bridge_needs_an_issued_token)
 	std::vector<PeerId> came;
 	SessionSrv(host.s).on_bridge_joined([&came](PeerId id) { came.push_back(id); });
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 
 	// a token this session never issued: refused, nobody is a bridge
@@ -107,6 +108,7 @@ TEST(srv_session_bridge_token_is_good_once_and_revoked_is_none)
 	Node host("world", 38642), ms("ms", 38642), again("x", 38642), late("y", 38642), zero("z", 38642);
 	host.cfg.host_plays = false;
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	SessionSrv(host.s).issue_bridge(2, token_of(7));
 	as_map_server(ms, token_of(7));
@@ -136,6 +138,7 @@ TEST(srv_session_a_lost_bridge_is_told)
 	std::vector<std::pair<PeerId, std::string>> went;
 	SessionSrv(host.s).on_bridge_left([&went](PeerId id, const std::string& why) { went.emplace_back(id, why); });
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	SessionSrv(host.s).issue_bridge(2, token_of(7));
 	as_map_server(ms, token_of(7));
@@ -167,6 +170,7 @@ TEST(srv_session_a_map_servers_level_is_hosted_through_its_world_connection)
 		}
 	});
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	SessionSrv(host.s).issue_bridge(2, token_of(7));
 	as_map_server(ms, token_of(7));
@@ -174,6 +178,7 @@ TEST(srv_session_a_map_servers_level_is_hosted_through_its_world_connection)
 
 	Session level; // after `ms`: the world connection outlives the level hosted through it
 	CHECK(!SessionSrv(level).is_virtual());
+	ms.cfg.mode = SessionMode::Server;
 	REQUIRE(SessionSrv(level).host_virtual(ms.cfg, ms.s, &err));
 	CHECK(SessionSrv(level).is_virtual());
 	CHECK(level.is_active());
@@ -234,6 +239,7 @@ TEST(srv_session_a_map_servers_mode_hosts_its_level_through_its_bridge)
 	Node host("world", 38649), ms("ms", 38649);
 	host.cfg.host_plays = false;
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	SessionSrv(host.s).issue_bridge(5, token_of(3));
 
@@ -242,6 +248,7 @@ TEST(srv_session_a_map_servers_mode_hosts_its_level_through_its_bridge)
 	as_map_server(ms, token_of(3));
 	REQUIRE(ms.connect(38649, &err));
 	SessionConfig cfg = ms.cfg;
+	cfg.mode = SessionMode::Server;
 	cfg.port = 38650; // a port nobody listens on: a level hosted through its bridge opens none
 	REQUIRE(level.host(cfg, &err)); // Manager::start_map_server
 	CHECK(SessionSrv(level).is_virtual());
@@ -251,9 +258,45 @@ TEST(srv_session_a_map_servers_mode_hosts_its_level_through_its_bridge)
 
 	// it listens nowhere: the port of its config is free for anybody else
 	Node other("other", 38650);
+	other.cfg.mode = SessionMode::Coop;
 	CHECK(other.host(&err));
 	CHECK(level.peers().empty());
 	level.shutdown("over");
+}
+
+// SESSION-MODE (review rv_SESSION-MODE, blocker): every host() is told its mode, a carried one too. A map server's start says Server
+// (MapServerMode::configure); a config that says none is refused before the carrier takes it, and the level stays idle. The seat rule
+// stays the listening host's (this config keeps host_plays true), and the carried session's mode is its world's Welcome's.
+TEST(srv_session_a_carried_host_needs_its_mode)
+{
+	Node world("world", 38654), bridge("bridge", 38654);
+	world.cfg.host_plays = false;
+	world.cfg.mode = SessionMode::Server;
+	std::string err;
+	REQUIRE(world.host(&err));
+	SessionSrv(world.s).issue_bridge(2, token_of(4));
+
+	Session level;
+	SessionSrv(level).level_through(bridge.s); // MapServerMode::install
+	as_map_server(bridge, token_of(4));
+	REQUIRE(bridge.connect(38654, &err));
+	CHECK(!level.host(bridge.cfg, &err)); // a start that said no mode
+	CHECK_EQ(err, std::string("the session's mode was not configured"));
+	CHECK(!level.is_active());
+	REQUIRE(level.role() == Role::None);
+
+	bridge.cfg.mode = SessionMode::Server; // MapServerMode::configure
+	REQUIRE(bridge.cfg.host_plays); // the seat rule (a Server seat plays nobody) is not asked of a carried host
+	REQUIRE(level.host(bridge.cfg, &err)); // Manager::start_map_server
+	CHECK(level.role() == Role::Host);
+	CHECK(!level.is_active());
+	CHECK(level.session_mode() == SessionMode::None); // the level waits for its world's Welcome
+	REQUIRE(t::pump_until({&world.s, &bridge.s}, 5000, [&] { return bridge.welcomed; }));
+	CHECK(bridge.welcome.mode == SessionMode::Server);
+	CHECK(level.is_active());
+	CHECK(level.session_mode() == SessionMode::Server);
+	level.shutdown("over");
+	CHECK(level.session_mode() == SessionMode::None);
 }
 
 // ============================================================================ Server: the operator of a world server
@@ -268,6 +311,7 @@ TEST(srv_session_armed_token_makes_the_operator_and_his_lines_reach_the_hook)
 	present(creator, tok);
 	SessionSrv(host.s).arm_operator(tok); // the world server's configure (srv/coop_srv_mode.cpp)
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38645));
 	REQUIRE(join(host, other, 38645));
@@ -298,6 +342,7 @@ TEST(srv_session_an_armed_token_is_for_one_host)
 	present(first, tok);
 	std::string err;
 	SessionSrv(host.s).arm_operator(tok);
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, first, 38646));
 	REQUIRE(t::pump_until({&host.s, &first.s}, 5000, [&] { return first.s.self_host_rights(); }));
@@ -340,6 +385,7 @@ TEST(srv_session_host_that_cannot_start_says_why)
 	host.cfg.host_plays = false;
 	std::string err;
 	SessionSrv(host.s).arm_operator(token_of(5));
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	CHECK(!host.host(&err)); // one session, one host()
 	CHECK_EQ(err, std::string("session is already active"));
@@ -360,6 +406,7 @@ TEST(srv_session_a_coop_host_has_no_server_part)
 {
 	Node host("Host", 38651), pal("Pal", 38651), ms("ms", 38651);
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err)); // a co-op host: its seat plays; it issues no bridge and holds no operator token
 	present(pal, token_of(5)); // a player who presents a token anyway
 	REQUIRE(join(host, pal, 38651));
@@ -401,6 +448,7 @@ TEST(srv_session_outside_a_session_takes_nothing)
 	CHECK(!idle.s.is_active());
 
 	std::string err;
+	idle.cfg.mode = SessionMode::Server;
 	REQUIRE(idle.host(&err));
 	as_map_server(ms, token_of(3));
 	CHECK(refused(idle, ms, 38652));

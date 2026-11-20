@@ -777,6 +777,7 @@ std::vector<uint64_t> fastest_requests(uint32_t seconds, uint32_t rtt)
 void host_and_join(t::Node& host, t::Node& client, uint16_t port)
 {
 	std::string err;
+	host.cfg.mode = coop::SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	REQUIRE(client.connect(port, &err));
 	REQUIRE(t::pump_until({&host.s, &client.s}, 5000, [&] { return client.s.is_active() && host.s.peers().size() == 1; }));
@@ -878,4 +879,34 @@ TEST(vehicle_state_gives_the_bodies_the_hubs_call)
 	// VehicleState is read with every bound (coop_vehicle_rules.h read) before anything is touched
 	const std::string on = between(state, "void state_on_state(Reader& payload)", "\n}\n");
 	CHECK(on.find("if (!read(payload, m))") != std::string::npos);
+}
+
+// Note 3 of F5-REV-1 (should-fix of rv_F5-VEH-4, both modes): the posed dolls belong to one world. After a load or a level change an id
+// of the old world can name another stalker: release_doll would show it and turn its collision back on. A new world forgets the dolls
+// without touching any object, before the sweep and before a doll is posed.
+TEST(vehicle_state_dolls_forget_an_old_world)
+{
+	const std::string state = without_comments(project_file("engine/src/xrGame/coop/coop_vehicles_state.cpp"));
+	CHECK(state.find("u32 g_dolls_world = 0;") != std::string::npos);
+	const std::string forget = between(state, "void dolls_world()", "\n}\n");
+	REQUIRE(!forget.empty());
+	const size_t gen = forget.find("const u32 world = join::world_generation();");
+	const size_t same = forget.find("if (world == g_dolls_world)");
+	const size_t clear = forget.find("g_dolls.clear();");
+	const size_t keep = forget.find("g_dolls_world = world;");
+	CHECK(gen != std::string::npos && same != std::string::npos && clear != std::string::npos && keep != std::string::npos);
+	CHECK(gen < same && same < clear && clear < keep);
+	CHECK(forget.find("release_doll") == std::string::npos); // the old world's objects are not this world's: nothing is touched
+
+	const std::string sweep = between(state, "void dolls_sweep()", "\n}\n");
+	const size_t sweep_world = sweep.find("dolls_world();");
+	const size_t sweep_loop = sweep.find("for (auto it = g_dolls.begin(); it != g_dolls.end();)");
+	CHECK(sweep_world != std::string::npos && sweep_loop != std::string::npos && sweep_world < sweep_loop);
+
+	const std::string frame = between(state, "bool doll_frame(CAI_Stalker* doll)", "\n}\n");
+	const size_t guard = frame.find("if (!doll || !mgr().active() || !world_up())");
+	const size_t frame_world = frame.find("dolls_world();");
+	const size_t find = frame.find("auto it = g_dolls.find(doll->ID());");
+	CHECK(guard != std::string::npos && frame_world != std::string::npos && find != std::string::npos);
+	CHECK(guard < frame_world && frame_world < find);
 }

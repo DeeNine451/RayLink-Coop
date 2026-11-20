@@ -219,6 +219,7 @@ TEST(mode_map_server_level_session_has_no_link_once_hosted)
 	CHECK(level.local() == &link);
 	srv::SessionSrv(level).level_through(world); // MapServerMode::install
 	SessionConfig cfg; // a carried host takes its seats from its carrier
+	cfg.mode = SessionMode::Server;
 	std::string err;
 	REQUIRE(level.host(cfg, &err)); // Manager::start_map_server
 	CHECK(srv::SessionSrv(level).is_virtual());
@@ -300,4 +301,40 @@ TEST(mode_srv_console_saves_one_name)
 	const std::string cls = e1_class(code, synonym);
 	CHECK_EQ(e1_override(cls, "Save"), std::string(""));
 	CHECK_EQ(e1_override(cls, "Execute"), std::string("<none>")); // typed, it does what the new name does
+}
+
+// Finding 6 (SESSION-MODE; rv_SESSION-MODE blocker): Session::host refuses a start that names no mode, so every start of the game names
+// one through its mode's configure before host(): the co-op host Coop (its seat plays), the world server Server (its seat plays nobody)
+// and a map server Server (its level is carried by its bridge: the seat rule is the listening host's, its mode the world's Welcome's).
+// The session asks for the mode before the carrier takes the host, and the seat rule after it.
+TEST(mode_every_host_start_names_its_mode)
+{
+	const std::string src = e1_engine_src();
+	const std::string coop = e1_class(e1_code(e1_read(src + "/xrGame/coop/hostplay/coop_hostplay_mode.cpp")), "CoopHostMode");
+	const std::string srv = e1_code(e1_read(src + "/xrGame/coop/srv/coop_srv_mode.cpp"));
+	const std::string co = e1_override(coop, "configure");
+	CHECK(e1_has(co, "cfg.host_plays = true;"));
+	CHECK(e1_has(co, "cfg.mode = session_mode_of_seat(cfg.host_plays);"));
+	const std::string world = e1_override(e1_class(srv, "WorldServerMode"), "configure");
+	CHECK(e1_has(world, "cfg.host_plays = false;"));
+	CHECK(e1_has(world, "cfg.mode = session_mode_of_seat(cfg.host_plays);"));
+	const std::string map = e1_override(e1_class(srv, "MapServerMode"), "configure");
+	CHECK(e1_has(map, "cfg.mode = SessionMode::Server;"));
+	CHECK(!e1_has(map, "host_plays")); // the carried host's seats are its world's
+
+	const std::string host = e1_body(e1_code(e1_read(src + "/xrCoop/coop_session.cpp")), R"(bool\s+Session::host)");
+	const size_t none = host.find("if (cfg.mode == SessionMode::None)");
+	const size_t carried = host.find("return s.host_carried(cfg, *carrier);");
+	const size_t seat = host.find("if (cfg.mode != session_mode_of_seat(cfg.host_plays))");
+	CHECK(none != std::string::npos && carried != std::string::npos && seat != std::string::npos);
+	CHECK(none < carried && carried < seat);
+
+	const std::string manager = e1_code(e1_read(src + "/xrGame/coop/coop_manager.cpp"));
+	for (const char* head : {R"(bool\s+Manager::start_host)", R"(bool\s+Manager::start_map_server)"})
+	{
+		const std::string start = e1_body(manager, head);
+		const size_t configured = start.find("m->configure(cfg);");
+		const size_t hosted = start.find("m_session.host(cfg, &err)");
+		CHECK(configured != std::string::npos && hosted != std::string::npos && configured < hosted);
+	}
 }

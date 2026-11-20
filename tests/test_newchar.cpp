@@ -197,6 +197,15 @@ TEST(newchar_creator_never_without_the_token)
 	CHECK(!newchar::make_creator(f));
 }
 
+TEST(newchar_creator_default_grants_no_rights)
+{
+	CHECK(!std::is_aggregate_v<newchar::CreatorFacts>); // plain default initialization must clear host_rights
+	newchar::CreatorFacts f{};
+	f.creator = true;
+	f.bare = true;
+	CHECK(!newchar::make_creator(f));
+}
+
 TEST(newchar_creator_each_missing_condition_gives_the_window)
 {
 	newchar::CreatorFacts f = creator_ready();

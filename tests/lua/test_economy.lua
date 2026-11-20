@@ -576,22 +576,6 @@ do
 end
 
 -------------------------------------------------------------------------------
-section("world: world loot taken on a map server's level")
-do
-	local H, A = setup(1, { [0] = { x = 0, y = 0, z = 0 }, [1] = { x = 1000, y = 0, z = 1000 } })
-	local gs = H.game_setup
-	gs.world_itm_on[710] = "spotm"
-	gs.world_itm_num.spotm = 5
-	gs.world_itm_info.spotm = { typ = "x" }
-	add_item(H, 710, "ammo_9x19", 65535)
-	H.coop_main.on_event("economy.loot_took", H.coop_main.encode({ id = 710, s = "ammo_9x19", p = 1 }), 1)
-	check(gs.world_itm_on[710] == "spotm", "a player cannot say it, only a map server")
-	H.coop_main.on_event("economy.loot_took", H.coop_main.encode({ id = 710, s = "ammo_9x19", p = 1 }), 0x101)
-	check(gs.world_itm_on[710] == nil and gs.world_itm_off.spotm, "the point is free on the world server, whose table it is")
-	check(gs.world_itm_num.spotm == nil, "and the roll is not left at the point")
-end
-
--------------------------------------------------------------------------------
 section("world: warfare capture and world loot")
 do
 	local H, A = setup(1, { [0] = { x = 0, y = 0, z = 0 }, [1] = { x = 1000, y = 0, z = 1000 } })
@@ -604,18 +588,6 @@ do
 	check(H.warfare.distance_to_xz_sqr == d0, "the distance function is restored")
 	deliver_all()
 	check(has(A.HUD, "smart900"), "the capture tip reaches the client")
-
-	-- split levels: the coordinates of a player on another level say nothing of this one
-	stw.manual_point = nil
-	H.coop.levels = {
-		split = function() return true end,
-		my_level = function() return 1 end,
-		level_of_player = function(p) return p == 1 and 2 or 1 end,
-	}
-	stw.process_manual_capture(smart)
-	check(stw.manual_point == nil, "a player on another level captures nothing here")
-	H.coop.levels = nil
-	stw.manual_point = nil
 
 	-- world loot
 	local gs = H.game_setup

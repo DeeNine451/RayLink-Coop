@@ -1491,6 +1491,7 @@ Writer load_wait(uint8_t state, uint32_t epoch, uint16_t level)
 TEST(load_prepared_world_reaches_the_client_across_the_epoch_move)
 {
 	Node host("Boss", 37801), cl("Alice", 37801);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.set_world_epoch(3);
 	REQUIRE(cl.connect(37801));
@@ -1526,6 +1527,7 @@ TEST(load_ready_before_the_server_world_waits_and_replays)
 {
 	LocalLink link; // outlives the session it is attached to
 	Node host("Boss", 37802), cl("Alice", 37802);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.set_world_epoch(4);
 	wgate::World world = wgate::World::Hole; // the host's process loads the world of the transition
@@ -1569,6 +1571,7 @@ TEST(load_wait_to_the_host_player_goes_after_the_epoch_move)
 {
 	LocalLink link;
 	Node host("Boss", 37803);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	host.s.set_world_epoch(4);
@@ -1598,6 +1601,7 @@ TEST(board_vote_and_state_travel_the_gated_link)
 	LocalLink link;
 	link.set_gate(&link_enabled);
 	Node host("Boss", 37804);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	std::vector<PeerId> votes_from;

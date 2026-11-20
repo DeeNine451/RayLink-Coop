@@ -1,4 +1,5 @@
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 dofile("tests/lua/support/clone_parts_evaluate.lua")
 
 local function worlds()
@@ -7,6 +8,7 @@ local function worlds()
 	for peer in pairs(PLAYERS) do
 		POS[peer] = { x = 0, y = 0, z = 0 }
 		local w = make_world(peer)
+		modes.live(load_script(w, "coop_mode"), function(name) return load_script(w, name) end)
 		load_script(w, "coop_economy_core")
 		load_script(w, "coop_economy_mdata")
 		w.coop_economy_mdata.on_game_start()

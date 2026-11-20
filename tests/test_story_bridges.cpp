@@ -58,6 +58,7 @@ TEST(story_bridges_a_bridge_is_the_world_servers_connection_that_is_no_player)
 	Node world("world", 38771), ms("ms", 38771), player("Ann", 38771);
 	world.cfg.host_plays = false; // its seat plays no character
 	std::string err;
+	world.cfg.mode = SessionMode::Server;
 	REQUIRE(world.host(&err));
 	srv::SessionSrv(world.s).issue_bridge(2, token_of(11));
 	ms.cfg.hello_role = kHelloRoleMapServer;
@@ -89,6 +90,7 @@ TEST(story_bridges_a_coop_host_has_no_connection_that_is_no_player)
 {
 	Node host("host", 38772), ann("Ann", 38772);
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, ann, 38772));
 	const PeerId slot = ann.s.self();

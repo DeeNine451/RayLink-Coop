@@ -180,14 +180,16 @@ TEST(seats_a_host_whose_mode_said_no_seats_is_refused)
 	Node host("Boss", 38903);
 	host.cfg.max_players = 0;
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	CHECK(!host.host(&err));
-	CHECK(!err.empty());
+	CHECK(err.find("max_players") != std::string::npos);
 	CHECK(host.s.role() == Role::None);
 	CHECK_EQ(host.s.max_players(), uint32_t(0));
 	// a number past the wire is cut to the wire's 16
 	Node big("Big", 38904);
 	big.cfg.host_plays = false;
 	big.cfg.max_players = 100;
+	big.cfg.mode = SessionMode::Server;
 	REQUIRE(big.host(&err));
 	CHECK_EQ(big.s.max_players(), kMaxPlayers);
 	big.s.shutdown("end");
@@ -198,6 +200,7 @@ TEST(seats_a_client_knows_no_seats_before_its_welcome)
 	Node host("Boss", 38905), cl("Alice", 38905);
 	host.cfg.max_players = kCoopSeats;
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	CHECK_EQ(cl.s.max_players(), uint32_t(0)); // no session
 	REQUIRE(cl.connect(38905, &err));
@@ -219,6 +222,7 @@ TEST(seats_a_map_servers_level_has_its_worlds_seats)
 	world.cfg.host_plays = false;
 	world.cfg.max_players = kServerSeats;
 	std::string err;
+	world.cfg.mode = SessionMode::Server;
 	REQUIRE(world.host(&err));
 	srv::SessionSrv(world.s).issue_bridge(2, token);
 	Session level;
@@ -227,6 +231,7 @@ TEST(seats_a_map_servers_level_has_its_worlds_seats)
 	ms.cfg.hello_token = token;
 	REQUIRE(ms.connect(38906, &err));
 	SessionConfig cfg = ms.cfg;
+	cfg.mode = SessionMode::Server;
 	cfg.port = 38907; // a level hosted through its bridge listens nowhere
 	cfg.max_players = kCoopSeats; // not its number: a carried host's seats are its carrier's
 	REQUIRE(level.host(cfg, &err));

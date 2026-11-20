@@ -475,6 +475,14 @@ function print_status()
 		tostring(installed), stats.reports_out, stats.reports_in, n, stats.meters, stats.exposed, P.error_count(TAG))
 end
 
+-- F5-REV-1 S4: the faction player `peer` is disguised as, from his last report (npc.disg) to this process, which leads his map; nil
+-- when he is not disguised or nothing was reported here. coop_progress_community answers the keeper's community check with it.
+function disguised_as(peer)
+	local s = players_state[peer]
+	if s and s.d == true and type(s.c) == "string" then return s.c end
+	return nil
+end
+
 function on_game_start()
 	P = coop_npc_players
 	if not rawget(_G, "coop") then return end

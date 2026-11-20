@@ -79,7 +79,10 @@ function gather_radius() return core.rule("gather_radius") or 20 end
 function party_fast_travel() return core.rule("party_fast_travel") ~= false end
 -- A travel moves the group (everybody gathered first, the others follow) when the rule is on and the levels are not
 -- split: with split levels a player goes alone, the others are on maps of their own.
-function travel_as_group() return party_fast_travel() and not core.split_levels() end
+function travel_as_group()
+	-- Without a session, keep the stock travel wrapper's ordinary single-player default.
+	return party_fast_travel() and (coop_mode.group_travels() or not (core.in_session() or coop_mode.decides_world()))
+end
 -- A trip takes game time only where the world's settings say so (off by default).
 function travel_takes_time() return core.rule("travel_takes_time") == true end
 
@@ -172,7 +175,7 @@ local function cgt_wrapper(d, h, m)
 		stats.trips_no_time = stats.trips_no_time + 1
 		return -- a trip takes no game time in this world: nothing for the engine, nothing for the host
 	end
-	if core.is_host() then
+	if core.owns_world() then
 		local r = orig_cgt(d, h, m)
 		if a and minutes > 0 then after_skip(a.kind, minutes, core.self_id()) end
 		return r
@@ -242,7 +245,7 @@ function request_skip(kind, minutes, cont)
 	st.pending[t] = { kind = kind, minutes = minutes or 0, cont = cont, at = core.now() }
 	stats.proposals = stats.proposals + 1
 	core.tip(core.tr("st_coop_eco_waiting_group", "Asking the group..."), 3000)
-	if core.is_host() then
+	if core.owns_world() then
 		host_open(core.self_id(), t, kind, minutes or 0)
 	else
 		core.send("propose", { t = t, k = kind, m = math_floor(minutes or 0) }, 0)
@@ -339,8 +342,7 @@ host_open = function(from, ticket, kind, minutes)
 		return send_verdict(from, ticket, true)
 	end
 	local rule = core.rule("sleep_rule")
-	local api = rawget(_G, "coop")
-	if rule == "host" and api and api.is_dedicated and api.is_dedicated() then rule = "vote" end -- no host to decide: the players do
+	if rule == "host" and not coop_mode.seat_plays(0) then rule = "vote" end -- no host to decide: the players do
 	if rule == "host" then
 		if from == core.self_id() then
 			grant(from, ticket, kind, minutes)
@@ -373,6 +375,27 @@ end
 -- answered nil there and the arena started with no vote.
 local remote = {} -- map server: ticket -> { cb = on_result, until_ms = when the world server's silence is a no }
 local remote_seq = 0
+local MAX_VOTE_TICKET = 9007199254740991 -- largest safe integer in Lua
+local MAX_VOTE_ARG = 128
+local MAX_VERDICT_REASON = 16
+local MAX_VERDICT_NICKS = 16 * 48 + 15 * 2 -- up to 16 missing voters, 48 bytes/nick (coop_session.cpp), ", " between them
+
+local function optional_text(value, max_len)
+	return value == nil or (type(value) == "string" and #value <= max_len)
+end
+
+local function parse_voters(list)
+	-- propose_remote joins decimal seat numbers with commas (players 0..16).
+	if type(list) ~= "string" or #list > 50 then return nil end
+	local voters = {}
+	if list == "" then return voters end
+	for seat in (list .. ","):gmatch("([^,]*),") do
+		local peer = core.player_id(seat)
+		if peer == nil or seat ~= tostring(peer) then return nil end
+		voters[peer] = true
+	end
+	return voters
+end
 
 local function propose_remote(name, from, voters, on_result, arg)
 	local list = {}
@@ -405,8 +428,8 @@ end
 
 function propose(name, from, voters, on_result, arg)
 	if not (core.live() and type(on_result) == "function") then return nil end
-	if core.is_map_server() then return propose_remote(name, from, voters, on_result, arg) end
-	if not core.is_host() then return nil end
+	if coop_mode.leads_here() and not coop_mode.decides_world() then return propose_remote(name, from, voters, on_result, arg) end
+	if not core.owns_world() then return nil end
 	local here = {}
 	for _, p in ipairs(core.players()) do
 		if p.avatar_id then here[p.id] = true end -- a player still loading the world has no say yet
@@ -523,7 +546,7 @@ local function in_shelter()
 end
 
 local function answer(ht, yes)
-	if core.is_host() then
+	if core.owns_world() then
 		host_ballot(core.self_id(), ht, yes)
 	else
 		core.send("ballot", { t = ht, y = yes == true }, 0)
@@ -591,7 +614,7 @@ end
 -------------------------------------------------------------------------------
 local function register_events()
 	core.on("propose", function(t, from)
-		if not core.is_host() or from <= 0 then return end
+		if not core.owns_world() or from <= 0 then return end
 		local ticket = core.int(t.t, 1)
 		local kind = KINDS[t.k] and t.k ~= "travel" and t.k or nil
 		local minutes = core.num(t.m, 0, (core.rule("max_skip_hours") or 48) * 60)
@@ -599,39 +622,44 @@ local function register_events()
 		host_open(from, ticket, kind, minutes)
 	end)
 	core.on("ballot", function(t, from)
-		if not core.is_host() or from <= 0 then return end
+		if not core.owns_world() or from <= 0 then return end
 		local ht = core.int(t.t, 1)
 		if ht then host_ballot(from, ht, t.y == true) end
 	end)
 	core.on("skip", function(t, from)
-		if not core.is_host() or from <= 0 then return end
+		if not core.owns_world() or from <= 0 then return end
 		host_skip(from, t)
 	end)
-	-- A map server (a peer from 0x100 up: the authority of its level) asks for a vote among players: it runs here as the
-	-- world server's own, and its end goes back. A player's machine cannot ask this way.
+	-- Keep the vote relay handlers registered on every process so unexpected senders are counted.
+	-- A map server asks the world server to run the vote and return the verdict.
 	core.on("propose_for", function(t, from)
-		if not core.is_host() or from < 0x100 then return end
-		local k = core.int(t.k, 1)
-		local asker = core.int(t.f, 0)
-		if not (k and asker and type(t.g) == "string" and SUBJECTS[t.g]) then return end
-		local voters = {}
-		for v in tostring(t.v or ""):gmatch("%d+") do voters[tonumber(v)] = true end
+		local sender = coop_mode.from_level(from)
+		if not core.event_ok("economy_propose_for_sender", sender, "vote request from unexpected peer %s", tostring(from)) then return end
+		local k = core.int(t.k, 1, MAX_VOTE_TICKET)
+		local asker = core.player_id(t.f)
+		local voters = parse_voters(t.v)
+		local valid = k and asker and voters and type(t.g) == "string" and #t.g <= 64 and SUBJECTS[t.g] ~= nil
+			and optional_text(t.a, MAX_VOTE_ARG)
+		if not core.event_ok("economy_propose_for_payload", valid, "invalid vote request from map peer %s", tostring(from)) then return end
 		local function tell(ok, reason, nick)
 			core.send("verdict_for", { k = k, ok = ok == true, r = reason or "", n = nick or "" }, from)
 		end
 		if not propose(t.g, asker, voters, tell, t.a) then tell(false, "bad") end
 	end)
 	core.on("verdict_for", function(t, from)
-		if from ~= 0 or not core.is_map_server() then return end
-		local k = core.int(t.k, 1)
-		if k then remote_end(k, t.ok == true, type(t.r) == "string" and t.r ~= "" and t.r or nil, type(t.n) == "string" and t.n ~= "" and t.n or nil) end
+		local sender = from == 0 and coop_mode.leads_here() and not coop_mode.decides_world()
+		if not core.event_ok("economy_verdict_for_sender", sender, "vote verdict from unexpected peer %s", tostring(from)) then return end
+		local k = core.int(t.k, 1, MAX_VOTE_TICKET)
+		local valid = k and type(t.ok) == "boolean" and optional_text(t.r, MAX_VERDICT_REASON) and optional_text(t.n, MAX_VERDICT_NICKS)
+		if not core.event_ok("economy_verdict_for_payload", valid, "invalid vote verdict from peer %s", tostring(from)) then return end
+		remote_end(k, t.ok, t.r ~= "" and t.r or nil, t.n ~= "" and t.n or nil)
 	end)
 	core.on("vote", function(t, from)
-		if from ~= 0 or core.is_host() then return end
+		if from ~= 0 or core.owns_world() then return end
 		show_ballot(t)
 	end)
 	core.on("verdict", function(t, from)
-		if from ~= 0 or core.is_host() then return end
+		if from ~= 0 or core.owns_world() then return end
 		local ticket = core.int(t.t)
 		if not ticket then return end
 		if ticket < 0 then -- a vote I was asked about ended
@@ -642,7 +670,7 @@ local function register_events()
 		on_verdict_local(ticket, t.ok == true, t.r, t.n ~= "" and t.n or nil)
 	end)
 	core.on("fade", function(t, from)
-		if from ~= 0 or core.is_host() then return end
+		if from ~= 0 or core.owns_world() then return end
 		local minutes = core.num(t.m, 0, 1e6) or 0
 		local kind = KINDS[t.k] and t.k or "wait"
 		stats.fades = stats.fades + 1
@@ -660,7 +688,7 @@ local function actor_on_update()
 	local t = core.now()
 	if t < next_tick then return end
 	next_tick = t + 500
-	if core.is_host() then host_tick() end
+	if core.owns_world() then host_tick() end
 	for k, r in pairs(remote) do -- a map server: the world server never answered
 		if t > r.until_ms then remote_end(k, false, "timeout") end
 	end

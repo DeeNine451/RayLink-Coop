@@ -114,6 +114,7 @@ struct Trunk
 	bool start()
 	{
 		std::string err;
+		host.cfg.mode = SessionMode::Coop;
 		return host.host(&err);
 	}
 
@@ -123,6 +124,7 @@ struct Trunk
 		SessionSrv(host.s).issue_bridge(kMs, token_of(7));
 		world.cfg.hello_role = kHelloRoleMapServer;
 		world.cfg.hello_token = token_of(7);
+		world.cfg.mode = SessionMode::Server;
 		std::string err;
 		if (!world.connect(port_, &err))
 			return false;

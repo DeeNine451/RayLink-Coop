@@ -1,7 +1,11 @@
 -- Execute the installed GAMMA handler through RayLink's actual rewrite and recipient scope.
 dofile("tests/lua/support/harness_quests.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 local M = machine("host", 0)
 local E = M.env
+E.coop.is_host = function() return M.role == "host" end
+E.coop.is_client = function() return M.role == "client" end
+modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
 local proxy = M.new_obj(501, "coop_player_avatar", vec(), { _stalker = true })
 local other = M.new_obj(502, "coop_player_avatar", vec(), { _stalker = true })
 local victim = M.new_obj(100, "stalker", vec(), { _stalker = true })
@@ -12,7 +16,6 @@ local target, deltas, goodwill = 0, {}, {}
 E.character_community = function(o) return faction[o:id()] or "stalker" end
 E.coop_npc_players = {
  active = function() return M.active ~= false end,
- is_host = function() return M.role ~= "client" end,
  peer_of = function(o) local id = type(o) == "number" and o or o and o:id(); return ({[0]=0,[501]=1,[502]=2})[id] end,
  object_of_peer = function(peer) return ({[0]=M.actor,[1]=proxy,[2]=other})[peer] end,
  own_actor = function() return M.actor end,
@@ -212,16 +215,15 @@ check(not ok and not E.coop_reputation.in_personal_check() and E.db.actor == M.a
  "failed personal zone check restores identity and condition mode")
 -- owner 2026-11-13: goodwill said of the actor with no player behind it, on a map server or a world server whose seat plays no
 -- character, would be its ghost's: dropped; a player's own and an ordinary host's are unchanged
-E.coop_npc_players.actor_is_nobody = function() return true end
+E.coop.is_dedicated = function() return true end
 rr.change_community_goodwill("ecolog", 0, -50)
 rr.set_community_goodwill("ecolog", 0, 70)
 check(values["ecolog:0"] == nil, "the ghost actor of a world/map server gets no goodwill")
 check(rr.community_goodwill("ecolog", 0) == 0, "reading it is still allowed")
 T.with_character(501, function() rr.change_community_goodwill("ecolog", 0, -7) end)
 check(values["ecolog:501"] == -7, "a player's own goodwill still reaches him there")
-E.coop_npc_players.actor_is_nobody = function() return false end
+E.coop.is_dedicated = function() return false end
 rr.change_community_goodwill("ecolog", 0, -3)
 check(values["ecolog:0"] == -3, "an ordinary host's own goodwill is unchanged")
-E.coop_npc_players.actor_is_nobody = nil
 print(string.format("== %d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then error("failures") end

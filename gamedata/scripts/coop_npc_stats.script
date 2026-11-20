@@ -91,7 +91,7 @@ end
 function on_game_start()
 	if not sync() then return end
 	coop.sync.on_change("object", KEY, on_change)
-	if not coop_mode.is_player_mirror() then install_counter() end
+	install_counter() -- the layer may start later; the wrapper checks authority when it runs
 	local cm = rawget(_G, "coop_main") or coop_main
 	if cm then cm.add_event_handler(EV_UP, on_up) end
 end

@@ -86,6 +86,7 @@ TEST(world_events_server_relay_preserves_sender_rules)
 	constexpr uint16_t port = 38951;
 	Node world("World", port), map("Map", port), sender("Sender", port), listener("Listener", port);
 	world.cfg.host_plays = false;
+	world.cfg.mode = SessionMode::Server;
 	REQUIRE(world.host());
 	map.cfg.hello_role = kHelloRoleMapServer;
 	map.cfg.hello_token.fill(42);
@@ -138,6 +139,7 @@ TEST(world_events_coop_relay_preserves_player_and_host)
 {
 	constexpr uint16_t port = 38952;
 	Node host("Host", port), sender("Sender", port), listener("Listener", port);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	REQUIRE(sender.connect(port));
 	REQUIRE(listener.connect(port));

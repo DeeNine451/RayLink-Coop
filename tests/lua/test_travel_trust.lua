@@ -4,6 +4,7 @@
 -- every player (q = 1) is no forced move and is not checked. coop_economy_core / _group / _travel on a host and two
 -- clients with stub engines. Run: tools\test_lua.cmd travel_trust
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 -- story points of this level (real names of STORY_POINTS) and a path no story teleport uses
 local PATHS = {
@@ -42,6 +43,7 @@ local function setup(nclients)
 	end
 	local mods = { "coop_trust", "coop_economy_core", "coop_economy_group", "coop_economy_travel" }
 	for _, W in pairs(WORLDS) do
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		for _, n in ipairs(mods) do load_script(W, n) end
 		for _, n in ipairs(mods) do
 			if W[n].on_game_start then W[n].on_game_start() end

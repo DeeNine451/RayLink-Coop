@@ -19,7 +19,10 @@ local function setup(nclients)
 			add_entity(W, lid, "coop_player_avatar", nil, POS[q])
 		end
 	end
-	for p, W in pairs(WORLDS) do start_world(W) end
+	for _, W in pairs(WORLDS) do
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
+		start_world(W)
+	end
 	return WORLDS[0], WORLDS[1], WORLDS[2]
 end
 
@@ -194,8 +197,6 @@ function is_actor_disguised() return is_disguised end
 section("providers: disguise state and its relation keys are read from gameplay_disguise")
 do
 	local H, A = setup(1)
-	local facade = load_script(A, "coop_mode")
-	modes.live(facade, function(name) return load_script(A, name) end)
 	A.coop_mods_core = load_script(A, "coop_mods_core")
 	local gd = setmetatable({}, { __index = A })
 	setfenv(assert(loadstring(DISGUISE, "=gameplay_disguise")), gd)()

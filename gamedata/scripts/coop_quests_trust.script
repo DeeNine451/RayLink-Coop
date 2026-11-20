@@ -742,6 +742,7 @@ local function talked(peer, id)
 	local core = qc()
 	local api = rawget(_G, "coop")
 	if core and core.is_far_peer and core.is_far_peer(peer) then
+		if not coop_mode.decides_world() then return false end
 		local facts = coop_mode.facts_of(peer)
 		return facts == nil or facts.talking ~= false
 	end

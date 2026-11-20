@@ -19,6 +19,7 @@ using t::Node;
 void join_one(Node& host, Node& cl, uint16_t port)
 {
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	REQUIRE(cl.connect(port, &err));
 	REQUIRE(t::pump_until({&host.s, &cl.s}, 5000, [&] { return cl.s.is_active() && host.s.peers().size() == 1; }));

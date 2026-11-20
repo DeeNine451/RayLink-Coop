@@ -84,7 +84,7 @@ function split_mode()
 	return faction_flow() ~= nil
 end
 
-local function authority() return coop_mode ~= nil and coop_mode.decides_world() end
+local function authority() return active() and coop_mode ~= nil and coop_mode.decides_world() end
 
 local function tr(id) return game.translate_string(id) end
 

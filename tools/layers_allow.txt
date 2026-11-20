@@ -1,4 +1,4 @@
-# ceiling: 349
+# ceiling: 273
 # Today's violations of the layer rules (tools/check_layers.py, docs/MODES.md section 5).
 # rule|path|code of the line, comments dropped, white space collapsed|count. The ceiling only goes down:
 # a migration step deletes lines here and lowers the ceiling in the same commit (python -I tools\check_layers.py
@@ -85,25 +85,11 @@ L1|engine/src/xrGame/coop/coop_script.cpp|if (t < -1 || (t > lua_Number(kMaxPlay
 L1|engine/src/xrGame/coop/coop_script.cpp|lua_pushboolean(L, levels::split() && id != self && level != levels::my_level());|1
 L1|engine/src/xrGame/coop/coop_survival.cpp|if (victim && ghost_actor() && smart_cast<CActor*>(victim) == g_actor)|1
 L1|engine/src/xrGame/coop/coop_sync_api.cpp|if (bound && !sn::cast_reaches(level, levels::level_of_player(p.id), levels::on_host_level(p.id)))|1
-L1|gamedata/scripts/coop_economy_core.script|function is_map_server() return api ~= nil and api.is_active() and api.is_map_server ~= nil and api.is_map_server() == true end|1
 L1|gamedata/scripts/coop_economy_core.script|if not (is_host() and type(l) == "table" and type(l.map_servers) == "function") then return out end|1
-L1|gamedata/scripts/coop_economy_core.script|local l = api and api.levels|2
+L1|gamedata/scripts/coop_economy_core.script|local l = api and api.levels|1
 L1|gamedata/scripts/coop_economy_core.script|local ok, list = pcall(l.map_servers)|1
-L1|gamedata/scripts/coop_economy_give.script|if not (core.is_host() or core.is_map_server()) then return end|1
-L1|gamedata/scripts/coop_economy_group.script|if core.is_map_server() then return propose_remote(name, from, voters, on_result, arg) end|1
-L1|gamedata/scripts/coop_economy_group.script|if from ~= 0 or not core.is_map_server() then return end|1
-L1|gamedata/scripts/coop_economy_group.script|if rule == "host" and api and api.is_dedicated and api.is_dedicated() then rule = "vote" end|1
-L1|gamedata/scripts/coop_economy_intent.script|if not (core.is_host() or core.is_map_server() or not core.in_session()) then return end|1
-L1|gamedata/scripts/coop_economy_intent.script|if not (core.is_host() or core.is_map_server()) or from <= 0 then return end|1
-L1|gamedata/scripts/coop_economy_travel.script|if not (core.is_client() and core.live() and db.actor) or core.is_map_server() then return end|1
-L1|gamedata/scripts/coop_economy_world.script|if not p.is_self and p.pos and (not l or l.level_of_player(p.id) == mine) then out[#out + 1] = p.pos end|1
-L1|gamedata/scripts/coop_economy_world.script|local map_server = core.is_map_server()|1
 L1|gamedata/scripts/coop_encounters.script|for _, ms in ipairs(l.map_servers()) do|1
 L1|gamedata/scripts/coop_encounters.script|if not (l and l.split and l.split() == true and l.map_servers) then return nil end|1
-L1|gamedata/scripts/coop_loot_claim.script|if leads() then|1
-L1|gamedata/scripts/coop_loot_claim.script|if not (leads() and rule_on()) then return end|1
-L1|gamedata/scripts/coop_loot_claim.script|if not leads() or type(from) ~= "number" or from == 0 then return end|2
-L1|gamedata/scripts/coop_loot_claim.script|return qc.is_host() or qc.is_map_server()|1
 L1|gamedata/scripts/coop_mods_core.script|for _, ms in ipairs(l.map_servers()) do|1
 L1|gamedata/scripts/coop_mods_core.script|function is_bridge(peer)|1
 L1|gamedata/scripts/coop_mods_core.script|if not (l and l.map_servers and is_world_server()) then return false end|1
@@ -115,7 +101,6 @@ L1|gamedata/scripts/coop_quests_core.script|for _, it in ipairs(api.levels.carri
 L1|gamedata/scripts/coop_quests_core.script|function is_map_server() return active() and api.is_map_server ~= nil and api.is_map_server() == true end|1
 L1|gamedata/scripts/coop_quests_core.script|local bridge = l and l.split and l.split() == true and l.bridge_of_player and l.bridge_of_player(from)|1
 L1|gamedata/scripts/coop_quests_core.script|local l = api.levels|1
-L1|gamedata/scripts/coop_reputation.script|if id == 0 and name ~= "community_goodwill" and players.actor_is_nobody and players.actor_is_nobody() then return end|1
 L1|gamedata/scripts/coop_reward_group.script|if api and api.is_dedicated and api.is_dedicated() then host_out = true end|1
 L2|engine/src/xrGame/coop/coop_levels.cpp|const PeerId bridge = arg_whole(L, 1, double(kMaxPeerSlots - 1), peer) && mgr().is_host() && !on_host_level(PeerId(peer)) ?|1
 L2|engine/src/xrGame/coop/coop_levels.cpp|const bool told = arg_whole(L, 1, double(kMaxPeerSlots - 1), peer) && mgr().is_host() && body_facts(join::proxy_of_peer(PeerId(peer)), facts);|1
@@ -135,46 +120,8 @@ L2|engine/src/xrGame/coop/coop_script.cpp|bool l_is_host() { return mgr().is_hos
 L2|engine/src/xrGame/coop/coop_script.cpp|lua_pushboolean(L, mgr().active() && world::owners_known());|1
 L2|engine/src/xrGame/coop/coop_world.cpp|bool owners_known() { return is_map_authority() || g_owners_known; }|1
 L2|gamedata/scripts/coop_client_binders.script|local role = not api and "no engine API" or api.is_host() and "host" or api.is_client() and "client" or "off"|1
-L2|gamedata/scripts/coop_economy_core.script|elseif e.avatar_id and api.is_host() then|1
 L2|gamedata/scripts/coop_economy_core.script|function is_host() return api ~= nil and api.is_active() and api.is_host() end|1
 L2|gamedata/scripts/coop_economy_core.script|if not (is_host() and type(l) == "table" and type(l.map_servers) == "function") then return out end|1
-L2|gamedata/scripts/coop_economy_give.script|if core.is_host() then|1
-L2|gamedata/scripts/coop_economy_give.script|if not (core.is_host() or core.is_map_server()) then return end|1
-L2|gamedata/scripts/coop_economy_group.script|if core.is_host() then host_tick() end|1
-L2|gamedata/scripts/coop_economy_group.script|if core.is_host() then|3
-L2|gamedata/scripts/coop_economy_group.script|if from ~= 0 or core.is_host() then return end|3
-L2|gamedata/scripts/coop_economy_group.script|if not core.is_host() or from < 0x100 then return end|1
-L2|gamedata/scripts/coop_economy_group.script|if not core.is_host() or from <= 0 then return end|3
-L2|gamedata/scripts/coop_economy_group.script|if not core.is_host() then return nil end|1
-L2|gamedata/scripts/coop_economy_intent.script|elseif core.is_host() then|1
-L2|gamedata/scripts/coop_economy_intent.script|if not (core.is_host() or core.is_map_server() or not core.in_session()) then return end|1
-L2|gamedata/scripts/coop_economy_intent.script|if not (core.is_host() or core.is_map_server()) or from <= 0 then return end|1
-L2|gamedata/scripts/coop_economy_mdata.script|elseif core.is_host() then|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() and t >= wmd_next_poll then|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() or from ~= 0 or type(str) ~= "string" then return end|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() or from ~= 0 then return end|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() or not SE_HOST_ONLY[entry[2]] then|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() or not SE_HOST_ONLY[key] then se_queue(tx.source, key, value) end|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() then se_release_held() end|1
-L2|gamedata/scripts/coop_economy_mdata.script|if core.is_host() then|1
-L2|gamedata/scripts/coop_economy_mdata.script|if not core.is_host() or from <= 0 then return end|1
-L2|gamedata/scripts/coop_economy_mdata.script|local host = core.is_host()|2
-L2|gamedata/scripts/coop_economy_money.script|if not is_world_server() then return end|1
-L2|gamedata/scripts/coop_economy_money.script|local function is_world_server()|1
-L2|gamedata/scripts/coop_economy_travel.script|if core.is_host() then|4
-L2|gamedata/scripts/coop_economy_world.script|elseif not se and core.is_host() then|1
-L2|gamedata/scripts/coop_economy_world.script|if capture_depth > 0 or not core.is_host() or core.others_count() == 0 then return orig(smart, ...) end|1
-L2|gamedata/scripts/coop_economy_world.script|if core.is_host() and core.others_count() > 0 then pcall(bake_pending) end|1
-L2|gamedata/scripts/coop_economy_world.script|if core.is_host() then mdata.coop_world_rolls = taken_rolls end|1
-L2|gamedata/scripts/coop_economy_world.script|if core.is_host() then|2
-L2|gamedata/scripts/coop_economy_world.script|if from ~= 0 or core.is_host() then return end|2
-L2|gamedata/scripts/coop_economy_world.script|if not (core.is_host() or map_server) then return end|1
-L2|gamedata/scripts/coop_economy_world.script|if not core.is_host() or type(from) ~= "number" or from < 0x100 then return end|1
-L2|gamedata/scripts/coop_economy_world.script|taken_rolls = core.is_host() and type(mdata.coop_world_rolls) == "table" and mdata.coop_world_rolls or {}|1
-L2|gamedata/scripts/coop_loot_claim.script|if not qc.is_host() then return end|1
-L2|gamedata/scripts/coop_loot_claim.script|if qc.is_host() then|1
-L2|gamedata/scripts/coop_loot_claim.script|local rows = qc.is_host() and type(m_data) == "table" and m_data.coop_loot_claims|1
-L2|gamedata/scripts/coop_loot_claim.script|return qc.is_host() or qc.is_map_server()|1
 L2|gamedata/scripts/coop_menu.script|set_control(self.invite, active and api.is_host() and type(api.steam_invite_ready) == "function" and api.steam_invite_ready() == true, true)|1
 L2|gamedata/scripts/coop_mods_core.script|function is_world_server()|1
 L2|gamedata/scripts/coop_mods_core.script|if not (l and l.map_servers and is_world_server()) then return false end|1
@@ -182,16 +129,7 @@ L2|gamedata/scripts/coop_mods_pdata.script|if not (C().is_world_server() and typ
 L2|gamedata/scripts/coop_npc_players.script|function is_host()|1
 L2|gamedata/scripts/coop_npc_players.script|function is_world_server()|1
 L2|gamedata/scripts/coop_quests_core.script|function is_host() return active() and api.is_host() == true end|1
-L2|gamedata/scripts/coop_reputation.script|if checking_personal or not players.is_host() or type(condlist) ~= "table" then return false end|1
-L2|gamedata/scripts/coop_reputation.script|if coop_npc_players.is_host() and id == 0 then|1
-L2|gamedata/scripts/coop_reputation.script|if coop_npc_players.is_host() and tasks.personal_character() ~= nil then|1
-L2|gamedata/scripts/coop_reputation.script|if coop_npc_players.is_host() then character, name = death_penalty(victim, killer) end|1
-L2|gamedata/scripts/coop_reputation.script|if not coop_npc_players.active() or coop_npc_players.is_host() then return original(self, ...) end|1
-L2|gamedata/scripts/coop_reputation.script|if not players.is_host() then return end|1
-L2|gamedata/scripts/coop_reputation.script|if players.active() and players.is_host() and players.peer_of(actor) ~= nil then|1
 L2|gamedata/scripts/coop_testplan.script|local ready = a.is_active() and ((a.is_client() and a.is_live()) or a.is_host())|1
-L2|gamedata/scripts/coop_trader_reputation.script|if not host() then return end|1
-L2|gamedata/scripts/coop_trader_reputation.script|local function host() return active() and api.is_host() == true end|1
 L3|engine/src/xrCoop/coop_newchar.h|#include "coop_world_stage.h"|1
 L3|engine/src/xrCoop/coop_reconcile.h|#include "coop_level_hash.h"|1
 L3|engine/src/xrCoop/coop_reconcile.h|const uint64_t a = xfer::mix64(uint64_t(uint32_t(community)) + 0x2545F4914F6CDD1Dull);|1

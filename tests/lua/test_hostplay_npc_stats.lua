@@ -65,14 +65,19 @@ F.as(client, function()
 	STATE = CLIENT_STATE
 	local m = load_module("coop_npc_stats")
 	m.on_game_start()
-	check(game_statistics.increment_npc_statistic == orig_inc, "a client leaves the stock counter alone")
+	local writes, set = 0, coop.sync.set
+	coop.sync.set = function(...) writes = writes + 1; return set(...) end
+	game_statistics.increment_npc_statistic(npc(501), "killed_stalkers")
+	coop.sync.set = set
+	check(CLIENT_STATE[501] and CLIENT_STATE[501].killed_stalkers == 1 and writes == 0,
+		"a client counts through stock without publishing an authority hint")
 	STATE = saved
 end)
 game_statistics.increment_npc_statistic = wrapped
 
 -- a kill on the host
 F.as(host, function() game_statistics.increment_npc_statistic(npc(500), "killed_stalkers") end)
-check(CALLS == 1, "the stock counter ran")
+check(CALLS == 2, "the stock counter ran once on each process")
 check(STATE[500].killed_stalkers == 1, "the host's own table")
 do
 	local saved = STATE

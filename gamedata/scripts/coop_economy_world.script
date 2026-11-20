@@ -38,10 +38,8 @@ local capture_depth = 0
 -- coordinates of that level.
 local function other_player_positions()
 	local out = {}
-	local l = core.split_levels() and core.engine().levels or nil
-	local mine = l and l.my_level()
 	for _, p in ipairs(core.players()) do
-		if not p.is_self and p.pos and (not l or l.level_of_player(p.id) == mine) then out[#out + 1] = p.pos end
+		if not p.is_self and p.pos and coop_mode.where(p.id) == "here" then out[#out + 1] = p.pos end
 	end
 	return out
 end
@@ -54,7 +52,7 @@ local function patch_warfare()
 	end
 	local orig = stw.process_manual_capture
 	stw.process_manual_capture = function(smart, ...)
-		if capture_depth > 0 or not core.is_host() or core.others_count() == 0 then return orig(smart, ...) end
+		if capture_depth > 0 or not core.owns_world() or core.others_count() == 0 then return orig(smart, ...) end
 		local positions = other_player_positions()
 		if #positions == 0 then return orig(smart, ...) end
 		stats.captures_checked = stats.captures_checked + 1
@@ -135,10 +133,19 @@ end
 -- Host: every rolled world item gets its value as soon as it can carry it.
 -- Taken items no longer have a world_itm_on entry; their retries belong to the item, not its reusable spot.
 local taken_rolls, roll_errors = {}, {}
+local saved_rolls -- a save loaded before this process has a session
+
+local function use_saved_rolls()
+	if not saved_rolls then return end
+	if core.owns_world() then taken_rolls = saved_rolls end
+	saved_rolls = nil
+end
 
 -- coop_mods_ammo: a taken pack whose world-loot count is not written yet. game_setup sets that count before it merges
 -- packs; merging such a pack first would let the late roll overwrite rounds moved into it.
-function roll_waiting(id) return taken_rolls[id] ~= nil end
+function roll_waiting(id)
+	return taken_rolls[id] ~= nil or (saved_rolls ~= nil and core.owns_world() and saved_rolls[id] ~= nil)
+end
 
 local function try_bake(gs, id, section, num)
 	local ok, done = pcall(bake, gs, id, section, num)
@@ -165,7 +172,7 @@ local function bake_taken(gs)
 			end
 			if roll.applied then
 				local delivered = true
-				if core.is_host() then
+				if core.owns_world() then
 					-- The owner must apply it too: coop_items enforces the owner's state on its host copy.
 					roll.sent = roll.sent or {}
 					for _, p in ipairs(core.players()) do
@@ -177,13 +184,14 @@ local function bake_taken(gs)
 				end
 				if delivered then taken_rolls[id] = nil end
 			end
-		elseif not se and core.is_host() then
+		elseif not se and core.owns_world() then
 			taken_rolls[id], roll_errors[id] = nil, nil -- destroyed, rather than a future reused id
 		end
 	end
 end
 
 local function bake_pending()
+	use_saved_rolls()
 	local gs = gs_ready()
 	if not gs then return end
 	local spawned = {} -- point name -> the id of what stands there now
@@ -204,6 +212,7 @@ end
 
 -- World server: a player took world loot, on its level or on a map server's (far: there is no object of it here).
 local function world_item_taken(peer, id, section, far)
+	use_saved_rolls()
 	local gs = gs_ready()
 	if not gs then return end
 	local name = gs.world_itm_on[id]
@@ -230,11 +239,12 @@ end
 -- server's: a map server tells it.
 local function npc_on_item_take(npc, item)
 	if not (npc and item) then return end
-	local map_server = core.is_map_server()
-	if not (core.is_host() or map_server) then return end
+	if not core.in_session() then return end
+	local world = coop_mode.decides_world()
+	if not (world or coop_mode.leads_here()) then return end
 	local peer = core.engine().peer_of_avatar(npc:id())
 	if peer == nil or peer == core.self_id() then return end
-	if map_server then
+	if not world then
 		core.send("loot_took", { p = peer, id = item:id(), s = item:section() }, 0)
 		return
 	end
@@ -252,7 +262,7 @@ local function patch_game_setup()
 	if type(orig) == "function" then
 		gs.try_spawn_world_item = function(...)
 			local r = orig(...)
-			if core.is_host() and core.others_count() > 0 then pcall(bake_pending) end
+			if core.owns_world() and core.others_count() > 0 then pcall(bake_pending) end
 			return r
 		end
 	end
@@ -262,28 +272,42 @@ end
 -------------------------------------------------------------------------------
 -- Events, update, status, start
 -------------------------------------------------------------------------------
+local function loot_roll_value(gs, section, value)
+	-- Match the ranges of ammo_set_count (u16), set_remaining_uses (u8) and condition (0..1).
+	if IsItem("ammo", section) then return core.int(value, 0, 65535) end
+	if gs.limited_uses[section] then return core.int(value, 0, 255) end
+	return core.num(value, 0, 1)
+end
+
 local function register_events()
+	-- Keep the Core handler so out-of-role reports reach the same refusal counter in co-op.
 	core.on("loot_took", function(t, from)
-		if not core.is_host() or type(from) ~= "number" or from < 0x100 then return end
-		local id, section, peer = core.int(t.id, 1, 65534), core.word(t.s, 128), core.num(t.p, 0)
-		if id and section and peer then world_item_taken(peer, id, section, true) end
+		local sender = coop_mode.from_level(from)
+		if not core.event_ok("economy_loot_took_sender", sender, "world loot report from unexpected peer %s", tostring(from)) then return end
+		local id, section, peer = core.int(t.id, 1, 65534), core.word(t.s, 128), core.player_id(t.p)
+		if not core.event_ok("economy_loot_took_payload", id and section and peer ~= nil,
+			"invalid world loot report from map peer %s", tostring(from)) then return end
+		world_item_taken(peer, id, section, true)
 	end)
 	core.on("loot_roll", function(t, from)
-		if from ~= 0 or not core.is_client() then return end
-		local id, section, num = core.int(t.id, 1, 65534), core.word(t.s, 128), core.num(t.n, 0)
+		local sender = from == 0 and core.follows_world()
+		if not core.event_ok("economy_loot_roll_sender", sender, "world loot roll from unexpected peer %s", tostring(from)) then return end
 		local gs = gs_ready()
-		if not (id and section and num and gs) then return end
+		local id, section = core.int(t.id, 1, 65534), core.word(t.s, 128)
+		local num = gs and section and loot_roll_value(gs, section, t.n)
+		if not core.event_ok("economy_loot_roll_payload", id and section and num,
+			"invalid or unavailable world loot roll from peer %s", tostring(from)) then return end
 		id = core.local_id(id)
 		taken_rolls[id] = { s = section, n = num }
 		bake_taken(gs) -- may wait for streaming or a temporarily unavailable setter
 	end)
 	core.on("wf_tip", function(t, from)
-		if from ~= 0 or core.is_host() then return end
+		if from ~= 0 or core.owns_world() then return end
 		local s = core.word(t.s, 96)
 		if s then show_capture_tip(s) end
 	end)
 	core.on("loot_taken", function(t, from)
-		if from ~= 0 or core.is_host() then return end
+		if from ~= 0 or core.owns_world() then return end
 		local id = core.int(t.id, 1, 65534)
 		local typ = core.word(t.t, 64)
 		local gs = core.mod("game_setup")
@@ -294,10 +318,11 @@ end
 local next_bake = 0
 local function actor_on_update()
 	if not core.live() then return end
+	use_saved_rolls()
 	local t = core.now()
 	if t < next_bake then return end
 	next_bake = t + 1000
-	if core.is_host() then
+	if core.owns_world() then
 		if core.others_count() > 0 or next(taken_rolls) then pcall(bake_pending) end
 	else
 		local gs = gs_ready()
@@ -324,10 +349,19 @@ function on_game_start()
 	register_events()
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("save_state", function(mdata)
-		if core.is_host() then mdata.coop_world_rolls = taken_rolls end
+		if not core.owns_world() then return end
+		use_saved_rolls()
+		mdata.coop_world_rolls = taken_rolls
 	end)
 	RegisterScriptCallback("load_state", function(mdata)
-		taken_rolls = core.is_host() and type(mdata.coop_world_rolls) == "table" and mdata.coop_world_rolls or {}
-		roll_errors, next_bake = {}, 0
+		taken_rolls, roll_errors, next_bake = {}, {}, 0
+		saved_rolls = nil
+		local rows = mdata.coop_world_rolls
+		if type(rows) ~= "table" then return end
+		if coop_mode.decides_world() then
+			taken_rolls = rows
+		elseif not core.in_session() then
+			saved_rolls = rows
+		end
 	end)
 end

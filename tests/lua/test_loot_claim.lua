@@ -690,6 +690,37 @@ do
 	end
 end
 
+print("== saved claims before hosting or joining")
+do
+	local saved = { coop_loot_claims = { { v = 701, k = 801 } } }
+	for _, dedicated in ipairs({ false, true }) do
+		local W = machine("host", 0)
+		setup_world(W)
+		W.env.coop.is_dedicated = function() return dedicated end
+		W.active = false
+		boot(W)
+		fire(W, "load_state", saved)
+		W.active = true
+		local out = {}
+		fire(W, "save_state", out)
+		local rows = out.coop_loot_claims or {}
+		check(#rows == 1 and rows[1].v == 701 and rows[1].k == 801,
+			(dedicated and "Server" or "Co-op") .. ": the first session save contains the claim loaded before hosting")
+	end
+
+	local M = machine("client", 1)
+	setup_world(M)
+	M.active = false
+	boot(M)
+	fire(M, "load_state", saved)
+	M.active = true
+	local claims = M.env.coop_loot_claim
+	check(claims.claim_of(701) == nil, "the mirror cannot see a local save's claim before the first frame")
+	M.handlers["quests.loot_claim"](H.encode({ v = 702, k = 802 }), 0)
+	fire(M, "actor_on_update")
+	check(claims.claim_of(701) == nil and claims.claim_of(702) == 802, "joining uses the host's claims, including events before the first update")
+end
+
 print("== single player")
 do
 	local S = machine("host", 0)

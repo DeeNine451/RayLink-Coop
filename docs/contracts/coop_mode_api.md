@@ -316,4 +316,5 @@ string argument: the guard reads no string, so `coop_mode.hook("levels.level_of_
 
 - LevelSide H-FIGHTREP `level_fight_reputation(character, delta)`: сервер карты отправляет FactMsg наверх как Relation op 17; никто другой на его карте — ничего.
 - Mode H-OPCMD `send_operator_command(line)`: none, хост и клиент кооп-режима, сервер мира и сервер карты отвечают Unreachable; игрок сервера — Refused при `!op::allowed`, иначе Sent или Unreachable от сессии.
+- Mode VEH-DISC `departure(peer, character)` → `Departure`: none, хост и клиент кооп-режима, сервер мира и игрок сервера отвечают Disconnected; сервер карты — `mapserver::departure_of`: что сказал `LevelMap` мира, когда ушёл его виртуальный узел (нет строки — Disconnected, строка на другой карте — LeftLevel, строка на этой — Replaced; без записи — Disconnected). Ядро спрашивает только пира, которого нет в сессии (`session_facts`).
 - Layer `join_request(address, via)`: слой Коопа возвращает приглашение Steam; слой Сервера и none — false.

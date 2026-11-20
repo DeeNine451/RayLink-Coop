@@ -408,5 +408,15 @@ do
 	check(A.env.get_actor_true_community() == "dolg" and comm(A) == "actor_bandit", "sync restores the true faction and leaves the disguise")
 end
 
+section("the world faction waits for the session")
+do
+	local cf = split_setup()
+	Hm.env.coop_game_settings = { world_faction = function() return "bandit" end }
+	Hm.active = false
+	check(Hm.env.coop_mode.decides_world() and cf.group_faction() == nil, "the pre-session world does not answer the session group faction")
+	Hm.active = true
+	check(cf.group_faction() == "bandit", "once hosting, the world answers from its own faction setting")
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then os.exit(1) end

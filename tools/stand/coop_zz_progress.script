@@ -1,0 +1,351 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57, stand only. The map authority makes the body. The keeper witnesses facts and the stored report.
+local NICK, STEP_FILE = "progress_tester", "zz_progress_step.txt"
+local STEP_M, STEPS, STEP_MS = 20, 15, 1500
+local role, step_path, next_poll, failed = nil, nil, 0, false
+local corpse_id, kill_sent, corpse_ready
+local phase, client_map, origin, endpoint, walk_at, steps = nil, nil, nil, nil, 0, 0
+local search_id, before_search
+local guest_peer, guest_character, pending, honest_xp, skills_done
+local step_m, corpse_search, facts_ready = 0, 0, false
+local walking = false
+local allow_report, report_sent = false, false
+
+local function flush()
+	pcall(function() get_console():execute("flush") end)
+end
+
+local function out(fmt, ...)
+	printf("%s", "[progress-stand] " .. string.format(fmt, ...))
+	flush()
+end
+
+local function read_step()
+	step_path = step_path or getFS():update_path("$fs_root$", STEP_FILE)
+	local file = io.open(step_path, "r")
+	if not file then return end
+	local step = file:read("*l")
+	file:close()
+	return step
+end
+
+local function object_id(n)
+	return type(n) == "number" and n > 0 and n < 65535 and n == math.floor(n)
+end
+
+local function distance_xz(a, b)
+	return math.sqrt((a.x - b.x)^2 + (a.z - b.z)^2)
+end
+
+local function near(a, b, meters)
+	return distance_xz(a, b)^2 + (a.y - b.y)^2 <= meters^2
+end
+
+local function vertex(pos)
+	local id = level.vertex_id(pos)
+	if id and id >= 0 and id < 0xffffffff then return id, level.vertex_position(id) end
+end
+
+local function walk_endpoint(start)
+	for i = 0, 15 do
+		local angle = i * math.pi / 8
+		local target = vector():set(start.x + STEP_M * math.cos(angle), start.y, start.z + STEP_M * math.sin(angle))
+		local _, ground = vertex(target)
+		if ground and near(ground, target, 1.5) then
+			local distance = distance_xz(start, ground)
+			if math.abs(distance - STEP_M) <= 0.5 then
+				local scale = STEP_M / distance
+				return vector():set(start.x + (ground.x - start.x) * scale, ground.y + 0.25,
+					start.z + (ground.z - start.z) * scale)
+			end
+		end
+	end
+end
+
+local function tester_peer()
+	for _, p in ipairs(coop_mods_core.players()) do
+		if not p.is_self and p.nick == NICK then return p.id end
+	end
+end
+
+local function make_corpse()
+	if corpse_ready or not coop_mode.leads_here() then return end
+	local peer = tester_peer()
+	local body = peer and coop_mode.where(peer) == "here" and coop_mode.decider(peer) == "this"
+		and coop_mods_core.avatar(peer)
+	if not (body and body:alive()) then return end
+	if not corpse_id then
+		local pos = body:position()
+		for i = 0, 7 do
+			local angle = i * math.pi / 4
+			local target = vector():set(pos.x + 2 * math.cos(angle), pos.y, pos.z + 2 * math.sin(angle))
+			local lv, ground = vertex(target)
+			if ground and near(ground, target, 1.5) then
+				local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
+				corpse_id = assert(alife_create("sim_default_stalker_3", ground, lv, gv), "cannot spawn the veteran").id
+				break
+			end
+		end
+		assert(object_id(corpse_id), "no valid corpse spawn next to the player")
+	end
+	local corpse = level.object_by_id(corpse_id)
+	if not corpse then return end
+	if corpse:alive() then
+		if not kill_sent then
+			kill_sent = true
+			corpse:kill(corpse, false) -- The guest gets no kill credit.
+		end
+		return
+	end
+	assert(IsStalker(corpse), "the stand corpse is not a stalker")
+	assert(ranks.get_obj_rank_name(corpse) == "veteran", "the stand corpse must award veteran XP")
+	if not near(body:position(), corpse:position(), 5) then return end
+	local host_id = coop_mods_core.hid(corpse_id)
+	assert(object_id(host_id), "cannot translate the corpse id")
+	corpse_ready = true
+	out("corpse map=%s id=%d", level.name(), host_id)
+end
+
+local function scavenging(skills)
+	return type(skills) == "table" and skills.scavenging
+end
+
+local function experience(data)
+	local row = type(data) == "table" and scavenging(data.skills_levels)
+	local xp = type(row) == "table" and row.experience
+	if type(xp) == "number" and xp >= 0 and xp <= coop_progress_check.constants.max_number then return xp end
+end
+
+local function trust_counts()
+	local checked, rejected, refused = 0, 0, 0
+	for name, row in pairs(coop_trust.status()) do
+		if name:match("^progress_") then
+			checked, rejected, refused = checked + row.checked, rejected + row.failed, refused + row.refused
+		end
+	end
+	return checked, rejected, refused
+end
+
+local function prepare_keeper()
+	if guest_peer or not coop_mode.decides_world() then return end
+	local peer = tester_peer()
+	local character = peer and coop.avatar_of(peer)
+	if not (object_id(peer) and object_id(character)) then return end
+	assert(coop_trust.mode_of("progress_skills") == "log", "run the progress stand with progress_skills=log")
+	guest_peer, guest_character = peer, character
+	local progress = coop_progress_check
+
+	-- Co-op's observe calls note locally. Server calls note only after the world tally
+	-- receiver has validated the transport sender, assignment, sequence and amounts.
+	local note = progress.note
+	progress.note = function(id, kind, amount, meta)
+		local recorded = note(id, kind, amount, meta)
+		if recorded and walking and not facts_ready and id == character and coop.avatar_of(peer) == character and amount > 0 then
+			if kind == "step_m" then step_m = step_m + amount end
+			if kind == "corpse_search" and meta and meta.rank == "veteran"
+				and (read_step() or ""):match("^search %d+$") then
+				corpse_search = corpse_search + amount
+			end
+		end
+		return recorded
+	end
+
+	local filter = progress.filter
+	progress.filter = function(id, from, clean, previous)
+		if not (from == peer and id == character and facts_ready and not pending) then
+			return filter(id, from, clean, previous)
+		end
+		local xp = experience(clean)
+		if not xp then return filter(id, from, clean, previous) end
+		local command = read_step() or ""
+		local expected = command:match("^honest (%d+%.%d%d%d%d%d%d)$")
+		local snapshot = expected and progress.snapshot(character)
+		local baseline = snapshot and experience(snapshot.records) or 0
+		local honest = not honest_xp and expected == string.format("%.6f", xp)
+			and xp - baseline > progress.constants.skill_allowance
+		local inflated = command == "skills" and honest_xp and not skills_done and xp - honest_xp == 5000
+		if not (honest or inflated) then return filter(id, from, clean, previous) end
+
+		-- Attribute the counter changes and the exact failed check to this transport report.
+		-- Restore the trust entry even if the real filter raises.
+		local checked, rejected, refused = trust_counts()
+		local pass, budget_failed = coop_trust.pass, false
+		coop_trust.pass = function(name, ok, fmt, ...)
+			if name == "progress_skills" and not ok and fmt == "progress check failed: %s"
+				and (...) == "scavenging: budget" then budget_failed = true end
+			return pass(name, ok, fmt, ...)
+		end
+		local ok, accepted, fixes = pcall(filter, id, from, clean, previous)
+		coop_trust.pass = pass
+		if not ok then error(accepted, 0) end
+		local after_checked, after_rejected, after_refused = trust_counts()
+		pending = { xp = xp, prior_token = previous and previous.t, honest = honest, budget_failed = budget_failed,
+			checked = after_checked - checked, rejected = after_rejected - rejected, refused = after_refused - refused }
+		return accepted, fixes
+	end
+	out("keeper ready peer=%d character=%d", peer, character)
+end
+
+local function keeper_step(step)
+	if step == "ready" then prepare_keeper() end
+	if not guest_peer then return end
+	assert(coop.avatar_of(guest_peer) == guest_character, "the keeper's guest changed")
+	if step == "walk" then walking = true end
+	if not facts_ready and step:match("^search %d+$") and step_m > 0 and corpse_search > 0 then
+		facts_ready = true
+		out("keeper facts peer=%d character=%d step_m=%.1f corpse_search=%d rank=veteran",
+			guest_peer, guest_character, step_m, corpse_search)
+	end
+	if pending then
+		local store = alife_storage_manager.get_state().coop_mods_pdata
+		local record = store and store[tostring(guest_character)]
+		if not (record and type(record.t) == "string" and record.t ~= pending.prior_token) then return end
+		assert(experience(record.d) == pending.xp, "the keeper stored a different report")
+		if pending.honest then
+			assert(pending.checked > 0 and pending.rejected == 0 and pending.refused == 0,
+				"trust flagged the guest's honest report")
+			assert(record.progress_checked and experience(record.progress_checked.records) == pending.xp,
+				"the keeper did not store the checked honest record")
+			honest_xp = pending.xp
+			out("honest accepted peer=%d character=%d xp=%.6f checked=%d failed=0 refused=0",
+				guest_peer, guest_character, honest_xp, pending.checked)
+		else
+			assert(pending.budget_failed and pending.rejected > 0 and pending.refused == 0,
+				"trust did not log the +5000 scavenging budget failure")
+			skills_done = true
+			out("skills budget failed peer=%d character=%d delta=5000", guest_peer, guest_character)
+		end
+		pending = nil
+	end
+	if step == "rank" then flush() end
+end
+
+local function walk(actor, now)
+	if now < walk_at then return end
+	if not origin then
+		local p = actor:position()
+		origin = vector():set(p.x, p.y, p.z)
+		endpoint = assert(walk_endpoint(origin), "no walkable point 20 m from the start")
+	elseif not near(actor:position(), steps % 2 == 0 and origin or endpoint, 2) then
+		error("the player did not reach the previous walking step")
+	end
+	if steps == STEPS then
+		phase = "walked"
+		out("client walked %d steps, %.1f m", STEPS, distance_xz(origin, endpoint) * STEPS)
+		return
+	end
+	actor:set_actor_position(steps % 2 == 0 and endpoint or origin)
+	steps, walk_at = steps + 1, now + STEP_MS
+end
+
+local function skill()
+	return assert(scavenging(haru_skills.skills_levels), "Haru scavenging is unavailable")
+end
+
+local function hold_automatic_reports()
+	local send = coop_mods_core.send_big
+	coop_mods_core.send_big = function(verb, ...)
+		if verb ~= "pd" then return send(verb, ...) end
+		if not allow_report then return false end
+		report_sent = send(verb, ...)
+		return report_sent
+	end
+end
+
+local function send_report()
+	allow_report, report_sent = true, false
+	local ok, err = pcall(coop_mods_pdata.report_now)
+	allow_report = false
+	if not ok then error(err, 0) end
+	assert(report_sent, "the client did not send its pdata report")
+end
+
+local function search(actor, host_id)
+	if not search_id then
+		local id = coop_mods_core.lid(host_id)
+		local corpse = object_id(id) and level.object_by_id(id)
+		if not (corpse and IsStalker(corpse) and not corpse:alive() and near(actor:position(), corpse:position(), 6)) then return end
+		local binder = assert(corpse:binded_object(), "the stand corpse has no stalker binder")
+		search_id, before_search = corpse:id(), skill().experience
+		binder:use_callback(corpse, actor)
+		return
+	end
+	local gui, xp = ui_inventory.GUI, skill().experience
+	if gui and gui.mode == "loot" and gui.npc_id == search_id and gui:IsShown() and xp > before_search then
+		gui:Close()
+		local delta = xp - before_search
+		assert(delta > coop_progress_check.constants.skill_allowance, "the search XP fits the unconditional allowance")
+		phase = "searched"
+		out("client searched id=%d xp=%.6f delta=%.6f", host_id, xp, delta)
+	end
+end
+
+local function client_step(step, actor, now)
+	if not coop_mode.is_player_mirror() then return end
+	local map = level.name()
+	assert(not client_map or client_map == map, "the player changed maps")
+	assert(actor:alive(), "the player died")
+	if step == "ready" and not phase then
+		skill()
+		hold_automatic_reports()
+		client_map, phase = map, "ready"
+		out("client ready map=%s", map)
+	elseif step == "walk" and phase == "ready" then
+		walk(actor, now)
+	elseif phase == "walked" then
+		local host_id = tonumber(step:match("^search (%d+)$"))
+		if object_id(host_id) then search(actor, host_id) end
+	elseif phase == "searched" then
+		local expected = step:match("^honest (%d+%.%d%d%d%d%d%d)$")
+		if expected then
+			local xp = skill().experience
+			assert(expected == string.format("%.6f", xp), "scavenging XP changed during the wait for facts")
+			send_report()
+			phase = "honest"
+			out("client honest report xp=%.6f", xp)
+		end
+	elseif step == "skills" and phase == "honest" then
+		local scav = skill()
+		scav.experience = scav.experience + 5000
+		send_report()
+		phase = "skills"
+		out("client added 5000 scavenging XP and reported")
+	elseif step == "rank" and phase == "skills" then
+		actor:change_character_rank(5000)
+		phase = "rank"
+		out("client added 5000 rank")
+	end
+end
+
+local function update()
+	if failed or not (coop.is_live() and db.actor) then return end
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+	local ok, err = pcall(function()
+		local step = read_step()
+		if not step then return end
+		if role == "client" then
+			client_step(step, db.actor, now)
+		else
+			if step == "spawn" and (role == "host" or role == "body") then make_corpse() end
+			if role == "host" or role == "world" then keeper_step(step) end
+		end
+	end)
+	if not ok then
+		failed = true
+		out("FAIL %s", tostring(err))
+	end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	if role or not ok or type(line) ~= "string" then return end
+	local probe = line:match("%-coop_probe%s+(%S+)")
+	if probe == "prg_client" then role = "client"
+	elseif probe == "prg_host" then role = "host"
+	elseif probe == "prg_world" then role = "world"
+	elseif not probe then role = "body" -- The launcher supplies no probe to its child; make_corpse asks who leads.
+	else return end
+	RegisterScriptCallback("actor_on_update", update)
+end

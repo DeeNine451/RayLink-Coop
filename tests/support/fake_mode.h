@@ -21,6 +21,10 @@
 // spots and from what the test says of the map servers: m.bridge(peer) (that peer is a map server's bridge), m.level_up(level)
 // (the map server of that level is up), m.map_down(peer) (nobody leads the map of that player now). m.world_level(level): the level
 // the world server stands on, as a player's loading screen sees it.
+//
+// VEH-DISC: departure(peer, character) answers Disconnected in every kind but a map server, which answers what its world's LevelMap
+// said when that player left its level: m.departed(peer, character, why) writes it, m.came(peer) drops it
+// (tests/test_vehicle_departure.cpp checks the real modes' answers against these).
 #pragma once
 
 #include "coop_ghost_rules.h"
@@ -68,6 +72,8 @@ struct ModeCase
 	bool level_ghost = false; // ghost_said and on_world_live are the level's (its actor is a ghost on a map it leads)
 	// INTEG-C (H-OPCMD): an operator's line goes to a world server from here (a player of a server world)
 	bool operator_link = false;
+	// VEH-DISC: departure() says how a player left (a map server: what its world's LevelMap said, m.departed); the others Disconnected
+	bool departure_facts = false;
 };
 
 inline const std::vector<ModeCase>& mode_cases()
@@ -75,7 +81,7 @@ inline const std::vector<ModeCase>& mode_cases()
 	using coop::Decider;
 	using coop::Where;
 	// the last five of a row (A-S6-IF): has_level_side, level_filter, delivers_links, server_loading_line, level_ghost; then
-	// operator_link (INTEG-C), true for a player of a server world only
+	// operator_link (INTEG-C), true for a player of a server world only; then departure_facts (VEH-DISC), true for a map server only
 	static const std::vector<ModeCase> cases = {
 		// the co-op host plays, everybody stands on his one map; he decides for every character
 		{"coop_host", {true, true, true, true, coop::host_roles()}, Where::Here, Where::Here, Where::Here, Where::Joining, Where::Here,
@@ -91,7 +97,7 @@ inline const std::vector<ModeCase>& mode_cases()
 		// session, which has no LocalLink (review A-REV-E-1, finding 2); its reports go up through up()
 		{"map_server", {false, false, true, false, coop::map_server_roles()}, Where::Away, Where::Here, Where::Away, Where::Joining,
 			Where::Away, Decider::Nobody, Decider::This, Decider::Other, Decider::This, Decider::Nobody, true, true, true, false, false, true,
-			true},
+			true, false, true},
 		// a player of a server world: his map's server decides, the world server's seat is nobody's character
 		{"server_client", {true, false, false, false, coop::client_roles()}, Where::Here, Where::Here, Where::Away, Where::Here,
 			Where::Away, Decider::Other, Decider::Other, Decider::Other, Decider::Other, Decider::Nobody, false, true, false, false, false,
@@ -212,6 +218,10 @@ public:
 	void level_up(uint16_t level) { m_ready.insert(level); }
 	void map_down(coop::PeerId peer) { m_down.insert(peer); }
 	void world_level(uint16_t level) { m_world_level = level; }
+	// VEH-DISC: what the world's LevelMap said when `peer` left this process's level with `character` (a map server's book); came()
+	// drops it, as his virtual peer's return to the level does.
+	void departed(coop::PeerId peer, uint16_t character, coop::Departure why) { m_gone[peer] = {character, why}; }
+	void came(coop::PeerId peer) { m_gone.erase(peer); }
 	FakeLevelSide& side() { return m_side; }
 
 	const char* name() const override { return m_case.name; }
@@ -314,6 +324,14 @@ public:
 			return coop::OperatorSend::Unreachable;
 		return coop::op::allowed(line) ? coop::OperatorSend::Sent : coop::OperatorSend::Refused;
 	}
+	// VEH-DISC, as the real modes answer: a map server what its book says of that peer with that character, everybody else Disconnected
+	coop::Departure departure(coop::PeerId peer, uint16_t character) const override
+	{
+		const auto it = m_gone.find(peer);
+		if (!m_case.departure_facts || it == m_gone.end() || it->second.first != character)
+			return coop::Departure::Disconnected;
+		return it->second.second;
+	}
 
 	std::vector<Sent> delivered; // deliver and stream, when this kind delivers
 	std::vector<Sent> sent_up; // up, when this kind sends up
@@ -334,6 +352,7 @@ private:
 	std::set<coop::PeerId> m_bridges, m_down;
 	std::set<uint16_t> m_ready;
 	uint16_t m_world_level = 0xffff;
+	std::map<coop::PeerId, std::pair<uint16_t, coop::Departure>> m_gone; // VEH-DISC: peer -> his character here, how he left
 	FakeLevelSide m_side;
 };
 } // namespace t

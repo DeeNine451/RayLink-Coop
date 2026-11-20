@@ -346,6 +346,32 @@ TEST(srv_join_core_asks_the_mode)
 	CHECK(sj_has(sj_body(join, R"(void\s+arrival_begin)"), "!mode().actor_is_player()"));
 }
 
+TEST(srv_join_map_exits_even_on_malformed_session_reset)
+{
+	const auto handler = sj_body(sj_engine("xrGame/coop/srv/coop_srv_join.cpp"), R"(void\s+map_on_session_reset)");
+	REQUIRE(!handler.empty());
+	CHECK(sj_order(handler, "from != kHostPeer", "r.str()"));
+	CHECK(sj_order(handler, "if (!r.ok())", "malformed SessionReset"));
+	CHECK(sj_order(handler, "malformed SessionReset", "mapserver::server_session_over()"));
+	const size_t malformed = handler.find("if (!r.ok())");
+	const size_t quit = handler.find("mapserver::server_session_over()", malformed);
+	REQUIRE(quit != std::string::npos);
+	CHECK(!sj_has(handler.substr(malformed, quit - malformed), "return"));
+	CHECK(!sj_has(handler, "mgr().stop("));
+}
+
+TEST(coop_join_level_move_refuses_with_the_requests_sequence)
+{
+	const auto source = sj_engine("xrGame/coop/hostplay/coop_hostplay_mode.cpp");
+	const auto install = sj_body(source, R"(void\s+install)");
+	CHECK(sj_has(install, "tables.session.on(Msg::LevelMove, &join::refuse_level_move)"));
+	const auto handler = sj_body(sj_engine("xrGame/coop/coop_join.cpp"), R"(void\s+refuse_level_move)");
+	CHECK(sj_order(handler, "if (!request.read(r))", "return;"));
+	CHECK(sj_order(handler, "return;", "request.seq"));
+	CHECK(sj_has(handler, "Result::Refused, Result::Invalid, levels::wire::kNoLevel"));
+	CHECK(sj_order(handler, "result.write(w)", "send(from, Lane::Reliable, Msg::LevelMoveResult, w)"));
+}
+
 // ---------------------------------------------------------------- Server: the feed lines on a player's machine
 
 // srv/coop_srv_join.cpp feed_frame: the world server's table as this machine sees it, the PDA feed, the texts of st_srv_feed.xml filled
@@ -372,8 +398,8 @@ TEST(srv_feed_frame_in_the_source)
 
 // ---------------------------------------------------------------- Co-op: nothing of the server in the Core's join
 
-// The Core's join installs no LevelMove (the co-op never installs it: the group moves together) and names no part of the server: no map
-// server, no dedicated host, no split levels, none of their headers. The co-op's mode calls nothing of the server's join.
+// The Core's join installs no LevelMove handler and names no part of the server: no map server, no dedicated host, no split levels.
+// The co-op mode installs its own refusal and calls nothing of the server's join.
 TEST(srv_join_coop_has_none_of_it)
 {
 	const std::string join = sj_engine("xrGame/coop/coop_join.cpp");

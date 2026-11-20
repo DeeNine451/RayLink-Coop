@@ -1,5 +1,6 @@
 -- Group goodwill uses world game time and stable character keys. Native APIs are stood in at the boundary.
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local NOW = 5 * 86400
 local REAL_NOW = 1800000000
@@ -41,6 +42,7 @@ local function boot()
 		end
 		W.xr_conditions = { actor_goodwill_ge = function(_, _, p) return W.GOODWILL[p[1]][0] >= tonumber(p[2]) end }
 		W.xr_logic = { parse_condlist = function(_, section, field, source) return { source = source, field = field, section = section } end }
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		load_script(W, "coop_economy_core")
 		load_script(W, "coop_economy_mdata").on_game_start()
 		load_script(W, "coop_trader_state")
@@ -187,6 +189,7 @@ fire(H, "load_state", role_save)
 H.coop_trader_reputation.refresh()
 
 section("group goodwill: dedicated roster, bridge delivery and join saves")
+H.coop.is_dedicated = function() return true end
 local roster = H.coop.players
 H.coop.players = function()
 	local peers = {}
@@ -198,8 +201,10 @@ H.coop.players = function()
 end
 PLAYERS[3] = { nick = "map server", proxy = 65535 }
 local M = make_world(3)
+M.coop.is_map_server = function() return true end
 M.coop.is_player = function() return false end
 M.xr_conditions, M.xr_logic = {}, { parse_condlist = function() end }
+modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
 load_script(M, "coop_economy_core")
 load_script(M, "coop_economy_mdata").on_game_start()
 load_script(M, "coop_trader_state")

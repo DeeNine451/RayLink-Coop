@@ -181,7 +181,7 @@ local function trade_scheme(C, P)
 		return function(self, ...)
 			-- A remote deal has no host ActorMenu_on_trade_started to seed this
 			-- counter. Preserve existing totals and the stock reaction/UI flags.
-			if (coop_mode.decides_world() or coop_mode.leads_here()) and self.st.all_money == nil then self.st.all_money = 0 end
+			if P.active() and (coop_mode.decides_world() or coop_mode.leads_here()) and self.st.all_money == nil then self.st.all_money = 0 end
 			return old(self, ...)
 		end
 	end)

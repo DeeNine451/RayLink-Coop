@@ -11,7 +11,7 @@
 -- names do NOT say what the roles say - a script that still asks is_host() / is_client() then does the wrong thing:
 --   names_world   is_world_server() yes, is_host() no           world-side Lua must run
 --   names_mirror  is_mirror() yes, is_client() no               mirror-only Lua must run
---   not_world     is_host() yes, is_world_server() no           world-side Lua must stay quiet
+--   not_world     playing co-op host with a false legacy is_world_server() answer
 --   dedicated     the world server with no player (plan 12)      player-facing Lua must stay quiet
 --   old_host / old_client   a build without the role functions: the old pair answers (the scripts fall back to it)
 MODE = "host"
@@ -33,7 +33,7 @@ local ROLES = {
 	client = { mode = "client", host = false, client = true, world = false, player = true, mirror = true },
 	names_world = { mode = "host", host = false, client = false, world = true, player = true, mirror = false, dedicated = true },
 	names_mirror = { mode = "client", host = false, client = false, world = false, player = true, mirror = true },
-	not_world = { mode = "host", host = true, client = false, world = false, player = false, mirror = false, map_server = true, split = true },
+	not_world = { mode = "host", host = true, client = false, world = false, player = true, mirror = false },
 	dedicated = { mode = "host", host = true, client = false, world = true, player = false, mirror = false, dedicated = true },
 	map_server = { mode = "host", host = true, client = false, world = false, player = false, map_server = true, split = true },
 	server_player = { mode = "client", host = false, client = true, world = false, player = true, split = true },
@@ -215,21 +215,16 @@ local function same_claims(a, b)
 end
 
 -- =================================================================== coop_checkpoints
-local function start_survival_mode(role)
+local function start_survival_mode()
 	load_script("coop_mode").on_game_start()
 	modes.live(coop_mode)
-	if role == "old_host" then
-		-- Preserve the pre-role engine's non-playing host answer for the two legacy consumer checks.
-		-- The live co-op host has a playing actor and is exercised by hostplayer above.
-		modes.install(coop_mode, "hostplay", { actor_is_player = answer(false) })
-	end
 end
 
 local function load_checkpoints(role)
 	world(role)
 	xr_effects = { scenario_autosave = function() ORIG_STORY = ORIG_STORY + 1 end }
 	load_script("coop_main")
-	start_survival_mode(role)
+	start_survival_mode()
 	coop_checkpoints = nil
 	load_script("coop_checkpoints")
 	coop_checkpoints.on_game_start()
@@ -276,7 +271,7 @@ case("checkpoints: the host player's tent claim is the client's claim", function
 	check(ck.request("tent", 0) == false and #CLAIMS == 0, "outside a session: nothing")
 
 	ck = load_checkpoints("old_host")
-	check(ck.request("tent", 0) == false, "the legacy non-playing host answer refuses a co-op tent claim")
+	check(ck.request("tent", 0) == true, "the co-op host can claim a tent without a legacy player predicate")
 	ck = load_checkpoints("old_client")
 	check(ck.request("tent", 0) == true, "... and the client claims as before")
 end)
@@ -364,7 +359,7 @@ end
 
 local function load_rest(role)
 	world(role)
-	start_survival_mode(role)
+	start_survival_mode()
 	install_rest_api()
 	stock_sleep()
 	coop_rest, coop_checkpoints = nil, nil
@@ -412,7 +407,7 @@ case("rest: the host player lies down and folds the bag the client's way", funct
 
 	load_rest("old_host")
 	lie_down_at_bag(6)
-	check(rest_win() ~= nil and not rest_win().btn_fold:IsShown(), "the legacy non-playing host answer leaves Fold hidden")
+	check(rest_win() ~= nil and rest_win().btn_fold:IsShown(), "the co-op host can fold its bag without a legacy player predicate")
 end)
 
 case("rest: the world block is fed by the world server", function()
@@ -441,7 +436,7 @@ end)
 -- =================================================================== coop_death
 local function load_death(role)
 	world(role)
-	start_survival_mode(role)
+	start_survival_mode()
 	coop_death = nil
 	load_script("coop_death")
 	coop_death.on_game_start()
@@ -503,7 +498,7 @@ case("money: the rules are pushed by the world server, the host player gives lik
 	check(#RULES_PUSHED >= 1, "the world server pushes the transfer rules into the ledger (old name says no)")
 	load_money("not_world")
 	advance(2500, 500)
-	check(#RULES_PUSHED == 0, "is_host yes but not the world server: nothing is pushed")
+	check(coop_mode.actor_is_player() and #RULES_PUSHED >= 1, "the playing co-op host pushes rules even when is_world_server says no")
 	load_money("client")
 	advance(2500, 500)
 	check(#RULES_PUSHED == 0, "a client pushes nothing")
@@ -577,9 +572,8 @@ case("core_player: the group move and /go", function()
 	run_time_events(1000)
 	check(count_of(EXEC, function(c) return c == "coop_accept_transition" end) == 1, "... then the engine moves the group")
 	load_player("not_world")
-	check(coop_core_player.accept_transition() == false, "is_host yes but not the world server: /go is refused")
-	run_time_events(100)
-	check(#EXEC == 0, "... and no engine command")
+	check(coop_core_player.accept_transition() == true, "the playing co-op host accepts /go even when is_world_server says no")
+	check(count_of(EXEC, function(c) return c == "coop_accept_transition" end) == 1, "... and runs the engine command once")
 	load_player("client")
 	check(coop_core_player.accept_transition() == false, "a client cannot accept the move of the group")
 end)
@@ -912,7 +906,7 @@ case("menu_char: world-side handlers run on the world server, accept peer 0, and
 	check(mh.is_new(0) and events_to(0, "menu.char_offer") == 1, "the world server (old name says no) marks and offers")
 	mh = load_menu_char("not_world")
 	CALLBACKS.coop_host_new_character(1)
-	check(not mh.is_new(0) and #SENT == 0, "is_host yes but not the world server: the callback does nothing")
+	check(mh.is_new(0) and events_to(0, "menu.char_offer") == 1, "the playing co-op host marks and offers even when is_world_server says no")
 	mh = load_menu_char("client")
 	CALLBACKS.coop_host_new_character(1)
 	check(not mh.is_new(0) and #SENT == 0, "a client: the callback does nothing")
@@ -940,11 +934,15 @@ case("menu_char: world-side handlers run on the world server, accept peer 0, and
 
 	-- F3a task 7: only the world server offers the host's choice (host_offer_self), as only it answers it
 	mh = load_menu_char("not_world")
-	check(mh.host_offer_self() == false and #SENT == 0, "is_host yes but not the world server: host_offer_self sends nothing")
+	check(mh.host_offer_self() == true and events_to(0, "menu.char_offer") == 1, "the playing co-op host offers to its own seat")
 	mh = load_menu_char("client")
 	check(mh.host_offer_self() == false and #SENT == 0, "a client: host_offer_self sends nothing")
 	mh = load_menu_char("names_world")
 	check(mh.host_offer_self() == true and events_to(0, "menu.char_offer") == 1, "the world server offers to peer 0")
 end)
 
+case("legacy disagreeing host fixture keeps its process kind", function()
+	check(ROLES.not_world.player == true and not ROLES.not_world.map_server and not ROLES.not_world.split,
+		"the legacy disagreeing host fixture is a playing process")
+end)
 done("HOST_AS_CLIENT")

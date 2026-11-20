@@ -328,13 +328,24 @@ TEST(vehicle_drive_release_reason_order)
 	CHECK(v::release_reason(f) == v::Release::CarGone);
 	f.on_map = false;
 	CHECK(v::release_reason(f) == v::Release::LeftLevel); // in the session, not on this map: co-op, he loads the world again
-	f.in_session = false;
-	// gone from the session and not on this map: a map server's level session drops the virtual peer of a player who went
-	// to another level (coop_trunk.cpp server_on_map)
+	f.same_character = false; // his player plays another character, or loads the world again for one: as before VEH-DISC
 	CHECK(v::release_reason(f) == v::Release::LeftLevel);
 	f.on_map = true;
-	// gone from the session while the mode still places him here: the co-op host's one map, his player disconnected
 	CHECK(v::release_reason(f) == v::Release::Disconnect);
+	// VEH-DISC (tests/test_vehicle_departure.cpp): gone from the session, the mode's fact of how decides, wherever it places him
+	f.in_session = false;
+	f.gone = coop::Departure::Disconnected; // he quit (the co-op host: every peer that leaves; a map server: no row of his)
+	CHECK(v::release_reason(f) == v::Release::Disconnect);
+	f.on_map = false;
+	CHECK(v::release_reason(f) == v::Release::Disconnect); // a map server's level session dropped him: still a quit
+	f.gone = coop::Departure::LeftLevel; // a map server: the LevelMap lists him on another level
+	CHECK(v::release_reason(f) == v::Release::LeftLevel);
+	f.on_map = true;
+	CHECK(v::release_reason(f) == v::Release::LeftLevel);
+	f.gone = coop::Departure::Replaced; // a map server: the LevelMap lists him here with another character or none
+	CHECK(v::release_reason(f) == v::Release::Disconnect);
+	f.on_map = false;
+	CHECK(v::release_reason(f) == v::Release::LeftLevel);
 	v::SitterFacts g;
 	g.body_online = false; // his character went from the map while his player stays: dead
 	CHECK(v::release_reason(g) == v::Release::Death);
@@ -482,4 +493,26 @@ TEST(vehicle_drive_group_transition_releases_the_seats)
 	const size_t own = seat.find("if (CCar* held = smart_cast<CCar*>(a->Holder()))");
 	const size_t rows = seat.find("\tcheck_own_rows();");
 	CHECK(own != std::string::npos && rows != std::string::npos && own < rows);
+}
+
+// Should-fix S2 of F5-REV-1 (both modes): CCar::Initiator names who did what the car did (a run-over hit, the explosion): the stock
+// Owner, else the car. A car a client drives has no Owner on the decider, so his kills, the relation and reputation changes, the
+// statistics and the task credit went to the car. The hook (docs/VEHICLES.md, coop_vehicles.h driver_of) names the client's character
+// in seat 0 after the stock Owner; nothing is installed in single player (driver_of answers kNoCharacter): the stock answer.
+TEST(vehicle_drive_initiator_is_the_client_driver)
+{
+	const std::string car = drive_project_file("engine/src/xrGame/Car.cpp");
+	REQUIRE(!car.empty());
+	const std::string initiator = drive_body(car, "u16 CCar::Initiator()");
+	REQUIRE(!initiator.empty());
+	const size_t owner = initiator.find("if (g_Alive() && Owner())");
+	const size_t owner_id = initiator.find("return Owner()->ID();");
+	const size_t driver = initiator.find("const u16 coop_driver = coop::vehicles::driver_of(u16(ID()));");
+	const size_t seated = initiator.find("if (g_Alive() && coop_driver != coop::vehicles::kNoCharacter)");
+	const size_t his = initiator.find("return coop_driver;");
+	const size_t stock = initiator.find("return ID();");
+	CHECK(owner != std::string::npos && owner_id != std::string::npos && driver != std::string::npos);
+	CHECK(seated != std::string::npos && his != std::string::npos && stock != std::string::npos);
+	CHECK(owner < owner_id && owner_id < driver && driver < seated && seated < his && his < stock);
+	CHECK(car.find("#include \"coop/coop_vehicles.h\"") != std::string::npos);
 }

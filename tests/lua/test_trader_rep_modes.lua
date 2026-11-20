@@ -5,6 +5,7 @@
 -- clients read the host's published view (mode, counted nicks, whose value is the best).
 -- Run: tools\test_lua.cmd trader_rep_modes   (needs GAMMA_SCRIPTS = <merged GAMMA>\gamedata\scripts)
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 dofile("tests/lua/support/mod_source.lua")
 assert(os.execute("python -B tests/lua/support/trader_catalog.py") == 0, "trader VFS catalog failed")
 local catalog = dofile("temp/trader_reputation/catalog.lua")
@@ -74,6 +75,7 @@ local function boot()
 			W.xr_logic = { parse_condlist = function(_, _, _, source) return source end }
 			W.xr_conditions = { actor_goodwill_ge = function() return false end }
 		end
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		load_script(W, "coop_economy_core")
 		load_script(W, "coop_economy_mdata").on_game_start()
 		load_script(W, "coop_trader_state")

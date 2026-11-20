@@ -167,6 +167,9 @@ task_status_functor.mirage_task_status_functor = function(tsk)
 end
 
 local far = {}
+nta_utils.actor_in_range = function(pos, dist)
+	return db.actor:position():distance_to_sqr(pos) < dist * dist
+end
 if role == "srv_world" then
 	far[500], far[600] = shooter, second
 	OBJ[500], OBJ[600], OBJ[heli:id()] = nil, nil, nil
@@ -265,6 +268,12 @@ end
 
 if role ~= "srv_world" then current_map = "zaton" end
 if role == "hostplay" or role == "srv_world" then
+	if role == "srv_world" then
+		local is_active = coop.is_active
+		coop.is_active = function() return false end
+		check(nta_utils.actor_in_range(host:position(), 1), "before hosting, NTA range checks use the stock actor")
+		coop.is_active = is_active
+	end
 	print("== m19:9 Mirage: a client's wave takes rank and name from that pass's server object")
 	local tsk = { stage = 0 }
 	task_status_functor.mirage_task_status_functor(tsk, "mirage")

@@ -68,6 +68,15 @@ using coop::task_target::Here;
 using coop::task_target::Take;
 using coop::task_target::take;
 
+TEST(task_target_default_here_has_no_authority_or_object)
+{
+	CHECK(!std::is_aggregate_v<Here>); // plain default initialization must use the same defaults as Here{}
+	Here h{};
+	CHECK(!h.level_object && !h.map_authority);
+	h.known = h.online = true;
+	CHECK(take(h) == Take::Online);
+}
+
 namespace
 {
 Here here(bool known, bool online, bool level_object, bool map_authority)

@@ -943,7 +943,7 @@ local function wrap_helis()
 	if type(aim) == "function" and not orig.heli_skyfall then
 		orig.heli_skyfall = aim
 		sky.set_player_enemy = function(...)
-			if not (coop_mode.decides_world() or coop_mode.leads_here()) then return aim(...) end
+			if not (P.active() and (coop_mode.decides_world() or coop_mode.leads_here())) then return aim(...) end
 			local go = sky.get_dynamic_heli()
 			local bound = go and go:binded_object()
 			local combat = bound and bound.st and bound.st.combat

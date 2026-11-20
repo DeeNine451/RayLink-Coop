@@ -787,3 +787,105 @@ TEST(progress_rules_book_forgets_an_old_world)
 	CHECK(book.on_world(1));
 	CHECK(!book.on_world(1));
 }
+
+// ---------------------------------------------------------------- Server: a map server's verified fight (F5-REV-1 should-fix S3)
+
+// The world server keeps the record as the alife object, which a map server's fight never touches: host_apply_fight puts the fight's
+// reputation into the stored report (g_reported) only, so the put-back, or his next report, rose by the fight against the window alone
+// ("log": a false "would refuse" line for every honest fight; "refuse": the fight cut from his record). coop.progress.
+// apply_verified_fight now credits the keeper with it (Book::credit_keeper), as the co-op host's record credits its own fights. The
+// probe of the review: the fight +40, the window 10.
+TEST(progress_rules_world_server_verified_fight_is_the_keepers)
+{
+	const pr::Values start = values(1000, 50, 3);
+	Window win;
+	win.rank = 0;
+	win.reputation = 10;
+	FactionAnswer f;
+	// co-op: the host's fight changed his record itself (the probe's co-op line)
+	{
+		pr::Book book;
+		book.check(kPeer, kChar, report(start, start), modes(pr::Trust::Log), 1000, win, f);
+		const pr::Outcome o =
+		    book.check(kPeer, kChar, report(values(1000, 90, 3), values(1000, 90, 3)), modes(pr::Trust::Log), 2000, win, f);
+		CHECK_EQ(int(o.failed), 0);
+		CHECK_EQ(o.base.reputation, 90);
+	}
+	// Server: the record stays 50, the fight is the keeper's credit
+	pr::Book book;
+	book.check(kPeer, kChar, report(start, start), modes(pr::Trust::Refuse), 1000, win, f);
+	book.credit_keeper(kPeer, kChar, 40, 1500);
+	const pr::Outcome put = book.check(kPeer, kChar, report(values(1000, 90, 3), start), modes(pr::Trust::Refuse), 2000, win, f);
+	CHECK_EQ(int(put.failed), 0);
+	CHECK_EQ(put.out.reputation, 90);
+	CHECK_EQ(put.budget.reputation, 50);
+	CHECK(put.commit);
+	// spent once: 40 more is the window and the carried 10 (20), not the fight again
+	const pr::Outcome more = book.check(kPeer, kChar, report(values(1000, 130, 3), start), modes(pr::Trust::Refuse), 3000, win, f);
+	CHECK_EQ(int(more.failed), int(pr::kReputation));
+	CHECK_EQ(more.out.reputation, 110);
+
+	// only for the peer's own character, a rise, a peer the book knows; kept kCreditMs, as the co-op host's credit
+	pr::Book other;
+	other.check(kPeer, kChar, report(start, start), modes(pr::Trust::Refuse), 1000, win, f);
+	other.credit_keeper(kPeer, kChar + 1, 40, 1500); // another character on his slot
+	other.credit_keeper(kPeer, kChar, -40, 1500); // a fight that cost him: no credit (a loss always passes)
+	other.credit_keeper(kPeer + 1, kChar, 40, 1500); // nobody the book knows: no entry made
+	CHECK(other.find(kPeer + 1) == nullptr);
+	REQUIRE(other.find(kPeer) != nullptr);
+	CHECK_EQ(other.find(kPeer)->keeper_rep, int64_t(0));
+	other.credit_keeper(kPeer, kChar, 40, 1500);
+	CHECK_EQ(other.find(kPeer)->keeper_rep, int64_t(40));
+	other.credit_keeper(kPeer, kChar, 5000, 1600); // capped as the record's credit
+	CHECK_EQ(other.find(kPeer)->keeper_rep, pr::kMaxCreditReputation);
+	pr::Book late;
+	late.check(kPeer, kChar, report(start, start), modes(pr::Trust::Refuse), 1000, win, f);
+	late.credit_keeper(kPeer, kChar, 40, 1500);
+	const pr::Outcome stale =
+	    late.check(kPeer, kChar, report(values(1000, 90, 3), start), modes(pr::Trust::Refuse), 1500 + pr::kCreditMs + 1, win, f);
+	CHECK_EQ(int(stale.failed), int(pr::kReputation));
+	CHECK_EQ(stale.out.reputation, 60);
+}
+
+// The engine half: apply_verified_fight credits the keeper after host_apply_fight took the fight, with the same peer, character and
+// delta (the Server path; the co-op host's fights reach the book through its record).
+TEST(progress_rules_engine_credits_a_verified_fight)
+{
+	const std::string src = progress_project_file("engine/src/xrGame/coop/coop_progress.cpp");
+	const std::string apply = progress_body(src, "int l_apply_verified_fight(lua_State* L)");
+	REQUIRE(!apply.empty());
+	const size_t applied = apply.find("ok = host_apply_fight(PeerId(p), u16(c), int(d));");
+	const size_t taken = apply.find("if (ok)", applied);
+	const size_t credit = apply.find("g.book.credit_keeper(u32(p), u16(c), int64_t(d), mgr().now_ms());");
+	CHECK(applied != std::string::npos && taken != std::string::npos && credit != std::string::npos);
+	CHECK(applied < taken && taken < credit);
+}
+
+// Note 2 of F5-REV-1: the book and the counters are one session's (only Book::on_world forgot them before): sync::reset() calls
+// progress::reset(), which starts the state afresh.
+TEST(progress_rules_engine_forgets_a_session)
+{
+	const std::string api = progress_project_file("engine/src/xrGame/coop/coop_progress.h");
+	CHECK(api.find("\nvoid reset();") != std::string::npos);
+	const std::string src = progress_project_file("engine/src/xrGame/coop/coop_progress.cpp");
+	const std::string reset = progress_body(src, "void reset()");
+	REQUIRE(!reset.empty());
+	CHECK(reset.find("g = State();") != std::string::npos);
+	const std::string sync = progress_body(progress_project_file("engine/src/xrGame/coop/coop_sync.cpp"), "void reset()");
+	REQUIRE(!sync.empty());
+	CHECK(sync.find("progress::reset();") != std::string::npos);
+}
+
+// Note 4 of F5-REV-1: the keeper adds a fight's reputation to the stored report of a player who may have told any number ("log"): the
+// sum is made in 64 bits and kept in the int range, no signed overflow.
+TEST(progress_rules_engine_added_reputation_stays_in_range)
+{
+	const std::string story = progress_project_file("engine/src/xrGame/coop/coop_story.cpp");
+	// the definition, not the forward declaration above it in the same file
+	const std::string add = progress_body(story, std::string("void host_add_reported_reputation(PeerId peer, int delta)") + "\n{");
+	REQUIRE(!add.empty());
+	CHECK(add.find("it->second.reputation += delta") == std::string::npos);
+	const size_t sum = add.find("const s64 sum = s64(it->second.reputation) + s64(delta);");
+	const size_t kept = add.find("it->second.reputation = int(sum > s64(INT_MAX) ? INT_MAX : (sum < s64(INT_MIN) ? INT_MIN : sum));");
+	CHECK(sum != std::string::npos && kept != std::string::npos && sum < kept);
+}

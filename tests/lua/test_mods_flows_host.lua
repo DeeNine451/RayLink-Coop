@@ -494,4 +494,20 @@ check(lamp_count() == before + 1 and SE[reload_source.id] == nil, "glowstick: lo
 
 coop_main.print_status()
 check(coop_mods_core.stats.errors == 0, "no Lua errors (" .. coop_mods_core.stats.errors .. ")")
+
+local modes = dofile("tests/lua/support/modes.lua")
+modes.install(coop_mode, "srv_world")
+local active = false
+coop.is_active = function() return active end
+actor_status_sleep.get_last_sleep = function() return 10000 end
+SENT = {}
+NOW = NOW + 6000
+SendScriptCallback("actor_on_update")
+check(not sent("mods.sleepy_max"), "server sleep: no send before hosting")
+active = true
+NOW = NOW + 6000
+SendScriptCallback("actor_on_update")
+local push = sent("mods.sleepy_max")
+check(push and push.v == 10000, "server sleep: the first live tick still sends an unchanged pre-session value")
+
 done("FLOWS HOST")

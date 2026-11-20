@@ -4,6 +4,10 @@ local installed = false
 local checking_personal = false
 local raw_goodwill
 
+local function owns_reputation()
+	return coop_npc_players.active() and (coop_mode.decides_world() or coop_mode.leads_here())
+end
+
 -- World snapshots/PDA name a character explicitly and must not inherit a reward recipient.
 function goodwill_of(faction, id)
 	return (raw_goodwill or relation_registry.community_goodwill)(faction, id)
@@ -25,7 +29,7 @@ end
 function for_actor(actor, fn, ...)
 	local players = coop_npc_players
 	if not players.active() then return fn(...) end
-	if not players.is_host() then return end -- mirrors must not run a second authoritative penalty
+	if not owns_reputation() then return end -- mirrors must not run a second authoritative penalty
 	local id = responsible_character(actor)
 	if id == nil then return end -- an NPC without a player owner is not the host
 	local recipient = body(id)
@@ -60,7 +64,7 @@ function in_personal_check() return checking_personal end
 -- expanded audience (which also contains nearby innocent players).
 function pick_offence(obj, npc, condlist, evaluate)
 	local players = coop_npc_players
-	if checking_personal or not players.is_host() or type(condlist) ~= "table" then return false end
+	if checking_personal or not owns_reputation() or type(condlist) ~= "table" then return false end
 	local offences = {}
 	for i, cond in ipairs(condlist) do
 		local zone, penalty = false, false
@@ -101,12 +105,11 @@ local function install_relations()
 			if type(original) == "function" then
 				registry[name] = function(faction, id, ...)
 					local tasks = coop_tasks
-					if coop_npc_players.is_host() and id == 0 then
+					if id == 0 and owns_reputation() then
 						if name ~= "community_goodwill" and tasks.each_personal(registry[name], faction, id, ...) then return end
 						id = tasks.personal_character() or id
 						-- no player behind it: the ghost actor of a map server / a dedicated world server earns nothing (owner 2026-11-13)
-						local players = coop_npc_players
-						if id == 0 and name ~= "community_goodwill" and players.actor_is_nobody and players.actor_is_nobody() then return end
+						if id == 0 and name ~= "community_goodwill" and not coop_mode.actor_is_player() then return end
 					end
 					return original(faction, id, ...)
 				end
@@ -119,7 +122,7 @@ local function install_relations()
 		if type(original) == "function" then
 			effects[name] = function(actor, npc, ...)
 				local tasks = coop_tasks
-				if coop_npc_players.is_host() and tasks.personal_character() ~= nil then
+				if owns_reputation() and tasks.personal_character() ~= nil then
 					if tasks.each_personal(effects[name], actor, npc, ...) then return end
 					actor = body(tasks.personal_character())
 					if not actor then return end
@@ -155,7 +158,7 @@ local function install_death()
 		end
 		-- Resolve the leader before stock removes the dead member from its squad.
 		local character, name
-		if coop_npc_players.is_host() then character, name = death_penalty(victim, killer) end
+		if owns_reputation() then character, name = death_penalty(victim, killer) end
 		local previous, outer_count = game_statistics.increment_statistic, active_count
 		local count = active_count or previous
 		active_count = count -- nested deaths must not award through the outer suppression wrapper
@@ -202,7 +205,7 @@ local function install_heli()
 	local original = class and class.on_hit
 	if type(original) ~= "function" then return end
 	class.on_hit = function(self, ...)
-		if not coop_npc_players.active() or coop_npc_players.is_host() then return original(self, ...) end
+		if not coop_npc_players.active() or owns_reputation() then return original(self, ...) end
 		-- Mirrored hit callbacks still play sounds and visuals; the level authority owns the award.
 		local gs = game_statistics
 		local count, npc_count = gs.increment_statistic, gs.increment_npc_statistic
@@ -267,7 +270,7 @@ function on_game_start()
 	if type(original) == "function" then
 		gs.increment_npc_statistic = function(actor, name, ...)
 			local players = coop_npc_players
-			if players.active() and players.is_host() and players.peer_of(actor) ~= nil then
+			if owns_reputation() and players.peer_of(actor) ~= nil then
 				return for_actor(actor, gs.increment_statistic, name, ...)
 			end
 			return original(actor, name, ...)

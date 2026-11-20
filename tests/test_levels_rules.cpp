@@ -29,6 +29,14 @@ constexpr uint64_t kT0 = 5000;
 
 // ---------------------------------------------------------------- who leads a level
 
+TEST(authority_default_seat_plays)
+{
+	const Seat s{};
+	CHECK(s.plays);
+	CHECK_EQ(s.level, kNoLevel);
+	CHECK(!s.in_world);
+}
+
 // Owner 2026-11-18, no hybrid: no host's process leads a level. Every level with a player on it, seat 0 included, is a map
 // server's; the world server's own seat plays nobody.
 TEST(authority_every_played_level_is_a_map_servers)

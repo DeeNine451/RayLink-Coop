@@ -88,6 +88,7 @@ local PRICE_POINTS = {
 local ANSWERS = { friend = true, price = true, paid = true, poor = true, enemy = true, gone = true }
 
 local claims = {} -- victim id -> { k = killer id, n = serial (age) }
+local saved_claims -- a save loaded before this process has a session
 local count = 0
 local serial = 0
 local next_scan = 0
@@ -216,9 +217,28 @@ local function claiming_killer(victim, killer)
 	return kid
 end
 
+local function load_claims(rows)
+	for _, r in ipairs(rows) do
+		local v, k = type(r) == "table" and id16(r.v), type(r) == "table" and id16(r.k)
+		if v and k then put(v, k) end
+	end
+end
+
+local function use_saved_claims()
+	if not saved_claims then return end
+	if coop_mode.decides_world() then
+		load_claims(saved_claims)
+	elseif qc.is_client() then
+		ask.need = true
+	end
+	saved_claims = nil
+end
+
 -- This process leads a level: its deaths, its bodies, its killers are here.
 local function leads()
-	return qc.is_host() or qc.is_map_server()
+	if not qc.active() then return false end
+	use_saved_claims()
+	return coop_mode.decides_world() or coop_mode.leads_here()
 end
 
 local function on_death(victim, killer)
@@ -492,7 +512,7 @@ local function ask_host(vid, killer)
 	local now = time_global()
 	if now - deal_at < DEAL.ask_gap_ms then return end
 	deal_at = now
-	if qc.is_host() then
+	if qc.active() and coop_mode.decides_world() then
 		local ok, ans = pcall(decide, 0, vid)
 		if not ok then
 			qc.report(TAG, "deal", ans)
@@ -506,7 +526,9 @@ local function ask_host(vid, killer)
 end
 
 local function on_before_key_press(key, bind, dis, flags)
-	if bind ~= key_bindings.kUSE or next(claims) == nil or not (qc.active() and db.actor) then return end
+	if bind ~= key_bindings.kUSE or not (qc.active() and db.actor) then return end
+	use_saved_claims()
+	if next(claims) == nil then return end
 	local body = body_in_reach()
 	local vid = body and qc.to_host_id(body:id())
 	local row = vid and claims[vid]
@@ -551,6 +573,7 @@ end
 
 local function client_on_snap(t, from)
 	if not from_host(from) or type(t.r) ~= "string" then return end
+	saved_claims = nil
 	claims, count = {}, 0
 	for v, k in t.r:gmatch("(%d+):(%d+);") do
 		v, k = id16(tonumber(v)), id16(tonumber(k))
@@ -590,7 +613,8 @@ local function on_update()
 end
 
 local function save_state(m_data)
-	if not qc.is_host() then return end
+	if not (qc.active() and coop_mode.decides_world()) then return end
+	use_saved_claims()
 	local rows = {}
 	for _, r in ipairs(sorted_rows()) do rows[#rows + 1] = { v = r.v, k = r.k } end
 	m_data.coop_loot_claims = rows
@@ -598,17 +622,19 @@ end
 
 local function load_state(m_data)
 	claims, count, serial = {}, 0, 0
+	saved_claims = nil
 	quotes, last_deal = {}, {}
 	ask.need, ask.tries, ask.at = false, 0, 0
 	if qc.is_client() then
 		ask.need = true -- the host's table comes as an event; the one in this save may be old
 		return
 	end
-	local rows = qc.is_host() and type(m_data) == "table" and m_data.coop_loot_claims
+	local rows = type(m_data) == "table" and m_data.coop_loot_claims
 	if type(rows) ~= "table" then return end
-	for _, r in ipairs(rows) do
-		local v, k = type(r) == "table" and id16(r.v), type(r) == "table" and id16(r.k)
-		if v and k then put(v, k) end
+	if coop_mode.decides_world() then
+		load_claims(rows)
+	elseif not qc.active() then
+		saved_claims = rows
 	end
 end
 

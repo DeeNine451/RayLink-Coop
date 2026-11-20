@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
     check(L,R"lua(
         function coop.is_active() return true end
         function coop.is_host() return true end
+        coop_mode = { decides_world = function() return true end }
         function coop.players() return {{id=0,is_self=true},{id=1,avatar_id=501},{id=2,avatar_id=502}} end
         local data={}
         -- the host's rule trader_rep (f77f52a, 2026-11-12): the default "best" would give the best player's 1200; the

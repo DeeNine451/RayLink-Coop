@@ -2,6 +2,7 @@
 -- alone, nobody has to be gathered) and without them (the group rule, now for the rows of Fair Fast Travel too:
 -- backpack and guide). coop_economy_core / _group / _travel on a host and two clients with stub engines. Not shipped.
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local SPLIT = false
 -- the rows Fair Fast Travel (game_fast_travel.parse_trip_tokens) puts in front of a destination
@@ -67,6 +68,7 @@ local function setup(nclients)
 		end
 	end
 	for _, W in pairs(WORLDS) do
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		for _, n in ipairs({ "coop_economy_core", "coop_economy_group", "coop_economy_travel" }) do load_script(W, n) end
 		for _, n in ipairs({ "coop_economy_core", "coop_economy_group", "coop_economy_travel" }) do
 			if W[n].on_game_start then W[n].on_game_start() end

@@ -269,7 +269,7 @@ local function split(obj, n, s)
 	npending = npending + 1
 	stats.parts = stats.parts + 1
 	local req = { q = q, i = core.host_id(obj:id()), n = n, k = have - n, p = s.peer }
-	if core.is_host() then
+	if core.owns_world() then
 		local ok, why = authority(req, core.self_id())
 		answered(q, ok == true, why)
 	elseif not core.send("give_part", req, 0) then
@@ -375,7 +375,7 @@ function authority(t, from)
 end
 
 local function on_part(t, from)
-	if not (core.is_host() or core.is_map_server()) then return end
+	if not (core.in_session() and (coop_mode.decides_world() or coop_mode.leads_here())) then return end
 	if type(from) ~= "number" or from <= 0 or from == core.self_id() or type(t) ~= "table" then return end
 	if not core.player(from) then return end -- not a player of the session: nobody to answer
 	local q = core.int(t.q, 1, 2000000000)

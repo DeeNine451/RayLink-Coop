@@ -42,6 +42,7 @@ struct HostWithLink
 	~HostWithLink() { host.s.attach_local(nullptr); }
 	bool start()
 	{
+		host.cfg.mode = SessionMode::Coop;
 		if (!host.host())
 			return false;
 		host.s.attach_local(&link);

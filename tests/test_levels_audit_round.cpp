@@ -248,6 +248,7 @@ TEST(levels_audit_round_transport_disconnect_clears_the_challenged_bridge_slot)
 			++replies;
 		}
 	});
+	world.cfg.mode = SessionMode::Server;
 	REQUIRE(world.host());
 	const auto join_bridge = [&](t::Node& node, uint8_t token) {
 		node.cfg.hello_role = kHelloRoleMapServer;

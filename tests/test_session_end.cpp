@@ -10,6 +10,7 @@ namespace
 void join(t::Node& host, t::Node& cl, uint16_t port)
 {
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	REQUIRE(cl.connect(port, &err));
 	REQUIRE(t::pump_until({&host.s, &cl.s}, 5000, [&] { return cl.s.is_active() && host.s.peers().size() == 1; }));
@@ -59,6 +60,7 @@ TEST(session_end_a_refusal_at_the_door_still_goes_to_on_rejected)
 	t::Node host("Boss", 37224), cl("Alice", 37224);
 	cl.cfg.build_id = "another-build";
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	REQUIRE(cl.connect(37224, &err));
 	REQUIRE(t::pump_until({&host.s, &cl.s}, 3000, [&] { return cl.rejected || cl.disconnected; }));
@@ -98,6 +100,7 @@ TEST(session_end_a_new_session_forgets_the_last_end)
 	host.s.shutdown("left the session");
 	REQUIRE(t::pump_until({&cl.s}, 3000, [&] { return cl.disconnected; }));
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	cl.disconnected = false;
 	REQUIRE(cl.connect(37227, &err));

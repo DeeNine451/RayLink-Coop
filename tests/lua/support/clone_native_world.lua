@@ -1,5 +1,6 @@
 dofile("tests/lua/support/harness_economy.lua")
 dofile("tests/lua/support/clone_parts_evaluate.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 PLAYERS = { [0] = { nick = "host", proxy = 0 }, [1] = { nick = "owner", proxy = 501 }, [2] = { nick = "mirror", proxy = 502 } }
 POS, WORLDS, QUEUE = {}, {}, {}
 for peer in pairs(PLAYERS) do POS[peer] = { x = 0, y = 0, z = 0 } end
@@ -9,6 +10,8 @@ for peer in pairs(PLAYERS) do
 		local id = peer == 0 and info.proxy or (other == peer and 0 or (other == 0 and PLAYERS[peer].proxy or info.proxy))
 		add_entity(w, id, "coop_player_avatar", nil)
 	end
+	load_script(w, "coop_mode").on_game_start()
+	modes.live(w.coop_mode, function(name) return load_script(w, name) end)
 	load_script(w, "coop_economy_core")
 	load_script(w, "coop_economy_mdata")
 	w.coop_economy_mdata.on_game_start()

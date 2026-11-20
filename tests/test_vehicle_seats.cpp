@@ -784,3 +784,37 @@ TEST(vehicle_seats_the_hubs_and_the_project)
 		CHECK(filters.find(std::string("<ClInclude Include=\"") + h + "\">\n      <Filter>Coop</Filter>") != std::string::npos);
 	}
 }
+
+// Should-fix S1 of F5-REV-1 (both modes): the player's mirror of the decider's seat table and his own seat record belong to one world.
+// The decider forgets its table at a world change without a released message, and arrivals send only the sitters of the new world: a
+// stale row kept another player seated (drawn in the car, his snapshots skipped) after a load (co-op) or after a trip to another map and
+// back (Server). A player's machine now forgets the mirror, the request, the input, the latch and its own seat when the world changes:
+// before it applies a VehicleSeat and at the start of its frame; a session's start takes the world it starts in.
+TEST(vehicle_seats_the_mirror_forgets_an_old_world)
+{
+	const std::string client = seats_project_file("engine/src/xrGame/coop/coop_vehicles_client.cpp");
+	REQUIRE(!client.empty());
+	CHECK(client.find("\nu32 g_world = 0;") != std::string::npos);
+	const std::string world = seats_body(client, "\nvoid client_world()");
+	REQUIRE(!world.empty());
+	std::string missing;
+	CHECK(in_order(world,
+	          {"const u32 w = join::world_generation();", "if (w == g_world)", "return;", "g_world = w;", "g_table.clear();",
+	              "g_req.reset();", "g_input.stop();", "g_tap.reset();", "g_mine = Mine();"},
+	          missing));
+	CHECK_EQ(missing, std::string());
+
+	const std::string seat = seats_body(client, "\nvoid client_on_seat(PeerId, Reader& r)");
+	missing.clear();
+	CHECK(in_order(seat, {"if (!is_mirror())", "return;", "client_world();", "g_table.apply(m);"}, missing));
+	CHECK_EQ(missing, std::string());
+
+	const std::string frame = seats_body(client, "\nvoid client_frame()");
+	missing.clear();
+	CHECK(in_order(frame, {"if (!is_mirror() || !world_up())", "return;", "client_world();", "CActor* actor = Actor();"}, missing));
+	CHECK_EQ(missing, std::string());
+
+	const std::string install = seats_body(client, "\nvoid install_client(Endpoint& e)");
+	CHECK(install.find("g_tap.reset();") != std::string::npos);
+	CHECK(install.find("g_world = join::world_generation();") != std::string::npos);
+}

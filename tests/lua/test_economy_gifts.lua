@@ -4,6 +4,7 @@
 --   The giver's inventory action sends economy.gift { i = host id of the item } to the receiver; the receiver keeps it
 --   pending and tells it only when the item is really in his inventory (the host may refuse the transfer).
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local NAMES = { medkit = "Medkit", bandage = "Bandage", vodka = "Vodka", bread = "Bread", wpn_pm = "PM pistol",
 	medkit_army = "Army medkit" }
@@ -39,6 +40,7 @@ local function setup(nclients)
 		end
 	end
 	for _, W in pairs(WORLDS) do
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		for _, n in ipairs({ "coop_economy_core", "coop_economy_money" }) do load_script(W, n) end
 		for _, n in ipairs({ "coop_economy_core", "coop_economy_money" }) do
 			if W[n].on_game_start then W[n].on_game_start() end

@@ -177,6 +177,7 @@ TEST(operator_loopback_token_makes_the_operator)
 	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38201));
 	REQUIRE(join(host, friend_, 38201, &creator.s));
@@ -213,6 +214,7 @@ TEST(operator_wrong_token_is_an_ordinary_player)
 	SessionSrv(host.s).arm_operator(token_of(5));
 	present(c, token_of(6));
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, c, 38202));
 	t::pump_for({&host.s, &c.s}, 200);
@@ -231,6 +233,7 @@ TEST(operator_no_token_on_the_server_makes_nobody_operator)
 	host.cfg.host_plays = false;
 	present(any, token_of(9));
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, zeros, 38203));
 	REQUIRE(join(host, any, 38203, &zeros.s));
@@ -249,6 +252,7 @@ TEST(operator_token_binds_to_the_first_key)
 	present(creator, tok);
 	present(thief, tok); // the same token, another player key
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38204));
 	REQUIRE(join(host, thief, 38204, &creator.s));
@@ -272,6 +276,7 @@ TEST(operator_comes_back_with_his_key)
 	present(again, tok);
 	again.cfg.key = creator.cfg.key;
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38205));
 	t::pump_for({&host.s}, 4300); // his game is gone (silent longer than kReplaceSilentLinkMs)
@@ -291,6 +296,7 @@ TEST(operator_command_reaches_the_hook)
 	Commands cmds;
 	cmds.attach(host);
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38206));
 	REQUIRE(t::pump_until({&host.s, &creator.s}, 5000, [&] { return creator.s.self_host_rights(); }));
@@ -318,6 +324,7 @@ TEST(operator_command_from_a_non_operator_is_refused)
 	Commands cmds;
 	cmds.attach(host);
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38207));
 	REQUIRE(join(host, other, 38207, &creator.s));
@@ -342,6 +349,7 @@ TEST(operator_command_rate_and_length)
 	Commands cmds;
 	cmds.attach(host);
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, creator, 38208));
 	REQUIRE(t::pump_until({&host.s, &creator.s}, 5000, [&] { return creator.s.self_host_rights(); }));
@@ -368,6 +376,7 @@ TEST(operator_command_needs_a_joined_client)
 	CHECK(!s.send_operator_command("coop_status")); // not connected
 	Node host("Boss", 38209);
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	CHECK(!host.s.send_operator_command("coop_status")); // a host has its own console
 	CHECK(!host.s.self_host_rights());
@@ -432,6 +441,7 @@ TEST(operator_keeps_his_place_in_a_full_session)
 	SessionSrv(host.s).arm_operator(tok);
 	present(creator, tok);
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, a, 38210));
 	CHECK(!join(host, b, 38210, &a.s)); // the last place waits for the token's holder
@@ -454,6 +464,7 @@ TEST(operator_keeps_his_place_among_eight_clients)
 	host.cfg.host_plays = false; // max_players: the test Node's 8 (test_main.cpp; a world server's mode says 16)
 	SessionSrv(host.s).arm_operator(tok);
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	std::vector<std::unique_ptr<Node>> others;
 	for (int i = 0; i < 8; ++i)
@@ -480,6 +491,7 @@ TEST(operator_place_is_nobodys_without_a_token)
 	host.cfg.host_plays = false;
 	host.cfg.max_players = 2;
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	REQUIRE(join(host, a, 38211));
 	REQUIRE(join(host, b, 38211, &a.s)); // no operator to wait for: both places are for players

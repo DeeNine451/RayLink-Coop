@@ -65,7 +65,7 @@ function requester_avatar(peer)
 end
 
 function host_bridge(owner_id, key, value)
-	if not (core.is_host() or core.is_map_server() or not core.in_session()) then return end
+	if core.in_session() and not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
 	if se_load_var(owner_id, nil, key) == value then return end
 	se_save_var(owner_id, nil, key, value)
 end
@@ -94,7 +94,7 @@ function request(opts)
 	local args = type(opts.args) == "string" and opts.args:sub(1, 1024) or ""
 	if not core.in_session() then
 		dispatch(verb, obj_id, state, args, 0) -- single player: same handler, here
-	elseif core.is_host() then
+	elseif core.owns_world() then
 		dispatch(verb, obj_id, state, args, core.self_id())
 	else
 		stats.sent = stats.sent + 1
@@ -169,7 +169,7 @@ function mdata_box_resolver(table_key)
 end
 
 local function on_intent(t, from)
-	if not (core.is_host() or core.is_map_server()) or from <= 0 then return end
+	if not (core.in_session() and (coop_mode.decides_world() or coop_mode.leads_here())) or from <= 0 then return end
 	local verb = core.word(t.v, 48)
 	local obj_id = core.int(t.o, 0, 65534)
 	local state = core.num(t.s, -1e9, 1e9) or 0

@@ -87,6 +87,7 @@ MOD_FILES = {
     "docs/NOTES.md": "notes\n",
     "tests/test_items.cpp": "TEST(a)\n{\n}\nTEST(b)\n{\n}\n",
     "tests/lua/test_items.lua": "-- t\n",
+    "tests/test_story_worldstate.py": "# Stub the isolated native slice in fake repositories.\n",
 }
 
 
@@ -363,7 +364,7 @@ def test_mark_of_other_ids_or_other_exe_does_not_count(repos, capsys):
     ((), {"scenarios": "ded_check"}, "base_server, carry_server, taskboard_ws, phantoms_server, "
                                  "allymark_server, companions_server, weather_server, cover_server, "
                                  "ms_crash_server, save_handover_server, creator10_server, "
-                                 "feed_server, vehicle_server did not run"),  # a part
+                                 "feed_server, vehicle_server, progress_server did not run"),  # a part
     (("scenarios",), {}, "did not run"),
     # B12: the scenario files that ran are HEAD's (tools/stand is tracked; a relaxed check is a change of HEAD)
     (("scenarios_sha256",), {}, "scenarios_sha256 missing"),
@@ -399,20 +400,23 @@ def test_mark_without_mode_dirty_or_partial_does_not_count(repos, capsys, drop, 
 @pytest.mark.parametrize(("mode", "scenario", "other_scenario"), [
     ("hostplay", "vehicle_group", "vehicle_server"),
     ("srv", "vehicle_server", "vehicle_group"),
+    ("hostplay", "progress_group", "progress_server"),
+    ("srv", "progress_server", "progress_group"),
 ])
-def test_vehicle_scenario_is_required_in_its_own_mode(tmp_path, mode, scenario, other_scenario):
-    mark_path = tmp_path / f"{mode}.ok"
+def test_scenario_is_required_in_its_own_mode(work, mode, scenario, other_scenario):
+    mark_path = work / f"{mode}.ok"
     mod_head, engine_head, exe_hash = "a" * 40, "b" * 40, "c" * 64
     fields = (f"mode={mode}\nmod_head={mod_head}\nengine_head={engine_head}\nexe_source={engine_head}\n"
               f"exe_sha256={exe_hash}\ndirty=0\nstand_extra=0\n")
     other_runs = [name for name in gates.SCENARIOS[mode] if name not in (scenario, other_scenario)]
 
-    mark_path.write_text(fields + f"scenarios={','.join([*other_runs, other_scenario])}\n", encoding="utf-8")
-    ok, reason = gates.check_mark(mode, tmp_path, mod_head, engine_head, exe_hash)
-    assert not ok and f"{scenario} did not run" in reason, reason
+    for ran in (other_runs, [*other_runs, other_scenario]):
+        mark_path.write_text(fields + f"scenarios={','.join(ran)}\n", encoding="utf-8")
+        ok, reason = gates.check_mark(mode, work, mod_head, engine_head, exe_hash)
+        assert not ok and f"{scenario} did not run" in reason, reason
 
     mark_path.write_text(fields + f"scenarios={','.join([*other_runs, scenario])}\n", encoding="utf-8")
-    ok, reason = gates.check_mark(mode, tmp_path, mod_head, engine_head, exe_hash)
+    ok, reason = gates.check_mark(mode, work, mod_head, engine_head, exe_hash)
     assert ok, reason
 
 
@@ -421,6 +425,102 @@ def test_stand_runners_list_the_scenarios_the_gate_demands():
     for mode, names in gates.SCENARIOS.items():
         text = (ROOT / "tools" / f"stand_{mode}.ps1").read_text(encoding="utf-8")
         assert tuple(re.findall(r"@\{ Name = '([^']+)'", text)) == names, mode
+
+
+@pytest.mark.parametrize(("mode", "own", "foreign"), [
+    ("hostplay", "progress_group", "progress_server"),
+    ("srv", "progress_server", "progress_group"),
+])
+def test_progress_scenario_runs_only_in_its_own_stand(mode, own, foreign):
+    text = (ROOT / "tools" / f"stand_{mode}.ps1").read_text(encoding="utf-8")
+    names = re.findall(r"@\{ Name = '([^']+)'", text)
+    assert names.count(own) == 1 and foreign not in names
+
+
+@pytest.mark.parametrize("name", ["progress_group", "progress_server"])
+def test_progress_stand_verdict_requires_correlated_evidence(name, work):
+    # Replay the blind review's log probe against the real judge, with no game or stand.
+    script = ROOT / "tools" / "stand" / f"{name}.ps1"
+    replay = work / "replay.ps1"
+    replay.write_text(r"""
+param($Path, $Name)
+$ErrorActionPreference = 'Stop'
+$tokens = $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw ($errors -join "`n") }
+$main = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] -and
+    $n.Body.Extent.Text.Contains("Set-ProgressStep 'walk'") }, $false)
+$statements = $main.Body.Statements
+$start = ($statements | Where-Object { $_.Extent.Text.Contains('client ready map=') } | Select-Object -First 1).Extent.StartOffset
+$judge = [scriptblock]::Create($ast.Extent.Text.Substring($start, $main.Body.Extent.EndOffset - 1 - $start))
+. ([scriptblock]::Create(($ast.Extent.Text -split '\r?\n' | Where-Object { $_ -match '^\$mark = ' }) -join "`n"))
+function Assert-ProgressHealthy {}
+function Start-Sleep {}
+function Add-Log($File, $Line) { Add-Content -LiteralPath $File -Value $Line -Encoding Ascii }
+function Wait-ProgressLine([string[]]$Files, [string]$Pattern, [int]$Seconds, [int]$After = 0) {
+    if ($Pattern.Contains('progress_rank') -and $Seconds -ne 30) { throw 'rank timeout must be 30 seconds' }
+    $hit = Select-String -LiteralPath $Files -Pattern $Pattern | Where-Object LineNumber -gt $After | Select-Object -First 1
+    if ($hit) { return $hit }
+    throw "waiting for $Pattern"
+}
+function Set-ProgressStep([string]$Step) {
+    switch -Regex ($Step) {
+        '^walk$' { Add-Log $clientLog '[progress-stand] client walked 15 steps, 300.0 m' }
+        '^spawn$' { Add-Log $authority '[progress-stand] corpse map=l01_escape id=123' }
+        '^search 123$' {
+            $delta = if ($case -eq 'allowance') { '25.000000' } else { '45.000000' }
+            Add-Log $clientLog "[progress-stand] client searched id=123 xp=56.000000 delta=$delta"
+            $meters = if ($case -eq 'no_steps') { '0.0' } else { '295.0' }
+            $searches = if ($case -eq 'no_search') { 0 } else { 1 }
+            Add-Log $hostLog "[progress-stand] keeper facts peer=4 character=42 step_m=$meters corpse_search=$searches rank=veteran"
+        }
+        '^honest 56\.000000$' {
+            Add-Log $clientLog '[progress-stand] client honest report xp=56.000000'
+            if ($case -eq 'late_honest_warning') {
+                Add-Log $hostLog '[progress-stand] honest accepted peer=4 character=42 xp=56.000000 checked=40 failed=1 refused=0'
+            } else {
+                Add-Log $hostLog '[progress-stand] honest accepted peer=4 character=42 xp=56.000000 checked=40 failed=0 refused=0'
+            }
+        }
+        '^skills$' {
+            if ($case -eq 'late_honest_warning') {
+                Add-Log $hostLog '[coop-trust] ! progress_skills: progress check failed: survival: budget (would be refused: let through, 1 of 1 failed)'
+            }
+            Add-Log $clientLog '[progress-stand] client added 5000 scavenging XP and reported'
+            Add-Log $hostLog '[coop-trust] ! progress_skills: progress check failed: scavenging: budget (would be refused: let through, 1 of 1 failed)'
+            $delta = if ($case -eq 'wrong_xp_delta') { 4999 } else { 5000 }
+            $peer = if ($case -eq 'wrong_skill_peer') { 7 } else { 4 }
+            Add-Log $hostLog "[progress-stand] skills budget failed peer=$peer character=42 delta=$delta"
+        }
+        '^rank$' {
+            Add-Log $clientLog '[progress-stand] client added 5000 rank'
+            $peer = if ($case -eq 'wrong_rank_peer') { 7 } else { 4 }
+            $character = if ($case -eq 'wrong_rank_character') { 43 } else { 42 }
+            Add-Log $hostLog "[coop-trust] progress_rank would refuse: peer $peer, character ${character}: rank 0 -> 5000 (+5000), budget 25: let through (1 of 1 failed)"
+        }
+        default { throw "unexpected command $Step" }
+    }
+}
+$hostLog = Join-Path $PSScriptRoot 'keeper.log'
+$worldLog = $hostLog
+$clientLog = Join-Path $PSScriptRoot 'client.log'
+$mapLogs = @(Join-Path $PSScriptRoot 'map.log')
+$authority = if ($Name -eq 'progress_server') { $mapLogs[0] } else { $hostLog }
+foreach ($case in 'honest', 'allowance', 'no_steps', 'no_search', 'late_honest_warning', 'wrong_xp_delta',
+                  'wrong_skill_peer', 'wrong_rank_peer', 'wrong_rank_character') {
+    Set-Content -LiteralPath $hostLog '[progress-stand] keeper ready peer=4 character=42' -Encoding Ascii
+    Set-Content -LiteralPath $clientLog '[progress-stand] client ready map=l01_escape' -Encoding Ascii
+    Set-Content -LiteralPath $mapLogs[0] '' -Encoding Ascii
+    try { $null = . $judge; Write-Output "$case accepted" }
+    catch { Write-Output "$case rejected: $_" }
+}
+""", encoding="utf-8")
+    result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(replay),
+                             str(script), name], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0 and not result.stderr, result.stdout + result.stderr
+    verdicts = [line for line in result.stdout.splitlines() if re.match(r"^\w+ (accepted|rejected:)", line)]
+    assert len(verdicts) == 9 and verdicts[0] == "honest accepted", verdicts
+    assert all(" rejected: " in line for line in verdicts[1:]), verdicts
 
 
 # A scenario of tools/stand that no runner runs is one the gate never demands (the review of round 7, R7:
@@ -1101,6 +1201,33 @@ def test_tests_mark_does_not_count_unless_clean_green_and_of_both_heads(repos, c
     write_tests_mark(root, engine, drop, **override)
     code, out = run(root, exe, capsys, "base..HEAD")
     assert code == 1 and "tests.ok does not count" in out and why in out, out
+
+
+@pytest.mark.parametrize(("body", "native", "expected"), [
+    (None, 0, 1),
+    ("raise SystemExit(17)\n", 0, 1),
+    ("print('worldstate slice ran')\n", 0, 0),
+    ("print('worldstate slice ran')\n", 1, 1),
+])
+def test_tests_mark_requires_the_native_worldstate_slice(work, monkeypatch, capfd, body, native, expected):
+    root = work
+    path = root / "tests" / "test_story_worldstate.py"
+    if body is not None:
+        write(root, "tests/test_story_worldstate.py", body)
+    monkeypatch.setattr(gates, "tests_state", lambda _root: {"mod_head": "a" * 40, "engine_head": "b" * 40,
+                                                          "dirty": "0", "first_dirty": ""})
+    fake_lua_runner(root)
+    marks = root / "temp" / "gates"
+    marks.mkdir(parents=True, exist_ok=True)
+    state = marks / "tests.state"
+    assert gates.tests_mark(root, marks, "begin", None, None, None) == 0
+    state.write_text(capfd.readouterr().out, encoding="utf-8")
+    code = gates.tests_mark(root, marks, "write", state, native, 0)
+    out = capfd.readouterr().out
+    assert code == expected and (marks / "tests.ok").exists() == (expected == 0), out
+    if native == 0 and expected:
+        assert "test_story_worldstate.py" in out
+    assert ("worldstate slice ran" in out) == (expected == 0), out
 
 
 def test_tests_mark_is_written_only_after_a_clean_green_run_of_both_heads(repos, capsys):

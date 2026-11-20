@@ -5,6 +5,7 @@
 -- map server of the Bar (peer 0x100) and two players (peers 1 and 2). Not shipped.
 -- Run: tools\test_lua.cmd vote_for
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local MK = 0x100
 local WS, M, C1, C2
@@ -25,10 +26,15 @@ local function boxes(P)
 	P.env.ui_dyn_msg_box = { msg_box_ui = class }
 end
 
-local function party(role, peer, map_server)
+local function party(role, peer, split)
 	local P = machine(role, peer, { [0] = 900, [1] = 501, [2] = 502 })
-	P.env.coop.is_map_server = function() return map_server == true end
-	P.env.coop.levels = { split = function() return true end }
+	P.env.coop.is_map_server = function() return peer == MK end
+	P.env.coop.is_dedicated = function() return split and peer == 0 end
+	P.env.coop.levels = {
+		split = function() return split end,
+		map_servers = function() return split and { { bridge = MK } } or {} end,
+	}
+	modes.live(load_script(P, "coop_mode"), function(name) return load_script(P, name) end)
 	P.tips = {}
 	P.env.news_manager = { send_tip = function(_, text) P.tips[#P.tips + 1] = text end }
 	boxes(P)
@@ -46,13 +52,14 @@ local function party(role, peer, map_server)
 	return P
 end
 
-local function setup()
+local function setup(split)
 	reset_world()
 	NOW = (NOW or 0) + 1000000
-	WS = party("host", 0, false)
-	M = party("client", MK, true)
-	C1 = party("client", 1, false)
-	C2 = party("client", 2, false)
+	split = split ~= false
+	WS = party("host", 0, split)
+	M = split and party("client", MK, split) or nil
+	C1 = party("client", 1, split)
+	C2 = party("client", 2, split)
 end
 
 local function tick(P, ms)
@@ -116,7 +123,7 @@ end
 
 print("== a plain host votes as before")
 do
-	setup()
+	setup(false)
 	local result = nil
 	local asked = WS.group.propose("arena", 1, { [2] = true }, function(ok) result = ok end, "4")
 	check(asked == true, "the host proposes itself")

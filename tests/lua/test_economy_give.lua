@@ -6,6 +6,7 @@
 -- the giver's machine puts the rounds back. coop_economy_core / _money / _give on a host and two clients with stub engines.
 -- Not shipped.
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
 local NAMES = { ammo_9x19_fmj = "9x19 FMJ", ammo_545x39_bp = "5.45 BP", bandage = "Bandage", medkit = "Medkit",
 	vodka = "Vodka", cigarettes = "Cigarettes" }
@@ -177,6 +178,7 @@ local function setup(nclients)
 	end
 	host_alife(WORLDS[0])
 	for _, W in pairs(WORLDS) do
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		for _, n in ipairs({ "coop_economy_core", "coop_economy_money", "coop_economy_give" }) do load_script(W, n) end
 		for _, n in ipairs({ "coop_economy_core", "coop_economy_money", "coop_economy_give" }) do
 			if W[n].on_game_start then W[n].on_game_start() end

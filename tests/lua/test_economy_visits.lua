@@ -3,6 +3,7 @@
 -- smarts never update, so game_statistics and Fair Fast Travel (state 1: only the places visited) saw nothing there.
 -- coop_economy_travel counts it on the client, once a second, for the fast travel points of its map. Not shipped.
 dofile("tests/lua/support/harness_economy.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 dofile("tests/lua/support/luabind_like.lua")
 
 local SMART = 77 -- clsid.smart_terrain of the stand-in
@@ -63,6 +64,7 @@ local function setup(opts)
 		smart(W, 903, "esc_smart_terrain_far", 10, 400)
 	end
 	for _, W in pairs(WORLDS) do
+		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
 		load_script(W, "coop_economy_core")
 		load_script(W, "coop_economy_group")
 		load_script(W, "coop_economy_travel")

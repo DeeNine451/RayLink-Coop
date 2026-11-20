@@ -228,6 +228,7 @@ TEST(protocol_f5_session_enforces_the_directions)
 		b.s.on(type, [&at_b, type](PeerId, Reader&) { at_b.push_back(uint16_t(type)); });
 	}
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	for (t::Node* c : {&a, &b})
 	{

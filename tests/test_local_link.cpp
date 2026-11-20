@@ -71,6 +71,7 @@ TEST(link_order_per_lane)
 	// Through a hosting session, both ways, two lanes interleaved: the host player's messages reach the server's handlers
 	// and the server's reach his, each lane in the order it was sent.
 	Node host("Boss", 37501);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	std::vector<uint32_t> server_reliable, server_unreliable, player_reliable, player_unreliable;
@@ -106,6 +107,7 @@ TEST(link_from_is_host_player)
 {
 	LocalLink link; // outlives the session it is attached to
 	Node host("Boss", 37502);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	CHECK(host.s.local() == &link);
@@ -194,6 +196,7 @@ TEST(link_no_reentrancy)
 	// answer. A send from inside a handler is never delivered inside it, and the game moves by one hop per update.
 	LocalLink link;
 	Node host("Boss", 37503);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	int at_server = 0, at_player = 0;
@@ -240,6 +243,7 @@ TEST(players_includes_local_peers_not)
 {
 	LocalLink link;
 	Node host("Boss", 37504), cl("Alice", 37504);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 
 	// no link: the host has no player of its own in the session, players() is peers()
@@ -289,6 +293,7 @@ TEST(link_world_epoch_old_packets_dropped)
 {
 	LocalLink link;
 	Node host("Boss", 37505);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	std::vector<uint32_t> at_server, at_player;
@@ -322,6 +327,7 @@ TEST(link_trunk_only_refused)
 {
 	LocalLink link;
 	Node host("Boss", 37506);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	int at_server = 0, at_player = 0;
@@ -344,6 +350,7 @@ TEST(link_world_gate_toward_player)
 {
 	LocalLink link;
 	Node host("Boss", 37507);
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host());
 	host.s.attach_local(&link);
 	wgate::World world = wgate::World::Hole;

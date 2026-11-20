@@ -31,7 +31,11 @@ $scenarios = @(
     @{ Name = 'save_handover_server'; Script = 'save_handover_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^save_handover_server: PASS$'); Bad = @('^save_handover_server: FAIL\b') },
     @{ Name = 'creator10_server'; Script = 'creator10_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^creator10_server: PASS$'); Bad = @('^creator10_server: FAIL\b') },
     @{ Name = 'feed_server'; Script = 'feed_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^feed: PASS$'); Bad = @('^feed: FAIL\b') },
-    @{ Name = 'vehicle_server'; Script = 'vehicle_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^vehicle_server: PASS$'); Bad = @('^vehicle_server: FAIL\b') }
+    @{ Name = 'vehicle_server'; Script = 'vehicle_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^vehicle_server: PASS$'); Bad = @('^vehicle_server: FAIL\b') },
+    @{ Name = 'progress_server'; Script = 'progress_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Bad = @('^progress_server: FAIL\b'); Pass = @(
+        '\[progress-stand\] client walked 15 steps, 300\.0 m', '\[progress-stand\] client searched id=\d+ xp=',
+        '\[progress-stand\] keeper facts .*step_m=(?:[1-9]\d*\.\d|0\.[1-9]) corpse_search=[1-9]\d* rank=veteran', '(?m)^progress_server: PASS$'
+    ) }
 )
 $code = Invoke-Stand -Mode 'srv' -Scenarios $scenarios -Tag $Tag -Stand $Stand -Only $Only -NoMark:$NoMark
 exit $code

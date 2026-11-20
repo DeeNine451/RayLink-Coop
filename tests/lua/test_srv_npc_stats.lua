@@ -38,13 +38,18 @@ local function start(machine, dedicated, map)
 	}
 	modes.live(load_script(machine, "coop_mode"), function(name) return load_script(machine, name) end)
 	load_script(machine, "coop_trust")
+	local stock_counter = e.game_statistics.increment_npc_statistic
 	load_script(machine, "coop_npc_stats").on_game_start()
-	return states
+	return states, stock_counter
 end
 
 local world = start(W, true, false)
 local map = start(M, false, true)
-local client = start(C, false, false)
+local client, stock_counter = start(C, false, false)
+check(C.env.game_statistics.increment_npc_statistic ~= stock_counter, "counter hooks install even when the player layer already answers")
+C.env.game_statistics.increment_npc_statistic(make_obj(501, 0), "killed_monsters")
+check(client[501] and client[501].killed_monsters == 1 and #C.sent == 0 and writes == 0,
+	"the server player runs the stock counter and publishes nothing")
 M.env.game_statistics.increment_npc_statistic(make_obj(501, 0), "killed_monsters")
 local up = M.sent[1]
 check(map[501] and map[501].killed_monsters == 1, "the map counts through the stock wrapper")

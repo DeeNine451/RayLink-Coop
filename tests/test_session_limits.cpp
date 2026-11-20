@@ -23,6 +23,7 @@ using t::Node;
 void host_and_join(Node& host, std::initializer_list<Node*> clients, uint16_t port)
 {
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	size_t expected = 0;
 	for (Node* c : clients)
@@ -190,6 +191,7 @@ TEST(session_duplicate_key_for_the_hosts_key)
 	Node host("Boss", 37103), cl("Alice", 37103);
 	cl.cfg.key = host.cfg.key;
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	REQUIRE(cl.connect(37103, &err));
 	REQUIRE(t::pump_until({&host.s, &cl.s}, 5000, [&] { return cl.rejected || cl.welcomed; }));
@@ -449,6 +451,7 @@ void pump_with(Node& host, RawClient& raw, uint32_t ms)
 void host_at_epoch_and_join(Node& host, Node& cl, uint16_t port, uint32_t epoch)
 {
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	host.s.set_world_epoch(epoch);
 	REQUIRE(cl.connect(port, &err));
@@ -516,6 +519,7 @@ TEST(limits_blob_kind_bytes_in_flight)
 	Node host("Boss", 37112);
 	host.s.accept_client_blob(kBlobOk);
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 
 	// Four blobs of exactly 1 MiB in flight = 4 MiB: still fine.
@@ -1020,6 +1024,7 @@ TEST(world_epoch_from_the_future_is_malformed)
 	Node host("Boss", 37117);
 	host.s.set_world_epoch(3);
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	CHECK_EQ(host.s.world_epoch(), uint32_t(0)); // a new session starts over; the game sets it after host()
 	host.s.set_world_epoch(3);
@@ -1350,6 +1355,7 @@ TEST(trunk_only_messages_are_refused_from_everybody_else)
 		b.s.on(m, [&at_b, m](PeerId, Reader&) { at_b.push_back(uint16_t(m)); });
 	}
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	auto pump_all = [&](uint32_t timeout_ms, const std::function<bool()>& done) {
 		const uint64_t start = t::now_ms();
@@ -2158,6 +2164,7 @@ TEST(limits_session_without_a_playing_host_seat_takes_one_more_client)
 	for (int i = 0; i < 4; ++i)
 		clients.emplace_back(new Node("C" + std::to_string(i), 38221));
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	CHECK_EQ(fill(host, clients, 38221), size_t(3));
 	CHECK(clients[3]->rejected);
@@ -2174,6 +2181,7 @@ TEST(limits_session_with_a_playing_host_seat_counts_it)
 	for (int i = 0; i < 3; ++i)
 		clients.emplace_back(new Node("C" + std::to_string(i), 38222));
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	CHECK_EQ(fill(host, clients, 38222), size_t(2));
 	CHECK(clients[2]->rejected);
@@ -2194,6 +2202,7 @@ TEST(limits_world_server_full_house)
 	for (uint32_t i = 0; i < 9; ++i)
 		clients.emplace_back(new Node("C" + std::to_string(i), 38223));
 	std::string err;
+	host.cfg.mode = SessionMode::Server;
 	REQUIRE(host.host(&err));
 	CHECK_EQ(fill(host, clients, 38223), size_t(8));
 	CHECK(clients.back()->rejected);
@@ -2227,6 +2236,7 @@ TEST(limits_ordinary_host_full_house_stays_host_plus_seven)
 	for (uint32_t i = 0; i < 8; ++i)
 		clients.emplace_back(new Node("C" + std::to_string(i), 38224));
 	std::string err;
+	host.cfg.mode = SessionMode::Coop;
 	REQUIRE(host.host(&err));
 	CHECK_EQ(fill(host, clients, 38224), size_t(7));
 	CHECK(clients.back()->rejected);

@@ -146,7 +146,8 @@ Id сообщений, направление (`MsgSender`) и область (`
    Куклы сидящих: у игроков кукла (аватар) каждый кадр стоит в `seat_transform` копии с выключенным контроллером и играет
    `steering_idle_<DriverAnimationType>_0`, как `attach_Vehicle` играет `idles[0]`; модели без позы и место 0 модели без
    `driver_place` — кукла спрятана, как стоковый владелец. Кто где сидит у игрока — зеркало таблицы (`mirror_seat_of`). На авторитете
-   прокси ставит F5-VEH-2, F5-VEH-4 только даёт позу и не показывает спрятанного.
+   прокси ставит F5-VEH-2, F5-VEH-4 только даёт позу и не показывает спрятанного. Куклы принадлежат одному миру
+   (`join::world_generation()`): новый мир (загрузка, переход) забывает их, не трогая объекты (F5-REV-1, заметка 3).
 7. **Выход.** F в машине: `GEG_PLAYER_DETACH_HOLDER` → `VehicleReq exit` → `exit()`. Разрешён — `free_seat`, для места 0
    «машина без водителя» (раздел 8) и `InputTrack::stop`, прокси снова физический и видимый в точке выхода → `VehicleSeat released`
    с точкой выхода всем.
@@ -290,7 +291,7 @@ Id сообщений, направление (`MsgSender`) и область (`
 private (:58-92). Открыты `OnKeyboardPress/Release` (:633-634), `SetParam` (:648-649), `HasWeapon` (:650), `ExitPosition` (:596).
 Предложение: в `Car.h` две строки `friend struct CoopCarDriver;` и `friend struct CoopCarState;`; структуры определяют F5-VEH-2
 (`coop_vehicles_seat.cpp`: посадка и выход водителя по таблицам выше) и F5-VEH-4 (`coop_vehicles_state.cpp`: чтение и применение
-состояния), каждая в своём `.cpp`. Хук `Initiator` — строка в `Car.cpp`. Владелец `Car.cpp` — F5-VEH-3; кто вносит строки в
+состояния), каждая в своём `.cpp`. Хук `Initiator` — строка в `Car.cpp` (внесена F5-REV-1 S2: после стокового `Owner` — `driver_of(ID())`). Владелец `Car.cpp` — F5-VEH-3; кто вносит строки в
 `Car.h`, решает ведущая (в брифах `Car.h` нет). `friend struct CoopCarDriver;` внесена при интеграции W8a (2026-11-20, после
 `friend struct SDoor;`); `friend struct CoopCarState;` — вместе с F5-VEH-4.
 
@@ -312,12 +313,19 @@ private (:58-92). Открыты `OnKeyboardPress/Release` (:633-634), `SetParam
 
 Свежесть ввода место не освобождает: водитель с оборванной связью стоит на ручнике, пока сессия не скажет «ушёл».
 
-- `Disconnect` или `LeftLevel` для игрока, которого больше нет в сессии, выбирает `mode().where` (F5-VEH-2): Here (хост Коопа) —
-  `Disconnect`; Away (так сервер карты видит уход виртуального узла) — `LeftLevel`. Порядок причин в одном кадре: `Disconnect` /
+- `Disconnect` или `LeftLevel` для игрока, которого больше нет в сессии, выбирает ответ режима `mode().departure(peer, character)`
+  (VEH-DISC): хост Коопа отвечает `Disconnected` → `Disconnect`; сервер карты — что сказал `LevelMap` мира, когда ушёл его
+  виртуальный узел (`coop_trunk.cpp` `server_on_map`, `xrCoop/srv/coop_srv_departure_rules.h`): строки нет — `Disconnect`, строка
+  на другой карте — `LeftLevel`, строка на этой карте с другим персонажем или без него — как замена персонажа (`Disconnect` при
+  `where` = Here, иначе `LeftLevel`). Порядок причин в одном кадре: `Disconnect` /
   `LeftLevel`, `CarGone`, `CarDestroyed`, `Death`, `Wounded`.
 - Кооп, переход группы: `release_all_seats(Release::LeftLevel)` (`coop_vehicles.h`) зовётся в начале перехода, до
   `sync::host_begin_join` переходящих (строка в `coop_join.cpp` — за ведущей). Без неё место освобождается, только когда переходящие
   уже «joining», и сообщение до них не доходит.
+- Зеркало таблицы у игрока, его запрос, ввод и его собственное место — одного мира (F5-REV-1 S1, оба режима): авторитет забывает
+  таблицу при смене мира без `released`, а пришедшим шлёт только сидящих нового мира. Новый мир (`join::world_generation()`)
+  стирает их у игрока до применения `VehicleSeat` и в начале `client_frame` (`coop_vehicles_client.cpp` `client_world`); иначе
+  строка старого мира держала другого игрока сидящим в машине (Кооп: загрузка сохранения; Сервер: ушёл на другую карту и вернулся).
 - Конец сессии (Manager::stop, потеря сессии): `sync::reset()` зовёт `session_over()` — машины, которые вели клиенты, ставятся как
   после `detach_Actor`, прокси встают, таблица забывается; сообщений нет (rv_F5-VEH-2, блокер 1).
 - Пассажир на машине игрока (rv_F5-VEH-5, блокер 1): хуки стокового актёра работают в любом процессе и мире, а `ride_frame` — только
@@ -419,7 +427,7 @@ private (:58-92). Открыты `OnKeyboardPress/Release` (:633-634), `SetParam
 | | Кооп | Сервер |
 |---|---|---|
 | Чистые правила (этот юнит) | `tests/test_vehicle_rules.cpp`: одни правила, режима не знают | то же |
-| Нативные тесты юнитов | `vehicle_drive` (VEH-2), `vehicle_input` (VEH-3), `vehicle_state` (VEH-4), `vehicle_seats` (VEH-5), `protocol_f5` (PROTO) | те же + маршрут туннеля в `protocol_f5` |
+| Нативные тесты юнитов | `vehicle_drive` (VEH-2), `vehicle_input` (VEH-3), `vehicle_state` (VEH-4), `vehicle_seats` (VEH-5), `vehicle_departure` (VEH-DISC), `protocol_f5` (PROTO) | те же + маршрут туннеля в `protocol_f5` |
 | Lua | `test_vehicles_hostplay.lua` (F5-VEH-6) | `test_vehicles_server.lua` (F5-VEH-6) |
 | Стенд | `vehicle_group` (F5-VEH-7) | `vehicle_server` (F5-VEH-7; на стенде один клиент — пассажир в пустой машине, которая стоит) |
 
