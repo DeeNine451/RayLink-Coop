@@ -28,9 +28,16 @@ local function set_stage(s)
 	if fh then fh:write(s .. "\n") fh:close() end
 end
 
+-- The steps go by the real clock of the process: the game clock stands still whenever something freezes the game
+-- (GAMMA's NPE tutorials run "freeze_time on" until a player clicks; the stand of 2026-11-21 waited for them 3 times).
+local function now()
+	local ok, t = pcall(function() return device():time_continual() end)
+	return ok and type(t) == "number" and t or time_global()
+end
+
 local t0, done = nil, {}
 local function at(name, seconds, f)
-	if done[name] or not t0 or time_global() - t0 < seconds * 1000 then return end
+	if done[name] or not t0 or now() - t0 < seconds * 1000 then return end
 	done[name] = true
 	local ok, err = pcall(f)
 	if not ok then out("! %s: %s", name, tostring(err)) end
@@ -40,14 +47,16 @@ local function state(tag)
 	local a = db.actor
 	if not a then return out("%s: no actor", tag) end
 	local active = rawget(_G, "coop") and type(coop.is_active) == "function" and coop.is_active()
-	out("%s: level %s hp %.3f, in a co-op session %s", tag, tostring(level.name()), a.health, tostring(active))
+	local okf, factor = pcall(level.get_time_factor)
+	out("%s: level %s hp %.3f, in a co-op session %s, time factor %s", tag, tostring(level.name()), a.health, tostring(active),
+		okf and tostring(factor) or "?")
 	flush()
 end
 
 local function actor_on_update()
 	if not db.actor then return end
 	if not t0 then
-		t0 = time_global()
+		t0 = now()
 		out("the steps start (stage '%s')", stage())
 	end
 	local s = stage()
@@ -66,7 +75,7 @@ local function actor_on_update()
 		end)
 	elseif s == "loading" then
 		set_stage("loaded")
-		t0 = time_global()
+		t0 = now()
 		done = {}
 		state("after the load")
 	else
@@ -84,6 +93,12 @@ function on_game_start()
 	local ok, line = pcall(command_line)
 	TOKEN = ok and type(line) == "string" and line:match("%-zz_sp%s+(%w+)") or nil
 	if not TOKEN then return end
+	-- Nobody clicks on the stand: GAMMA's NPE tutorials (npe_director init_npe_execution reads npe/general/enable at the
+	-- first update) would hold the game frozen. This profile of the stand only (appdata_s), the stock MCM switch.
+	local okn = pcall(function()
+		axr_main.config:w_value("mcm", "npe/general/enable", false)
+		axr_main.config:save()
+	end)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
-	printf("%s", "[sp] armed")
+	printf("%s", "[sp] armed" .. (okn and ", NPE tutorials off" or ", NPE switch failed"))
 end
