@@ -5,10 +5,45 @@ local modes = dofile("tests/lua/support/modes.lua")
 local gamma = "temp/review/corpus/merged/"
 local stock = "temp/stock_scripts/scripts/"
 
-local function mod(E, path, name)
+-- The engine's unlocalizer (engine\src\xrServerEntities\script_storage.cpp) as G.A.M.M.A. configures it for this script
+-- (gamedata\configs\unlocalizers\xcv_phantoms_fix_unlocalizer.ltx): these locals become module fields before compiling.
+local XCV_UNLOCAL = { enable_psi_hit = true, tmr = true, phantom_frequency = true, phantoms_appear_at = true,
+	spawned_phantoms = true }
+local function unlocalize(src)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if XCV_UNLOCAL[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+
+local function mod(E, path, name, transform)
 	local module = setmetatable({}, { __index = E })
 	E[name] = module
-	setfenv(assert(loadfile(path .. name .. ".script")), module)()
+	if transform then
+		local fh = assert(io.open(path .. name .. ".script", "rb"))
+		local src = fh:read("*a")
+		fh:close()
+		setfenv(assert(loadstring(transform(src), "@" .. path .. name .. ".script")), module)()
+	else
+		setfenv(assert(loadfile(path .. name .. ".script")), module)()
+	end
 	return module
 end
 
@@ -199,7 +234,54 @@ local function phantoms_case(set, scenario)
 	end
 end
 
+-- Regression 1 (build 57): the stand's xcv_phantoms is unlocalized, its settings are module fields. The override must run
+-- as in build 56 in every process kind: no "cannot resolve" report, and in a session the roll still happens.
+local function unlocalized_case(set)
+	local M, E = boot(set, { [0] = 0, [1] = 500, [2] = 501 })
+	M.add(make_obj(500, 100, 0, 0))
+	if set ~= "none" then M.add(make_obj(501, 200, 0, 0)) end
+	E.math = setmetatable({ random = function(_, max) return max or 1 end }, { __index = math })
+	local psy_table = { actor_psy_health = set == "srv_world" and 0 or 1 }
+	E.arszi_psy = { get_ppe_intensity = function() return (1 - psy_table.actor_psy_health) * 0.5 end }
+	E.coop_economy_mdata = {
+		player_value = function(id) return { actor_psy_health = id == 500 and 0.8 or 1 } end,
+	}
+	local calls = {}
+	E.alife_object = function() return nil end
+	E.alife_release_id = function() end
+	local xcv = mod(E, gamma, "xcv_phantoms", unlocalize)
+	mod(E, gamma, "xcv_phantoms_fix")
+	local label = set .. "/unlocalized"
+	check(type(rawget(xcv, "phantom_frequency")) == "number" and type(rawget(xcv, "spawned_phantoms")) == "table",
+		label .. ": the settings are module fields, as the engine loads them")
+	xcv.spawn_xphantoms = function()
+		calls[#calls + 1] = { id = E.db.actor:id(), x = E.db.actor:position().x }
+	end
+	xcv.on_game_start()
+	local applied = {}
+	load_script(M, "coop_npc_phantoms").install(E.coop_npc_players, function() return set ~= "none" end, applied)
+	local warned = false
+	for _, line in ipairs(M.log) do
+		if tostring(line):find("cannot resolve private XCV spawn settings", 1, true) then warned = true end
+	end
+	check(not warned, label .. ": no unresolved-settings report")
+	local function tick(delta)
+		NOW = NOW + delta
+		return pcall(M.fire, "actor_on_update")
+	end
+	if set == "none" or set == "srv_world" then
+		local ok = tick(10000)
+		check(ok and #calls == 0, label .. ": the override runs without error and spawns nothing here")
+		return
+	end
+	if set == "hostplay" then tick(1) end
+	local ok = tick(10000)
+	check(ok and #calls == 1 and calls[1].id == 500 and calls[1].x == 100,
+		label .. ": the override rolls and spawns at the client with low psy health")
+end
+
 for _, set in ipairs(modes.names()) do
+	unlocalized_case(set)
 	if set == "hostplay" then
 		silent_case(set, true)
 		silent_case(set, false)

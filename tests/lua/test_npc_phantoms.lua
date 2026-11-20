@@ -305,4 +305,88 @@ do
 	check(route:find("monster_on_update@coop_npc_phantoms%s*=%s*level") ~= nil, "the route keeps the wrapper on who leads the level")
 end
 
+-- Regression (build 57): on the stand G.A.M.M.A.'s configs\unlocalizers\xcv_phantoms_fix_unlocalizer.ltx has the engine
+-- (script_storage.cpp) turn xcv's spawned_phantoms into a module field before compiling. The contact and squad hooks
+-- must find it there too, or a phantom the rotation spawns at a client runs to the host (id 0) and never touches him.
+local gamma = "temp/review/corpus/merged/"
+local XCV_UNLOCAL = { enable_psi_hit = true, tmr = true, phantom_frequency = true, phantoms_appear_at = true,
+	spawned_phantoms = true }
+local function unlocalize(src)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if XCV_UNLOCAL[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+
+local function load_xcv(E)
+	local module = setmetatable({}, { __index = E })
+	E.xcv_phantoms = module
+	local fh = assert(io.open(gamma .. "xcv_phantoms.script", "rb"))
+	local src = fh:read("*a")
+	fh:close()
+	setfenv(assert(loadstring(unlocalize(src), "@xcv_phantoms.script")), module)()
+	return module
+end
+
+for _, on in ipairs({ true, false }) do
+	local label = on and "session with a client" or "no client in the session"
+	local M, E, proxy = boot()
+	stubs(E)
+	local class = { get_current_task = function(self) return "stock of " .. self.id end }
+	E.sim_squad_scripted = { sim_squad_scripted = class }
+	E.CALifeSmartTerrainTask = function(gvid, lvid) return { gvid = gvid, lvid = lvid } end
+	local xcv = load_xcv(E)
+	check(type(rawget(xcv, "spawned_phantoms")) == "table", label .. ": spawned_phantoms is a module field, as on the stand")
+	local seen = {}
+	xcv.release_phantoms = function(obj) seen[#seen + 1] = E.db.actor:id() end
+	xcv.on_game_start()
+	local applied = {}
+	load_script(M, "coop_npc_phantoms").install(E.coop_npc_players, function() return on end, applied)
+	local has = {}
+	for _, a in ipairs(applied) do has[a] = true end
+	check(has["native:phantom_contact"], label .. ": native:phantom_contact applied")
+	check(has["native:phantom_squad"], label .. ": native:phantom_squad applied")
+
+	-- squad target: xcv's "actor" is id 0 (the host); a phantom spawned at a far client must run to him
+	E.db.actor._pos = vec(1000, 0, 0)
+	proxy._pos = vec(10, 0, 0)
+	local sq = { id = 40, position = vec(12, 0, 0) }
+	xcv.spawned_phantoms[40] = true
+	local task = class.get_current_task(sq)
+	if on then
+		check(type(task) == "table" and task.gvid == proxy:game_vertex_id(), label .. ": phantom at a far client runs to him")
+	else
+		check(task == "stock of 40", label .. ": stock target")
+	end
+	xcv.load_state({ spawned_phantoms = { [41] = true } })
+	local task2 = class.get_current_task({ id = 41, position = vec(12, 0, 0) })
+	if on then
+		check(type(task2) == "table", label .. ": the table load_state puts in the module is the one read")
+	else
+		check(task2 == "stock of 41", label .. ": stock target after load")
+	end
+
+	-- contact: xcv's monster_on_update measures to db.actor; at a client it must run as him
+	local npc = M.add(make_obj(30, 100.5, 0, 0, { _squad = { id = 41 } }))
+	M.fire("monster_on_update", npc)
+	check(seen[#seen] == (on and 500 or 0), label .. ": contact measured to " .. (on and "the client" or "the host"))
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))

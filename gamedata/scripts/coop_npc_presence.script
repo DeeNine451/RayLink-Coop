@@ -312,6 +312,12 @@ local function update_safespawn(mod)
 		if not next(ops) then seen[peer] = nil end
 	end
 	if not arrival_due or now < arrival_due then return end
+	-- A player's machine is in the decider's world once it is Live, which a held load puts off long after its first
+	-- update: the arrival counts from then, so the wait does not use up its window
+	if coop_mode.is_player_mirror() and not coop_mods_core.live_client() then
+		arrival_due = now + 1000
+		return
+	end
 	if not coop_mode.actor_is_player() or now > arrival_due + 10000 then arrival_due = nil; return end
 	local peer = coop_mods_core.self_peer()
 	local actor = local_player(peer)

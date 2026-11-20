@@ -72,13 +72,29 @@ local function psy(C, P, active)
 	return true
 end
 
+-- xcv's squad table, read anew on every call (xcv replaces it at load_state). A file local of xcv_phantoms.script, or a
+-- module field where G.A.M.M.A.'s configs\unlocalizers\xcv_phantoms_fix_unlocalizer.ltx has the engine
+-- (script_storage.cpp) turn the local into one before the script compiles. nil: no such table.
+local function xcv_squads(C, m)
+	if type(m) ~= "table" then return nil end
+	if type(rawget(m, "spawned_phantoms")) == "table" then
+		return function() return rawget(m, "spawned_phantoms") end
+	end
+	local _, holder, index = C.find_local(m, "spawned_phantoms")
+	if not holder then return nil end
+	return function()
+		local _, t = debug.getupvalue(holder, index)
+		return t
+	end
+end
+
 local function contact(C, P, active)
 	local m = C.mod("xcv_phantoms")
 	local update, psi_hit = m and m.monster_on_update, m and m.psi_health_hit
 	if type(update) ~= "function" or type(psi_hit) ~= "function" then return false end
-	local _, holder, index = C.find_local(m, "spawned_phantoms")
+	local phantom_squads = xcv_squads(C, m)
 	local power = C.find_local(m, "psi_hit_power")
-	if not holder or type(power) ~= "number" then return false end
+	if not phantom_squads or type(power) ~= "number" then return false end
 	local phantom -- the one touching a client, while xcv's update runs as him
 	m.psi_health_hit = function(enable, ...)
 		if not (phantom and enable) then return psi_hit(enable, ...) end
@@ -94,7 +110,7 @@ local function contact(C, P, active)
 	local wrapped = function(npc, ...)
 		if P.is_client() then return end
 		local squad = active() and not P.in_identity() and npc and npc:alive() and get_object_squad(npc)
-		local _, spawned = debug.getupvalue(holder, index) -- xcv replaces the table at load_state
+		local spawned = phantom_squads()
 		local near = squad and type(spawned) == "table" and spawned[squad.id] and P.nearest(npc)
 		if not (near and P.is_proxy(near)) then return update(npc, ...) end
 		phantom = npc
@@ -112,10 +128,10 @@ local function squad_place(C, P, active)
 	local class = squads and squads.sim_squad_scripted
 	local task = class and class.get_current_task
 	if type(task) ~= "function" then return false end
-	local _, holder, index = C.find_local(m, "spawned_phantoms")
-	if not holder then return false end
+	local phantom_squads = xcv_squads(C, m)
+	if not phantom_squads then return false end
 	class.get_current_task = function(self, ...) -- the engine asks this for every squad: the table first
-		local _, spawned = debug.getupvalue(holder, index) -- xcv replaces the table at load_state
+		local spawned = phantom_squads()
 		if not (type(spawned) == "table" and spawned[self.id] and active()) then return task(self, ...) end
 		local near = P.nearest(self.position)
 		if not (near and P.is_proxy(near)) then return task(self, ...) end
@@ -149,6 +165,10 @@ local function xcv_fix(C, P)
 	local m = C.mod("xcv_phantoms")
 	local original = m and m.actor_on_update
 	if type(original) ~= "function" or coop_route.script_of(original) ~= "xcv_phantoms_fix" then return false end
+	-- G.A.M.M.A. ships configs\unlocalizers\xcv_phantoms_fix_unlocalizer.ltx: the engine makes these locals module
+	-- fields before the script compiles, so the replacement reads what it expects. Nothing to supply (build 56).
+	if type(rawget(m, "phantom_frequency")) == "number" and type(rawget(m, "phantoms_appear_at")) == "number"
+		and type(rawget(m, "spawned_phantoms")) == "table" then return false end
 	local _, holder, index = C.find_local(m, "spawned_phantoms")
 	local ok, frequency, threshold = pcall(xcv_settings)
 	local environment = getfenv(original)

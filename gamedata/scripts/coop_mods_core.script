@@ -459,9 +459,13 @@ function on(verb, f, side)
 	end)
 end
 
--- The payload of an event, or nil (and counted) when it cannot go: no session, too big.
+-- The payload of an event, or nil when it cannot go: no session, not in the world yet (both uncounted), too big (counted).
 local function payload_of(verb, t)
 	if not active() then return nil end
+	-- coop.is_live is coop.send_event's own acceptance test ("not in a co-op world"): the process that decides the world,
+	-- or a client that is Live in it. A player's machine offers nothing while it loads (build 56 ran no sender then); every
+	-- send the engine accepts passes here unchanged, in every process kind
+	if api.is_live and api.is_live() ~= true then return nil end
 	local cm = mod("coop_main")
 	local payload = type(t) == "table" and cm and cm.encode(t) or tostring(t or "")
 	if #payload > MAX_PAYLOAD then
