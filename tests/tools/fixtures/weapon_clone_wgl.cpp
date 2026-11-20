@@ -125,7 +125,9 @@ CInventoryItem* find_go(u16 id) { return find_item(id); }
 u16 quant(float value) { return u16(std::lround(value * 65535.f)); }
 float dequant(u16 value) { return value / 65535.f; }
 bool is_map_authority() { return false; }
-struct Mode { bool decides_world() const { return false; } bool leads_level() const { return false; } };
+enum class EntityUp : uint8_t { Spawned, Released, Parent, Died };
+struct LevelSide { void level_entity_up(EntityUp, uint16_t, uint16_t) {} };
+struct Mode { bool decides_world() const { return false; } bool leads_level() const { return false; } LevelSide* level() const { return nullptr; } };
 Mode mode() { return {}; }
 // ITEM_DATA
 UpgradeList spawn_upgrade_list(const std::string&, const UpgradeList& list, bool) { return list; }

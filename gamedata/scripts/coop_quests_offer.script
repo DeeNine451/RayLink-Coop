@@ -249,7 +249,10 @@ local function character_of(peer)
 	return ok and c or nil
 end
 
-local function note_offer(peer, npc_id, tid, vars, bounty)
+-- Review A-REV-E-2 finding 4: a module function, so that a mode's layer can pass the offers this process makes on to the process
+-- that runs the give (Server: the map server of his map builds the offer, the world server gives the task; coop_srv_tasks), and
+-- note there the offers it hears (the same record, judged by coop_tasks host.give_offer as this process's own).
+function note_offer(peer, npc_id, tid, vars, bounty)
 	local s = qc.ser(vars or {})
 	if not (type(peer) == "number" and type(tid) == "string" and s) then return end
 	local mine = made_offers[peer]
@@ -353,7 +356,8 @@ local function offer_here(t, from, relayed)
 	local kind = t.k == "sim" and "sim" or "dyn"
 	local npc = npc_id and level.object_by_id(npc_id)
 	local function refuse(why)
-		-- These checks are mandatory in every trust mode. Pass records why the request failed.
+		-- These checks are mandatory in every trust mode. Pass records why the request failed; the shipped settings name
+		-- offer_request "refuse", so its line says what happens (review A-REV-E-2 finding 3, mod_system_coop_trust.ltx).
 		local trust = coop_trust
 		if trust and type(trust.pass) == "function" then
 			trust.pass("offer_request", false, "peer %d, NPC %d, sequence %d: %s", from, npc_id or 0, seq, why)
@@ -830,6 +834,25 @@ local function giver_npc(giver)
 	return o and IsStalker(o) and o or nil
 end
 
+-- Review A-REV-E-2 finding 4: the vars of the newest offer of task `id` made to player `from` by his giver (the NPC, or the commander
+-- of the giver's squad), as note_offer keeps them; nil: none.
+local function offered_vars(id, from, giver)
+	local list, meta = offers_of(from, id)
+	if not list then return nil end
+	local npc = giver_npc(giver)
+	local nid = npc and npc:id()
+	for i, vars in ipairs(list) do
+		local m = type(meta) == "table" and meta[i]
+		if type(m) == "table" and m.npc ~= nil and (m.npc == giver or m.npc == nid) then return vars end
+	end
+	return nil
+end
+
+-- Review A-REV-E-2 finding 4: before the host prepares a given task itself (host_after_give: its on_job_descr again), with the vars of
+-- the offer that player was made. Nothing here: on a co-op host the vendor caches the effects read hold this process's own offer. A
+-- mode's layer fills what its process lacks (Server: the world server's vendor caches, coop_srv_quests_gamma).
+function prime_rerun(id, vars) end
+
 function host_after_give(id, from, giver, got_vars)
 	if not qc.active() or not coop_mode.decides_world() then return end
 	stats.after_give = stats.after_give + 1
@@ -838,6 +861,11 @@ function host_after_give(id, from, giver, got_vars)
 	if on_jd ~= "" and not (got_vars and got_vars[id]) and load_var(db.actor, id) == nil then
 		local npc = giver_npc(giver)
 		if npc then
+			local okv, vars = pcall(offered_vars, id, from, giver)
+			if okv and type(vars) == "table" then
+				local okp, perr = pcall(prime_rerun, id, vars)
+				if not okp then qc.report(TAG, "prime rerun " .. id, perr) end
+			end
 			stats.rerun = stats.rerun + 1
 			local ok, err = with_talk(npc, function()
 				local cond = xr_logic.parse_condlist(db.actor, "task_manager", "condlist", on_jd)

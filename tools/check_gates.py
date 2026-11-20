@@ -152,11 +152,12 @@ DEPLOY_SKIP_EXT = frozenset({".bak", ".tmp", ".log", ".orig"})
 # the two in step): a mark of a part of the stand does not count
 SCENARIOS = {
     # guard round 8 (the review of round 7, R7): companions_group (F5-CMP-1) and phantoms_server (S3) were in no runner
-    "hostplay": ("carry_group", "base_group", "sil_group", "squads_group", "sp_smoke", "companions_group", "cover_group"),
+    "hostplay": ("carry_group", "base_group", "sil_group", "squads_group", "sp_smoke", "companions_group", "cover_group",
+                 "vehicle_group"),
     "srv": (
         "ded_check", "base_server", "carry_server", "taskboard_ws", "phantoms_server",
         "allymark_server", "companions_server", "weather_server", "cover_server",
-        "ms_crash_server", "save_handover_server", "creator10_server", "feed_server",
+        "ms_crash_server", "save_handover_server", "creator10_server", "feed_server", "vehicle_server",
     ),
 }
 

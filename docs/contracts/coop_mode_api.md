@@ -311,3 +311,9 @@ when `mode()` is still none, so these two are not `Mode` members.
 
 A function is looked up when it is asked: nil when its script or function is not there. A hook name in a Core line is a
 string argument: the guard reads no string, so `coop_mode.hook("levels.level_of_player")` is no L1.
+
+**Добавлено интегратором C (сборка 57).**
+
+- LevelSide H-FIGHTREP `level_fight_reputation(character, delta)`: сервер карты отправляет FactMsg наверх как Relation op 17; никто другой на его карте — ничего.
+- Mode H-OPCMD `send_operator_command(line)`: none, хост и клиент кооп-режима, сервер мира и сервер карты отвечают Unreachable; игрок сервера — Refused при `!op::allowed`, иначе Sent или Unreachable от сессии.
+- Layer `join_request(address, via)`: слой Коопа возвращает приглашение Steam; слой Сервера и none — false.

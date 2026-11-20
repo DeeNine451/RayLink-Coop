@@ -273,6 +273,45 @@ local function install_north_picker(C, world)
 	return reset_roster
 end
 
+-- Review A-REV-E-2 finding 4 (world server): a given task whose give brought no task var is prepared again by its on_job_descr
+-- (coop_quests_offer host_after_give). Since A-S5S-offer the map server of the player's map made the offer, so this process's vendor
+-- cache never held its pick: an assault would hold no squad, a stash would roll another. Before that run the entry of the task is
+-- filled from the offer he was made (coop_quests_offer prime_rerun; the map server passes its offers up, coop_srv_tasks), as a
+-- co-op host's own cache holds it. Only the vendors whose setup the task's on_job_descr names, only whole ids.
+local function whole_id(v) return type(v) == "number" and v >= 1 and v <= 65534 and v % 1 == 0 end
+local VENDOR_FILL = {
+	{ "tasks_assault", "setup_assault_task", "cache_assault", function(v)
+		if not (whole_id(v.squad_id) and whole_id(v.smart_id)) then return nil end
+		return { squad_id = v.squad_id, smart_id = v.smart_id, is_enemy = v.is_enemy, scripted = v.scripted }
+	end },
+	{ "tasks_stash", "drx_sl_create_quest_stash", "cache_stash", function(v)
+		return whole_id(v.target_id) and v.target_id or nil
+	end },
+}
+
+local function install_vendor_fill(C)
+	local offers = C.mod("coop_quests_offer")
+	if not (offers and type(offers.prime_rerun) == "function") then return end
+	C.wrap(offers, "prime_rerun", "quests_gamma.vendor_fill", function(original)
+		return function(id, vars, ...)
+			original(id, vars, ...)
+			if not world_live() then return end
+			local v = type(id) == "string" and type(vars) == "table" and vars[id]
+			if type(v) ~= "table" then return end
+			local ini = task_manager and task_manager.task_ini
+			local okj, on_jd = pcall(function() return ini:r_string_ex(id, "on_job_descr") end)
+			if not (okj and type(on_jd) == "string") then return end
+			for _, e in ipairs(VENDOR_FILL) do
+				if on_jd:find(e[2] .. "(", 1, true) and C.mod(e[1]) then
+					local cache = C.find_local({ setup = xr_effects[e[2]] }, e[3])
+					local entry = type(cache) == "table" and e[4](v) or nil
+					if entry ~= nil then cache[id] = entry end
+				end
+			end
+		end
+	end)
+end
+
 function on_game_start()
 	coop_mode.when_srv(function()
 		local C = coop_mods_core
@@ -280,6 +319,7 @@ function on_game_start()
 		if not world and not coop_mode.leads_here() then return end
 		local reset_roster = step("install north picker", install_north_picker, C, world)
 		if reset_roster then RegisterScriptCallback("coop_world_back", reset_roster) end
+		if world then step("install vendor fill", install_vendor_fill, C) end
 		local lost = C.mod("dialogs_lostzone")
 		if not world then
 			-- The stock Darkscape cleanup needs the actual online NPCs of that map.

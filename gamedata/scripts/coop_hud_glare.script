@@ -37,7 +37,6 @@ local NEAR = 3 -- m: full strength from here in
 local BEAM_EDGE, BEAM_FULL = 0.866, 0.990 -- 30 and 8 deg off his beam
 local VIEW_EDGE, VIEW_FULL = 0.819, 0.995 -- 35 and 6 deg off my view: it goes before he leaves the screen
 local SPOT_MIN, SPOT_MAX = 72, 220 -- px at 768 high
-local SLOTS = 7 -- kMaxPlayers without me
 local HEAD_BONE = "bip01_head"
 local LAMP_UP, LAMP_AHEAD = 0.1, 0.15 -- m from the head bone: where the lamp sits (coop_equip.cpp kHeadLampOffset)
 local RAY_FLAGS = 3 -- rq_target: rqtObject + rqtStatic, a closed door counts too
@@ -94,6 +93,15 @@ end
 -------------------------------------------------------------------------------
 -- What the game says
 -------------------------------------------------------------------------------
+-- F5-SEAT-2: the most spots, one per other player the session can have: its seats without me (the co-op 7, a server 15).
+-- An engine that says no seats (outside a session, an older exe): nil, no limit but the players it lists.
+function spots_max()
+	local ok, info = pcall(api.session_info)
+	local n = ok and type(info) == "table" and tonumber(info.max_players) or nil
+	if n and n >= 1 and n == math_floor(n) then return n - 1 end
+	return nil
+end
+
 local function hud_visible()
 	local f = rawget(_G, "main_hud_shown")
 	if not f then return true end
@@ -146,12 +154,10 @@ class "UICoopGlare" (CUIScriptWnd)
 function UICoopGlare:__init() super()
 	local xml = CScriptXmlInit()
 	xml:ParseFile(XML_FILE)
+	self.xml = xml
 	self.root = xml:InitStatic("coop_glare", self)
 	self.spots = {}
-	for i = 1, SLOTS do
-		self.spots[i] = xml:InitStatic("coop_glare:spot", self.root)
-		self.spots[i]:Show(false)
-	end
+	self:AddSpots(spots_max() or 0)
 	self.glares = {} -- character id -> { value, lamp = {x, y, z}, beam = {x, y, z}, ray_at, clear }
 	self.ids = {}
 	self.point = vector()
@@ -160,10 +166,19 @@ end
 function UICoopGlare:__finalize()
 end
 
+-- Spots up to `want`, hidden (a Welcome after the overlay was made, or an engine without seats, can need more).
+function UICoopGlare:AddSpots(want)
+	for i = #self.spots + 1, want do
+		self.spots[i] = self.xml:InitStatic("coop_glare:spot", self.root)
+		self.spots[i]:Show(false)
+	end
+end
+
 function UICoopGlare:AvatarIds(tg)
 	if self.ids_at and tg >= self.ids_at and tg - self.ids_at < LIST_GAP_MS then return self.ids end
 	self.ids_at = tg
 	self.ids = other_avatars()
+	self.most = spots_max() -- with the list: coop.session_info() builds tables, not for every frame
 	local kept = {}
 	for _, id in ipairs(self.ids) do kept[id] = self.glares[id] or { value = 0 } end
 	self.glares = kept
@@ -202,13 +217,16 @@ function UICoopGlare:DrawSpots(dev, tg, dt)
 	local w2ui = game and game.world2ui
 	local cam, view = dev.cam_pos, dev.cam_dir
 	if not (w2ui and cam and view) then return 0 end
-	for _, id in ipairs(self:AvatarIds(tg)) do
+	local ids = self:AvatarIds(tg)
+	local most = self.most or #ids
+	for _, id in ipairs(ids) do
 		local g = self.glares[id]
 		g.value = fade(g.value, self:GlareOf(id, g, cam, view, tg), dt)
-		if g.value > 0 and g.lamp and used < SLOTS then
+		if g.value > 0 and g.lamp and used < most then
 			local ok, s = pcall(w2ui, self.point:set(g.lamp.x, g.lamp.y, g.lamp.z), false, false)
 			if ok and s and s.x and s.x > -9000 then
 				used = used + 1
+				if used > #self.spots then self:AddSpots(used) end
 				local w = self.spots[used]
 				local size = spot_size(g.value)
 				w:SetWndSize(vector2():set(size * self.kx, size))
@@ -222,7 +240,7 @@ function UICoopGlare:DrawSpots(dev, tg, dt)
 end
 
 function UICoopGlare:HideSpots(from)
-	for i = from, SLOTS do
+	for i = from, #self.spots do
 		if self.spots[i]:IsShown() then self.spots[i]:Show(false) end
 	end
 end

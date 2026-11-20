@@ -362,7 +362,8 @@ def test_mark_of_other_ids_or_other_exe_does_not_count(repos, capsys):
     (("dirty",), {}, "dirty=missing"),
     ((), {"scenarios": "ded_check"}, "base_server, carry_server, taskboard_ws, phantoms_server, "
                                  "allymark_server, companions_server, weather_server, cover_server, "
-                                 "ms_crash_server, save_handover_server, creator10_server, feed_server did not run"),  # a part
+                                 "ms_crash_server, save_handover_server, creator10_server, "
+                                 "feed_server, vehicle_server did not run"),  # a part
     (("scenarios",), {}, "did not run"),
     # B12: the scenario files that ran are HEAD's (tools/stand is tracked; a relaxed check is a change of HEAD)
     (("scenarios_sha256",), {}, "scenarios_sha256 missing"),
@@ -393,6 +394,26 @@ def test_mark_without_mode_dirty_or_partial_does_not_count(repos, capsys, drop, 
     mark(root, engine, exe, "srv", drop, **override)
     code, out = run(root, exe, capsys, "base..HEAD", "--per-commit")
     assert code == 1 and "srv.ok does not count" in out and why in out, out
+
+
+@pytest.mark.parametrize(("mode", "scenario", "other_scenario"), [
+    ("hostplay", "vehicle_group", "vehicle_server"),
+    ("srv", "vehicle_server", "vehicle_group"),
+])
+def test_vehicle_scenario_is_required_in_its_own_mode(tmp_path, mode, scenario, other_scenario):
+    mark_path = tmp_path / f"{mode}.ok"
+    mod_head, engine_head, exe_hash = "a" * 40, "b" * 40, "c" * 64
+    fields = (f"mode={mode}\nmod_head={mod_head}\nengine_head={engine_head}\nexe_source={engine_head}\n"
+              f"exe_sha256={exe_hash}\ndirty=0\nstand_extra=0\n")
+    other_runs = [name for name in gates.SCENARIOS[mode] if name not in (scenario, other_scenario)]
+
+    mark_path.write_text(fields + f"scenarios={','.join([*other_runs, other_scenario])}\n", encoding="utf-8")
+    ok, reason = gates.check_mark(mode, tmp_path, mod_head, engine_head, exe_hash)
+    assert not ok and f"{scenario} did not run" in reason, reason
+
+    mark_path.write_text(fields + f"scenarios={','.join([*other_runs, scenario])}\n", encoding="utf-8")
+    ok, reason = gates.check_mark(mode, tmp_path, mod_head, engine_head, exe_hash)
+    assert ok, reason
 
 
 def test_stand_runners_list_the_scenarios_the_gate_demands():

@@ -335,7 +335,9 @@ local A = M.allies
 local r, g, b = A.color(0)
 check(r == 217 and g == 177 and b == 96, "host colour from mod_system_coop.ltx (sand)")
 r, g, b = A.color(9)
-check(r == 83 and g == 140 and b == 224 and A.slot(9) == 1, "peer 9 wraps to slot 1 (blue)")
+check(r == 64 and g == 169 and b == 112 and A.slot(9) == 9, "peer 9 has a colour of its own (slot 9, jade; F5-SEAT-2: 17 colours)")
+r, g, b = A.color(18)
+check(r == 83 and g == 140 and b == 224 and A.slot(18) == 1, "peer 18 wraps to slot 1 (blue)")
 check(A.text_tag(4) == "%c[255,211,117,79]", "text colour tag of slot 4")
 check(select(1, A.state_color("down")) == 226 and select(1, A.state_color("spec")) == 150 and A.state_color("alive") == nil, "state colours")
 local seen = {}

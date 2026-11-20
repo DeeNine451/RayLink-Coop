@@ -77,9 +77,9 @@ end
 
 local function coop_sub()
 	local games = #G.list()
-	local most = 8
-	local ok, n = pcall(function() return coop_menu.max_players() end)
-	if ok and n then most = n end
+	-- F5-SEAT-2: the session's seats in a session, else the co-op's (coop_menu.max_players); no number of its own
+	local ok, most = pcall(function() return coop_menu.max_players() end)
+	if not (ok and type(most) == "number") then return "" end
 	if games == 0 then return tr("st_coop_mm_sub_coop_none", most) end
 	return tr("st_coop_mm_sub_coop", games, most)
 end

@@ -165,6 +165,7 @@ local OTHER_PLAYERS = 7 -- lines of the choice of player: a full session less th
 local PHRASE_HAND, PHRASE_WHOM, PHRASE_BACK, PHRASE_SLOTS = 7000, 7001, 7002, 7010 -- free ids of dm_is_actor_companion_dialog
 local PHRASE_GOODWILL = -10001 -- the engine sorts by this: after the stock lines (-10000)
 local paid_period = nil -- client: the seconds of the contract he just paid for
+local paid_mult = nil -- client (B-REV F4): the multiplier of the price his paid dialog showed (txr_paid_companions' roll)
 local TAKE_WAIT_MS = 3000 -- a line of control just used stays away this long, the host's answer is on its way
 local asked_lead = {} -- NPC id -> time_global() of this machine's last request about its control
 local lead_peer = {} -- squad id -> its leader's peer, while this process knows him
@@ -238,6 +239,27 @@ end
 -------------------------------------------------------------------------------
 -- Client: dialog actions go to the host
 -------------------------------------------------------------------------------
+-- B-REV F4: a paid dialog's take_guard_money_1/2 `f` (named fn) on a player's machine in a session takes no money: the authority of
+-- his map does (coop_npc_companions_hire). It names the multiplier this machine's dialog showed (the stock's file local dialog_squad,
+-- its roll for the squad) and shows the stock's line of the money (relocate_money_from_actor's news_manager.relocate_money).
+-- -> the multiplier, nil when this machine has none
+local function shown_price(f, fn, a, b)
+	local core = rawget(_G, "coop_mods_core") or _G["coop_mods_core"]
+	if not (core and type(core.upvalue) == "function") then return nil end
+	local npc = npc_of(a, b)
+	local squad = npc and squad_of(npc)
+	local book = core.upvalue(f, "dialog_squad")
+	local row = squad and type(book) == "table" and book[squad.id]
+	local m = type(row) == "table" and tonumber(row.money) or nil
+	local base = tonumber((core.upvalue(f, fn == "take_guard_money_2" and "money_2_base" or "money_1_base")))
+	local nm = _G["news_manager"]
+	if m and base and nm and type(nm.relocate_money) == "function" then
+		local ok, err = pcall(nm.relocate_money, db.actor, "out", m * base)
+		if not ok then report("paid hire news", err) end
+	end
+	return m
+end
+
 local function patch_client_actions()
 	for full in pairs(ACTIONS) do
 		local m, fn = resolve(full)
@@ -258,7 +280,7 @@ local function patch_client_actions()
 					give_back(before)
 					return res
 				end
-				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()), p = paid_period, d = dialog_id }, 0) then
+				if npc and P.send(EV_CMD, { f = full, i = P.to_host(npc:id()), p = paid_period, m = paid_mult, d = dialog_id }, 0) then
 					stats.cmd_out = stats.cmd_out + 1
 				end
 			end
@@ -268,9 +290,16 @@ local function patch_client_actions()
 	for fn, seconds in pairs(PAID_SECONDS) do
 		local f = paid and paid[fn]
 		if type(f) == "function" then
-			paid[fn] = function(...)
+			paid[fn] = function(a, b, ...)
 				paid_period = seconds
-				return f(...)
+				-- B-REV F4: in a session the price is taken by the authority of his map, nothing here (nothing paid twice)
+				if P.client_live() then
+					local ok, m = pcall(shown_price, f, fn, a, b)
+					if not ok then report("paid hire price", m) end
+					paid_mult = ok and m or nil
+					return
+				end
+				return f(a, b, ...)
 			end
 		end
 	end
@@ -632,6 +661,20 @@ local function host_on_cmd(t, from)
 		stats.refused = stats.refused + 1
 		return
 	end
+	-- B-REV F4: the stock paid hire is paid here, before the squad joins him (his machine named the days and the price)
+	if kind == "add" and hire and not hire.pay_hire(t, from, npc) then
+		stats.refused = stats.refused + 1
+		return
+	end
+	local days = nil
+	if full == PAID and hire and hire.paid_register then
+		local ok
+		ok, days = hire.paid_register(from, npc, squad)
+		if not ok then
+			stats.refused = stats.refused + 1
+			return
+		end
+	end
 	stats.cmd_in = stats.cmd_in + 1
 	if kind == "one" then -- G12-1 (m31:1): the clone is made here and joins him when it is online
 		if hire then hire.recruit_one(full, t, from, npc) end
@@ -649,7 +692,8 @@ local function host_on_cmd(t, from)
 	squad = squad_of(npc)
 	if full == PAID then
 		local e = squad and txr_paid_companions.paid_companions[squad.id]
-		if e then e.guard_period = t.p == PAID_SECONDS.take_guard_money_2 and t.p or PAID_SECONDS.take_guard_money_1 end
+		-- B-REV F4: the days he paid for here; none paid and no contract running: the days his machine named.
+		if e then e.guard_period = days or (t.p == PAID_SECONDS.take_guard_money_2 and t.p or PAID_SECONDS.take_guard_money_1) end
 	end
 	if kind == "add" then
 		-- a story's recruit that marks the squad and sets the logic but writes no line of the table (the Fanatic, dialogs_escape): the
@@ -659,6 +703,7 @@ local function host_on_cmd(t, from)
 		if se and se_load_var(cid, se:name(), "companion") then axr_companions.companion_squads[squad.id] = squad end
 		claim_new_squads(before, from)
 		give_back(before)
+		if hire then hire.hire_done(from, npc, is_companion_squad(squad)) end -- B-REV F4: paid for, did not join: his money back
 	elseif kind == "remove" and squad then
 		leaders[squad.id] = nil
 	end
@@ -690,6 +735,11 @@ function recruit_for(from, npc, paid)
 	local peer = is_companion_squad(squad) and control_peer(squad) or nil
 	for _, o in ipairs(members(squad)) do push_info(o, peer) end
 	return is_companion_squad(squad)
+end
+
+-- B-REV F4, for coop_npc_companions_hire: a refused hire, told to that player (key: a string id of the game's texts).
+function tell_refused(peer, key)
+	tell(peer, key)
 end
 
 -- G12-1, for coop_npc_companions_hire (the count of ordinary companions per player): whose this squad is here. A character id: its

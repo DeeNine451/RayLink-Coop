@@ -333,10 +333,89 @@ local function stock_lifecycle(mode)
 	check(M.rolls() == 0 and defense_packets(M, false) == 0, mode .. " does not run the server's periodic defense checks")
 end
 
+-- Review A-REV-E-2 finding 4: the world server prepares a given task again (coop_quests_offer host_after_give: its on_job_descr) when
+-- his give brought no task var. The map server of his map made the offer (A-S5S-offer), so the world's vendor caches are empty or
+-- stale: before that run the task's entry is filled from the offer he was made (prime_rerun), as a co-op host's own cache holds it.
+local function vendor_fill(mode)
+	print("== A-REV-E-2 F4: vendor caches before a task is prepared again, " .. mode)
+	local M = base(mode, mode == "srv_map")
+	local e = M.env
+	-- the vendors keep these caches in their setup effects' closures (tasks_assault.script cache_assault, tasks_stash.script cache_stash)
+	local cache_assault, cache_stash, picked = {}, {}, {}
+	e.tasks_assault, e.tasks_stash = {}, {}
+	e.xr_effects.setup_assault_task = function(_, _, p)
+		local c = cache_assault[p[1]]
+		if c then
+			picked[p[1]] = c.squad_id
+			e.save_var(e.db.actor, p[1], { squad_id = c.squad_id, smart_id = c.smart_id, is_enemy = c.is_enemy, scripted = c.scripted })
+		end
+	end
+	e.xr_effects.drx_sl_create_quest_stash = function(_, _, p)
+		if not cache_stash[p[1]] then cache_stash[p[1]] = 4444 end -- the stock rolls one when its cache is empty
+		picked[p[1]] = cache_stash[p[1]]
+		e.save_var(e.db.actor, p[1], { target_id = cache_stash[p[1]], stash_type = tonumber(p[2]) })
+	end
+	M.ini.as_t = { on_job_descr = "%=setup_assault_task(as_t)%" }
+	M.ini.st_t = { on_job_descr = "%=drx_sl_create_quest_stash(st_t:2)%" }
+	M.ini.plain_t = { on_job_descr = "%=other_effect(plain_t)%" }
+	local giver = M.new_obj(700, "quest_giver", vec(0, 0, 0), { _stalker = true })
+	e.db.storage[700] = { object = giver, pstor = {} }
+	load_script(M, "coop_quests_core")
+	local offers = load_script(M, "coop_quests_offer")
+	offers.on_game_start()
+	boot(M)
+	local as_vars = { as_t = { squad_id = 900, smart_id = 901, is_enemy = true, scripted = false } }
+	local st_vars = { st_t = { target_id = 950, stash_type = 2 } }
+	check(type(offers.prime_rerun) == "function", mode .. ": the Core asks before a task is prepared again (prime_rerun)")
+	if type(offers.prime_rerun) ~= "function" then return end
+	offers.prime_rerun("as_t", as_vars)
+	offers.prime_rerun("st_t", st_vars)
+	if mode == "srv_world" then
+		local c = cache_assault.as_t
+		check(c and c.squad_id == 900 and c.smart_id == 901 and c.is_enemy == true and c.scripted == false,
+			"world server: the assault cache holds the squad the offer named")
+		check(cache_stash.st_t == 950, "world server: the stash cache holds the stash the offer named")
+		cache_assault.as_t, cache_stash.st_t = { squad_id = 1 }, 1 -- stale: an older run's
+		offers.prime_rerun("as_t", as_vars)
+		offers.prime_rerun("st_t", st_vars)
+		check(cache_assault.as_t.squad_id == 900 and cache_stash.st_t == 950, "world server: a stale entry is replaced by the offer's")
+		cache_assault.as_t, cache_stash.st_t = nil, nil
+		for _, junk in ipairs({ { as_t = { squad_id = 1.5, smart_id = 901 } }, { as_t = { squad_id = 900 } },
+			{ as_t = { squad_id = 900, smart_id = 65535 } }, { as_t = "900" }, {}, { st_t = { target_id = 950 } } }) do
+			offers.prime_rerun("as_t", junk)
+		end
+		offers.prime_rerun("st_t", { st_t = { target_id = -1 } })
+		offers.prime_rerun("plain_t", { plain_t = { squad_id = 900, smart_id = 901, target_id = 950 } })
+		offers.prime_rerun(nil, as_vars)
+		check(cache_assault.as_t == nil and cache_stash.st_t == nil and next(cache_assault) == nil and next(cache_stash) == nil,
+			"world server: junk ids, another task's vars, a task whose on_job_descr names neither vendor: nothing filled")
+		-- the Core path: his give brought no task var, the offer of his giver is known here; the run of its on_job_descr finds the
+		-- offer's pick (before: an empty cache, no squad held, another stash)
+		M.new_obj(900, "squad_assault_target", vec(0, 0, 0))
+		load_script(M, "coop_tasks").on_game_start()
+		offers.note_offer(1, 700, "as_t", as_vars, nil)
+		offers.note_offer(1, 700, "st_t", st_vars, nil)
+		offers.note_offer(1, 701, "as_t", { as_t = { squad_id = 777, smart_id = 778 } }, nil) -- another NPC's offer of it
+		M.handlers.coop_tq("op=sgive;i=sas_t;g=n700", 1)
+		M.handlers.coop_tq("op=sgive;i=sst_t;g=n700", 1)
+		check(picked.as_t == 900 and picked.st_t == 950, "world server: the task prepared again takes the offer of his giver ("
+			.. tostring(picked.as_t) .. ", " .. tostring(picked.st_t) .. ")")
+		local var = e.load_var(e.db.actor, "as_t")
+		check(var and var.squad_id == 900 and e.sim_offline_combat.task_squads[900] == true,
+			"world server: the squad the offer named is the task's and is held")
+		check(offers.offers_of(1, "as_t") == nil and offers.offers_of(1, "st_t") == nil,
+			"world server: the gives spend both tasks' offers after preparing them")
+	else
+		check(next(cache_assault) == nil and next(cache_stash) == nil,
+			mode .. ": nothing filled (a co-op host's cache holds its own offer; a map server runs no give)")
+	end
+end
+
 for _, mode in ipairs(modes.names()) do
 	if mode == "srv_world" then lost_zone(); defense(); defense_daily_roll(); north(mode) end
 	if mode == "srv_map" then darkscape_map(); north(mode); north(mode, true) end
 	if mode == "hostplay" or mode == "none" then north(mode); stock_lifecycle(mode) end
+	vendor_fill(mode)
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

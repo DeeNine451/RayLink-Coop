@@ -7,7 +7,8 @@
 --   - character 0 on a server is the world server's seat, which plays no character: its effects are nobody's, the map server drops
 --     them at once instead of sending them up every second for good;
 --   - the NPC a player on a map server's level talks to (coop_mode.facts_of, protocol 33);
---   - the player's sound, truce and offer goodwill, plus delivery of the task-end surge flag clear (level logic grants no player immunity).
+--   - the player's sound, truce and offer goodwill, plus delivery of the task-end surge flag clear (level logic grants no player immunity);
+--     the offer goodwill also on the map server that builds his offer (review A-REV-E-2 finding 1).
 -- Real scripts over the quests harness: a world server (peer 0, -coop_dedicated), a player on a map server's level (peer 1, character
 -- 500) and that map server (bridge 0x101). Run: tools\test_lua.cmd srv_tasks
 dofile("tests/lua/support/harness_quests.lua")
@@ -80,6 +81,12 @@ do
 	fire(Co, "actor_on_update")
 	check(Co.env.coop_srv_tasks ~= nil, "(the script loads in the co-op process)")
 	check(Co.handlers.coop_rep_map == nil and Co.handlers.coop_rep_map_ack == nil, "no map server's effects are taken in the co-op")
+	check(Co.handlers.coop_talk_new == nil, "no map server's word of a new talk is taken in the co-op (A-REV-E-2 F5)")
+	check(Co.handlers["quests.offer_up"] == nil, "no map server's offer record is taken in the co-op (A-REV-E-2 F4)")
+	Co.env.coop_npc_meet = { talk_verdict = function() return true end }
+	fire(Co, "actor_on_update")
+	check(rawget(Co.env.coop_npc_meet, "_coop_srv_talk_up") == nil, "the co-op host's talk verdict is not watched by the server code")
+	Co.env.coop_npc_meet = nil
 	check(Co.env.xr_effects.play_sound_on_actor == Co.stock.sound and Co.env.xr_effects.actor_surge_immuned == Co.stock.surge
 		and Co.env.xr_effects.stalker_ceasefire == Co.stock.ceasefire
 		and Co.env.xr_conditions.is_faction_friend_to_actor == Co.stock.friend, "the four effects stay the stock's")
@@ -422,6 +429,28 @@ do
 	check(Hm.env.AC_ID == 0, "AC_ID is back")
 	scope = nil
 	Hm.env.coop_srv_quests_far = nil
+	-- 4b. Review A-REV-E-2 finding 1: since A-S5S-offer the map server of his level builds the offer, with no far scope and no
+	-- reward scope; coop_quests_offer.requester() names him while it builds. The precondition reads his goodwill, not the ghost's.
+	local req = nil
+	Ms.env.coop_quests_offer = { requester = function() return req end }
+	local mfriend = Ms.env.xr_conditions.is_faction_friend_to_actor
+	check(mfriend ~= Ms.stock.friend, "(the map server wraps is_faction_friend_to_actor)")
+	check(mfriend(Ms.actor, nil, { "freedom" }) == false, "map server, no offer being built: the ghost's goodwill (0), as the stock")
+	req = 1
+	check(mfriend(Ms.actor, nil, { "freedom" }) == true, "map server, his offer being built: his goodwill (1200), not the ghost's")
+	check(Ms.env.AC_ID == 0, "AC_ID is back on the map server")
+	for _, bad in ipairs({ 2, 0, 1.5, -1, 65536, "1" }) do
+		req = bad
+		check(mfriend(Ms.actor, nil, { "freedom" }) == false, "a requester with no character here (" .. tostring(bad) .. "): the ghost's")
+	end
+	req = function() error("requester failed") end
+	Ms.env.coop_quests_offer = { requester = function() return req() end }
+	check(mfriend(Ms.actor, nil, { "freedom" }) == false, "a requester that throws: the ghost's")
+	Ms.env.coop_quests_offer = nil
+	-- the world server keeps HEAD's answer: a requester while no far scope is open (its fallback over no scope) is the ghost's
+	Hm.env.coop_quests_offer = { requester = function() return 1 end }
+	check(friend(Hm.actor, nil, { "freedom" }) == false, "world server, a requester and no far scope: the ghost's goodwill, as before")
+	Hm.env.coop_quests_offer = nil
 	-- his machine runs its own calls as the stock
 	check(Cm.env.xr_effects.play_sound_on_actor == Cm.stock.sound and Cm.env.xr_effects.stalker_ceasefire == Cm.stock.ceasefire,
 		"a player's machine keeps the stock effects")
@@ -468,6 +497,142 @@ do
 	Hm.handlers.coop_rep_map(Hm.env.coop_main.encode(packet), BRIDGE)
 	pump()
 	check(Cm.rank == rank - 0.5 and #Hm.sent == sent + 2, "a corrected retry forwards one fractional stat and is acknowledged")
+end
+
+-------------------------------------------------------------------------------
+print("== one step per talk: the map server tells the world server each talk it grants (review A-REV-E-2 finding 5)")
+do
+	local T = Hm.env.coop_tasks
+	local real = T.far_talk_new
+	local heard = {}
+	T.far_talk_new = function(p, n)
+		heard[#heard + 1] = tostring(p) .. ":" .. tostring(n)
+		if real then return real(p, n) end
+	end
+	local lock, allow, verdicts = {}, true, 0
+	Ms.env.coop.talk_lock_of = function(peer) return lock[peer] end
+	Ms.env.coop_npc_meet = { talk_verdict = function()
+		verdicts = verdicts + 1
+		if allow then return true end
+		return false, "unwilling"
+	end }
+	NOW = NOW + 1100
+	fire(Ms, "actor_on_update")
+	local meet = Ms.env.coop_npc_meet
+	check(rawget(meet, "_coop_srv_talk_up") == true, "(the map server watches the talks it grants)")
+	local npc = Ms.new_obj(777, "stalker_trader", vec(12, 0, 10), { _stalker = true })
+	local av = Ms.objects[500]
+	local yes = meet.talk_verdict(npc, av)
+	pump()
+	check(yes == true and verdicts == 1, "the stock verdict still answers")
+	check(#heard == 1 and heard[1] == "1:777", "a talk the map server grants him: the world server hears it (" .. tostring(heard[1]) .. ")")
+	lock[1] = 777
+	meet.talk_verdict(npc, av)
+	pump()
+	check(#heard == 1, "the lock he holds already, asked again: no new talk")
+	lock[1] = nil
+	allow = false
+	local no, why = meet.talk_verdict(npc, av)
+	pump()
+	check(no == false and why == "unwilling" and #heard == 1, "a refused talk: the verdict as the stock's, no word")
+	allow = true
+	local other = Ms.new_obj(778, "stalker", vec(12, 0, 10), { _stalker = true })
+	meet.talk_verdict(npc, other)
+	pump()
+	check(#heard == 1, "a talk of an NPC with an NPC (no player's character): no word")
+	fire(Ms, "actor_on_update")
+	meet.talk_verdict(npc, av)
+	pump()
+	check(#heard == 2, "the watch is installed once: one word per grant")
+	check(Cm.handlers.coop_talk_new == nil and Ms.handlers.coop_talk_new == nil, "only the world server takes the word")
+	check(rawget(Hm.env.coop_npc_meet or {}, "_coop_srv_talk_up") == nil, "the world server grants no lock of his and watches none")
+
+	-- the world server: only the bridge of that player's map, a whole player and a whole NPC id
+	local n = #heard
+	Hm.handlers.coop_talk_new("1:777", 1)
+	Hm.handlers.coop_talk_new("1:777", BRIDGE + 1)
+	Hm.handlers.coop_talk_new("1:777", 0)
+	local senders = Hm.env.coop_trust.status().task_talk_new_sender
+	check(#heard == n and senders and senders.failed == 3, "a player, an unregistered bridge, peer 0: no word, each through coop_trust")
+	for _, junk in ipairs({ "2:777", "1:0", "1:65535", "0:777", "65536:777", "1:777:1", "1:7.5", "x:777", "", "1:777\n",
+		string.rep("1", 13), "%s%s%s:777" }) do
+		Hm.handlers.coop_talk_new(junk, BRIDGE)
+	end
+	Hm.handlers.coop_talk_new(nil, BRIDGE)
+	Hm.handlers.coop_talk_new(777, BRIDGE)
+	local payloads = Hm.env.coop_trust.status().task_talk_new_payload
+	check(#heard == n and payloads and payloads.failed == 14,
+		"another player's (his map has no map server here), junk and out-of-range ids: no word, each through coop_trust")
+	Hm.handlers.coop_talk_new("1:777", BRIDGE)
+	check(#heard == n + 1 and heard[#heard] == "1:777", "the word of his map's bridge reaches the Core")
+	-- these reports are dropped in every trust mode: the shipped settings say "refuse", so the [coop-trust] line says what happens
+	-- (A-REV-E-2 finding 3's rule)
+	local fh = io.open("gamedata/configs/mod_system_coop_trust.ltx", "r")
+	local text = fh and fh:read("*a") or ""
+	if fh then fh:close() end
+	for _, name in ipairs({ "task_map_effect_sender", "task_map_effect_size", "task_map_effect_payload", "task_map_ack_sender",
+		"task_map_ack_payload", "task_talk_new_sender", "task_talk_new_payload" }) do
+		check(text:match("\n" .. name .. "%s*=%s*(%w+)") == "refuse", "the shipped policy refuses the dropped check " .. name)
+	end
+	T.far_talk_new = real
+	Ms.env.coop_npc_meet, Ms.env.coop.talk_lock_of = nil, nil
+end
+
+-------------------------------------------------------------------------------
+print("== the offers a map server makes reach the world server, which gives the task (review A-REV-E-2 finding 4)")
+do
+	for _, M in ipairs({ Hm, Ms, Cm }) do M.ini.as_t = {} end
+	local wo = load_script(Hm, "coop_quests_offer")
+	local mo = load_script(Ms, "coop_quests_offer")
+	NOW = NOW + 1100
+	fire(Ms, "actor_on_update")
+	fire(Hm, "actor_on_update")
+	check(rawget(mo, "_coop_srv_offers_up") == true and rawget(wo, "_coop_srv_offers_up") == nil,
+		"(only the map server passes its offers up)")
+	local vars = { as_t = { squad_id = 900, smart_id = 901 } }
+	mo.note_offer(1, 777, "as_t", vars, 55)
+	pump()
+	check(mo.offers_of(1, "as_t") ~= nil, "the map server keeps its offer as before")
+	local list, meta = wo.offers_of(1, "as_t")
+	check(list and list[1].as_t and list[1].as_t.squad_id == 900 and meta[1].npc == 777 and meta[1].bt == 55,
+		"the world server keeps the map server's offer as its own (offers_of judges his give there)")
+	mo.forget_offers(1, 777)
+	pump()
+	check(wo.offers_of(1, "as_t") == nil and mo.offers_of(1, "as_t") == nil,
+		"an offer the map server drops (a refusal: his machine makes that NPC's offers itself) is dropped on the world server too")
+	-- only the bridge of that player's map; whole ids, a task this world knows, bounded vars
+	local qc = Hm.env.coop_quests_core
+	local function up(t, from) Hm.handlers["quests.offer_up"](Hm.env.coop_main.encode(t), from) end
+	local function good(over)
+		local t = { p = 1, n = 777, i = "as_t", v = qc.ser(vars), bt = 55 }
+		for k, v in pairs(over or {}) do t[k] = v end
+		return t
+	end
+	up(good(), 1)
+	up(good(), BRIDGE + 1)
+	up(good(), 0)
+	local senders = Hm.env.coop_trust.status().task_offer_up_sender
+	check(wo.offers_of(1, "as_t") == nil and senders and senders.failed == 3,
+		"a player, an unregistered bridge, peer 0: nothing noted, each through coop_trust")
+	local junk = { { p = 2 }, { p = 0 }, { p = 1.5 }, { n = 0 }, { n = 65535 }, { i = "unknown_task" }, { i = "as\001t" },
+		{ bt = 1.5 }, { bt = 70000 }, { v = string.rep("x", qc.MAX_BLOB + 1) }, { v = "garbage" }, { f = 2 } }
+	for _, over in ipairs(junk) do up(good(over), BRIDGE) end
+	local payloads = Hm.env.coop_trust.status().task_offer_up_payload
+	check(wo.offers_of(1, "as_t") == nil and wo.offers_of(2, "as_t") == nil and payloads and payloads.failed == #junk,
+		"another player's (his map is not that bridge's), junk ids, an unknown task, bad vars: nothing noted, each through coop_trust")
+	local plain = good()
+	plain.bt = nil
+	up(plain, BRIDGE)
+	list, meta = wo.offers_of(1, "as_t")
+	check(list and meta[1].npc == 777 and meta[1].bt == nil, "a well-formed record of his map's bridge is noted")
+	up({ p = 1, n = 777, f = 1 }, BRIDGE)
+	check(wo.offers_of(1, "as_t") == nil, "a well-formed forget of his map's bridge drops it")
+	check(Cm.handlers["quests.offer_up"] == nil and Ms.handlers["quests.offer_up"] == nil, "only the world server takes offer records")
+	local fh = io.open("gamedata/configs/mod_system_coop_trust.ltx", "r")
+	local text = fh and fh:read("*a") or ""
+	if fh then fh:close() end
+	check(text:match("\ntask_offer_up_sender%s*=%s*(%w+)") == "refuse" and text:match("\ntask_offer_up_payload%s*=%s*(%w+)") == "refuse",
+		"the shipped policy refuses the dropped offer records")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

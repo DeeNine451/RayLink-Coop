@@ -86,8 +86,12 @@ namespace sync
 bool host_peer_joining(PeerId) { return false; }
 }
 
+// coop_script.cpp's own helper (A-S6-E-hub): the process that decides the world takes events from the session
+bool decides_world() { return mgr().is_host(); }
+
 namespace net
 {
+bool client() { return mgr().is_client(); }
 struct Delivery
 {
     std::vector<uint8_t> bytes;

@@ -130,6 +130,23 @@ check(exit_count == prior_exits + 1 and use_count == prior_uses, "the world-leav
 
 physically_seated = false
 SendScriptCallback(detach, car)
+
+-- INTEG-C (rv_F5-VEH-6 blocker 2): the engine holds a native LevelMove while the actor sits and asks out through this function
+-- first, so the map server of this level releases the seat before the world server moves him.
+local glue = rawget(_G, "coop_vehicles")
+local exit_for_travel = glue and rawget(glue, "exit_for_travel")
+check(type(exit_for_travel) == "function", "the engine's seated level move has a Lua ask-out to call")
+if type(exit_for_travel) == "function" then
+	local before_exit, before_use = exit_count, use_count
+	seat, physically_seated = { car = car_id, seat = 0 }, true
+	check(exit_for_travel() == true and exit_count == before_exit + 1 and use_count == before_use,
+		"a held level move asks the seat's decider for an exit without pressing USE")
+	seat = nil
+	check(exit_for_travel() == false and exit_count == before_exit + 1,
+		"no grant left: nothing more is asked while the local detach finishes")
+	physically_seated = false
+end
+
 -- Leave the stub seat set to catch an accidental call from an authority's process.
 MODE = "host"
 for _, name in ipairs({ "map", "world" }) do
@@ -138,6 +155,9 @@ for _, name in ipairs({ "map", "world" }) do
 	local before = exit_count
 	coop_main.on_world_leaving(1)
 	check(exit_count == before, name .. " server does not ask to exit on the player's behalf")
+	if type(exit_for_travel) == "function" then
+		check(exit_for_travel() == false and exit_count == before, name .. " server's travel hold asks no exit for anybody")
+	end
 end
 
 done("vehicle Lua glue, server")

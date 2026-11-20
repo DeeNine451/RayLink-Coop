@@ -1243,14 +1243,14 @@ function ops.give(tm, id, t, from)
 	local given = tm.task_info[id] ~= nil
 	if given then
 		local qo = rawget(_G, "coop_quests_offer")
-		-- round 5: his offers of this task are spent by the give (host.give_offer)
-		if type(qo) == "table" and type(qo.offer_given) == "function" then pcall(qo.offer_given, from, id) end
 		stamp_wait(id, tm.task_info[id])
 		-- host-side parts of the offer the client's dialog prepared (pinned target squads, ...)
 		if type(qo) == "table" and type(qo.host_after_give) == "function" then
 			local ok, err = pcall(qo.host_after_give, id, from, giver, got_vars)
 			if not ok then report("after give " .. id, err) end
 		end
+		-- his offers of this task are spent by the give, after host_after_give read the one he took (A-REV-E-2 F4)
+		if type(qo) == "table" and type(qo.offer_given) == "function" then pcall(qo.offer_given, from, id) end
 	end
 	return given
 end
@@ -1801,6 +1801,23 @@ function host.talk_started(npc, who)
 	local f = api and api.talk_lock_of
 	if type(f) == "function" and tonumber(f(peer)) == npc:id() then return end -- he holds it already: no new talk
 	host.talk_starts[peer] = (host.talk_starts[peer] or 0) + 1
+end
+
+-- Review A-REV-E-2 finding 5: the process that leads player `peer`'s map granted him a new talk lock of NPC `npc` (host numbering;
+-- coop_srv_tasks hears it from his map server's bridge). The talk a step used with that NPC is over: the next step with him is a step
+-- of a new talk. The map server's body reports (LevelBodyFacts.partner, about one a second) miss a dialog closed and opened again
+-- between two of them; this word does not. A talk no step used yet needs nothing: the step that names it numbers it (host.talk_of).
+function far_talk_new(peer, npc)
+	if not (type(peer) == "number" and peer >= 1 and peer <= 0xffff and peer == math_floor(peer)) then return end
+	if not (type(npc) == "number" and npc >= 1 and npc <= 65534 and npc == math_floor(npc)) then return end
+	local t = host.talks[peer]
+	if not t then return end
+	for _, key in ipairs({ npc, "?" }) do -- "?": an engine that says only "in some dialog" (_talk_vague)
+		if t.of[key] ~= nil then
+			t.n = t.n + 1
+			t.of[key] = t.n
+		end
+	end
 end
 
 -- Round 4: the talk of player `from` with NPC `sp` that a step names now: { key, n }, nil: no talk facts here.

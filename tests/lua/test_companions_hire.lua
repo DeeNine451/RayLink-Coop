@@ -98,6 +98,14 @@ local function npc(M, id, x)
 	o.set_npc_position = function(self, p) self._pos = vec(p.x, p.y, p.z); self.placed = (self.placed or 0) + 1 end
 	o.dont_has_info = function(self, i) return not self:has_info(i) end
 	o.level_vertex_id = function() return 7 end
+	-- B-REV F3: its relation (friend 0, neutral 1) to all players or by actor id, a friend by default.
+	o.relation = function(self, who)
+		local r = W.rel and W.rel[self._id]
+		if type(r) == "table" then r = r[who and who:id()] end
+		if r ~= nil then return r end
+		return 0
+	end
+	o._comm = W.comm and W.comm[id] or "stalker"
 	M.env.db.storage[id] = { object = o }
 	return o
 end
@@ -109,11 +117,121 @@ local function new_squad(id, vertex, ...)
 		return function() i = i + 1; local m = t.members[i]; if m then return { id = m } end end
 	end
 	function t.commander_id() return t.members[1] end
+	function t.section_name() return W.sections and W.sections[id] or "stalker_sim_squad_novice" end
 	function t.force_change_position(self, p) t.forced = vec(p.x, p.y, p.z) end
 	W.squads[id], W.raw[id] = luabind_object(t), t
 	for _, m in ipairs({ ... }) do W.se[m] = W.se[m] or se_obj(m) end
 	return W.squads[id]
 end
+
+-- Stock txr_paid_companions.script (Tronex), the parts the hire uses, with its bodies: :9 paid_companions, :11-24 the file locals,
+-- :25-32 is_not_dangerous_map, :34-50 is_actor_natural, :52-82 is_squad_competent (the price's roll), :88-98 is_paid_companion_faction,
+-- :126-152 take_guard_money_1/2, :154-174 register_paid_companion.
+local PAID_STOCK = [==[
+paid_companions = {}
+local factions_paid = {
+	["stalker"] = true,
+	["freedom"] = true,
+	["killer"] = true,
+	["bandit"] = true,
+}
+local money_1_base = 1500
+local money_2_base = 3000
+local dialog_squad = {}
+local guard_period
+function is_not_dangerous_map(actor,npc)
+	local lvl_name = level.name()
+	local blk = xr_effects.blacklisted_maps
+	if blk[lvl_name] then
+		return false
+	end
+	return true
+end
+function is_actor_natural(actor,npc)
+	local npc = dialogs.who_is_npc(actor,npc)
+	local squad = get_object_squad(npc)
+	if not (squad) then
+		return false
+	end
+	if not (axr_companions.allow_simulation_squads_as_companions) then
+		return false
+	end
+	if not (axr_companions.allow_only_friends_as_companions) then
+		return true
+	end
+	return npc:relation(db.actor) == game_object.neutral
+end
+function is_squad_competent(actor,npc)
+	local npc = dialogs.who_is_npc(actor,npc)
+	local squad = get_object_squad(npc)
+	if not (squad) then
+		return false
+	end
+	local section = squad:section_name()
+	local rand = 0
+	dialog_squad[squad.id] = dialog_squad[squad.id] or {}
+	if string.find(section,"veteran") then
+		rand = 70
+		dialog_squad[squad.id].money = dialog_squad[squad.id].money or (math.random(180,240)/100)
+	elseif string.find(section,"advanced") then
+		rand = 40
+		dialog_squad[squad.id].money = dialog_squad[squad.id].money or (math.random(130,160)/100)
+	else
+		dialog_squad[squad.id].money = dialog_squad[squad.id].money or (math.random(80,120)/100)
+	end
+	if (dialog_squad[squad.id].can_work == "true") or ((dialog_squad[squad.id].can_work ~= "false") and (math.random(1,100) <= rand)) then
+		dialog_squad[squad.id].can_work = "true"
+		return true
+	end
+	dialog_squad[squad.id].can_work = "false"
+	return false
+end
+function is_paid_companion_faction(actor,npc)
+	local npc = dialogs.who_is_npc(actor,npc)
+	local comm = character_community(npc) or ""
+	if factions_paid[comm] then
+		return true
+	end
+	return false
+end
+function take_guard_money_1(actor,npc)
+	local npc = dialogs.who_is_npc(actor,npc)
+	local squad = get_object_squad(npc)
+	if not (squad) then
+		return false
+	end
+	local money = (dialog_squad[squad.id].money * money_1_base) or ((math.random(80,120)/100) * money_1_base)
+	guard_period = 1*24*60*60
+	dialogs.relocate_money_from_actor(actor, npc, money)
+end
+function take_guard_money_2(actor,npc)
+	local npc = dialogs.who_is_npc(actor,npc)
+	local squad = get_object_squad(npc)
+	if not (squad) then
+		return false
+	end
+	local money = (dialog_squad[squad.id].money * money_2_base) or ((math.random(80,120)/100) * money_2_base)
+	guard_period = 2*24*60*60
+	dialogs.relocate_money_from_actor(actor, npc, money)
+end
+function register_paid_companion(actor,npc)
+	local npc = dialogs.who_is_npc(actor,npc)
+	local squad = get_object_squad(npc)
+	if not (squad) then
+		return
+	end
+	if axr_companions.companion_squads[squad.id] then
+		local members_id = {}
+		for k in squad:squad_members() do
+			local member = db.storage[k.id] and db.storage[k.id].object
+			if ( member and member:alive() ) then
+				members_id[#members_id + 1] = member:id()
+			end
+		end
+		paid_companions[squad.id] = { members_id = members_id , join_time = utils_data.CTime_to_table(game.get_game_time()) , guard_period = guard_period }
+	end
+end
+]==]
 
 local function stock(M)
 	local E = M.env
@@ -130,7 +248,29 @@ local function stock(M)
 		end
 	end
 	E.alife = function()
-		return { level_name = function(_, id) return NAMES[id] end, level_id = function() return M.level_id or 1 end }
+		return { level_name = function(_, id) return NAMES[id] end, level_id = function() return M.level_id or 1 end,
+			object = function(_, id)
+				local sq = E.get_object_squad(id)
+				return { id = id, group_id = sq and sq.id or 65535 }
+			end }
+	end
+	-- B-REV F3/F4: what the dialogs' preconditions read (stock _g.script character_community, get_object_story_id;
+	-- xr_effects.blacklisted_maps; the engine's game_object relation constants)
+	E.game_object = { friend = 0, neutral = 1, enemy = 2 }
+	E.character_community = function(o) return o:character_community() end
+	E.get_object_story_id = function(id) return W.story and W.story[id] end
+	E.xr_effects = { blacklisted_maps = { l03_agroprom_underground = true } }
+	E.utils_data = { CTime_to_table = function() return {} end }
+	E.dialogs.relocate_money_from_actor = function(a, b, n) M.paid_local = (M.paid_local or 0) + n end
+	E.news_manager = { relocate_money = function(a, kind, n) M.news = M.news or {}; M.news[#M.news + 1] = { kind = kind, n = n } end }
+	-- the world's book of money (coop.money_of / coop.money_grant: the co-op host's ledger, a map server's word up to the world)
+	M.grants = {}
+	E.coop.money_of = function(peer) return W.money and W.money[peer] end
+	E.coop.money_grant = function(peer, n)
+		if not (W.money and W.money[peer]) or n == 0 then return false, "no character" end
+		M.grants[#M.grants + 1] = { peer = peer, n = n }
+		W.money[peer] = math.max(0, W.money[peer] + n)
+		return true
 	end
 	E.game_graph = function()
 		return { vertex = function(_, gv) return { level_id = function() return LEVEL_OF_VERTEX[gv] end } end }
@@ -158,7 +298,8 @@ local function stock(M)
 	end
 	E.db.actor.run_talk_dialog = function(self, o) M.talks = M.talks or {}; M.talks[#M.talks + 1] = o:id() end
 	-- axr_companions (stock bodies: get_companion_count :310, add_to_actor_squad :393, companion_squad_can_teleport :293)
-	local ac = { companion_squads = {}, non_task_companions = {}, max_actor_squad_size = LIMIT }
+	local ac = { companion_squads = {}, non_task_companions = {}, max_actor_squad_size = LIMIT,
+		allow_simulation_squads_as_companions = true, allow_only_friends_as_companions = true }
 	E.axr_companions = ac
 	function ac.get_companion_count()
 		local n = 0
@@ -178,12 +319,34 @@ local function stock(M)
 		return not (o and (o:has_info("npcx_beh_patrol_mode") or o:has_info("npcx_beh_wait")))
 	end
 	function ac.get_inventory_table() return {} end
-	-- dialogs_axr_companion (stock :311 become_actor_companion, :384 is_not_actor_companion)
+	-- dialogs_axr_companion (stock :311 become_actor_companion, :384 is_not_actor_companion; B-REV F3: :246 is_non_story,
+	-- :268 is_actor_friend, :357-376 is_hostage_task_giver / is_not_hostage_task_giver, the stock's bodies)
 	E.dialogs_axr_companion = {
+		is_non_story = function(actor, o)
+			local squad = E.get_object_squad(o)
+			if not squad then return false end
+			if E.get_object_story_id(squad.id) then return false end
+			return true
+		end,
+		is_actor_friend = function(actor, o)
+			local n = E.dialogs.who_is_npc(actor, o)
+			if not E.get_object_squad(n) then return false end
+			if not ac.allow_simulation_squads_as_companions then return false end
+			if not ac.allow_only_friends_as_companions then return true end
+			return n:relation(E.db.actor) == E.game_object.friend
+		end,
+		is_hostage_task_giver = function(a, b)
+			local n = E.dialogs.who_is_npc(a, b)
+			local se = n and E.alife():object(n:id())
+			local giver_id = se and (se.group_id ~= 65535 and se.group_id or se.id)
+			if E.load_var(E.db.actor, "drx_sl_hostage_giver_" .. giver_id, false) then return true end
+			return false
+		end,
+		is_not_hostage_task_giver = function(a, b) return not E.dialogs_axr_companion.is_hostage_task_giver(a, b) end,
 		is_not_actor_companion = function(a, o) return o:has_info("npcx_is_companion") ~= true end,
 		become_actor_companion = function(a, o)
 			local sq = E.get_object_squad(E.dialogs.who_is_npc(a, o))
-			if not sq then return end
+			if not sq or M.join_fails then return end
 			ac.companion_squads[sq.id] = sq
 			for k in sq:squad_members() do
 				local m = M.objects[k.id]
@@ -192,14 +355,13 @@ local function stock(M)
 			M.recruits = (M.recruits or 0) + 1
 		end,
 	}
-	-- txr_paid_companions (stock :127-174: the contract of the squad with this machine's guard_period)
-	E.txr_paid_companions = { paid_companions = {} }
-	function E.txr_paid_companions.take_guard_money_1() M.guard_local = 86400 end
-	function E.txr_paid_companions.take_guard_money_2() M.guard_local = 172800 end
-	function E.txr_paid_companions.register_paid_companion(a, o)
-		local sq = E.get_object_squad(E.dialogs.who_is_npc(a, o))
-		if sq then E.txr_paid_companions.paid_companions[sq.id] = { guard_period = M.guard_local } end
-	end
+	-- txr_paid_companions: the stock's file, its bodies (txr_paid_companions.script :9-174; the price's roll, the money, the contract
+	-- of the squad with this machine's guard_period), compiled with its file locals
+	local tp = setmetatable({}, { __index = E })
+	E.txr_paid_companions = tp
+	local chunk = assert(loadstring(PAID_STOCK, "@txr_paid_companions.script"))
+	setfenv(chunk, tp)
+	chunk()
 	-- G_FLAT's clone (stalker_cloning_utility.clone_stalker): a squad of one where the NPC stands, online at the next update
 	E.stalker_cloning_utility = { clone_stalker = function(o)
 		M.clones = (M.clones or 0) + 1
@@ -236,7 +398,7 @@ local function mods(M)
 	real(M, "custom_companion_squad_size", { "function dialogs_axr_companion.is_room_in_actor_squad(actor, npc)" })
 	real(M, IRC, { "function become_actor_companion_individually(actor, npc)",
 		"function become_paid_actor_companion_individually_and_register(actor, npc)",
-		"function is_room_for_one_in_actor_squad(actor, npc)" },
+		"function is_room_for_one_in_actor_squad(actor, npc)", "function not_a_one_man_squad(actor, npc)" },
 		"local custom_actor_squadsize, custom_actor_squadsize_folkhero, hascustomsquadsize = 2, 4, false")
 	local fft = real(M, "game_fast_travel", { "function companions_travel_with_actor()", "function bring_companions_to_actor(forced)",
 		"function on_key_release(key)" })
@@ -313,6 +475,57 @@ local function ordinary(M, sid, mid, x, lead, vertex)
 	M.marks[mid] = { companion = true }
 	M.env.coop_npc_companions._leaders()[sid] = lead
 	return o
+end
+
+-- B-REV F4: the paid dialog on machine M with NPC o rolls the squad's price (phrase 1's precondition is_squad_competent, stock :52):
+-- -> the multiplier the dialog shows
+local function roll(M, o)
+	local tp = M.env.txr_paid_companions
+	tp.is_squad_competent(M.env.db.actor, o)
+	local ds = M.env.coop_mods_core.upvalue(tp.is_squad_competent, "dialog_squad")
+	return ds[M.env.get_object_squad(o).id].money
+end
+-- the stock's price of a multiplier: take_guard_money_1 (:131, base 1500) / _2 (:144, base 3000), in whole RU
+local function price(m, base) return math.floor(m * 100 + 0.5) * base / 100 end
+local function grants(M, peer)
+	local list = {}
+	for _, g in ipairs(M.grants) do if g.peer == peer then list[#list + 1] = g.n end end
+	return list
+end
+local function told(M, peer, key)
+	for _, s in ipairs(sent_named(M, "npc.comp_msg")) do
+		if s.target == peer and s.payload:find(key, 1, true) then return true end
+	end
+	return false
+end
+local function trust(M, name) return M.env.coop_trust.status()[name] or { checked = 0, failed = 0, refused = 0 } end
+
+-- B1: run the stock paid dialog, then send just its register again after ten minutes.
+local function check_paid_renewal(M, B, id, sid)
+	W.talk[2] = id
+	W.rel = { [id] = 1 }
+	W.money = { [2] = 10000 }
+	W.sections = { [sid] = "stalker_sim_squad_advanced" }
+	local o, actor = B.objects[id], B.env.db.actor
+	local tp, d = B.env.txr_paid_companions, "paid_companion_dialog"
+	local m = roll(B, o)
+	tp.take_guard_money_1(actor, o, d)
+	B.env.dialogs_axr_companion.become_actor_companion(actor, o, d)
+	tp.register_paid_companion(actor, o, d)
+	pump()
+	local book = M.env.txr_paid_companions.paid_companions
+	local contract = book[sid]
+	check(contract ~= nil and contract.guard_period == 86400, "one day paid, one-day contract")
+	local g = grants(M, 2)
+	check(#g == 1 and g[1] == -price(m, 1500), "the decider charges for one day")
+	NOW = NOW + 600000
+	W.talk[2] = nil
+	tp.take_guard_money_2(actor, o, d)
+	tp.register_paid_companion(actor, o, d)
+	pump()
+	check(book[sid] == contract and contract and contract.guard_period == 86400, "unpaid register leaves the original one-day contract")
+	check(#M.grants == 1, "nothing more paid")
+	check(trust(M, "comp_paid_renew").failed == 1, "comp_paid_renew counts the refused register")
 end
 
 -------------------------------------------------------------------------------
@@ -502,6 +715,9 @@ do
 	H.env.axr_companions.non_task_companions[221] = nil
 	H.marks[221] = nil
 	W.talk[2] = 271
+	W.rel = { [271] = 1 } -- a neutral stalker: the paid dialog (is_actor_natural)
+	W.money = { [2] = 10000 }
+	roll(B, B.objects[271])
 	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[271])
 	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[271])
 	check(sent_f(B, ONE_PAID) == 1, "the paid one: one request")
@@ -520,6 +736,339 @@ do
 	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[291])
 	pump()
 	check(H.clones == 2, "after it: the next one is served")
+end
+
+-------------------------------------------------------------------------------
+-- B-REV F3 / F4 (the trust review of phase 4): the individual recruit's dialog and the hire's price, on the decider
+-------------------------------------------------------------------------------
+print("== co-op (B-REV F3): a forged individual recruit of a story NPC or of a hostage task's giver: refused in every trust mode, nothing released")
+for _, mode in ipairs({ "refuse", "log", "off" }) do
+	coop_stand({ trust = mode })
+	local H, B = W.H, W.B
+	local n = mode == "off" and 0 or 1 -- "off" only stops the counting: a guard drops in every mode (coop_trust.guard)
+	W.story = { [370] = "esc_story_squad" } -- 271's squad has a story id: G_FLAT's dialog is not offered (is_non_story)
+	W.talk[2] = 271
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[271])
+	check(sent_f(B, ONE) == 1, mode .. ": the modified client's request went out")
+	pump()
+	check(H.clones == nil and H.released == nil and H.objects[271] ~= nil, mode .. ": the story NPC: no clone, not released")
+	check(trust(H, "comp_one_story").failed == n, mode .. ": counted by the always-on guard comp_one_story")
+	check(n == 0 or (has_line(H, "comp_one_story") and has_line(H, "dropped")), mode .. ": its line says dropped")
+	-- a hostage task's giver (the group's task book: drx_sl keys of the deciding process's actor, coop_tasks)
+	W.story = nil
+	H.env.db.actor._pstor = { ["drx_sl_hostage_giver_370"] = true }
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[271])
+	pump()
+	check(H.clones == nil and H.released == nil, mode .. ": the hostage task's giver: no clone, not released")
+	check(trust(H, "comp_one_story").failed == 2 * n, mode .. ": counted again")
+	-- the paid one of a story NPC: refused before any money moves
+	W.story = { [370] = "esc_story_squad" }
+	H.env.db.actor._pstor = nil
+	W.rel, W.money = { [271] = 1 }, { [2] = 10000 }
+	roll(B, B.objects[271])
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[271])
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[271])
+	pump()
+	check(H.clones == nil and #H.grants == 0 and W.money[2] == 10000, mode .. ": the paid one of a story NPC: nothing cloned, nothing paid")
+	-- the honest sequence: the task is over, the squad is no story's -> served
+	W.story = nil
+	W.rel = nil
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[271])
+	pump()
+	check(H.clones == 1 and H.released and H.released[1] == 271, mode .. ": an ordinary NPC: cloned and released, as the mod does")
+	check(trust(H, "comp_one_story").failed == 3 * n and errors(H) == 0, mode .. ": no new failure, no error")
+end
+
+print("== co-op (B-REV F3): the rest of his dialog's preconditions go through coop_trust comp_one_dialog")
+do
+	coop_stand({ trust = "refuse" })
+	local H, B = W.H, W.B
+	W.rel = { [271] = { [0] = 0, [501] = 1 } } -- friendly to the host, neutral to B
+	W.talk[2] = 271
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[271])
+	pump()
+	check(H.clones == nil and H.released == nil, "refuse: the free recruit of a stalker who is no friend of his: refused, nothing released")
+	check(trust(H, "comp_one_dialog").refused == 1, "counted by comp_one_dialog")
+	-- a squad of one: G_FLAT's dialog is not offered (not_a_one_man_squad), the stock squad dialog is
+	coop_stand({ trust = "refuse" })
+	H, B = W.H, W.B
+	W.talk[2] = 261
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[261])
+	pump()
+	check(H.clones == nil and trust(H, "comp_one_dialog").refused == 1, "refuse: the one man of a squad of one: refused")
+	-- the paid one: a faction that does not hire out (is_paid_companion_faction), a friend (is_actor_natural wants neutral)
+	W.money = { [2] = 10000 }
+	W.talk[2] = 291
+	H.objects[291]._comm = "dolg"
+	W.rel = { [291] = 1 }
+	roll(B, B.objects[291])
+	B.env.txr_paid_companions.take_guard_money_1(B.env.db.actor, B.objects[291])
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[291])
+	pump()
+	check(H.clones == nil and #H.grants == 0, "refuse: the paid one of Duty: refused, nothing paid")
+	H.objects[291]._comm = "stalker"
+	W.rel = nil
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[291])
+	pump()
+	check(H.clones == nil and #H.grants == 0 and trust(H, "comp_one_dialog").refused == 3, "refuse: the paid one of a friend: refused, nothing paid")
+	check(has_line(H, "is_actor_natural"), "the line names the precondition")
+	-- The paid dialog sees B as neutral while the host still sees a friend.
+	W.rel = { [291] = { [0] = 0, [501] = 1 } }
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[291])
+	pump()
+	check(H.clones == 1 and #H.grants == 1, "refuse: neutral, of a faction that hires out, a squad of two: served and paid")
+	-- log: the check says what it would refuse and lets it through
+	coop_stand({ trust = "log" })
+	H, B = W.H, W.B
+	W.rel = { [271] = 1 }
+	W.talk[2] = 271
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[271])
+	pump()
+	check(H.clones == 1 and H.released and H.released[1] == 271, "log: the free recruit of a neutral stalker goes through")
+	check(has_line(H, "comp_one_dialog") and has_line(H, "would be refused") and has_line(H, "is_actor_friend"), "log: the line says it would be refused, and why")
+end
+
+print("== co-op (B-REV F4): G_FLAT's paid recruit is paid on the host: the price his dialog showed, once; his machine pays nothing")
+do
+	coop_stand()
+	local H, B = W.H, W.B
+	H.env.axr_companions.companion_squads[320] = nil
+	H.env.axr_companions.non_task_companions[221] = nil
+	H.marks[221] = nil
+	W.talk[2] = 271
+	W.rel = { [271] = 1 }
+	W.money = { [2] = 10000 }
+	local m = roll(B, B.objects[271])
+	local due = price(m, 3000)
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[271])
+	check(B.paid_local == nil, "his machine takes no money (the stock's relocate_money_from_actor does not run)")
+	check(B.news and #B.news == 1 and B.news[1].kind == "out" and math.abs(B.news[1].n - m * 3000) < 0.01, "his machine shows the stock's line of the money he pays")
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[271])
+	pump()
+	local g = grants(H, 2)
+	check(#g == 1 and g[1] == -due, "the host takes the two-day price his dialog showed (" .. tostring(due) .. " RU), once")
+	check(W.money[2] == 10000 - due, "his balance in the book")
+	local clone = W.next_id
+	online(clone)
+	run_timers(H)
+	local contract = H.env.txr_paid_companions.paid_companions[clone + 1000]
+	check(contract ~= nil and contract.guard_period == 172800 and W.CH._leaders()[clone + 1000] == 501, "two days, his")
+	check(#H.grants == 1 and B.paid_local == nil, "nothing paid twice")
+	-- the stock's roll on an advanced squad: 1.30-1.60
+	coop_stand()
+	H, B = W.H, W.B
+	W.sections = { [390] = "stalker_sim_squad_advanced" }
+	W.talk[2] = 291
+	W.rel = { [291] = 1 }
+	W.money = { [2] = 10000 }
+	m = roll(B, B.objects[291])
+	check(m >= 1.3 and m <= 1.6, "an advanced squad's multiplier")
+	B.env.txr_paid_companions.take_guard_money_1(B.env.db.actor, B.objects[291])
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[291])
+	pump()
+	g = grants(H, 2)
+	check(#g == 1 and g[1] == -price(m, 1500), "one day: the one-day price of his roll")
+	online(W.next_id)
+	run_timers(H)
+	contract = H.env.txr_paid_companions.paid_companions[W.next_id + 1000]
+	check(contract ~= nil and contract.guard_period == 86400, "one day")
+end
+
+print("== co-op (B-REV F4): a forged paid recruit: too little money is refused, a forged price is the stock's top")
+do
+	coop_stand()
+	local H, B = W.H, W.B
+	H.env.axr_companions.companion_squads[320] = nil
+	H.env.axr_companions.non_task_companions[221] = nil
+	H.marks[221] = nil
+	W.talk[2] = 271
+	W.rel = { [271] = 1, [291] = 1 }
+	W.money = { [2] = 100 }
+	roll(B, B.objects[271])
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[271])
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[271])
+	pump()
+	check(H.clones == nil and H.released == nil and #H.grants == 0 and W.money[2] == 100, "100 RU: refused, nothing cloned, released or taken")
+	check(told(H, 2, "st_not_enough_money"), "he is told: not enough money")
+	check(trust(H, "comp_paid_money").failed == 1, "counted: comp_paid_money")
+	-- no dialog at all: the request names two days and no price; the host asks the tier's top (novice 1.20 x 3000)
+	local P = B.env.coop_npc_players
+	W.money[2] = 3599
+	P.send("npc.comp", { f = ONE_PAID, i = 271, p = 172800, d = "paid_companion_dialog_individually" }, 0)
+	pump()
+	check(H.clones == nil and #H.grants == 0, "no price named, 3599 RU: refused (the top is 3600)")
+	-- a price out of the stock's roll (0.01): the top again
+	W.money[2] = 3600
+	P.send("npc.comp", { f = ONE_PAID, i = 271, p = 172800, m = 0.01, d = "paid_companion_dialog_individually" }, 0)
+	pump()
+	local g = grants(H, 2)
+	check(H.clones == 1 and #g == 1 and g[1] == -3600 and W.money[2] == 0, "a price of 0.01: 3600 taken, the tier's top")
+	-- a whole day for nothing: p is not two days -> one day and its price; the contract is the days he paid for
+	online(W.next_id)
+	run_timers(H)
+	W.money[2] = 1800
+	W.talk[2] = 291
+	P.send("npc.comp", { f = ONE_PAID, i = 291, p = 999999, m = 1.2, d = "paid_companion_dialog_individually" }, 0)
+	pump()
+	g = grants(H, 2)
+	check(H.clones == 2 and #g == 2 and g[2] == -1800, "p of 999999 s: one day, its price (1.20 x 1500)")
+	online(W.next_id)
+	run_timers(H)
+	local contract = H.env.txr_paid_companions.paid_companions[W.next_id + 1000]
+	check(contract ~= nil and contract.guard_period == 86400, "a contract of one day")
+	check(errors(H) == 0, "no error")
+end
+
+print("== co-op (B-REV F4): the stock paid hire: paid on the host before the squad joins; the contract is for the days he paid")
+do
+	coop_stand()
+	local H, B = W.H, W.B
+	W.talk[2] = 261
+	W.rel = { [261] = 1 }
+	W.money = { [2] = 10000 }
+	local m = roll(B, B.objects[261])
+	local d = "paid_companion_dialog"
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[261], d)
+	B.env.dialogs_axr_companion.become_actor_companion(B.env.db.actor, B.objects[261], d)
+	B.env.txr_paid_companions.register_paid_companion(B.env.db.actor, B.objects[261], d)
+	check(B.paid_local == nil, "his machine pays nothing")
+	pump()
+	local g = grants(H, 2)
+	check(cs(H, 360) ~= nil and W.CH._leaders()[360] == 501, "the squad joins him")
+	check(#g == 1 and g[1] == -price(m, 3000), "the host takes the two-day price, once")
+	local contract = H.env.txr_paid_companions.paid_companions[360]
+	check(contract ~= nil and contract.guard_period == 172800, "two days")
+	-- forged: one day paid, two days asked at the register
+	coop_stand()
+	H, B = W.H, W.B
+	W.talk[2] = 261
+	W.rel = { [261] = 1 }
+	W.money = { [2] = 10000 }
+	m = roll(B, B.objects[261])
+	B.env.txr_paid_companions.take_guard_money_1(B.env.db.actor, B.objects[261], d)
+	B.env.dialogs_axr_companion.become_actor_companion(B.env.db.actor, B.objects[261], d)
+	pump()
+	NOW = NOW + 60000 -- the register a minute later
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[261], d)
+	B.env.txr_paid_companions.register_paid_companion(B.env.db.actor, B.objects[261], d)
+	pump()
+	g = grants(H, 2)
+	check(#g == 1 and g[1] == -price(m, 1500), "one day paid")
+	contract = H.env.txr_paid_companions.paid_companions[360]
+	check(contract ~= nil and contract.guard_period == 86400, "a register that asks two days, a minute later, gets the one day he paid for")
+	-- too little money: the squad does not join, he is told
+	coop_stand()
+	H, B = W.H, W.B
+	W.talk[2] = 261
+	W.rel = { [261] = 1 }
+	W.money = { [2] = 10 }
+	roll(B, B.objects[261])
+	B.env.txr_paid_companions.take_guard_money_1(B.env.db.actor, B.objects[261], d)
+	B.env.dialogs_axr_companion.become_actor_companion(B.env.db.actor, B.objects[261], d)
+	B.env.txr_paid_companions.register_paid_companion(B.env.db.actor, B.objects[261], d)
+	pump()
+	check(cs(H, 360) == nil and H.env.txr_paid_companions.paid_companions[360] == nil and #H.grants == 0, "10 RU: no companion, no contract, nothing taken")
+	check(told(H, 2, "st_not_enough_money"), "he is told")
+	-- the free stock dialog asks no money
+	W.rel = nil
+	B.env.dialogs_axr_companion.become_actor_companion(B.env.db.actor, B.objects[261], "friendly_companion_dialog")
+	pump()
+	check(cs(H, 360) ~= nil and #H.grants == 0, "the friendly dialog: joins, nothing taken")
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[261], d)
+	B.env.txr_paid_companions.register_paid_companion(B.env.db.actor, B.objects[261], d)
+	pump()
+	contract = H.env.txr_paid_companions.paid_companions[360]
+	check(contract ~= nil and contract.guard_period == 172800 and #H.grants == 0,
+		"a free companion with no running contract still takes the register's two-day period")
+end
+
+print("== co-op (B1): an unpaid register cannot renew the stock paid contract")
+do
+	coop_stand()
+	check_paid_renewal(W.H, W.B, 261, 360)
+end
+
+print("== co-op (B3): failed paid recruits refund the same character")
+do
+	local function check_refund(H, due, what)
+		local g = grants(H, 2)
+		check(#g == 2 and g[1] == -due and g[2] == due and W.money[2] == 10000, what .. ": paid once and refunded in full")
+	end
+
+	for _, failure in ipairs({ "clone never comes online", "clone does not join", "clone throws", "no clone", "seat changes character" }) do
+		coop_stand()
+		local H, B = W.H, W.B
+		W.talk[2] = 271
+		W.rel = { [271] = 1 }
+		W.money = { [2] = 10000 }
+		if failure == "clone throws" then
+			H.env.stalker_cloning_utility.clone_stalker = function() error("clone failed", 0) end
+		elseif failure == "no clone" then
+			H.env.stalker_cloning_utility.clone_stalker = function() return nil end
+		end
+		local due = price(roll(B, B.objects[271]), 1500)
+		B.env.txr_paid_companions.take_guard_money_1(B.env.db.actor, B.objects[271])
+		B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[271])
+		pump()
+		if failure == "clone does not join" then
+			H.join_fails = true
+			online(W.next_id)
+			run_timers(H)
+			check(cs(H, W.next_id + 1000) == nil, "the online clone did not join")
+		elseif failure == "clone never comes online" or failure == "seat changes character" then
+			local g = grants(H, 2)
+			check(H.clones == 1 and #g == 1 and g[1] == -due and W.money[2] == 10000 - due,
+				failure .. ": the recruit is paid while the clone is pending")
+			if failure == "seat changes character" then
+				local players = H.env.coop.players
+				H.add(make_obj(502, 6, 0, 0))
+				H.env.coop.players = function()
+					local list = players()
+					for _, p in ipairs(list) do if p.id == 2 then p.avatar_id = 502 end end
+					return list
+				end
+				H.env.coop_npc_players.invalidate()
+				W.money[2] = 7000
+			end
+			NOW = NOW + 31000
+			run_timers(H)
+		end
+		if failure == "seat changes character" then
+			check(#H.grants == 1 and W.money[2] == 7000 and has_line(H, "he left"), "the new character gets no refund; the log says he left")
+		else
+			check_refund(H, due, failure)
+		end
+	end
+
+	coop_stand()
+	local H, B = W.H, W.B
+	H.join_fails = true
+	W.talk[2] = 261
+	W.rel = { [261] = 1 }
+	W.money = { [2] = 10000 }
+	local due = price(roll(B, B.objects[261]), 1500)
+	local d = "paid_companion_dialog"
+	B.env.txr_paid_companions.take_guard_money_1(B.env.db.actor, B.objects[261], d)
+	B.env.dialogs_axr_companion.become_actor_companion(B.env.db.actor, B.objects[261], d)
+	pump()
+	check(cs(H, 360) == nil, "the stock paid squad did not join")
+	check_refund(H, due, "stock paid squad")
+end
+
+print("== co-op (B-REV F4): the host's own paid hire: the stock takes the money on the host, as before; nothing goes to the book twice")
+do
+	coop_stand()
+	local H = W.H
+	H.env.axr_companions.companion_squads[330] = nil
+	H.env.axr_companions.non_task_companions[231] = nil
+	H.marks[231] = nil
+	W.rel = { [271] = 1 }
+	W.money = { [0] = 10000 }
+	local m = roll(H, H.objects[271])
+	H.env.txr_paid_companions.take_guard_money_2(H.env.db.actor, H.objects[271])
+	check(H.paid_local ~= nil and math.abs(H.paid_local - m * 3000) < 0.01, "the stock's relocate_money_from_actor on the host's actor")
+	H.env[IRC].become_paid_actor_companion_individually_and_register(H.env.db.actor, H.objects[271])
+	check(#sent_named(H, "npc.comp") == 0 and H.clones == 1 and #H.grants == 0, "the mod's own code: cloned here, nothing sent, nothing granted")
 end
 
 print("== co-op: the host's own individual recruit runs the mod's own code, as before")
@@ -739,6 +1288,58 @@ do
 	check(B.talks and B.talks[1] == clone, "B's machine opens the talk")
 end
 
+print("== server (B-REV F3/F4): Garbage's map server checks B's individual recruit and takes its price from the world's book")
+do
+	server_stand()
+	local S, G, B = W.S, W.G, W.B
+	W.talk[2] = 471
+	W.rel = { [471] = 1 }
+	W.money = { [2] = 10000 }
+	local m = roll(B, B.objects[471])
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[471])
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[471])
+	pump()
+	local g = grants(G, 2)
+	check(G.clones == 1 and #g == 1 and g[1] == -price(m, 3000), "the map server of his map takes the two-day price, once")
+	check(#S.grants == 0 and #W.K.grants == 0 and B.paid_local == nil, "nobody else takes anything; his machine nothing")
+	local clone = W.next_id
+	online(clone)
+	run_timers(G)
+	local contract = G.env.txr_paid_companions.paid_companions[clone + 1000]
+	check(contract ~= nil and contract.guard_period == 172800 and W.CG._leaders()[clone + 1000] == 501, "two days, his, on Garbage")
+	-- a story NPC on Garbage: refused there, nothing released, nothing paid
+	server_stand()
+	S, G, B = W.S, W.G, W.B
+	W.story = { [470] = "gar_story_squad" }
+	W.talk[2] = 471
+	W.rel = { [471] = 1 }
+	W.money = { [2] = 10000 }
+	roll(B, B.objects[471])
+	B.env.txr_paid_companions.take_guard_money_2(B.env.db.actor, B.objects[471])
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[471])
+	pump()
+	check(G.clones == nil and G.released == nil and #G.grants == 0, "a story NPC: no clone, not released, nothing paid")
+	check(trust(G, "comp_one_story").failed == 1, "counted on the map server")
+	-- too little money in the world's book
+	W.story = nil
+	W.money[2] = 50
+	B.env[IRC].become_paid_actor_companion_individually_and_register(B.env.db.actor, B.objects[471])
+	pump()
+	check(G.clones == nil and #G.grants == 0 and told(G, 2, "st_not_enough_money"), "50 RU: refused, he is told")
+	-- the free one of a stalker who is no friend: comp_one_dialog on the map server
+	W.money[2] = 10000
+	B.env[IRC].become_actor_companion_individually(B.env.db.actor, B.objects[471])
+	pump()
+	check(G.clones == nil and trust(G, "comp_one_dialog").refused == 1, "a neutral stalker's free recruit: refused by comp_one_dialog")
+	check(errors(G) == 0 and errors(S) == 0, "no error")
+end
+
+print("== server (B1): an unpaid register cannot renew the stock paid contract on Garbage")
+do
+	server_stand()
+	check_paid_renewal(W.G, W.B, 461, 460)
+end
+
 print("== server: FFT's companion key of A on Escape: the map server of Escape brings his squads (m21:6)")
 do
 	server_stand()
@@ -782,6 +1383,11 @@ do
 	S.env.db.actor.level_vertex_id = function() return S.env.level.vertex_id(vec(1000, 0, 0)) end
 	S.env.game_fast_travel.on_key_release(KEY)
 	check(math.abs(S.objects[201]._pos.x - 1000) < 0.01 and #S.sent == 0, "FFT's key: the stock brings the companions, nothing sent")
+	-- B-REV F4: the paid dialog's money is the stock's, taken here
+	local m = roll(S, S.objects[272])
+	S.env.txr_paid_companions.take_guard_money_1(S.env.db.actor, S.objects[272])
+	check(S.paid_local ~= nil and math.abs(S.paid_local - m * 1500) < 0.01 and S.news == nil and #S.sent == 0,
+		"the paid dialog: the stock's relocate_money_from_actor takes the price here, nothing sent")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

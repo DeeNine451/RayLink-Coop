@@ -2,7 +2,7 @@
 	Anomaly Coop - allies UI (W6): other players on the minimap and the PDA map (gamedata\scripts\coop_allies_map.script)
 
 	Marker of another player = a map spot on his avatar object:
-	- coop_ally_<slot> (slot 0..7 = peer id, colour from coop_allies): an arrow in the player's colour that turns
+	- coop_ally_<slot> (slot 0..16 = peer id, colour from coop_allies): an arrow in the player's colour that turns
 	  with his heading (heading="1": CMapLocation::CalcDirection uses the avatar's direction), with an edge pointer
 	  in the same colour when he is outside the minimap circle / the PDA map view (pointer=).
 	- coop_ally_down: "needs help" overlay added on top of the arrow while the player is down: a red ring around
@@ -33,10 +33,16 @@ local tostring, type, pairs, pcall, math_floor, string_format = tostring, type, 
 
 TYPE_DOWN = "coop_ally_down"
 TYPE_DEAD = "coop_ally_dead"
-local SLOTS = 8
 
 function ally_type(slot)
 	return "coop_ally_" .. tostring(slot)
+end
+
+-- F5-SEAT-2: a spot type for every colour slot of coop_allies (0..16: the co-op uses 0..7, a server's players 1..16).
+-- map_spots.xml is read once per process, before any session, so the types do not depend on the session's seats.
+local function slots()
+	local allies = rawget(_G, "coop_allies") or coop_allies
+	return allies.SLOTS
 end
 
 -- Sizes in UI units (1024x768 space, map spots are not pixel-snapped). Minimap circle is ~154 units across.
@@ -76,7 +82,7 @@ end
 function spot_xml()
 	local allies = rawget(_G, "coop_allies") or coop_allies
 	local out = {}
-	for s = 0, SLOTS - 1 do
+	for s = 0, slots() - 1 do
 		local r, g, b = allies.slot_color(s)
 		local t = ally_type(s)
 		out[#out + 1] = string_format('<%s hint=""><level_map spot="%s_lvl" pointer="%s_lptr"/>'
@@ -123,7 +129,7 @@ local function check_ready()
 		log("nolocal", "markers of other players are off: coop.spot_is_local is missing (engine request W5 C1)")
 		return false
 	end
-	for _, t in pairs({ ally_type(0), ally_type(SLOTS - 1), TYPE_DOWN, TYPE_DEAD }) do
+	for _, t in pairs({ ally_type(0), ally_type(slots() - 1), TYPE_DOWN, TYPE_DEAD }) do
 		local ok, is_local = pcall(api.spot_is_local, t)
 		if not (ok and is_local == true) then
 			log("replicated", "markers of other players are off: the engine replicates spot type '%s'", t)

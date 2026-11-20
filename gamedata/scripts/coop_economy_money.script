@@ -41,8 +41,8 @@ local tostring, type, ipairs, pairs, next, pcall = tostring, type, ipairs, pairs
 local math_floor, math_huge, math_abs = math.floor, math.huge, math.abs
 local table_concat = table.concat
 
-local MAX_SLOTS = 8
 local AMOUNTS = { 100, 500, 1000, 5000, 10000, 50000 }
+local MENU_INDEX = 40 -- the inventory menu: "Give to" at 41.., "Give money to" right after them (stock entries end at 25)
 
 local stats = { sent = 0, refused = 0, items_given = 0, host_refused = 0, gifts_got = 0, gift_lines = 0, gifts_lost = 0,
 	gifts_bad = 0 }
@@ -477,15 +477,27 @@ end
 local slots = {} -- index -> { peer, nick, avatar_id } (players near enough for an item)
 local money_slots = {} -- index -> { peer, nick }
 
+-- F5-SEAT-2: the most entries of each list = the session's seats (the co-op 8, a server 16); an engine that says no seats
+-- (an older exe): nil, as many as it lists players.
+function slots_max()
+	local api = rawget(_G, "coop")
+	local ok, info = pcall(function() return api.session_info() end)
+	local n = ok and type(info) == "table" and tonumber(info.max_players) or nil
+	if n and n >= 1 and n == math_floor(n) then return n end
+	return nil
+end
+
 local function refresh_slots()
 	slots, money_slots = {}, {}
 	if not (core.live() and db.actor) then return end
 	local me = core.position_of_id(0)
 	local radius = core.rule("give_radius") or 5
-	for _, p in ipairs(core.players()) do
+	local list = core.players()
+	local most = slots_max() or #list
+	for _, p in ipairs(list) do
 		if not p.is_self then
-			if #money_slots < MAX_SLOTS then money_slots[#money_slots + 1] = { peer = p.id, nick = p.nick } end
-			if #slots < MAX_SLOTS and p.obj and p.pos and me and core.dist(me, p.pos) <= radius then
+			if #money_slots < most then money_slots[#money_slots + 1] = { peer = p.id, nick = p.nick } end
+			if #slots < most and p.obj and p.pos and me and core.dist(me, p.pos) <= radius then
 				slots[#slots + 1] = { peer = p.id, nick = p.nick, avatar_id = p.avatar_id }
 			end
 		end
@@ -576,16 +588,20 @@ local function patch_inventory()
 	function cls:InitProperties(obj, bag, ...)
 		if core.live() then
 			refresh_slots()
-			if not self.coop_eco_props and type(self.properties) == "table" then
-				self.coop_eco_props = true
-				for i = 1, MAX_SLOTS do
+			-- F5-SEAT-2: an entry per seat of the session (a server 16; more when a later session has more seats). "Give money
+			-- to" follows every "Give to": at 51.. while there are up to 10 (the co-op's 8 keep their places), else right after.
+			local want = math.max(slots_max() or 0, #slots, #money_slots)
+			if (tonumber(self.coop_eco_props) or 0) < want and type(self.properties) == "table" then
+				self.coop_eco_props = want
+				local money_at = MENU_INDEX + math.max(10, want)
+				for i = 1, want do
 					self.properties["coop_eco_give_" .. i] = {
-						index = 40 + i, name_func = { "coop_eco_NameGive", i }, mode = { inventory = true },
+						index = MENU_INDEX + i, name_func = { "coop_eco_NameGive", i }, mode = { inventory = true },
 						cont = { actor_bag = true, actor_equ = true, actor_belt = true },
 						precondition1 = { "coop_eco_CondGive", i }, action = { "coop_eco_ActionGive", i },
 					}
 					self.properties["coop_eco_money_" .. i] = {
-						index = 50 + i, name_func = { "coop_eco_NameMoney", i }, mode = { inventory = true },
+						index = money_at + i, name_func = { "coop_eco_NameMoney", i }, mode = { inventory = true },
 						cont = { actor_bag = true, actor_equ = true, actor_belt = true },
 						precondition1 = { "coop_eco_CondMoney", i }, action = { "coop_eco_ActionMoney", i },
 					}

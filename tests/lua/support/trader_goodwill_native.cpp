@@ -3,6 +3,7 @@
 #include "coop_protocol.h"
 #include "coop_limits.h"
 #include "coop_ghost_rules.h"
+#include "coop_fight_fact.h" // INTEG-C: host_on_relation_request reads a fight fact
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -87,15 +88,23 @@ struct Outbound { coop::PeerId from; std::vector<u8> data; };
 std::vector<Outbound> requests, replies;
 namespace coop { namespace net {
 void host_broadcast(coop::Msg, const Writer& value) { replies.push_back({ 0, value.data() }); }
+} namespace progress {
+// INTEG-C: a map server's fight fact goes to the keeper's script; this fixture has none
+bool host_fight_fact(PeerId, uint32_t, uint32_t, uint16_t, int) { return false; }
 } namespace story {
 constexpr u16 kNoId = 0xffff;
 // RELATION_CODES
 // RELATION_KEY
 xr_set<RelKey> g_rel_dirty;
-struct Stats { unsigned action_dropped = 0, derived_dropped = 0, requests_out = 0, requests_in = 0, rel_out = 0; } g_stats;
+struct Stats { unsigned action_dropped = 0, derived_dropped = 0, requests_out = 0, requests_in = 0, rel_out = 0,
+    rep_facts_in = 0, rep_facts_refused = 0; } g_stats;
 int g_action_depth = 0;
 bool applying_any() { return false; }
-bool is_map_server() { return false; }
+struct StoryMode {
+    bool decides_world() const { return mgr().is_host(); }
+    bool leads_level() const { return false; }
+};
+const StoryMode& mode() { static const StoryMode m; return m; }
 bool ghost_said(const ghost::Said&) { return false; }
 bool is_player(u16 id) { return id == 0 || id == 501 || id == 502; }
 struct ExecFor { explicit ExecFor(PeerId) {} };

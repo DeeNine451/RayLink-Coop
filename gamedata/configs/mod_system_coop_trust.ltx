@@ -20,3 +20,46 @@ pda_achv_name = refuse
 pda_ency_section = refuse
 level_request_sender = refuse
 level_request_peer = refuse
+; Review A-REV-E-2 finding 3: refused whatever this setting says (coop_quests_offer offer_here's refuse, coop_mods_trade_computer
+; checked): an offer request the host cannot serve, a trading computer permit that does not hold.
+offer_request = refuse
+tcomp_permit_ids = refuse
+tcomp_permit_computer = refuse
+tcomp_permit_near = refuse
+tcomp_permit_trader = refuse
+tcomp_permit_range = refuse
+; Integrator C (build 57): the level map and the Server progress tallies / fight facts / skills - dropped whatever this
+; setting says; refuse only makes the log say so.
+level_map_sender = refuse
+level_map_phase = refuse
+level_map_payload = refuse
+level_map_level_id = refuse
+progress_tally_sender = refuse
+progress_tally_payload = refuse
+progress_tally_route = refuse
+progress_tally_assignment = refuse
+progress_tally_sequence = refuse
+progress_tally_rate = refuse
+progress_fight_sender = refuse
+progress_fight_payload = refuse
+progress_fight_route = refuse
+progress_fight_sequence = refuse
+progress_fight_apply = refuse
+progress_skills_sender = refuse
+progress_skills_payload = refuse
+progress_skills_route = refuse
+progress_skills_sequence = refuse
+progress_skills_rate = refuse
+tcomp_permit_signal = refuse
+; coop_srv_tasks: a map server's report its world server drops whatever this setting says (a sender that is no bridge of that map,
+; a malformed report); A-REV-E-2 adds the word of a new talk (task_talk_new_*, finding 5) and an offer record (task_offer_up_*,
+; finding 4).
+task_map_effect_sender = refuse
+task_map_effect_size = refuse
+task_map_effect_payload = refuse
+task_map_ack_sender = refuse
+task_map_ack_payload = refuse
+task_talk_new_sender = refuse
+task_talk_new_payload = refuse
+task_offer_up_sender = refuse
+task_offer_up_payload = refuse

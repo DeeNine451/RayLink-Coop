@@ -1,0 +1,395 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Dev 57 F5-VEH-7. Local stand instructions, never sent over the network.
+-- vehicle_h is the playing authority, vehicle_ag the test client.
+-- The other authority is the process that leads the test client's map with a ghost actor.
+
+local NICK, SECTION = "vehicle_tester", "veh_niva"
+local STEP_FILE = "zz_vehicle_step.txt"
+local POLL_MS, GRANT_MS, DRIVE_MS = 100, 5000, 3000
+local state = { index = 1, next_poll = 0 }
+local role, step_path
+
+local function console(command)
+	get_console():execute(command)
+end
+
+local function out(fmt, ...)
+	printf("%s", "[vehicle-stand] " .. string.format(fmt, ...))
+	console("flush")
+end
+
+local function measurement(ok, fmt, ...)
+	local line = string.format(fmt, ...)
+	assert(ok, line)
+	out("%s", line)
+	return true
+end
+
+local function instruction()
+	step_path = step_path or getFS():update_path("$fs_root$", STEP_FILE)
+	local file = io.open(step_path, "r")
+	if not file then return end
+	local line = file:read("*l")
+	file:close()
+	if line and #line <= 128 then return line:match("^([a-z_]+)%s*(.-)%s*$") end
+end
+
+local function copy(p)
+	return {x = p.x, y = p.y, z = p.z}
+end
+
+local function delta(a, b)
+	return {x = a.x - b.x, y = a.y - b.y, z = a.z - b.z}
+end
+
+local function distance(a, b)
+	local d = delta(a, b)
+	return math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z)
+end
+
+local function car_here(id)
+	local car = id and level.object_by_id(id)
+	return car and car:section() == SECTION and car or nil
+end
+
+local function player_body()
+	for _, player in ipairs(coop.players()) do
+		if not player.is_self and player.nick == NICK and player.avatar_id
+			and coop_mode.where(player.id) == "here" then
+			local body = level.object_by_id(player.avatar_id)
+			if body and body:alive() then return body end
+		end
+	end
+end
+
+-- Static ground is measured by a ray. An AI vertex alone can snap to a different floor.
+local function ground_gap(p, ignore)
+	local ray = rq_result()
+	local top = vector():set(p.x, p.y + 1, p.z)
+	if level.ray_pick(top, vector():set(0, -1, 0), 3, rq_target.rqtStatic, ray, ignore) then
+		return ray.range - 1
+	end
+end
+
+local function runway(p, body)
+	-- A fresh ALife car has zero yaw. Check the space around it and in front of it.
+	local forward = vector():set(0, 0, 1)
+	for _, x in ipairs({-1.25, 0, 1.25}) do
+		local start = vector():set(p.x + x, p.y + 1, p.z - 2)
+		if level.ray_pick(start, forward, 22, rq_target.rqtStatic, rq_result(), body) then return false end
+	end
+	for _, z in ipairs({-2, 4, 10, 16, 20}) do
+		local gap = ground_gap(vector():set(p.x, p.y, p.z + z), body)
+		if not gap or math.abs(gap) > 0.8 then return false end
+	end
+	return true
+end
+
+local function spawn_car(body)
+	local p = body:position()
+	for i = 0, 15 do
+		local angle = i * math.pi / 8
+		local near = vector():set(p.x + 6 * math.cos(angle), p.y, p.z + 6 * math.sin(angle))
+		local gap = ground_gap(near, body)
+		if gap and math.abs(gap) <= 0.6 then
+			local pos = vector():set(near.x, near.y - gap + 0.15, near.z)
+			local lv = level.vertex_id(pos)
+			if lv and lv >= 0 and lv < 4294967295 and runway(pos, body) then
+				local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
+				return assert(alife_create(SECTION, pos, lv, gv), "veh_niva spawn was refused").id
+			end
+		end
+	end
+	error("no clear flat lane for veh_niva 6 m from the client")
+end
+
+local function start_engine(car)
+	if not car:IsActiveEngine() then
+		if car:GetfFuel() < 1 then car:SetfFuel(car:GetfFuelTank()) end
+		car:StartEngine()
+		assert(car:IsActiveEngine(), "fixture engine did not start")
+	end
+end
+
+local function authority_car()
+	return assert(car_here(state.car), "authority lost the fixture car")
+end
+
+local function status(label)
+	out("%s status", label)
+	console("coop_status")
+	console("flush")
+	return true
+end
+
+local authority_steps = {}
+
+function authority_steps.ready()
+	if not player_body() then return end
+	out("%s ready map=%s", role, level.name())
+	return true
+end
+
+function authority_steps.spawn()
+	if not state.car then
+		local body = player_body()
+		if not body then return end
+		state.car, state.body = spawn_car(body), body:id()
+	end
+	local car, body = car_here(state.car), player_body()
+	if not (car and body) then return end
+	local d = distance(car:position(), body:position())
+	assert(d >= 5.5 and d <= 6.5, string.format("spawn distance %.3f m", d))
+	out("spawned car=%d body=%d distance=%.3f", coop.to_host_id(state.car), coop.to_host_id(state.body), d)
+	return true
+end
+
+function authority_steps.prepare(_, now)
+	local car = authority_car()
+	if not state.prepared then
+		start_engine(car:get_car())
+		state.prepared = now + 1000
+		return
+	end
+	if now < state.prepared then return end
+	state.origin = copy(car:position())
+	out("drive origin=%.3f %.3f %.3f", state.origin.x, state.origin.y, state.origin.z)
+	return status("driver")
+end
+
+function authority_steps.drive_sample()
+	local p = authority_car():position()
+	local moved = distance(p, state.origin)
+	return measurement(moved >= 5, "drive moved=%.3f pos=%.3f %.3f %.3f", moved, p.x, p.y, p.z)
+end
+
+function authority_steps.replica_sample()
+	local p = authority_car():position()
+	out("authority pos=%.3f %.3f %.3f", p.x, p.y, p.z)
+	return true
+end
+
+function authority_steps.driver_clear() return status("driver exit") end
+
+function authority_steps.passenger_prepare()
+	out("map passenger ready car=%d", coop.to_host_id(state.car))
+	return status("empty")
+end
+
+local function prepare_host_passenger()
+	local car = authority_car()
+	db.actor:attach_vehicle(car, true)
+	local attached = db.actor:get_attached_vehicle()
+	assert(attached and attached:id() == car:id(), "stock host attachment failed")
+	out("host seated car=%d", coop.to_host_id(state.car))
+	return status("host")
+end
+
+function authority_steps.passenger_status() return status("passenger") end
+
+local function host_drive(_, now)
+	local car = authority_car()
+	local physics = car:get_car()
+	if not state.host_drive_at then
+		local key = bind_to_dik(key_bindings.kFWD, -1)
+		assert(key and key > 0, "the host has no forward key bound")
+		start_engine(physics)
+		physics:SetThrottle(1)
+		state.host_origin = copy(car:position())
+		state.host_drive_at, state.host_key = now, key
+		level.press_action(key)
+		out("host driving")
+		return
+	end
+	if now - state.host_drive_at < DRIVE_MS then return end
+	level.release_action(state.host_key)
+	state.host_key = nil
+	physics:SetThrottle(0)
+	physics:HandBreak()
+	local p = car:position()
+	local moved = distance(p, state.host_origin)
+	return measurement(moved >= 3, "host moved=%.3f pos=%.3f %.3f %.3f", moved, p.x, p.y, p.z)
+end
+
+function authority_steps.passenger_clear() return status("passenger exit") end
+function authority_steps.reboard_status() return status("reboard") end
+
+function authority_steps.disconnect(_, now)
+	-- Sample as soon as the body disappears, while the map server still has the map.
+	if player_body() or now < (state.next_status or 0) then return end
+	state.next_status = now + 1000
+	status("disconnect")
+end
+
+local client_steps = {}
+
+function client_steps.ready()
+	out("client ready map=%s", level.name())
+	return true
+end
+
+function client_steps.online(arg)
+	local id = tonumber(arg)
+	assert(arg:match("^%d+$") and id > 0 and id < 65535, "bad fixture car id")
+	local local_id = coop.to_local_id(id)
+	local car = car_here(local_id)
+	if not car then return end
+	assert(distance(car:position(), db.actor:position()) <= 7, "fixture copy is outside enter range")
+	state.wire_car, state.car = id, local_id
+	out("client online car=%d local=%d", id, local_id)
+	return true
+end
+
+local function enter(seat, command, now, label)
+	if not state.deadline then
+		state.deadline = now + GRANT_MS
+		console(command)
+		out("client asked %s seat=%d", label, seat)
+	end
+	assert(now <= state.deadline, "no attachment within 5 s")
+	local grant = coop.vehicle.status()
+	if not grant then return end
+	assert(grant.car == state.car and grant.seat == seat, "different car or seat granted")
+	if not coop.vehicle.attached() then return end
+	out("client %s seat=%d car=%d", label, seat, state.wire_car)
+	return true
+end
+
+function client_steps.driver(_, now)
+	return enter(0, "coop_vehicle_enter nearest", now, "seated")
+end
+
+function client_steps.drive()
+	console("coop_vehicle_drive 0x1 3000")
+	out("client driving")
+	return true
+end
+
+function client_steps.replica(arg)
+	local x, y, z = arg:match("^(-?%d+%.%d+) (-?%d+%.%d+) (-?%d+%.%d+)$")
+	local target = {x = tonumber(x), y = tonumber(y), z = tonumber(z)}
+	for _, axis in ipairs({"x", "y", "z"}) do
+		assert(target[axis] and math.abs(target[axis]) < 100000, "bad authority position")
+	end
+	local p = assert(car_here(state.car), "client lost the fixture car"):position()
+	local d = distance(p, target)
+	return measurement(d <= 2, "replica pos=%.3f %.3f %.3f delta=%.3f", p.x, p.y, p.z, d)
+end
+
+local function leave(seat, now)
+	if not state.deadline then
+		state.deadline = now + GRANT_MS
+		console("coop_vehicle_exit")
+	end
+	local p = db.actor:position()
+	local near = distance(p, assert(car_here(state.car), "fixture car went offline at exit"):position())
+	local gap = ground_gap(p, db.actor)
+	assert(now <= state.deadline,
+		string.format("exit did not settle beside the car (distance %.3f, ground gap %s)", near, tostring(gap)))
+	if coop.vehicle.status() or coop.vehicle.attached() or near > 3 or not gap or math.abs(gap) > 0.6 then return end
+	out("client exited seat=%d distance=%.3f ground=%.3f", seat, near, gap)
+	return true
+end
+
+function client_steps.driver_exit(_, now) return leave(0, now) end
+
+function client_steps.passenger(_, now)
+	return enter(1, string.format("coop_vehicle_enter %d 1", state.wire_car), now, "seated")
+end
+
+function client_steps.follow_start()
+	state.follow_car = copy(assert(car_here(state.car), "client lost the fixture car"):position())
+	state.follow_actor = copy(db.actor:position())
+	out("client following")
+	return true
+end
+
+function client_steps.follow_sample()
+	local car, actor = assert(car_here(state.car), "client lost the fixture car"):position(), db.actor:position()
+	local car_move, actor_move = distance(car, state.follow_car), distance(actor, state.follow_actor)
+	local drift = distance(delta(car, state.follow_car), delta(actor, state.follow_actor))
+	local near = distance(car, actor)
+	local attached = coop.vehicle.attached()
+	return measurement(attached and car_move >= 3 and actor_move >= 3 and drift <= 2 and near <= 3,
+		"client followed car=%.3f actor=%.3f drift=%.3f distance=%.3f attached=%s", car_move, actor_move, drift, near, tostring(attached))
+end
+
+function client_steps.passenger_exit(_, now) return leave(1, now) end
+
+function client_steps.reboard(_, now)
+	return enter(1, string.format("coop_vehicle_enter %d 1", state.wire_car), now, "reboarded")
+end
+
+function client_steps.quit()
+	local seat = coop.vehicle.status()
+	assert(seat and seat.car == state.car and seat.seat == 1 and coop.vehicle.attached(), "client lost the seat before quit")
+	out("client quit seat=1")
+	console("quit")
+	return true
+end
+
+local host_steps = {
+	"ready", "spawn", "prepare", "drive_sample", "replica_sample", "driver_clear", "passenger_prepare",
+	"passenger_status", "host_drive", "passenger_clear", "reboard_status", "disconnect",
+}
+local map_steps = {
+	"ready", "spawn", "prepare", "drive_sample", "replica_sample", "driver_clear", "passenger_prepare",
+	"passenger_status", "passenger_clear", "reboard_status", "disconnect",
+}
+local mirror_steps = {
+	"ready", "online", "driver", "drive", "replica", "driver_exit", "passenger",
+	"passenger_exit", "reboard", "quit",
+}
+
+local function update()
+	if state.failed or not (coop.is_live() and db.actor) then return end
+	if role == "client" then
+		if not coop_mode.is_player_mirror() then return end
+	elseif not coop_mode.leads_here() or coop_mode.actor_is_player() ~= (role == "host") then
+		return
+	end
+	local now = time_global()
+	if now < state.next_poll then return end
+	state.next_poll = now + POLL_MS
+	local step
+	local ok, err = pcall(function()
+		local arg
+		step, arg = instruction()
+		if not step then return end
+		local order = role == "client" and mirror_steps or role == "host" and host_steps or map_steps
+		local expected = order[state.index]
+		if expected == "disconnect" and step == "quit" then step = "disconnect" end
+		local run = (role == "client" and client_steps or authority_steps)[step]
+		if role == "client" and expected == "passenger_exit" then
+			-- The host runner inserts the ride; the Server runner exits the stationary car.
+			if step == "follow_start" and not state.follow_car then client_steps.follow_start(); return end
+			if step == "follow_sample" and state.follow_car and not state.followed then
+				state.followed = client_steps.follow_sample()
+				return
+			end
+			if state.follow_car and not state.followed then return end
+		elseif role == "host" then
+			if step == "passenger_prepare" then run = prepare_host_passenger end
+			if step == "host_drive" then run = host_drive end
+		end
+		if step == expected and run(arg, now) then
+			state.index, state.deadline = state.index + 1, nil
+		end
+	end)
+	if not ok then
+		state.failed = true
+		if state.host_key then pcall(level.release_action, state.host_key) end
+		out("FAIL %s %s", step or "instruction", tostring(err))
+	end
+end
+
+function on_game_start()
+	local ok, line = pcall(command_line)
+	if role or not ok or type(line) ~= "string" then return end
+	local probe = line:match("%-coop_probe%s+(%S+)")
+	if probe == "vehicle_h" then role = "host"
+	elseif probe == "vehicle_ag" then role = "client"
+	elseif not probe then role = "map"
+	else return end
+	RegisterScriptCallback("actor_on_update", update)
+end

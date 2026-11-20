@@ -3,14 +3,16 @@
 
 	One colour per player, the same on every machine and everywhere a player is shown (minimap/PDA arrows,
 	party panel, name tags of C++ coop_presence, chat). Colours: configs\mod_system_coop.ltx [coop_player_colors];
-	slot = the player's session peer id (host 0, clients 1..7), ids >= 8 wrap.
+	slot = the player's session peer id: the co-op's host 0 and clients 1..7, a server's clients 1..16 (F5-SEAT-2: 17
+	colours, slots 0..16, one for every peer id of the wire); ids >= 17 wrap.
 
 	Player state for the UI: "alive" | "down" (wounded, needs help) | "dead" | "spec" (spectating) |
 	"respawn" | "unknown" (no status from that player yet). The engine's survival state wins when it exists
 	(coop.life_of), otherwise the player's own "core.status" report (coop_core_hud).
 
 	For other scripts:
-		coop_allies.slot(peer) -> 0..7
+		coop_allies.seats() -> the session's seats (co-op 8, a server 16)   coop_allies.others_max() -> seats() - 1
+		coop_allies.slot(peer) -> 0..16
 		coop_allies.color(peer) -> r, g, b           coop_allies.slot_color(slot) -> r, g, b
 		coop_allies.argb(peer [, alpha]) -> ARGB     coop_allies.text_tag(peer) -> "%c[255,r,g,b]" (text colour code)
 		coop_allies.state_color(state) -> r, g, b    ("down" red, "dead"/"spec"/"respawn" grey, else nil)
@@ -23,17 +25,41 @@ local api = rawget(_G, "coop")
 
 local tonumber, tostring, type, math_floor, string_format = tonumber, tostring, type, math.floor, string.format
 
-SLOTS = 8
 SECTION = "coop_player_colors"
 STATUS_STALE_MS = 15000 -- no status for this long: state unknown
 
--- Defaults = the shipped ltx values (used when the section or a line is missing or broken).
+-- Defaults = the shipped ltx values (used when the section or a line is missing or broken). Slots 0..7: W6; 8..16: F5-SEAT-2
+-- (temp\b58\f5_seat2\palette17.py), for a server's 16 players.
 local DEFAULT = {
 	[0] = { 217, 177, 96 }, { 83, 140, 224 }, { 146, 190, 154 }, { 206, 202, 253 },
 	{ 211, 117, 79 }, { 111, 211, 203 }, { 224, 218, 164 }, { 161, 134, 178 },
+	{ 166, 168, 245 }, { 64, 169, 112 }, { 174, 231, 202 }, { 252, 197, 224 }, { 205, 168, 217 },
+	{ 251, 183, 177 }, { 174, 202, 130 }, { 88, 180, 196 }, { 211, 150, 85 },
 }
 local DEFAULT_DOWN = { 226, 58, 48 }
 local DEFAULT_DEAD = { 150, 150, 150 }
+SLOTS = #DEFAULT + 1 -- 17 colours: one for every peer id of the wire (0 and 16 clients, coop_protocol.h kMaxPlayers)
+
+-- F5-SEAT-2: the seats of this session, coop.session_info().max_players: the co-op 8 (the host and 7 clients), a server 16
+-- (all of them clients: its own seat 0 plays no one). The engine says none outside a session and before the Welcome: then
+-- COOP_SEATS, the co-op's, which is what this game starts (a server comes from the launcher with its own session).
+COOP_SEATS = 8
+
+function seats()
+	local info
+	if api and api.session_info then
+		local ok, t = pcall(api.session_info)
+		info = ok and type(t) == "table" and t or nil
+	end
+	local n = info and tonumber(info.max_players)
+	if n and n >= 1 and n == math_floor(n) then return n end
+	return COOP_SEATS
+end
+
+-- The most other players this player can see: the session's seats without his own (the co-op 7, a server 15).
+function others_max()
+	return math.max(0, seats() - 1)
+end
 
 local palette -- slot -> {r, g, b}, plus .down / .dead; read once per Lua state
 

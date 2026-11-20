@@ -123,10 +123,22 @@ check(later_uses == prior_uses + 1, "the host's already registered LevelChangeCa
 SendScriptCallback(before_change)
 check(use_count == prior_uses + 1, "the host has no synthetic USE on a second transition callback after the stock exit")
 
+-- INTEG-C (rv_F5-VEH-6 blocker 2): the engine's ask-out for a held level move is a player mirror's only; the deciders drive by
+-- the stock path and ask nobody.
+local glue = rawget(_G, "coop_vehicles")
+local exit_for_travel = glue and rawget(glue, "exit_for_travel")
+check(type(exit_for_travel) == "function", "the engine's held travel has a Lua ask-out to call")
+if type(exit_for_travel) == "function" then
+	check(exit_for_travel() == false and exit_count == prior_exits, "the co-op host asks no seat's exit for a held travel")
+end
+
 MODE = "sp"
 SendScriptCallback(attach)
 SendScriptCallback(before_change)
 check(exit_count == prior_exits and use_count == prior_uses + 2, "single player detaches through the original mod callback")
 check(later_uses == prior_uses + 2, "single player's already registered LevelChangeCars keeps its priority")
+if type(exit_for_travel) == "function" then
+	check(exit_for_travel() == false and exit_count == prior_exits, "single player asks no seat's exit for a travel")
+end
 
 done("vehicle Lua glue, co-op")

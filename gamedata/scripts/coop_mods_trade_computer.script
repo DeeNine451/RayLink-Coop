@@ -73,7 +73,8 @@ local function trust(check, ok, fmt, ...)
 	return not good or res ~= false
 end
 
--- Recorded by coop_trust, refused in every mode (see the header).
+-- Recorded by coop_trust, refused in every mode (see the header). The shipped settings name every tcomp_permit_* check "refuse",
+-- so the line says "refused", not "let through" (review A-REV-E-2 finding 3, mod_system_coop_trust.ltx).
 local function checked(check, ok, from, id)
 	ok = ok and true or false
 	return trust(check, ok, "player #%s, object %s", tostring(from), tostring(id)) and ok

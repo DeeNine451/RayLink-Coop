@@ -1,0 +1,463 @@
+-- Server (srv): map observations up to the world keeper, checked skill levels back to the map.
+-- The flat event codec carries the t and s tables as coop_mods_core serialized strings.
+-- A map asks for {c,e}. The keeper replies with {c,e,g,q,s}: assignment generation,
+-- last merged batch number and checked skills. A data batch {c,e,g,q,t} advances q by one.
+-- INTEG-C: a reply with f = 1 asks the map to flush now; a map with nothing pending answers {c,e}.
+-- The batches of an assignment that closed (the player moved or left) still merge for ROW_TIMEOUT.
+
+local api = rawget(_G, "coop")
+local TALLY, SKILLS = "prg_tally", "prg_skills"
+local INTERVAL, RETRY, ROW_TIMEOUT = 15000, 1000, 30000
+local HOLD = 5000 -- a disputed report waits this long for its map's flush
+local MAX_AMOUNT, MAX_COUNT = 1000000, 10000
+local MAX_U32 = 0xffffffff
+local tally_fields = { c = true, e = true, g = true, q = true, t = true }
+local skill_fields = { c = true, e = true, g = true, q = true, s = true, f = true }
+local skill_names = { endurance = true, strength = true, survival = true, scavenging = true }
+local ranks_seen = { "novice", "trainee", "experienced", "professional", "veteran", "expert", "master", "legend" }
+
+local kinds = {
+	step_m = { "step_m" }, jump = { "jump", nil, true },
+	melee_hit = { "melee_hit", { alive = true } }, hit_taken = { "hit_taken", { type = 5 } },
+	monster_loot = { "monster_loot" }, task_rank = { "task_rank" },
+	corpse_search = { "corpse_search", nil, true },
+	-- Core gives typed stalker deaths reputation. A tally can only back rank and total kills.
+	kill_stalker = { "kill", nil, true },
+	kill_monster = { "kill", { kind = "monster" }, true },
+	kill = { "kill", nil, true },
+}
+
+local function in_range(value, low, high, whole)
+	return type(value) == "number" and value >= low and value <= high and (not whole or value % 1 == 0)
+end
+
+local function character_id(value) return in_range(value, 1, 65534, true) end
+
+local function amount_ok(spec, amount)
+	local limit = spec[3] and MAX_COUNT or MAX_AMOUNT
+	return in_range(amount, 0, limit, spec[3])
+end
+
+-- Transport identity, routing and wire bounds have no usable value when invalid,
+-- even while coop_trust is auditing gameplay checks in log mode.
+local function required(name, ok, from)
+	return coop_trust.pass(name, ok, "invalid progress event from peer %s", tostring(from)) and ok
+end
+
+local function fields_ok(t, fields)
+	for name in pairs(t) do
+		if not fields[name] then return false end
+	end
+	return true
+end
+
+local function unpack_table(C, value, max_bytes, valid)
+	if type(value) ~= "string" or #value > max_bytes then return nil end
+	local data = C.deser(value)
+	if type(data) ~= "table" then return nil end
+	for name, amount in pairs(data) do
+		if not valid(name, amount) then return nil end
+	end
+	return data
+end
+
+local function tally_amount_ok(name, amount)
+	return kinds[name] ~= nil and amount_ok(kinds[name], amount) and amount > 0
+end
+
+local function skill_level_ok(name, amount)
+	return skill_names[name] == true and in_range(amount, 0, 1000, true)
+end
+
+-- Group the actual PRG-3 observations by the metadata that affects Core's
+-- formulas. Only those formulas in note() turn these observations into credit.
+local function tally_kind(kind, amount, meta)
+	meta = type(meta) == "table" and meta or {}
+	if kind == "kill" then
+		local victim = meta.kind or meta.victim_kind
+		if victim == "monster" then return "kill_monster", amount end
+		kind = victim == "stalker" and "kill_stalker" or "kill"
+	elseif kind == "melee_hit" then
+		if meta.alive == true and not meta.important then return kind, meta.power or amount end
+		return
+	elseif kind == "hit_taken" then
+		if in_range(meta.type, 5, 8, true) then return kind, meta.power or amount end
+		return
+	elseif kind == "monster_loot" then return kind, meta.health or amount
+	elseif kind == "task_rank" then return kind, meta.points or amount
+	end
+	if (kind == "kill_stalker" or kind == "kill" or kind == "corpse_search") and type(meta.rank) == "string" then
+		local named = kind .. "_" .. meta.rank
+		if kinds[named] then return named, amount end
+	end
+	return kind, amount
+end
+
+local function current_epoch()
+	return api.world_epoch and api.world_epoch() or false
+end
+
+function on_game_start()
+	if not api then return end
+	coop_mode.when_srv(function()
+		local C = coop_mods_core
+		local P = C.mod("coop_progress_check")
+		if not P then return end
+		local function step(label, f)
+			local ok, err = pcall(f)
+			if not ok then C.report("progress", label, err) end
+		end
+
+		for _, rank in ipairs(ranks_seen) do
+			kinds["corpse_search_" .. rank] = { "corpse_search", { rank = rank }, true }
+			kinds["kill_stalker_" .. rank] = { "kill", { rank = rank }, true }
+			kinds["kill_" .. rank] = { "kill", { rank = rank }, true }
+		end
+		if coop_mode.decides_world() then
+			-- closing: the routes of assignments that ended, open for their final batches until `closes`;
+			-- held: disputed Haru reports waiting for their map's flush (INTEG-C, rv_F5-PRG-4 blockers 3 and 4)
+			local routes, closing, held, generation = {}, {}, {}, 0
+			local epoch = nil
+			local function reset()
+				routes, closing, held = {}, {}, {}
+				epoch = current_epoch()
+			end
+			local function load(m)
+				reset()
+				if C.active() then return end -- the Core restores active loads itself
+				P.clear()
+				local records = type(m) == "table" and m.coop_mods_pdata
+				if type(records) ~= "table" then return end
+				for key, record in pairs(records) do
+					local c = tonumber(key)
+					if character_id(c) and type(record) == "table" and record.progress_checked then
+						P.restore(c, record.progress_checked)
+					end
+				end
+			end
+			local function refresh()
+				if epoch ~= current_epoch() then reset() end
+				local bridge_of = coop_mode.hook("levels.bridge_of_player")
+				local live = {}
+				if bridge_of and C.active() and in_range(epoch, 0, MAX_U32, true) then
+					for _, player in ipairs(C.players()) do
+						local c = player.avatar_id -- the keeper's IDs already are in host numbering
+						local bridge = bridge_of(player.id)
+						if character_id(c) and bridge then
+							local old = routes[c]
+							if old and old.bridge == bridge and old.peer == player.id then
+								live[c] = old
+							elseif generation < MAX_U32 then
+								generation = generation + 1
+								live[c] = { bridge = bridge, peer = player.id, g = generation, q = 0, fq = 0, dirty = true }
+							end
+						end
+					end
+				end
+				-- An assignment that ended keeps merging its own sequence for a while: the map sends its
+				-- final batch only after it sees the player gone, which is after this move.
+				local now = time_global()
+				for c, old in pairs(routes) do
+					if live[c] ~= old then
+						old.closes = now + ROW_TIMEOUT
+						closing[c] = old
+					end
+				end
+				for c, old in pairs(closing) do
+					if now >= old.closes then closing[c] = nil end
+				end
+				routes = live
+			end
+			local function send_skills(c, route, flush)
+				if not (route and route.bridge) then return end
+				local levels = {}
+				for name in pairs(skill_names) do
+					local n, checked = P.skill_of(c, name)
+					if checked then levels[name] = n end
+				end
+				route.dirty = not C.to_peer(route.bridge, SKILLS,
+					{ c = c, e = epoch, g = route.g, q = route.q, s = C.ser(levels), f = flush and 1 or nil })
+			end
+			local function store_of(c)
+				local m = alife_storage_manager.get_state()
+				local store = type(m) == "table" and m.coop_mods_pdata
+				local record = type(store) == "table" and store[tostring(c)]
+				return type(record) == "table" and type(record.d) == "table" and record or nil
+			end
+			-- The correction coop_mods_pdata sends for a key its check changed (pd_fix, or in parts).
+			local function send_fix(peer, value)
+				local encoded = C.ser(value)
+				if not encoded then return end
+				local fix = { k = "skills_levels", v = encoded }
+				if #encoded <= 4800 then
+					C.to_peer(peer, "pd_fix", fix)
+				else
+					local big = C.ser(fix)
+					if big then C.send_big("prg_pd_fix_big", big, peer) end
+				end
+			end
+			-- A held report is checked once more, now that its map flushed (or the time is up): the
+			-- record keeps what passes, and only a part that still fails goes back as a correction.
+			local function release(c)
+				local h = held[c]
+				if not h then return end
+				held[c] = nil
+				local accepted, reasons = P.check(c, h.peer, "skills_levels", nil, h.report)
+				local record = store_of(c)
+				if record then
+					record.d.skills_levels = accepted
+					record.progress_checked = P.snapshot(c)
+				end
+				if #reasons > 0 and accepted ~= h.report then send_fix(h.peer, accepted) end
+			end
+			local function tally(t, from)
+				if not required("progress_tally_sender", coop_mode.from_level(from), from) then return end
+				local c, q = t.c, t.q
+				local request = t.t == nil and t.g == nil and q == nil
+				local data = not request and unpack_table(C, t.t, 4096, tally_amount_ok)
+				local valid = character_id(c) and in_range(t.e, 0, MAX_U32, true) and fields_ok(t, tally_fields)
+					and (request or (data and next(data) ~= nil and in_range(t.g, 1, MAX_U32, true) and in_range(q, 1, MAX_U32, true)))
+				if not required("progress_tally_payload", valid, from) then return end
+				refresh()
+				local route = routes[c]
+				if not (route and route.bridge == from) then
+					local old = closing[c]
+					if old and old.bridge == from then route = old end
+				end
+				if not required("progress_tally_route", route and route.bridge == from, from) then return end
+				if not required("progress_tally_assignment", t.e == epoch and (request or t.g == route.g), from) then return end
+				-- Stop-and-wait keeps the receive window to one batch. Repeat its ACK after loss.
+				if request or q == route.q then
+					send_skills(c, route)
+					if request then release(c) end -- the map has nothing more to flush
+					return
+				end
+				if not required("progress_tally_sequence", q == route.q + 1, from) then return end
+				for name, amount in pairs(data) do
+					local spec = kinds[name]
+					P.note(c, spec[1], amount, spec[2])
+				end
+				route.q = q
+				send_skills(c, route)
+				if routes[c] and routes[c] ~= route then routes[c].dirty = true end -- the current map hears it too
+				release(c)
+			end
+			-- Native keeper entry, never a ScriptEvent. The engine must corroborate the fight
+			-- and assign a stable, increasing fact ID within this world before calling it.
+			local function verified_fight(e, q, from, c, delta)
+				if not required("progress_fight_sender", coop_mode.from_level(from), from) then return false end
+				refresh()
+				local valid = in_range(e, 0, MAX_U32, true) and e == epoch and character_id(c)
+					and in_range(q, 1, MAX_U32, true) and in_range(delta, -MAX_COUNT, MAX_COUNT, true) and delta ~= 0
+				if not required("progress_fight_payload", valid, from) then return false end
+				local route = routes[c]
+				-- A fight just before a move: the map he left still tells it while its assignment closes
+				-- (INTEG-C), in that assignment's own order, never after ROW_TIMEOUT.
+				if not (route and route.bridge == from) then
+					local old = closing[c]
+					if old and old.bridge == from then route = old end
+				end
+				local routed = route and route.bridge == from and api.avatar_of(route.peer) == c
+				if not required("progress_fight_route", routed, from) then return false end
+				-- Each map server numbers its own facts: the order is its route's.
+				if not required("progress_fight_sequence", q > route.fq, from) then return false end
+				local apply = C.fn(api.progress, "apply_verified_fight")
+				local applied = apply and apply(route.peer, c, delta) == true
+				if not required("progress_fight_apply", applied, from) then return false end
+				route.fq = q
+				return true
+			end
+			-- The engine drops its reservations with each session (coop_script.cpp on_session_end):
+			-- reserved at load and again at every session's first update (INTEG-C).
+			local reserved = false
+			local function reserve()
+				reserved = api.reserve_world_event and api.reserve_world_event("mods." .. SKILLS) == true
+				return reserved
+			end
+			step("reserve checked skills", function()
+				if not reserve() then error("could not reserve checked skills on the native relay") end
+			end)
+			step("receive map tallies", function()
+				-- All players on one map can report or move together.
+				C.set_limit(TALLY, 64, 32, function(_, from) required("progress_tally_rate", false, from) end)
+				C.on(TALLY, tally) -- the sender check also audits invalid transport peers
+			end)
+			step("receive verified fight facts", function()
+				if api.progress then api.progress.on_verified_fight = verified_fight end
+			end)
+			step("hold disputed reports", function()
+				-- A Haru report that fails its check may only be ahead of its map's tally: the
+				-- correction waits for a flush of that map (or HOLD); the store keeps the checked
+				-- value meanwhile. Other keys and reports that pass go on at once.
+				C.wrap(P, "filter", "srv_progress.filter", function(orig)
+					return function(character, peer, clean, previous)
+						local report = type(clean) == "table" and type(clean.skills_levels) == "table"
+							and C.deser(C.ser(clean.skills_levels)) or nil
+						local out, fixes = orig(character, peer, clean, previous)
+						if not (report and C.active() and type(fixes) == "table") then return out, fixes end
+						local others, disputed = {}, false
+						for _, fix in ipairs(fixes) do
+							if fix.k == "skills_levels" then disputed = true else others[#others + 1] = fix end
+						end
+						if not disputed then return out, fixes end
+						refresh()
+						local route, old = routes[character], closing[character]
+						if not (route or old) then return out, fixes end -- no map to ask: as before
+						held[character] = { peer = peer, report = report, due = time_global() + HOLD }
+						if route then send_skills(character, route, true) end
+						if old then send_skills(character, old, true) end
+						return out, others
+					end
+				end)
+			end)
+			step("send accepted records", function()
+				local function send_accepted(character)
+					refresh()
+					send_skills(character, routes[character])
+				end
+				C.wrap(P, "check", "srv_progress.check", function(orig)
+					return function(character, ...)
+						local accepted, reasons = orig(character, ...)
+						if #reasons == 0 and C.active() then step("checked record", function() send_accepted(character) end) end
+						return accepted, reasons
+					end
+				end)
+			end)
+			step("world callbacks", function()
+				RegisterScriptCallback("load_state", load)
+				local was_active = false
+				RegisterScriptCallback("actor_on_update", function()
+					local active = C.active()
+					if active and (not was_active or not reserved) then reserve() end
+					was_active = active
+					refresh()
+					for c, route in pairs(routes) do if route.dirty then send_skills(c, route) end end
+					local now = time_global()
+					for c, h in pairs(held) do
+						if now >= h.due then release(c) end
+					end
+				end)
+			end)
+		elseif coop_mode.leads_here() then
+			local rows, checked, epoch = {}, {}, nil
+			local function reset()
+				rows, checked = {}, {}
+				epoch = current_epoch()
+			end
+			local function sync_world()
+				if epoch ~= current_epoch() then reset() end
+				return C.active() and coop_mode.leads_here() and in_range(epoch, 0, MAX_U32, true)
+			end
+			local function row_of(c, now)
+				if not rows[c] then rows[c] = { pending = {}, next = now + INTERVAL, retry = now } end
+				return rows[c]
+			end
+			local function flush(c, row, now)
+				if now < row.retry then return end
+				if not row.g then
+					if row.left then return end
+					C.publish(TALLY, { c = c, e = epoch })
+				else
+					if not row.flight then
+						if not row.left and now < row.next then return end
+						row.next = now + INTERVAL
+						if next(row.pending) == nil or row.q == MAX_U32 then return end
+						row.flight = { c = c, e = epoch, g = row.g, q = row.q + 1, t = C.ser(row.pending) }
+						row.pending = {}
+					end
+					C.publish(TALLY, row.flight)
+				end
+				row.retry = now + RETRY
+			end
+			local function local_character(id)
+				if not character_id(id) then return nil end
+				local peer = C.peer_of(id)
+				if not (peer and coop_mode.decider(peer) == "this") then return nil end
+				local c = C.hid(id)
+				return character_id(c) and c or nil
+			end
+			local function update()
+				if not sync_world() then return end
+				local now, present = time_global(), {}
+				for _, player in ipairs(C.players()) do
+					local c = local_character(player.avatar_id)
+					if c then
+						present[c] = true
+						row_of(c, now).left = nil
+					end
+				end
+				for c, row in pairs(rows) do
+					if not present[c] and not row.left then
+						row.left, checked[c] = now, nil
+					end
+					flush(c, row, now)
+					if row.left and ((not row.flight and next(row.pending) == nil) or now - row.left >= ROW_TIMEOUT) then
+						rows[c] = nil
+					end
+				end
+			end
+
+			step("observe the map", function()
+				C.wrap(P, "observe", "srv_progress.observe", function(orig)
+					return function(character, kind, amount, meta)
+						local observed = orig(character, kind, amount, meta)
+						if not observed or not sync_world() then return observed end
+						local c = local_character(character)
+						local key, n = tally_kind(kind, amount, meta)
+						if c and key and tally_amount_ok(key, n) then
+							local t = row_of(c, time_global()).pending
+							local limit = kinds[key][3] and MAX_COUNT or MAX_AMOUNT
+							t[key] = math.min(limit, (t[key] or 0) + n)
+						end
+						return observed
+					end
+				end)
+			end)
+			step("receive checked skills", function()
+				C.set_limit(SKILLS, 64, 32, function(_, from) required("progress_skills_rate", false, from) end)
+				C.on(SKILLS, function(t, from)
+					if not required("progress_skills_sender", sync_world() and from == 0, from) then return end
+					local data = unpack_table(C, t.s, 512, skill_level_ok)
+					local c = t.c
+					local valid = character_id(c) and t.e == epoch and in_range(t.g, 1, MAX_U32, true)
+						and in_range(t.q, 0, MAX_U32, true) and data ~= nil and fields_ok(t, skill_fields)
+						and (t.f == nil or t.f == 1)
+					if not required("progress_skills_payload", valid, from) then return end
+					local row, here = rows[c], local_character(C.lid(c)) == c
+					-- The final ACK may arrive before the map's next presence scan marks the row left.
+					if not required("progress_skills_route", here or (row and row.g == t.g), from) then return end
+					local now = time_global()
+					row = row or row_of(c, now)
+					if not row.g or t.g > row.g then
+						-- An expired assignment's observations cannot move to the new one.
+						if row.g then row.flight, row.pending = nil, {} end
+						row.g, row.q, row.retry = t.g, t.q, now
+					else
+						local ack = row.flight and t.q == row.flight.q
+						if not required("progress_skills_sequence", t.g == row.g and (ack or t.q == row.q), from) then return end
+						if ack then row.flight, row.q, row.retry = nil, t.q, now end
+					end
+					if here then checked[c] = data end
+					if t.f == 1 then
+						-- The keeper checks a disputed report after this flush: what is pending goes now,
+						-- and "nothing more" is said at once.
+						row.next = now
+						if not row.flight and next(row.pending) == nil then C.publish(TALLY, { c = c, e = epoch }) end
+					end
+				end)
+				C.wrap(P, "skill_of", "srv_progress.skill_of", function(orig)
+					return function(character, skill)
+						if not sync_world() then return orig(character, skill) end
+						local c = local_character(character)
+						local n = c and checked[c] and checked[c][skill]
+						return n or 0, n ~= nil
+					end
+				end)
+			end)
+			step("map callbacks", function()
+				RegisterScriptCallback("load_state", reset)
+				RegisterScriptCallback("actor_on_update", update)
+			end)
+		end
+	end)
+end

@@ -103,6 +103,30 @@ local function guards()
 	NOW = NOW + 2000
 	ask({ n = NPC, q = 23, b = true })
 	expect_list(host, "stock_task", "a boolean board request can use the 200 m radius")
+
+	-- Review A-REV-E-2 finding 3: an offer request is refused in every trust mode, so with the shipped settings its line says
+	-- "refused", never "would be refused: let through" (honest board batches hit "rate", dead NPCs "npc")
+	local shipped = { default = "log" }
+	local fh = io.open("gamedata/configs/mod_system_coop_trust.ltx", "r")
+	local text = fh and fh:read("*a") or ""
+	if fh then fh:close() end
+	local section = text:match("%[coop_trust%]([^%[]*)") or ""
+	for key, value in section:gmatch("\n([%w_]+)%s*=%s*(%w+)") do shipped[key] = value end
+	check(shipped.default == "log" and shipped.offer_request == "refuse", "the shipped policy refuses offer_request (default stays log)")
+	trust.reset_for_test(shipped)
+	local lines = #host.log
+	ask({ n = NPC, q = 24, b = true })
+	expect_refusal(host, "rate", NPC, 24, "shipped policy: the honest batch's rate refusal answers the player as before")
+	ask({ n = 65535, q = 25, b = true })
+	expect_refusal(host, "npc", 0, 25, "shipped policy: a missing NPC is refused as before")
+	local refused, let = 0, 0
+	for i = lines + 1, #host.log do
+		local l = host.log[i]
+		if l:find("offer_request", 1, true) and l:find("(refused,", 1, true) then refused = refused + 1 end
+		if l:find("let through", 1, true) then let = let + 1 end
+	end
+	check(refused == 2 and let == 0, "both refusals are logged as refused, none as let through (" .. refused .. ", " .. let .. ")")
+	check(trust.status().offer_request.refused == 2, "the refusals are counted as refused")
 end
 
 local function hosted()

@@ -1524,3 +1524,73 @@ TEST(ledger_owner_state_brings_no_upgrade)
 	host.apply(sold);
 	CHECK_EQ(host.price(), before + 4840u);
 }
+
+// Review A-REV-E-2 finding 2 (Server): a map server judges a deal by the balance its world server last named (LevelMap); the player's
+// transfer settled on the world server meanwhile. The deal's charge then arrives larger than the world's balance. Before: capped_balance
+// floored it at 0 and nobody paid for the goods. Now the world book keeps what the balance could not pay as the character's debt (the
+// goods have moved on the map server already) and his next income pays it first.
+TEST(ledger_trade_shortfall_becomes_debt)
+{
+	coop::ledger::TradeDebts debts;
+	const std::string a = "key_a", b = "key_b";
+	// the review's race: A has 1000; his transfer of 1000 to B is settled on the world; his deal (buy for 1000) was judged by his map
+	// server's copy (1000) and its charge arrives now
+	uint32_t world_a = 1000, world_b = 0;
+	world_a -= 1000;
+	world_b += 1000;
+	uint32_t shortfall = 0;
+	world_a = debts.debit(a, world_a, 1000, shortfall);
+	CHECK_EQ(world_a, 0u);
+	CHECK_EQ(shortfall, 1000u); // before: charged 0 of 1000
+	CHECK_EQ(debts.debt_of(a), 1000u);
+	CHECK_EQ(debts.debt_of(b), 0u);
+	CHECK_EQ(world_b, 1000u);
+	// his next incomes pay it first: 300, then 1000 (700 of it pays the rest)
+	uint32_t paid = 0;
+	CHECK_EQ(debts.income(a, 300, paid), 0u);
+	CHECK_EQ(paid, 300u);
+	CHECK_EQ(debts.debt_of(a), 700u);
+	CHECK_EQ(debts.income(a, 1000, paid), 300u);
+	CHECK_EQ(paid, 700u);
+	CHECK_EQ(debts.debt_of(a), 0u);
+	CHECK_EQ(debts.size(), size_t(0)); // paid off: no entry kept
+	// every RU of the goods is paid: 1000 of the balance went to B, 1000 of his later income to the debt
+	CHECK_EQ(debts.total(), uint64_t(0));
+
+	// a charge within the balance: no debt; another character's income pays nothing of A's
+	CHECK_EQ(debts.debit(a, 500, 200, shortfall), 300u);
+	CHECK_EQ(shortfall, 0u);
+	CHECK_EQ(debts.size(), size_t(0));
+	debts.debit(a, 0, 50, shortfall);
+	CHECK_EQ(debts.income(b, 80, paid), 80u);
+	CHECK_EQ(paid, 0u);
+	CHECK_EQ(debts.debt_of(a), 50u);
+	CHECK_EQ(debts.income(a, 0, paid), 0u); // no income, nothing paid
+	CHECK_EQ(paid, 0u);
+	CHECK_EQ(debts.debt_of(a), 50u);
+
+	// bounds: a debt saturates at the u32 range; an empty key (no character) keeps nothing; a new session starts clean
+	debts.debit(a, 0, 0xffffffffu, shortfall);
+	debts.debit(a, 0, 0xffffffffu, shortfall);
+	CHECK_EQ(debts.debt_of(a), 0xffffffffu);
+	debts.debit("", 0, 100, shortfall);
+	CHECK_EQ(shortfall, 100u);
+	CHECK_EQ(debts.debt_of(""), 0u);
+	CHECK_EQ(debts.size(), size_t(1));
+	debts.clear();
+	CHECK_EQ(debts.size(), size_t(0));
+	CHECK_EQ(debts.debt_of(a), 0u);
+
+	// at most kMax characters keep a debt: one more is counted as untracked, the ones kept stay
+	for (size_t i = 0; i < coop::ledger::TradeDebts::kMax; ++i)
+		debts.debit("c" + std::to_string(i), 0, 1, shortfall);
+	CHECK_EQ(debts.size(), coop::ledger::TradeDebts::kMax);
+	CHECK_EQ(debts.untracked(), uint64_t(0));
+	debts.debit("one_more", 0, 7, shortfall);
+	CHECK_EQ(shortfall, 7u);
+	CHECK_EQ(debts.size(), coop::ledger::TradeDebts::kMax);
+	CHECK_EQ(debts.debt_of("one_more"), 0u);
+	CHECK_EQ(debts.untracked(), uint64_t(7));
+	debts.debit("c0", 0, 1, shortfall); // a character already listed still adds up
+	CHECK_EQ(debts.debt_of("c0"), 2u);
+}

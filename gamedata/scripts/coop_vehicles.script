@@ -20,6 +20,16 @@ local function exit_before_travel()
 	request_exit(player_vehicle())
 end
 
+-- INTEG-C (rv_F5-VEH-6 blocker 2): the engine holds this player's own level move while his actor sits
+-- (coop_join.cpp client_send_move) and asks out here once; the move goes after the decider's release
+-- and the local detach. True when an exit request went out.
+function exit_for_travel()
+	local vehicle = player_vehicle()
+	if not (vehicle and vehicle.status()) then return false end
+	vehicle.exit()
+	return true
+end
+
 local function on_actor_update()
 	-- The transition board's Going state precedes the group load. The stock
 	-- on_before_level_changing is not sent to clients on that path.

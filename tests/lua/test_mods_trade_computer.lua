@@ -247,6 +247,38 @@ if name == "hostplay" or name == "srv_map" then
 	check(trusted("tcomp_permit_near", false) and last_answer().ok == false, name .. ": a failed check in log mode still refuses")
 	player_at(2)
 
+	-- 8b. Review A-REV-E-2 finding 3: these checks refuse in every trust mode, so the shipped settings name them "refuse" and the
+	-- real coop_trust's line says "refused", never "would be refused: let through"
+	local shipped = { default = "log" }
+	local fh = io.open("gamedata/configs/mod_system_coop_trust.ltx", "r")
+	local text = fh and fh:read("*a") or ""
+	if fh then fh:close() end
+	for key, value in (text:match("%[coop_trust%]([^%[]*)") or ""):gmatch("\n([%w_]+)%s*=%s*(%w+)") do shipped[key] = value end
+	for _, check_name in ipairs({ "tcomp_permit_ids", "tcomp_permit_computer", "tcomp_permit_near", "tcomp_permit_trader",
+		"tcomp_permit_range", "tcomp_permit_signal" }) do
+		check(shipped[check_name] == "refuse", name .. ": the shipped policy refuses " .. check_name)
+	end
+	check(shipped.default == "log", name .. ": the shipped default stays log")
+	local stub_trust = coop_trust
+	local real_trust = load_script("coop_trust")
+	real_trust.reset_for_test(shipped)
+	local lines = #LOG
+	player_at(40)
+	request({ c = computer:id(), t = trader:id() })
+	check(last_answer().ok == false, name .. ": shipped policy, far from the computer: refused as before")
+	player_at(2)
+	request({ c = lamp:id(), t = trader:id() })
+	check(last_answer().ok == false, name .. ": shipped policy, no computer: refused as before")
+	local refused_lines, let = 0, 0
+	for i = lines + 1, #LOG do
+		local l = tostring(LOG[i])
+		if l:find("tcomp_permit_", 1, true) and l:find("(refused,", 1, true) then refused_lines = refused_lines + 1 end
+		if l:find("let through", 1, true) then let = let + 1 end
+	end
+	check(refused_lines == 2 and let == 0, name .. ": both refusals are logged as refused, none as let through (" .. refused_lines
+		.. ", " .. let .. ")")
+	coop_trust = stub_trust
+
 	-- 9. the host's own player (co-op): his trade is local, like single player
 	if name == "hostplay" then
 		local sent_before, trades_before = sent_count("mods.tcomp_permit"), #TRADES

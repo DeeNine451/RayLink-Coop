@@ -93,7 +93,6 @@ struct Manager
 {
 	Session session_data;
 	const Session& session() const { return session_data; }
-	bool is_host() const { return true; }
 	bool is_client() const { return false; }
 	u64 now_ms() const { return 1000; }
 };
@@ -140,6 +139,8 @@ constexpr size_t kMaxPayload = 16 * 1024;
 constexpr size_t kMaxInbox = 4096;
 constexpr size_t kMaxInboxBytes = 4 * 1024 * 1024;
 constexpr s32 kTargetAll = -1;
+
+bool decides_world() { return true; } // The relay scenarios run on the world's decider in both modes.
 
 #include "script_relay_types.inc"
 

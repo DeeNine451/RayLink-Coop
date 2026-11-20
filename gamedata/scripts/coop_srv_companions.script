@@ -265,10 +265,13 @@ local function entity_id(value)
 	return integer_in(value, 1, 0xfffe) -- 0 is the actor, 0xffff is the engine's invalid id
 end
 
+-- F5-SEAT-2: a server's players are its clients 1 .. the session's seats; an engine that says none: the server's 16
+-- (srv/coop_srv_mode.cpp starts it with kMaxPlayers), not the co-op's 8.
+local SERVER_SEATS = 16
 local function player_peer(value)
 	local api = rawget(_G, "coop")
 	local info = api and api.session_info and api.session_info()
-	return integer_in(value, 1, info and info.max_players or 8)
+	return integer_in(value, 1, info and tonumber(info.max_players) or SERVER_SEATS)
 end
 
 local function transfer_word(name, ok, from)

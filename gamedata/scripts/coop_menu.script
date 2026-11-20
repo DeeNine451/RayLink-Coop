@@ -351,8 +351,12 @@ function status_kind(info)
 	return "idle"
 end
 
+-- F5-SEAT-2: the co-op's seats, the host and 7 (hostplay coop_hostplay_mode.cpp; the Steam lobby). Said only where the engine
+-- gives no number: outside a session and before the Welcome. In a session it is coop.session_info().max_players (a server 16).
+COOP_SEATS = 8
+
 local function players_text(info)
-	return tr("st_coop_menu_players", #(info.players or {}), info.max_players or 8)
+	return tr("st_coop_menu_players", #(info.players or {}), info.max_players or COOP_SEATS)
 end
 
 -- What the status line says: { kind = idle | wait | live | error, title =, detail =, dim = }.
@@ -2340,10 +2344,12 @@ end
 -- Module functions (not closures): the callback is stored per menu instance by AddCallback.
 function on_btn_coop(menu) open(menu) end
 
--- The most players a session takes, for the line under the button of the main menu.
+-- The most players a session takes, for the line under the button of the main menu: in a session the session's own
+-- (coop.session_info().max_players: the co-op 8, a server 16), outside it (and before the Welcome) the co-op's COOP_SEATS,
+-- which is what this menu starts (F5-SEAT-2).
 function max_players()
 	local info = api and api.session_info and api.session_info()
-	return info and info.max_players or 8
+	return info and info.max_players or COOP_SEATS
 end
 
 local function stop_session_first()

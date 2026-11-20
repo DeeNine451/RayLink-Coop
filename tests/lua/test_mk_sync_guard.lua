@@ -163,7 +163,7 @@ print("== the engine answers what the scripts expect")
 do
 	local api = read("engine/src/xrGame/coop/coop_sync_api.cpp") or ""
 	local cast = api:match("int l_broadcast%(lua_State%* L%)(.-)\n}\n") or ""
-	check(cast:find("sn::may_broadcast(client(), is_map_authority())", 1, true) ~= nil, "l_broadcast lets the authority of a level through")
+	check(cast:find("sn::may_broadcast(client(), net::host())", 1, true) ~= nil, "l_broadcast asks the facade for level authority")
 	check(cast:find("sn::cast_reaches(", 1, true) ~= nil, "a cast bound to a level asks where the player stands")
 	check(api:find("g_level_out", 1, true) ~= nil and api:find("net::host_send(o.peer, o.type, o.payload, Lane::Reliable);\n\t\tg_level_out.pop_front();", 1, true) ~= nil,
 		"a map server's cast goes down to its players, not to the world")

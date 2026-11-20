@@ -25,12 +25,14 @@
 
 #include "coop_ghost_rules.h"
 #include "coop_mode.h"
+#include "coop_operator.h"
 #include "coop_roles.h"
 #include "coop_scope.h"
 
 #include <cstring>
 #include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace t
@@ -64,13 +66,16 @@ struct ModeCase
 	bool delivers_links = false; // deliver_links reaches a link (the co-op host's player, the world server's bridges; a map server has none)
 	bool server_loading_line = false; // load_text names the map server of the level
 	bool level_ghost = false; // ghost_said and on_world_live are the level's (its actor is a ghost on a map it leads)
+	// INTEG-C (H-OPCMD): an operator's line goes to a world server from here (a player of a server world)
+	bool operator_link = false;
 };
 
 inline const std::vector<ModeCase>& mode_cases()
 {
 	using coop::Decider;
 	using coop::Where;
-	// the last five of a row (A-S6-IF): has_level_side, level_filter, delivers_links, server_loading_line, level_ghost
+	// the last five of a row (A-S6-IF): has_level_side, level_filter, delivers_links, server_loading_line, level_ghost; then
+	// operator_link (INTEG-C), true for a player of a server world only
 	static const std::vector<ModeCase> cases = {
 		// the co-op host plays, everybody stands on his one map; he decides for every character
 		{"coop_host", {true, true, true, true, coop::host_roles()}, Where::Here, Where::Here, Where::Here, Where::Joining, Where::Here,
@@ -90,7 +95,7 @@ inline const std::vector<ModeCase>& mode_cases()
 		// a player of a server world: his map's server decides, the world server's seat is nobody's character
 		{"server_client", {true, false, false, false, coop::client_roles()}, Where::Here, Where::Here, Where::Away, Where::Here,
 			Where::Away, Decider::Other, Decider::Other, Decider::Other, Decider::Other, Decider::Nobody, false, true, false, false, false,
-			true, false},
+			true, false, true},
 		// no session: single player
 		{"none", coop::kNoSessionAnswers, Where::Away, Where::Away, Where::Away, Where::Away, Where::Away, Decider::Nobody,
 			Decider::Nobody, Decider::Nobody, Decider::Nobody, Decider::Nobody, false, false, false, false, false, false, false},
@@ -162,6 +167,12 @@ public:
 		return coop::kInvalidPeer;
 	}
 	void level_entity_up(coop::EntityUp kind, uint16_t id, uint16_t other) override { ups.push_back({kind, id, other}); }
+	// INTEG-C (H-FIGHTREP): a fact goes up for a player of this level only
+	void level_fight_reputation(uint16_t character, int delta) override
+	{
+		if (level_peer_of(character) != coop::kInvalidPeer)
+			fights.emplace_back(character, delta);
+	}
 
 	std::map<coop::PeerId, uint16_t> trunk; // the level's players: peer -> character
 	std::set<uint16_t> in_world; // characters whose join on the level is over
@@ -169,6 +180,7 @@ public:
 	std::vector<Money> money_up;
 	std::vector<uint16_t> items_told, tents_up, tents_packed;
 	std::vector<Up> ups;
+	std::vector<std::pair<uint16_t, int>> fights; // level_fight_reputation of a player of the level: character, delta
 	int markers = 0;
 };
 
@@ -295,6 +307,13 @@ public:
 		return m_case.server_loading_line && !world_up && screen_level != m_world_level ? "st_coop_load_server" : nullptr;
 	}
 	bool ghost_said(const coop::ghost::Said& s) const override { return m_case.level_ghost && coop::ghost::about_actor(s); }
+	// INTEG-C (H-OPCMD): the fake has no session; "Sent" stands for a session that took the line
+	coop::OperatorSend send_operator_command(const std::string& line) override
+	{
+		if (!m_case.operator_link)
+			return coop::OperatorSend::Unreachable;
+		return coop::op::allowed(line) ? coop::OperatorSend::Sent : coop::OperatorSend::Refused;
+	}
 
 	std::vector<Sent> delivered; // deliver and stream, when this kind delivers
 	std::vector<Sent> sent_up; // up, when this kind sends up

@@ -385,7 +385,11 @@ TEST(mode_hooks_srv_console_names)
 		CHECK_EQ(now->second.cls, old->second.cls);
 		CHECK(now->second.rest.empty() && old->second.rest.empty());
 	}
-	CHECK_EQ(cmds.size(), size_t(10));
+	const auto netstats = cmds.find("srv_netstats");
+	REQUIRE(netstats != cmds.end());
+	CHECK_EQ(netstats->second.cls, std::string("CCC_SrvNetStats"));
+	CHECK(netstats->second.rest.empty());
+	CHECK_EQ(cmds.size(), size_t(11));
 	CHECK(has(collapse(body_of(code, R"(void\s+Execute)")), "levels::print_status();"));
 	CHECK(calls(code, "levels\\s*::\\s*xfer_audit_now"));
 }
@@ -413,7 +417,7 @@ TEST(mode_hooks_layers_register_their_own)
 	CHECK_EQ(hook(layer, "register_lua"), std::string("srv::register_lua(L);"));
 	const std::string coop = class_body(code_of(read_text(src + "/xrGame/coop/hostplay/coop_hostplay_mode.cpp")), "CoopLayer");
 	CHECK_EQ(hook(coop, "register_console"), std::string("<none>"));
-	CHECK_EQ(hook(coop, "register_lua"), std::string("<none>"));
+	CHECK_EQ(hook(coop, "register_lua"), std::string("steam::register_lua(L);")); // INTEG-C: Steam is the co-op's
 }
 
 // docs/MODES.md section 4 "Lua": the predicates of the server's mode in their own table srv.*; the coop.* copies stay until A-S8.

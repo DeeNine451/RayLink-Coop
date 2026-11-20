@@ -44,7 +44,6 @@ local string_format = string.format
 local MAX_STR = 64
 local MAX_COORD = 100000
 local MAX_ID = 65534
-local MAX_PEER = 7 -- kMaxPlayers - 1
 local MAX_ITEMS = 20 -- n without confirmation
 local MAX_ITEMS_ALL = 100 -- n with ok = true (a whole category, confirmed in the window)
 local MAX_MONEY = 1000000
@@ -153,10 +152,24 @@ local function name_of(v)
 	return v
 end
 
+-- F5-SEAT-2: the highest peer id a player of this session can have. The co-op's seats are the host's 0 and clients 1 .. 7; a
+-- server's 16 seats are all clients, 1 .. 16 (its own seat 0 plays no one: coop_mode.seat_plays(0) is false). The seats come
+-- from the session (coop.session_info().max_players); an engine that says none (outside a session) gets the co-op's 0 .. 7.
+COOP_MAX_PEER = 7
+function max_peer()
+	local api = rawget(_G, "coop")
+	local ok, info = pcall(function() return api.session_info() end)
+	local seats = ok and type(info) == "table" and tonumber(info.max_players) or nil
+	if not (seats and seats >= 1 and seats == math_floor(seats)) then return COOP_MAX_PEER end
+	local okp, plays = pcall(function() return coop_mode.seat_plays(0) end)
+	if okp and plays == false then return seats end
+	return seats - 1
+end
+
 -- kind -> converter(v, spec) -> value | nil
 local KINDS = {
 	id = function(v) local n = whole_of(v) return n and n >= 0 and n <= MAX_ID and n or nil end,
-	peer = function(v) local n = whole_of(v) return n and n >= 0 and n <= MAX_PEER and n or nil end,
+	peer = function(v) local n = whole_of(v) return n and n >= 0 and n <= max_peer() and n or nil end,
 	int = function(v, s)
 		local n = whole_of(v)
 		if not n or (s.min and n < s.min) or (s.max and n > s.max) then return nil end

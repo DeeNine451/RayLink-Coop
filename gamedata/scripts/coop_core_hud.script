@@ -10,7 +10,8 @@
 	   survival state (coop.life_of, W5 C1) wins over the reported state when it exists.
 	2. Team panel on the HUD (HUD v2, variant B - the owner's pick 2026-10-23): one row per other player, bottom left
 	   above the own HUD, the block growing upwards (host on top), sorted by peer id. Every size: coop_hud_layout team_*
-	   (one line per value in [coop_hud_layout] of mod_system_coop.ltx), px at 768 high, never stretched.
+	   (one line per value in [coop_hud_layout] of mod_system_coop.ltx), px at 768 high, never stretched. F5-SEAT-2: a row for
+	   every other player of the session (the co-op 7, a server 15); more than 7 rows close up to one row's height (row_pitch).
 	   A row: a 2 px bar in his colour; nick in white with a 1 px shadow, host star, distance and an arrow to him turned
 	   relative to the camera (every frame); under the nick his health in 4 segments of 25 % (white, red under 30 %, the
 	   empty part white at ~0.18). No state words - icon, colour and motion:
@@ -47,7 +48,9 @@ local STATUS_MS = 1000 -- check own status this often
 local STATUS_KEEPALIVE_MS = 5000 -- resend an unchanged status
 local PANEL_MS = 500 -- party panel refresh (2 Hz)
 local SPOTS_MS = 200 -- map markers (5 Hz)
-local MAX_ENTRIES = 7 -- host + 7 clients
+-- F5-SEAT-2: the panel has a row for every other player the session can have (coop_allies.others_max: the co-op 7, a server
+-- 15). Up to ROWS_FULL rows keep the HUD v2 pitch team_row; more rows close up to the height of one row (compact_pitch).
+local ROWS_FULL = 7
 local XML_FILE = "ui_coop_core.xml"
 
 local function log(fmt, ...)
@@ -457,7 +460,15 @@ end
 function UICoopParty:InitControls()
 	local xml = CScriptXmlInit()
 	xml:ParseFile(XML_FILE)
-	for i = 1, MAX_ENTRIES do
+	self.xml = xml
+	self:AddRows(allies().others_max())
+	self:Relayout()
+end
+
+-- F5-SEAT-2: rows up to `want` (the session's other players); a row made later is laid out at once.
+function UICoopParty:AddRows(want)
+	local xml = self.xml
+	for i = #self.rows + 1, want do
 		local r = {}
 		r.base = el(xml:InitStatic("team_row", self))
 		local b = r.base.e
@@ -495,47 +506,48 @@ function UICoopParty:InitControls()
 		pcall(function() r.name_sh.e:SetEllipsis(true) end)
 		b:Show(false)
 		self.rows[i] = r
+		if self.m then self:LayoutRow(r) end
 	end
-	self:Relayout()
 end
 
 -- Sizes of everything that does not depend on the texts (layout table team_*: units down, px * kx across).
 function UICoopParty:Relayout()
-	local m = metrics()
-	local L = layout()
-	self.m, self.L = m, L
+	self.m, self.L = metrics(), layout()
 	self.width_cache = {}
+	for _, r in ipairs(self.rows) do self:LayoutRow(r) end
+end
+
+function UICoopParty:LayoutRow(r)
+	local m, L = self.m, self.L
 	local kx = m.kx
-	for _, r in ipairs(self.rows) do
-		for _, t in pairs(r) do
-			if type(t) == "table" and t.e then t.x, t.y, t.w, t.h = nil, nil, nil, nil end
-		end
-		put(r.base, 0, 0, 1, 1)
-		put(r.strip, 0, 0, L.team_strip_w * kx, L.team_strip_h)
-		local sx = L.team_seg_x * kx
-		for k = 1, SEGS do
-			local s = r.segs[k]
-			for _, t in pairs(s) do t.x, t.y, t.w, t.h = nil, nil, nil, nil end
-			local x = sx + (k - 1) * (L.team_seg_w + L.team_seg_gap) * kx
-			put(s.bg, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
-			put(s.fill, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
-			put(s.over, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
-			put(s.flash, x, L.team_seg_y - m.py, L.team_seg_w * kx, L.team_seg_h + 2 * m.py)
-			tint(s.bg, argb(255 * L.team_seg_empty_alpha, CLR.white))
-		end
-		r.seg_end = sx + (SEGS * L.team_seg_w + (SEGS - 1) * L.team_seg_gap) * kx
-		local icx = r.seg_end + L.team_status_gap * kx
-		local icy = L.team_seg_y + L.team_seg_h / 2
-		r.icon_cx, r.icon_cy = icx, icy
-		put(r.icon, icx - L.team_status * kx / 2, icy - L.team_status / 2, L.team_status * kx, L.team_status)
-		for k = 1, ARCS do
-			-- turned (heading): the box stays square in units, the engine squeezes it across
-			put(r.arcs[k], icx - L.team_status / 2, icy - L.team_status / 2, L.team_status, L.team_status)
-		end
-		put(r.arrow, 0, 0, L.team_arrow, L.team_arrow)
-		put(r.host, 0, 0, L.team_star * kx, L.team_star)
-		r._nick, r._dist, r._timer = nil, nil, nil
+	for _, t in pairs(r) do
+		if type(t) == "table" and t.e then t.x, t.y, t.w, t.h = nil, nil, nil, nil end
 	end
+	put(r.base, 0, 0, 1, 1)
+	put(r.strip, 0, 0, L.team_strip_w * kx, L.team_strip_h)
+	local sx = L.team_seg_x * kx
+	for k = 1, SEGS do
+		local s = r.segs[k]
+		for _, t in pairs(s) do t.x, t.y, t.w, t.h = nil, nil, nil, nil end
+		local x = sx + (k - 1) * (L.team_seg_w + L.team_seg_gap) * kx
+		put(s.bg, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
+		put(s.fill, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
+		put(s.over, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
+		put(s.flash, x, L.team_seg_y - m.py, L.team_seg_w * kx, L.team_seg_h + 2 * m.py)
+		tint(s.bg, argb(255 * L.team_seg_empty_alpha, CLR.white))
+	end
+	r.seg_end = sx + (SEGS * L.team_seg_w + (SEGS - 1) * L.team_seg_gap) * kx
+	local icx = r.seg_end + L.team_status_gap * kx
+	local icy = L.team_seg_y + L.team_seg_h / 2
+	r.icon_cx, r.icon_cy = icx, icy
+	put(r.icon, icx - L.team_status * kx / 2, icy - L.team_status / 2, L.team_status * kx, L.team_status)
+	for k = 1, ARCS do
+		-- turned (heading): the box stays square in units, the engine squeezes it across
+		put(r.arcs[k], icx - L.team_status / 2, icy - L.team_status / 2, L.team_status, L.team_status)
+	end
+	put(r.arrow, 0, 0, L.team_arrow, L.team_arrow)
+	put(r.host, 0, 0, L.team_star * kx, L.team_star)
+	r._nick, r._dist, r._timer = nil, nil, nil
 end
 
 -- Width (units) of a text, measured once per text.
@@ -549,10 +561,31 @@ function UICoopParty:TextWidth(r, text)
 	return w
 end
 
+-- F5-SEAT-2: the compact pitch, for more than ROWS_FULL rows (a server's 8..15 other players): one row's own height, from
+-- the highest of its parts (the nick box starts team_name_y above the row) to the lowest (the strip, the segments), so the
+-- rows close up without touching. HUD v2 sizes only: every part keeps its size; never more than team_row. At the shipped
+-- values: 25.5 instead of 36 (the nick box from -2, the state icon and "0:42" down to 23.5), 15 rows from 20 to 399 (7 rows
+-- at team_row: 20 to 258).
+function compact_pitch(L)
+	local icon_cy = L.team_seg_y + L.team_seg_h / 2 -- the state icon, its ring and the timer are centred here (LayoutRow)
+	local icon_half = math_max(L.team_status, L.team_timer_h) / 2
+	local top = math_min(0, L.team_name_y, L.team_dist_y, L.team_arrow_y - L.team_arrow / 2, icon_cy - icon_half)
+	local bottom = math_max(L.team_strip_h, L.team_seg_y + L.team_seg_h, L.team_name_y + L.team_name_h,
+		L.team_dist_y + L.team_dist_h, L.team_arrow_y + L.team_arrow / 2, icon_cy + icon_half)
+	return math_min(L.team_row, bottom - top)
+end
+
+-- From one row to the next: team_row for up to ROWS_FULL rows, else the compact pitch.
+function row_pitch(L, n)
+	if n > ROWS_FULL then return compact_pitch(L) end
+	return L.team_row
+end
+
 -- Top of row i of n, the host on top: down from team_top, or (team_top < 0) hanging from team_bottom upwards.
 local function row_top(L, i, n)
-	if L.team_top >= 0 then return L.team_top + (i - 1) * L.team_row end
-	return L.team_bottom - L.team_strip_h - (n - i) * L.team_row
+	local pitch = row_pitch(L, n)
+	if L.team_top >= 0 then return L.team_top + (i - 1) * pitch end
+	return L.team_bottom - L.team_strip_h - (n - i) * pitch
 end
 
 function UICoopParty:Place(r, i, n)
@@ -790,10 +823,12 @@ function UICoopParty:Refresh(tg)
 	end
 	local m = metrics()
 	if not self.m or m.W ~= self.m.W or m.H ~= self.m.H or layout() ~= self.L then self:Relayout() end
-	local n = math_min(#list, MAX_ENTRIES)
+	local most = allies().others_max() -- the session's other players (a Welcome after the panel was made can say more)
+	if most > #self.rows then self:AddRows(most) end
+	local n = math_min(#list, most)
 	self.shown = {}
 	local seen = {}
-	for i = 1, MAX_ENTRIES do
+	for i = 1, #self.rows do
 		local r, v = self.rows[i], list[i]
 		if v and i <= n then
 			self:Fill(r, v, tg)

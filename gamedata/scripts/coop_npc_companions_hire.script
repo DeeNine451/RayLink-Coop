@@ -29,6 +29,25 @@
 	  mod does, and when the clone is online it joins that player (coop_npc_companions.recruit_for: the stock recruit, his leader
 	  entry, the paid one with the days he paid for) and his machine opens the talk with it (npc.comp_one). One under way per player.
 	  The co-op host's own recruit runs the mod's own code, as before.
+	The dialog on the decider (B-REV F3). The request skips the dialog's preconditions (modxml_individually_recruitable_companions :24-31
+	  the free one, :46-55 the paid one) and a release cannot be undone, so recruit_one asks them again before the clone:
+	  dialogs_axr_companion.is_non_story and is_not_hostage_task_giver as always-on guards (coop_trust.guard "comp_one_story": a story NPC
+	  or a hostage task's giver is never released); not_a_one_man_squad, and is_actor_friend (free) or txr_paid_companions.is_actor_natural,
+	  is_paid_companion_faction, is_not_dangerous_map (paid) under his identity (his character's relation) through coop_trust.pass
+	  "comp_one_dialog". The hostage giver's mark is in the group's task book (drx_sl_* of this process's own actor, coop_tasks; a map server
+	  holds the world server's copy), so that one runs as this process.
+	The price on the decider (B-REV F4). The paid dialogs take the money with take_guard_money_1/2, an action on the player's machine. In a
+	  session that action there only names the days and the multiplier its dialog showed (txr_paid_companions' dialog_squad, the stock's
+	  roll of the squad's price) and shows the stock's line of the money (coop_npc_companions patch_client_actions); the authority of his
+	  map takes the price from the world's book (coop.money_of / coop.money_grant: the co-op host's ledger, a map server's word up to the
+	  world server) before anything joins him, and refuses a player who has too little ("st_not_enough_money" to him; coop_trust.guard
+	  "comp_paid_money": what he cannot pay for he does not get). The price, as take_guard_money_1/2 compute it: the multiplier x
+	  money_1_base (one day) or money_2_base (two days, p = 172800). The multiplier: the one his dialog showed when the stock could have
+	  rolled it for that squad (is_squad_competent :62-75: 1.80-2.40 veteran, 1.30-1.60 advanced, else 0.80-1.20), else this process's own
+	  roll of the squad, else the top of that range; a modified client pays at least the stock's lowest price of that squad. G_FLAT's paid
+	  one is paid in recruit_one (given back when no clone came of it); the stock's (dialogs.xml paid_companion_dialog: take_guard_money_N,
+	  become_actor_companion, register_paid_companion) when its recruit comes (pay_hire), and its register gets the days he paid for
+	  (paid_days). The co-op host's own and single player: the stock's action takes the money where the dialog runs, as before.
 	Events (ids in host numbering):
 	  npc.comp_count  authority -> player  { n = his ordinary companions on every map }
 	  npc.comp_one    authority -> player  { i = NPC }: open the talk with it once it is here (the clone, or the NPC itself)
@@ -56,6 +75,19 @@ local DAY, TWO_DAYS = 86400, 172800 -- txr_paid_companions' guard_period of take
 local MAX_COUNT = 64 -- far beyond any squad limit: a bigger number on the wire is a bad one
 local MAX_ID = 65534 -- 0xffff is the engine's invalid id
 local PUSH_MS, ONE_WAIT_MS, TALK_WAIT_MS = 1000, 30000, 5000
+-- B-REV F3: G_FLAT's dialogs' preconditions that the decider asks again under his identity (coop_trust "comp_one_dialog")
+local DAC, TP = "dialogs_axr_companion", "txr_paid_companions"
+local DIALOG_FREE = { { IRC, "not_a_one_man_squad" }, { DAC, "is_actor_friend" } }
+local DIALOG_PAID = { { IRC, "not_a_one_man_squad" }, { TP, "is_actor_natural" }, { TP, "is_paid_companion_faction" },
+	{ TP, "is_not_dangerous_map" } }
+-- B-REV F4: the stock's paid hire dialog; txr_paid_companions.is_squad_competent's roll of the price (:62-75, hundredths by the squad's
+-- section; the rest 80-120); money_1_base / money_2_base (:19-20) per contract, the stock's values when its file has none
+local PAID_DIALOG = "paid_companion_dialog"
+local TIERS = { { "veteran", 180, 240 }, { "advanced", 130, 160 } }
+local TIER_LO, TIER_HI = 80, 120
+local BASE = { [DAY] = { "money_1_base", 1500 }, [TWO_DAYS] = { "money_2_base", 3000 } }
+local MAX_PRICE = 1000000
+local MSG_POOR = "st_not_enough_money" -- the stock's "Not enough money" (ui_st_other.xml)
 
 local started = false
 local asking = nil -- authority: the player whose count the mod's room rule reads now
@@ -63,11 +95,13 @@ local word = nil -- player's machine: his count, as the authority of his map sai
 local told = {} -- authority: peer -> the count he was told last
 local rows = {} -- world server: level id -> { [character] = n }, as its map server said
 local remote = { m = {}, w = {} } -- map server: the world server's word: the rows of every map, and its own
-local pending = {} -- authority: clone id -> { from, paid, at }
+local pending = {} -- authority: clone id -> { from, paid, price, who, at }
 local busy = {} -- authority: peer -> clone id of his individual recruit under way
+local paid_hire = {} -- authority: peer -> { npc, period, price, who }: the stock paid hire he paid for, until its register
 local talk_wait = nil -- player's machine: { id, at }: the talk to open once that NPC is here
 local next_push = 0
-local stats = { pushed = 0, room_failed = 0, ones = 0, ones_done = 0, ones_lost = 0, talks = 0 }
+local stats = { pushed = 0, room_failed = 0, ones = 0, ones_done = 0, ones_lost = 0, talks = 0, ones_refused = 0, paid = 0, paid_ru = 0,
+	poor = 0, given_back = 0 }
 
 local function whole(v, min, max)
 	return type(v) == "number" and v == v and v >= min and v <= max and v % 1 == 0
@@ -209,6 +243,197 @@ function room_on_decider(full, from, npc, dialog)
 end
 
 -------------------------------------------------------------------------------
+-- The price on the decider (B-REV F4)
+-------------------------------------------------------------------------------
+-- A player's balance in the world's book (coop.money_of: the co-op host's ledger; a map server: the world server's word), nil: unknown.
+local function balance(peer)
+	local api = rawget(_G, "coop")
+	local f = api and api.money_of
+	if type(f) ~= "function" then return nil end
+	local ok, v = pcall(f, peer)
+	v = ok and tonumber(v) or nil
+	if v and v == v and v >= 0 then return v end
+	return nil
+end
+
+-- Money from (delta < 0) or back to (delta > 0) a player through the book (coop.money_grant; a map server's goes up to the world
+-- server). -> true: done
+local function grant(peer, delta)
+	local api = rawget(_G, "coop")
+	local f = api and api.money_grant
+	if type(f) ~= "function" then return false end
+	local ok, done = pcall(f, peer, delta)
+	return ok and done == true
+end
+
+local function squad_of(npc)
+	local ok, sq = pcall(get_object_squad, npc)
+	return ok and sq or nil
+end
+
+-- The range of the stock's roll for this squad, in hundredths (txr_paid_companions.is_squad_competent :62-75).
+local function tier(squad)
+	local ok, section = pcall(function() return squad:section_name() end)
+	section = ok and type(section) == "string" and section or ""
+	for _, t in ipairs(TIERS) do
+		if section:find(t[1], 1, true) then return t[2], t[3] end
+	end
+	return TIER_LO, TIER_HI
+end
+
+-- A multiplier the stock could have rolled in [lo, hi] hundredths: its hundredths; anything else nil.
+local function hundredths(m, lo, hi)
+	if type(m) ~= "number" or m ~= m then return nil end
+	local k = math.floor(m * 100 + 0.5)
+	if k < lo or k > hi or math.abs(m * 100 - k) > 1e-6 then return nil end
+	return k
+end
+
+-- A file local of txr_paid_companions on this process (its dialog_squad, its money_N_base).
+local function stock_local(name)
+	local core = coop_mods_core
+	local m = core.mod(TP)
+	if not m then return nil end
+	return (core.find_local(m, name))
+end
+
+-- The price of a contract of `period` seconds with NPC's squad, as take_guard_money_1/2 compute it; m: the multiplier his dialog showed.
+local function price_of(npc, period, m)
+	local squad = squad_of(npc)
+	local lo, hi = TIER_LO, TIER_HI
+	if squad then lo, hi = tier(squad) end
+	local k = hundredths(m, lo, hi)
+	if not k and squad then
+		local book = stock_local("dialog_squad")
+		local row = type(book) == "table" and book[squad.id]
+		k = hundredths(type(row) == "table" and row.money, lo, hi)
+	end
+	local b = BASE[period] or BASE[DAY]
+	local base = tonumber(stock_local(b[1]))
+	if not (base and base > 0 and base <= MAX_PRICE) then base = b[2] end
+	return math.min(math.floor((k or hi) * base / 100 + 0.5), MAX_PRICE)
+end
+
+-- Takes `price` from player `from` for a hire of NPC; too little money: refused and told. -> true: paid
+local function pay(from, price, npc, what)
+	local have = balance(from)
+	if not coop_trust.guard("comp_paid_money", have ~= nil and have >= price, "%s of %s by player #%s: %s RU, he has %s", what,
+		tostring(npc:name()), tostring(from), tostring(price), tostring(have)) then
+		stats.poor = stats.poor + 1
+		local C = coop_npc_companions
+		if C.tell_refused then C.tell_refused(from, MSG_POOR) end
+		return false
+	end
+	if not grant(from, -price) then
+		P.log(TAG, "%s of %s by player #%s refused: the book did not take %s RU", what, tostring(npc:name()), tostring(from), tostring(price))
+		return false
+	end
+	stats.paid = stats.paid + 1
+	stats.paid_ru = stats.paid_ru + price
+	return true
+end
+
+-- His money back for a hire that did not happen; only to the character that paid (a seat goes to another player after a leave).
+local function give_back(from, who, price)
+	if not price then return end
+	if who == nil or P.avatar_of_peer(from) ~= who then
+		P.log(TAG, "hire of player #%s: %s RU not given back, he left", tostring(from), tostring(price))
+		return
+	end
+	if grant(from, price) then
+		stats.given_back = stats.given_back + 1
+	else
+		P.log(TAG, "hire of player #%s: %s RU not given back, the book refused", tostring(from), tostring(price))
+	end
+end
+
+-- coop_npc_companions host_on_cmd, the stock paid hire's recruit (the dialog's second action, after take_guard_money_N named the days and
+-- the price on his machine): paid here before the squad joins him. Any other recruit asks nothing. -> true: go on
+function pay_hire(t, from, npc)
+	if not (started and t.d == PAID_DIALOG) then return true end
+	local period = t.p == TWO_DAYS and TWO_DAYS or DAY
+	local price = price_of(npc, period, t.m)
+	if not pay(from, price, npc, "paid hire") then return false end
+	paid_hire[from] = { npc = npc:id(), period = period, price = price, who = P.avatar_of_peer(from) }
+	return true
+end
+
+-- After that recruit's action: the squad did not join him -> his money back.
+function hire_done(from, npc, joined)
+	local h = paid_hire[from]
+	if joined or not (h and h.npc == npc:id()) then return end
+	paid_hire[from] = nil
+	give_back(from, h.who, h.price)
+end
+
+-- The register of the stock paid hire's contract (its third action): the days he paid for, once, however late it comes. nil: he paid
+-- for no hire of this NPC here (his last paid hire is kept, one per player, until its register).
+function paid_days(from, npc)
+	local h = paid_hire[from]
+	if not (h and h.npc == npc:id()) then return nil end
+	paid_hire[from] = nil
+	return h.period
+end
+
+-- B-REV F4: the stock paid hire's register (host_on_cmd, before the stock's register runs). -> ok, days (nil: nothing paid here).
+-- A register that names no payment never replaces a running contract (the stock writes a new join_time: a renewal for free). An
+-- honest player never sends one (the paid dialog wants is_not_actor_companion): an always-on guard.
+function paid_register(from, npc, squad)
+	local days = paid_days(from, npc)
+	local tp = coop_mods_core.mod(TP)
+	local book = tp and tp.paid_companions
+	local running = days == nil and squad ~= nil and type(book) == "table" and book[squad.id] ~= nil
+	return coop_trust.guard("comp_paid_renew", not running, "contract of %s by player #%s: a register with nothing paid, the running one stays",
+		tostring(npc:name()), tostring(from)), days
+end
+
+-------------------------------------------------------------------------------
+-- The individual recruit's dialog on the decider (B-REV F3)
+-------------------------------------------------------------------------------
+-- A mod's precondition f(actor, npc), under the identity of `who` when given: true / false; nil: no such function in this game, or
+-- it broke (then the second value is true, reported).
+local function ask(script, name, actor, npc, who)
+	local core = coop_mods_core
+	local m = core.mod(script)
+	local f = m and core.fn(m, name)
+	if not f then return nil end
+	local ok, res
+	if who then
+		ok, res = pcall(P.with_identity, who, f, actor, npc)
+	else
+		ok, res = pcall(f, actor, npc)
+	end
+	if not ok then
+		P.report(TAG, script .. "." .. name, res)
+		return nil, true
+	end
+	return res and true or false
+end
+
+-- G_FLAT's dialog would offer player `from` this recruit. `actor`: this process's own actor, the dialog's first speaker (the stock's
+-- who_is_npc then names the NPC). -> true: go on
+local function one_allowed(full, from, npc)
+	local name, actor = tostring(npc:name()), db.actor
+	-- a release cannot be undone: never a story NPC or a hostage task's giver, whatever coop_trust's mode
+	local story, broke = ask(DAC, "is_non_story", actor, npc)
+	if not coop_trust.guard("comp_one_story", story ~= false and not broke, "individual recruit of %s by player #%s: a story NPC (%s)",
+		name, tostring(from), broke and "the rule broke" or "is_non_story") then return false end
+	local giver
+	giver, broke = ask(DAC, "is_not_hostage_task_giver", actor, npc)
+	if not coop_trust.guard("comp_one_story", giver ~= false and not broke, "individual recruit of %s by player #%s: a hostage task's giver (%s)",
+		name, tostring(from), broke and "the rule broke" or "is_not_hostage_task_giver") then return false end
+	-- the rest as his dialog read it: his character's relation
+	local who = P.object_of_peer(from)
+	if not who then return false end
+	local failed = {}
+	for _, c in ipairs(PAID[full] and DIALOG_PAID or DIALOG_FREE) do
+		if ask(c[1], c[2], actor, npc, who) == false then failed[#failed + 1] = c[2] end
+	end
+	return coop_trust.pass("comp_one_dialog", #failed == 0, "individual recruit of %s by player #%s: his dialog does not offer it (%s)",
+		name, tostring(from), table.concat(failed, ", "))
+end
+
+-------------------------------------------------------------------------------
 -- The individual recruit (G_FLAT)
 -------------------------------------------------------------------------------
 -- Player `from`'s machine opens the talk with NPC `id` (the mod: run_talk_dialog after the recruit, or with the NPC when no clone).
@@ -236,6 +461,7 @@ local function finish_one(clone_id)
 		done_one(clone_id, p)
 		stats.ones_lost = stats.ones_lost + 1
 		P.log(TAG, "individual recruit of player #%s: clone %s never came online", tostring(p.from), tostring(clone_id))
+		give_back(p.from, p.who, p.price)
 		return true
 	end
 	done_one(clone_id, p)
@@ -243,7 +469,11 @@ local function finish_one(clone_id)
 		P.log(TAG, "individual recruit: player #%s left, clone %s stays free", tostring(p.from), tostring(clone_id))
 		return true
 	end
-	if coop_npc_companions.recruit_for(p.from, npc, p.paid) then stats.ones_done = stats.ones_done + 1 end
+	if coop_npc_companions.recruit_for(p.from, npc, p.paid) then
+		stats.ones_done = stats.ones_done + 1
+	else
+		give_back(p.from, p.who, p.price) -- B-REV F4: paid for, not his
+	end
 	talk_on(p.from, clone_id)
 	push_counts()
 	return true
@@ -260,7 +490,7 @@ local function finish_one_safe(clone_id)
 end
 
 -- coop_npc_companions host_on_cmd, on the authority, after the recruit's checks: the mod's action for player `from`. full: which
--- action (the paid one registers a contract of t.p seconds, the days his machine took the money for).
+-- action (the paid one registers a contract of t.p seconds and is paid here for those days, B-REV F4).
 function recruit_one(full, t, from, npc)
 	if not started then return end
 	local under_way = busy[from]
@@ -268,24 +498,35 @@ function recruit_one(full, t, from, npc)
 		P.log(TAG, "individual recruit of %s by player #%s refused: his last one is not done", tostring(npc:name()), tostring(from))
 		return
 	end
+	if not one_allowed(full, from, npc) then -- B-REV F3
+		stats.ones_refused = stats.ones_refused + 1
+		return
+	end
 	local core = coop_mods_core
 	local util = core.mod("stalker_cloning_utility")
 	local clone = util and core.fn(util, "clone_stalker")
 	if not clone then return end
+	local paid, price, who = nil, nil, nil
+	if PAID[full] then -- B-REV F4: paid before the clone, given back when no clone comes of it
+		paid = t.p == TWO_DAYS and TWO_DAYS or DAY
+		price = price_of(npc, paid, t.m)
+		who = P.avatar_of_peer(from)
+		if not pay(from, price, npc, "individual paid recruit") then return end
+	end
 	local ok, clone_id = pcall(clone, npc)
 	if not ok then
 		P.report(TAG, "individual recruit clone", clone_id)
+		give_back(from, who, price)
 		return
 	end
 	if not whole(clone_id, 1, MAX_ID) then -- the mod: no clone, the talk goes on with the NPC
+		give_back(from, who, price)
 		talk_on(from, npc:id())
 		return
 	end
 	local released, err = pcall(alife_release, npc)
 	if not released then P.report(TAG, "individual recruit release", err) end
-	local paid = nil
-	if PAID[full] then paid = t.p == TWO_DAYS and TWO_DAYS or DAY end
-	pending[clone_id] = { from = from, paid = paid, at = time_global() }
+	pending[clone_id] = { from = from, paid = paid, price = price, who = who, at = time_global() }
 	busy[from] = clone_id
 	stats.ones = stats.ones + 1
 	CreateTimeEvent("coop_comp_hire", "one_" .. tostring(clone_id), 0, finish_one_safe, clone_id)
@@ -377,8 +618,9 @@ function print_status()
 	if not started then return end
 	local n = 0
 	for _ in pairs(pending) do n = n + 1 end
-	P.log(TAG, "hire: counts sent %d | room failed %d | individual recruits %d, done %d, lost %d, under way %d | talks %d",
-		stats.pushed, stats.room_failed, stats.ones, stats.ones_done, stats.ones_lost, n, stats.talks)
+	P.log(TAG, "hire: counts sent %d | room failed %d | individual recruits %d, done %d, lost %d, under way %d, refused %d | talks %d | paid %d (%d RU), too poor %d, given back %d",
+		stats.pushed, stats.room_failed, stats.ones, stats.ones_done, stats.ones_lost, n, stats.ones_refused, stats.talks, stats.paid,
+		stats.paid_ru, stats.poor, stats.given_back)
 end
 
 function on_game_start()

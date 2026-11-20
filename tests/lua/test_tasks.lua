@@ -1791,6 +1791,33 @@ do
 	check(not turned(st) and failed("task_complete_talk") == 2,
 		"Server, partner named: he names 780, his map server says he talks to 781 and his talk with 780 is 16 s old: refused")
 
+	-- Review A-REV-E-2 finding 5: he closed the dialog with 777 and opened it again between two of his map server's body reports
+	-- (the partner stays 777; the world server's looks never saw him talk to nobody). The map server's word "a new talk granted"
+	-- (coop_srv_tasks -> coop_tasks.far_talk_new) makes the next step a step of a new talk; one step in it, as in any talk.
+	partner = 777
+	tk.stage = 1
+	local s0 = failed("task_stage")
+	req("stage", "s5_talk", ";st=n2;sp=n777")
+	check(tk.stage == 1 and failed("task_stage") == s0 + 1, "(the talk with 777 a step used: a second step is refused)")
+	local T = H.env.coop_tasks
+	check(type(T.far_talk_new) == "function", "the Core takes a map server's word of a new talk (coop_tasks.far_talk_new)")
+	if type(T.far_talk_new) == "function" then
+		for _, junk in ipairs({ { 1, 0 }, { 1, 65535 }, { 1, 1.5 }, { 1, "777" }, { 0, 777 }, { 2, 777 }, { "1", 777 }, { 1.5, 777 } }) do
+			T.far_talk_new(junk[1], junk[2])
+		end
+		req("stage", "s5_talk", ";st=n2;sp=n777")
+		check(tk.stage == 1 and failed("task_stage") == s0 + 2, "a word with junk ids or of another player renews nothing")
+		T.far_talk_new(1, 779)
+		req("stage", "s5_talk", ";st=n2;sp=n777")
+		check(tk.stage == 1 and failed("task_stage") == s0 + 3, "a new talk with another NPC renews nothing with 777")
+		T.far_talk_new(1, 777)
+		req("stage", "s5_talk", ";st=n2;sp=n777")
+		check(tk.stage == 2 and failed("task_stage") == s0 + 3, "a step in the talk with 777 his map server granted again: ok")
+		req("stage", "s5_talk", ";st=n3;sp=n777")
+		check(tk.stage == 2 and failed("task_stage") == s0 + 4, "one step in that talk: a second is refused")
+	end
+	tk.stage = 1
+
 	-- An older engine has no partner binding.
 	H.env.coop.levels.talk_partner = nil
 	NOW = NOW + 16000
@@ -1860,6 +1887,37 @@ do
 	check(hb.s5_bty == 4702, "log: his target is written as in build 56 (a line only): " .. tostring(hb.s5_bty))
 	again()
 	H.env.coop_quests_offer, H.env.coop_trust = nil, nil
+end
+
+-- ---------------------------------------------------------------- A-REV-E-2 F4: give prepares the task before spending the offer
+print("== F4, Co-op: a give keeps the offer through host_after_give")
+do
+	local id, giver = "f4_give", 777
+	local ti = H.env.task_manager.task_ini
+	local known = ti.section_exist
+	ti.section_exist = function(self, tid) return tid == id or known(self, tid) end
+	local offer = { {} }
+	local pending = offer
+	local prepared_with_offer
+	local offers = {}
+	function offers.offers_of(peer, tid)
+		if peer == 1 and tid == id then return pending, { { npc = giver } } end
+	end
+	function offers.host_after_give(tid, peer, npc)
+		prepared_with_offer = npc == giver and offers.offers_of(peer, tid) == offer
+	end
+	function offers.offer_given(peer, tid)
+		if peer == 1 and tid == id then pending = nil end
+	end
+	H.env.coop_quests_offer = offers
+
+	C.env.coop.send_event("coop_tq", "op=sgive;i=s" .. id .. ";g=n" .. giver, 0)
+	pump()
+	check(H.tm.task_info[id] ~= nil and prepared_with_offer == true, "the host prepares the given task with the player's offer still available")
+	check(offers.offers_of(1, id) == nil, "the give spends the offer after preparing the task")
+
+	H.tm.task_info[id], H.engine_tasks[id], C.tm.task_info[id] = nil, nil, nil
+	H.env.coop_quests_offer, ti.section_exist = nil, known
 end
 
 -- ---------------------------------------------------------------- single player untouched

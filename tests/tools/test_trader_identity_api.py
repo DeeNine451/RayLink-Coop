@@ -77,6 +77,8 @@ bool key_digest_hex(const std::string& key, std::string& out) { out=std::string(
 void follow_role() { g_peer_digest.clear(); }
 void forget_lua() {}
 bool in_world(PeerId id) { auto p=manager.s.peer(id); return manager.host && p && p->joined; }
+bool decides_sync_store() { return manager.active() && manager.is_host(); }
+namespace net { bool client() { return mgr().is_client(); } }
 // METHODS
 // OTHER_API
 // REGISTER
