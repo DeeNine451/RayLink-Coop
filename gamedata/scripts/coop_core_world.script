@@ -129,13 +129,13 @@ local stats = { news_out = 0, news_in = 0, news_kept = 0, news_local = 0, news_s
 -------------------------------------------------------------------------------
 local news_applying = false -- client: showing a host news now
 local scope = nil -- "world" | "personal" | nil: what the generator that is running now makes (see the header)
-local personal_msgs = {} -- text -> true: queued by a personal generator, the stock queue sends it a bit later
-local personal_n = 0
+local personal_records = setmetatable({}, { __mode = "k" })
+local flushing_news, recipient_pda_charged
 
 -- Generators of the stock DynamicNewsManager (dynamic_news_manager.DynamicNewsManager) by what they say.
 -- Senders: the methods that call dynamic_news_helper.send_tip themselves (everything else only queues the
 -- message with PushToChannel and TickNews / TickQuick send it). They open the world scope.
-local DYN_WORLD_SENDERS = { "TickNews", "TickQuick", "NewsToggle", "GossipEmissionEnd" }
+local DYN_WORLD_SENDERS = { "TickQuick", "NewsToggle", "GossipEmissionEnd" }
 -- Personal: by the host's name, or about his companions. TickTask: its own line is Degtyarev calling him by name.
 local DYN_PERSONAL = {
 	"WelcomeToNetwork", "GossipAlphaSquad", "GossipTaskLL", "GossipTaskMS", "GossipTaskOA", "GossipTaskDRX",
@@ -295,18 +295,6 @@ local function stalker_stand_in(ic)
 	}
 end
 
-local function mark_personal(text)
-	if type(text) ~= "string" then return end
-	if not personal_msgs[text] then
-		personal_n = personal_n + 1
-		if personal_n > 64 then -- stale ones (a surge clears the stock queue); only a few are ever pending
-			personal_msgs = {}
-			personal_n = 1
-		end
-	end
-	personal_msgs[text] = true
-end
-
 local function name_in(name, set, prefixes)
 	if set[name] then return true end
 	for i = 1, #prefixes do
@@ -387,7 +375,7 @@ end
 
 -- Host: a sender showed a message; the header's rule says who else gets it. Called by a sender wrapper, no tail call in
 -- between: made_by counts the levels.
-local function pass_on(kind, t)
+local function pass_on(kind, t, personal_record)
 	if not others_online() then return end
 	local text = t.m or t.id or t.t or t.s
 	local v = scope
@@ -397,8 +385,7 @@ local function pass_on(kind, t)
 		v = listed_id(text) and "personal" or made_by(4)
 	end
 	if v == "world" then
-		if kind == "dyn" and personal_msgs[text] then -- a personal generator queued this text
-			personal_msgs[text] = nil
+		if personal_record then
 			stats.news_kept = stats.news_kept + 1
 			note("kept, personal talk", text)
 		else
@@ -440,6 +427,48 @@ local function sender_done(ok, ...)
 	return ...
 end
 
+local function flat_pda()
+	return recipient_pda_charged and not recipient_pda_charged(true)
+end
+
+-- Run the actual sender (including mod vetoes) with its local PDA outputs muted.
+local function muted_dyn_sender(orig, ...)
+	local actor = db.actor
+	local cls = type(actor) == "table" and actor or rawget(_G, "game_object")
+	local sound, dev = module_of("xr_sound"), module_of("item_device")
+	local display = cls and cls.give_game_news
+	local play, drain = sound and sound.set_sound_play, dev and dev.drain_device_on_event
+	local schedule = rawget(_G, "CreateTimeEvent")
+	local function mute() end
+	if display then cls.give_game_news = mute end
+	if play then sound.set_sound_play = mute end
+	if drain then dev.drain_device_on_event = mute end
+	if schedule then
+		_G.CreateTimeEvent = function(id, ...)
+			if id ~= "dynamic_news_snd_delay" then return schedule(id, ...) end
+		end
+	end
+	local ok, result = pcall(orig, ...)
+	if schedule then _G.CreateTimeEvent = schedule end
+	if drain then dev.drain_device_on_event = drain end
+	if play then sound.set_sound_play = play end
+	if display then cls.give_game_news = display end
+	if not ok then error(result, 0) end
+	return result
+end
+
+-- TickNews sends the tail record of the first non-empty channel while that record is still queued.
+local function queued_record(text, caption)
+	if not flushing_news or not flushing_news.queue then return end
+	for _, channel in pairs(flushing_news.queue) do
+		local record = channel[#channel]
+		if record then
+			if record.Mg == text and record.Se == caption then return record end
+			return
+		end
+	end
+end
+
 -- A sender. A mod may have put its own wrapper around an older one of ours (zzz_tasks_guide returns nothing): the outermost
 -- does the work, with the result of the innermost, the one that called the stock function. A message of a client's doing
 -- is his alone: not shown here. Outside a session, and on a client, the stock function just runs.
@@ -451,17 +480,28 @@ local function sender_wrapper(kind, orig, fields)
 			if not sender_seen then sender_seen, sender_result = true, r end
 			return r
 		end
-		if kind ~= "snd" and scope ~= "world" then
+		local record = kind == "dyn" and queued_record(...)
+		local personal_record = record and personal_records[record] == true
+		if kind ~= "snd" and (scope ~= "world" or personal_record) then
 			local peer = identity_peer()
 			if peer then
 				share(kind, fields(...), peer)
 				return true
 			end
 		end
+		local muted = kind == "dyn" and scope == "world" and flat_pda()
 		in_sender, sender_seen, sender_result = true, false, nil
-		local r = sender_done(pcall(orig, ...))
+		local r
+		if muted then
+			r = sender_done(pcall(muted_dyn_sender, orig, ...))
+		else
+			r = sender_done(pcall(orig, ...))
+		end
 		if sender_seen then r = sender_result end
-		if r ~= false and (r or kind ~= "snd") then pass_on(kind, fields(...)) end -- send_sound: nil, no such text
+		if r ~= false and (r or kind ~= "snd") then -- send_sound: nil, no such text
+			pass_on(kind, fields(...), personal_record)
+			if record then flushing_news.sent = record end
+		end
 		return r
 	end
 end
@@ -523,31 +563,79 @@ local function install_direct()
 end
 
 -- Runs f in a scope and puts the previous one back, also when f fails (the error goes on unchanged).
-local function scope_done(prev, ok, ...)
-	scope = prev
+local function scope_done(prev, queue, ok, ...)
+	scope, flushing_news = prev, queue
 	if not ok then error((...), 0) end
 	return ...
 end
 
 local function in_scope(sc, f, ...)
-	local prev = scope
-	scope = sc
-	return scope_done(prev, pcall(f, ...))
+	local prev, queue = scope, flushing_news
+	scope, flushing_news = sc, nil
+	return scope_done(prev, queue, pcall(f, ...))
 end
 
-local function around_world(orig, ...) return in_scope("world", orig, ...) end
+local function around_world(orig, ...)
+	if not in_session() then return orig(...) end
+	return in_scope("world", orig, ...)
+end
 local function around_personal(orig, ...) return in_scope("personal", orig, ...) end
 local function around_open(orig, ...) return in_scope(nil, orig, ...) end
 
 -- f runs as a world generator: its news reach every client (coop_world_fx hands this to the scripts of group tasks).
 function in_world_scope(f, ...) return in_scope("world", f, ...) end
 
--- PushToChannel(name, t, fifo) queues t; the text of a personal one is remembered until TickNews sends it.
-local function around_push(orig, ...)
-	local _, _, t = ...
-	local personal = scope == "personal"
-	local r = orig(...)
-	if personal and type(t) == "table" then mark_personal(t.Mg) end -- Mg is final only after orig translated it
+local function around_news_toggle(orig, self, ...)
+	local blocked = around_world(orig, self, ...)
+	local flush = flushing_news
+	if not blocked and flush and flush.held and flush.queue and flush.queue == self.queue then
+		-- Only hide personal records once the stock pause/surge gate has run against the full queue.
+		for _, channel in pairs(flush.queue) do
+			for i = #channel, 1, -1 do
+				if personal_records[channel[i]] then
+					flush.held[#flush.held + 1] = { channel, i, table.remove(channel, i) }
+				end
+			end
+		end
+	end
+	return blocked
+end
+
+local function tick_news_done(prev, queue, flush, ok, ...)
+	local held = flush.held
+	for i = held and #held or 0, 1, -1 do
+		local row = held[i]
+		table.insert(row[1], math.min(row[2], #row[1] + 1), row[3])
+	end
+	local record = flush.sent
+	if ok and record and record.coop_on_dequeue then
+		local notify = record.coop_on_dequeue
+		record.coop_on_dequeue = nil
+		scope, flushing_news = prev, queue
+		notify()
+	end
+	return scope_done(prev, queue, ok, ...)
+end
+
+local function around_tick_news(orig, self, ...)
+	if not in_session() then return orig(self, ...) end
+	local prev, queue = scope, flushing_news
+	local flush = { queue = self.queue, held = flat_pda() and {} or nil }
+	scope, flushing_news = "world", flush
+	return tick_news_done(prev, queue, flush, pcall(orig, self, ...))
+end
+
+-- dEmergence discards the return value. The queue itself says whether this record was accepted.
+local function around_push(orig, self, name, record, fifo, ...)
+	if not in_session() then return orig(self, name, record, fifo, ...) end
+	if scope ~= "personal" then return in_world_scope(orig, self, name, record, fifo, ...) end
+	local channel = self.queue and self.queue[name]
+	local count = channel and #channel or 0
+	local r = orig(self, name, record, fifo, ...)
+	channel = self.queue and self.queue[name]
+	if channel and #channel > count and channel[fifo and #channel or 1] == record then
+		personal_records[record] = true
+	end
 	return r
 end
 
@@ -570,7 +658,13 @@ local function wrap_like(orig, modname, around)
 	return factory and factory(around, orig) or nil
 end
 
-local function patch_method(cls, name, around, modname)
+local function patch_method(cls, name, around, modname, mods)
+	if mods then
+		local ok, wrapped = pcall(mods.wrap, cls, name, modname .. "." .. name, function(orig)
+			return wrap_like(orig, modname, around)
+		end)
+		return ok and wrapped
+	end
 	local ok, f = pcall(function() return cls[name] end)
 	if not (ok and type(f) == "function") then return false end
 	local w = wrap_like(f, modname, around)
@@ -584,7 +678,8 @@ local class_patched = false
 -- later by get_dynamic_news) look them up there at call time, and CreateTimeEvent gets self.TickNews then.
 local function install_manager_class()
 	if class_patched then return end
-	local mod = module_of("dynamic_news_manager")
+	local mods = module_of("coop_mods_core")
+	local mod = (mods and mods.mod or module_of)("dynamic_news_manager")
 	local ok, cls = pcall(function() return mod and mod.DynamicNewsManager end)
 	if not (ok and cls) then
 		news_report.class = "DynamicNewsManager not found"
@@ -594,13 +689,19 @@ local function install_manager_class()
 	local done, wanted = 0, 0
 	local function patch(name, around)
 		wanted = wanted + 1
-		if patch_method(cls, name, around, "dynamic_news_manager") then
+		if patch_method(cls, name, around, "dynamic_news_manager", mods) then
 			done = done + 1
 		else
 			log("! news: DynamicNewsManager.%s not patched", name)
 		end
 	end
-	for _, name in ipairs(DYN_WORLD_SENDERS) do patch(name, around_world) end
+	for _, name in ipairs(DYN_WORLD_SENDERS) do patch(name, name == "NewsToggle" and around_news_toggle or around_world) end
+	patch("TickNews", around_tick_news)
+	-- These generators can be absent in a replaced manager. Their own PDA check precedes the queue.
+	for _, name in ipairs({ "TickRandom", "TickSpecial" }) do
+		local present, method = pcall(function() return cls[name] end)
+		if present and type(method) == "function" then patch(name, around_world) end
+	end
 	for _, name in ipairs(DYN_PERSONAL) do patch(name, around_personal) end
 	for _, name in ipairs(DYN_WORLD_INSIDE_PERSONAL) do patch(name, around_open) end
 	patch("PushToChannel", around_push)
@@ -686,6 +787,7 @@ local function wrap_pda_check()
 	local charged = dev and dev.is_pda_charged
 	if pda_wrapped or type(charged) ~= "function" then return end
 	pda_wrapped = true
+	recipient_pda_charged = charged
 	dev.is_pda_charged = function(...)
 		if scope == "world" and is_host() then return true end
 		return charged(...)

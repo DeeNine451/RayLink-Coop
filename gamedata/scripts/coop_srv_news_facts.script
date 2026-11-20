@@ -1,0 +1,207 @@
+-- Server (srv): map observations for the world server's scheduled dynamic news.
+
+local api = rawget(_G, "coop")
+local SAMPLE, FACTS = "srv.news_sample", "srv.news_facts"
+local REQUEST_MS, REACTION_CONTEXT_MS = 10000, 120000
+local ACTIVITY = 3
+local GENERATORS = {
+	{ "GossipWeather", "beep_1" },
+	{ "GossipTime", "beep_1" },
+	{ "GossipNearbyActivity", "beep_2" },
+	{ "DumbZombie", "beep_2" },
+}
+
+local function allowed(ok, check, fmt, ...)
+	return coop_trust.pass(check, ok, fmt, ...) and ok
+end
+
+local function integer(value, max)
+	return type(value) == "number" and value >= 1 and value <= max and value % 1 == 0
+end
+
+local function text(value, max)
+	return type(value) == "string" and #value > 0 and #value <= max and not value:find("%z")
+end
+
+local function valid_facts(t)
+	return text(t.channel, 32) and t.channel:match("^[a-z][a-z0-9_]*$") ~= nil
+		and text(t.message, 4000) and text(t.caption, 512) and text(t.icon, 128)
+end
+
+local function valid_request(t)
+	return integer(t.token, 0x7fffffff) and integer(t.kind, #GENERATORS)
+		and (t.reaction == nil or (t.reaction == true and t.kind == ACTIVITY))
+end
+
+local function expire(jobs, now)
+	for token, job in pairs(jobs) do
+		if job.until_ms < now then jobs[token] = nil end
+	end
+end
+
+local function bridge_of(peer)
+	local levels = api.levels
+	return levels and levels.bridge_of_player and levels.bridge_of_player(peer)
+end
+
+local function active_maps()
+	local maps, seen = {}, {}
+	for _, p in ipairs(api.players()) do
+		if coop_mode.seat_plays(p.id) and coop_mode.where(p.id) ~= "joining" then
+			local bridge = bridge_of(p.id)
+			if bridge and not seen[bridge] and coop_mode.from_level(bridge) then
+				seen[bridge] = true
+				maps[#maps + 1] = { peer = p.id, bridge = bridge }
+			end
+		end
+	end
+	return maps
+end
+
+local function still_on_map(job)
+	return coop_mode.seat_plays(job.peer) and coop_mode.where(job.peer) ~= "joining" and bridge_of(job.peer) == job.bridge
+end
+
+local function world_handler(cm, cls)
+	local cursor, serial, pending, reactions = 0, 0, {}, {}
+	local function request_reaction(job)
+		CreateTimeEvent("coop_srv_news_reaction", job.token, math.random(5, 6), function()
+			local now = time_global()
+			expire(reactions, now)
+			if api.is_active() and coop_mode.from_level(job.bridge) and still_on_map(job)
+				and api.send_event(SAMPLE, cm.encode({ token = job.token, kind = ACTIVITY, peer = job.peer, reaction = true }), job.bridge) then
+				job.until_ms = now + REQUEST_MS
+				reactions[job.token] = job
+			end
+			return true
+		end)
+	end
+
+	local function request(manager, kind)
+		local now = time_global()
+		if not api.is_active() or (pending[kind] and pending[kind].until_ms >= now) then return false end
+		local maps = active_maps()
+		if #maps == 0 then return false end
+		cursor = cursor % #maps + 1
+		local map = maps[cursor]
+		serial = serial % 0x7fffffff + 1
+		if api.send_event(SAMPLE, cm.encode({ token = serial, kind = kind, peer = map.peer }), map.bridge) then
+			pending[kind] = { token = serial, peer = map.peer, bridge = map.bridge, manager = manager, until_ms = now + REQUEST_MS }
+		end
+		return false
+	end
+
+	for kind, row in ipairs(GENERATORS) do
+		coop_mods_core.wrap(cls, row[1], "srv news " .. row[1], function()
+			return function(self) return request(self, kind) end
+		end)
+	end
+
+	return function(payload, from)
+		if not allowed(coop_mode.from_level(from), "news_facts_sender", "news facts from non-bridge peer %s", tostring(from)) then return end
+		if not allowed(type(payload) == "string" and #payload <= 14100, "news_facts_size", "invalid news facts size") then return end
+		local t = cm.decode(payload)
+		if not allowed(valid_request(t) and valid_facts(t)
+			and cm.encode({ token = t.token, kind = t.kind, channel = t.channel, message = t.message,
+				caption = t.caption, icon = t.icon, reaction = t.reaction }) == payload,
+			"news_facts_payload", "invalid news facts from map peer %s", tostring(from)) then return end
+		local jobs, key = pending, t.kind
+		if t.reaction then jobs, key = reactions, t.token end
+		local job = jobs[key]
+		if not allowed(job ~= nil and job.bridge == from and job.token == t.token and job.until_ms >= time_global()
+			and still_on_map(job),
+			"news_facts_request", "news facts do not match a current request from map peer %s", tostring(from)) then return end
+		local queue = job.manager.queue
+		if not allowed(queue ~= nil and type(queue[t.channel]) == "table", "news_facts_channel",
+			"news facts from map peer %s name an unavailable channel", tostring(from)) then return end
+		jobs[key] = nil
+		local record = { Mg = t.message, Se = t.caption, Ic = t.icon, Snd = t.reaction and "beep_1" or GENERATORS[t.kind][2], It = "npc" }
+		if t.kind == ACTIVITY and not t.reaction then
+			record.coop_on_dequeue = function() request_reaction(job) end
+		end
+		job.manager:PushToChannel(t.channel, record)
+	end
+end
+
+-- Run the nearby-activity branch of TickQuick where its reporter and responding NPCs live.
+local function observe_reaction(mod, manager, job)
+	if mod.enable_news == false or not ui_options.get("alife/dynamic_news/reaction_news")
+		or device():is_paused() or xr_conditions.surge_started() or math.random(100) >= 70 then return end
+	local st = db.storage[job.speaker]
+	local npc = st and st.object or level.object_by_id(job.speaker)
+	if not (npc and IsStalker(npc) and npc:alive()) then return end
+	local sampler = setmetatable({ response = {} }, { __index = function(_, key) return manager[key] end })
+	sampler:ResponseOnGossipNearbyActivity(npc, job.activity)
+	return sampler.response.message
+end
+
+local function map_handler(cm, mod, cls)
+	local next_sample, contexts = 0, {}
+	local function report(t, channel, record)
+		local facts = { token = t.token, kind = t.kind, channel = channel, message = record.Mg,
+			caption = record.Se, icon = record.Ic, reaction = t.reaction }
+		return valid_facts(facts) and api.send_event(FACTS, cm.encode(facts), 0)
+	end
+
+	return function(payload)
+		if not allowed(type(payload) == "string" and #payload <= 72, "news_sample_size", "invalid news sample size") then return end
+		local t = cm.decode(payload)
+		if not allowed(valid_request(t) and integer(t.peer, 0x7fffffff)
+			and cm.encode({ token = t.token, kind = t.kind, peer = t.peer, reaction = t.reaction }) == payload,
+			"news_sample_payload", "invalid news sample request") then return end
+		if not allowed(api.is_active() and db.actor ~= nil and coop_mode.where(t.peer) == "here", "news_sample_placement",
+			"news sample player %d is not on this map", t.peer) then return end
+		local now = time_global()
+		if not t.reaction and not allowed(now >= next_sample, "news_sample_rate", "news sample requested too soon") then return end
+		if dynamic_news_helper.IsInvalidMap(level.name()) then return end
+		expire(contexts, now)
+		local context = contexts[t.token]
+		if t.reaction then
+			if not allowed(context ~= nil and context.peer == t.peer, "news_sample_reaction",
+				"news reaction does not match a current sample for player %d", t.peer) then return end
+			contexts[t.token] = nil
+		end
+
+		local generate = cls[GENERATORS[t.kind][1]]
+		if type(generate) ~= "function" or type(mod.get_dynamic_news) ~= "function" then return end
+		if not t.reaction then next_sample = now + 1000 end
+		if mod.update_settings then mod.update_settings() end
+		local manager = mod.get_dynamic_news()
+		if not manager then return end
+		if t.reaction then
+			local reply = observe_reaction(mod, manager, context)
+			if reply then report(t, context.channel, reply) end
+			return
+		end
+		-- The active generator reads this map's speaker, surroundings and weather. Capture its portable
+		-- message fields in place of enqueueing. The world owns the queue, display time and delivery.
+		local channel, record
+		local sampler = setmetatable({ PushToChannel = function(_, name, entry)
+			channel, record = name, entry
+		end }, { __index = function(_, key) return manager[key] end })
+		generate(sampler)
+		if not (record and report(t, channel, record)) then return end
+		if t.kind == ACTIVITY and type(record.Ty) == "string" and record.Id then
+			local speaker = type(record.Id) == "number" and record.Id or record.Id:id()
+			contexts[t.token] = { peer = t.peer, channel = channel, activity = record.Ty,
+				speaker = speaker, until_ms = now + REACTION_CONTEXT_MS }
+		end
+	end
+end
+
+function on_game_start()
+	if not api then return end
+	coop_mode.when_srv(function()
+		coop_main.reserve_world_event(SAMPLE)
+		local world = coop_mode.decides_world()
+		if not world and not coop_mode.leads_here() then return end
+		local mod = coop_mods_core.mod("dynamic_news_manager")
+		local cls = mod and mod.DynamicNewsManager
+		if not cls then return end
+		if world then
+			coop_main.add_event_handler(FACTS, world_handler(coop_main, cls))
+		else
+			coop_main.add_event_handler(SAMPLE, map_handler(coop_main, mod, cls))
+		end
+	end)
+end

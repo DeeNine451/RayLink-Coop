@@ -62,3 +62,6 @@ mdata coop_paid_contracts_v1
 event coop_env_verdict
 event mods.bounty_req
 event mods.bounty_t
+event mods.preblowout_warning
+event srv.news_facts
+event srv.news_sample

@@ -231,6 +231,7 @@ end
 -- Engine entry: a Msg::ScriptEvent for this machine. `from` is the sender's peer id (0 = host).
 function on_event(name, payload, from)
 	stats.events_in = stats.events_in + 1
+	if not allow_world_event(name, from) then return end
 	local hs = handlers[name]
 	if hs then
 		for f in pairs(hs) do
@@ -608,13 +609,13 @@ local function with_cover(cover, fn, what)
 	end
 end
 
-local function mirror_start_surge(m)
+local function mirror_start_surge(m, previous_factor)
 	if not m._state_loaded then
 		m:initialize()
 		m._state_loaded = true
 	end
 	m.surge_time = NEVER_ENDS -- R5 I2
-	m.game_time_factor = level.get_time_factor()
+	m.game_time_factor = previous_factor
 	if m.finalize then m:finalize() end
 	m.started, m.finished = true, false
 	-- false: the stock neither starts nor fades these, quake_step plays them
@@ -629,14 +630,14 @@ local function mirror_start_surge(m)
 	log("emission started by the host")
 end
 
-local function mirror_start_psi(m)
+local function mirror_start_psi(m, previous_factor)
 	surge_mgr() -- psi initialize() reads surge_manager.SurgeManager.ini
 	if not m._state_loaded then
 		m:initialize()
 		m._state_loaded = true
 	end
 	m.psi_storm_duration = NEVER_ENDS -- R5 I2
-	m.game_time_factor = level.get_time_factor()
+	m.game_time_factor = previous_factor
 	if m.finalize then m:finalize() end
 	m.started, m.finished = true, false
 	m.hitFactor = 0
@@ -647,17 +648,23 @@ local function mirror_start_psi(m)
 	log("psi-storm started by the host")
 end
 
+local function follow_env_factor()
+	if level.get_time_factor() ~= env_cl.tf then level.set_time_factor(env_cl.tf) end
+end
+
 local function mirror_update(m, game_sec, what, limit_field)
 	m.first_update = true -- the host already validated level and options
 	m[limit_field] = NEVER_ENDS -- R5 I2: only the host ends the emission / psi storm
 	set_inited(m, game_sec)
+	follow_env_factor()
 	with_cover(env_cl.cover, function() m:update() end, what)
 end
 
 -- A mirror that starts late (the player joined during it): the stock update plays every stage that is due at once. A
 -- stage is over this many stock seconds in. The rumble is not listed: it is on now, and it ends later.
-local SURGE_STAGES_OVER = { beginning = 5, siren = 30, impact = 52,
-	["1stwavesnd"] = 120, ["1stwave"] = 124, ["2ndwavesnd"] = 168, ["2ndwave"] = 172 }
+-- Stock Anomaly and Preblowout Murder use these same thresholds in CSurgeManager:update().
+local SURGE_STAGES_OVER = { siren = 25, impact = 47, ["1stwavesnd"] = 108,
+	["1stwave"] = 120, ["2ndwavesnd"] = 156, ["2ndwave"] = 168, endsnd = 220 }
 local PSI_STAGES_OVER = { beginning = 5, siren = 15 }
 
 -- The quake on a client (live 2026-11-01: the emission ran and nothing shook, the cause not found by reading): the stock's ladder
@@ -675,6 +682,7 @@ local function quake_stop()
 end
 
 local function quake_step(sec)
+	if sec >= 214 then return quake_stop() end
 	local name = nil
 	for _, row in ipairs(QUAKE) do
 		if sec >= row[1] then name = row[2] end
@@ -686,8 +694,7 @@ local function quake_step(sec)
 	log("emission quake: %s at %d s, %s", name, sec, ok and ("runs " .. tostring(res) .. " s") or tostring(res))
 end
 
-local function skip_stages_over(m, over, game_sec)
-	local sec = game_sec / (env_cl.tf or level.get_time_factor())
+local function skip_stages_over(m, over, sec)
 	for stage, at in pairs(over) do
 		if sec >= at then m.stages[stage] = true end
 	end
@@ -726,6 +733,7 @@ end
 
 -- Client: the host's phase is "not running" here. `why`: nil for the host's end, else why it is not running here.
 local function env_off_here(m, key, why)
+	if key == "surge" then env_cl.surge_mirror = nil end
 	if not m then return end
 	local e = ENV_LOCAL[key]
 	if key == "surge" then quake_stop() end
@@ -762,7 +770,8 @@ local function client_env_tick()
 		if coop_env_cover then coop_env_cover.clear_client_verdict() end
 		return
 	end
-	local dt = (tg - env_cl.at) / 1000 * (env_cl.tf or level.get_time_factor())
+	local previous_factor = level.get_time_factor()
+	local dt = (tg - env_cl.at) / 1000 * env_cl.tf
 	if env_cl.own then
 		local cover = coop_env_cover and coop_env_cover.client_verdict()
 		if cover == nil then
@@ -776,13 +785,38 @@ local function client_env_tick()
 	local sm = surge_mgr()
 	if sm then
 		if env_cl.s then
-			if not sm.started then
-				mirror_start_surge(sm)
-				skip_stages_over(sm, SURGE_STAGES_OVER, env_cl.sg + dt)
+			local game_sec = env_cl.sg + dt
+			-- set_inited uses whole game seconds. The manager rounds that clock up after dividing by the factor.
+			local sec = math.ceil(math.floor(game_sec) / env_cl.tf)
+			local entering = not rawequal(env_cl.surge_mirror, sm) or not sm.started
+			local restore_rumble = false
+			if entering then
+				-- A save can say the surge is active without having started any effects on this machine.
+				mirror_start_surge(sm, previous_factor)
+				skip_stages_over(sm, SURGE_STAGES_OVER, sec)
+				-- Keep the opening cue on the first phase packet, which may reach an existing player a few seconds in.
+				if sec >= 5 then
+					sm.stages.beginning = true
+					-- The manager starts the weather and plays the opening cue in the same stage.
+					if (not ghost or coop_mode.leads_here()) and level.get_time_hours and level.set_weather_fx then
+						local hour = level.get_time_hours()
+						level.set_weather_fx(hour >= 5 and hour <= 20 and "fx_blowout_day" or "fx_blowout_night")
+					end
+				end
+				if not ghost and sm.blowout_sounds and sm.blowout_sounds.crow0 then
+					-- Preblowout Murder holds the last psychic strength between the waves.
+					if sec >= 120 and sec < 210 then sm.hitFactor = 0.3 end
+					if sec >= 214 then sm.stages.rumble = false end
+					restore_rumble = sec > 75 and sec < 200
+				end
+				env_cl.surge_mirror = sm
 			end
 			env_host.sample_cover(true)
-			mirror_update(sm, env_cl.sg + dt, "emission mirror", "surge_time")
-			if not ghost then quake_step((env_cl.sg + dt) / (env_cl.tf or level.get_time_factor())) end
+			mirror_update(sm, game_sec, "emission mirror", "surge_time")
+			if restore_rumble and sm.blowout_sound then
+				xr_sound.set_volume_sound_looped(AC_ID, "blowout_rumble", 1)
+			end
+			if not ghost then quake_step(sec) end
 		else
 			env_off_here(sm, "surge")
 		end
@@ -791,8 +825,8 @@ local function client_env_tick()
 	if pm then
 		if env_cl.p then
 			if not pm.started then
-				mirror_start_psi(pm)
-				skip_stages_over(pm, PSI_STAGES_OVER, env_cl.pg + dt)
+				mirror_start_psi(pm, previous_factor)
+				skip_stages_over(pm, PSI_STAGES_OVER, (env_cl.pg + dt) / env_cl.tf)
 			end
 			if not (env_cl.s and sm) then env_host.sample_cover(true) end
 			mirror_update(pm, env_cl.pg + dt, "psi-storm mirror", "psi_storm_duration")
@@ -803,34 +837,59 @@ local function client_env_tick()
 	if not (env_cl.s or env_cl.p) then env_host.sample_cover(false) end
 
 	-- After start/stop (they remember the factor to restore), follow the host's time factor.
-	local tf = env_cl.tf
-	if tf and tf > 0 and math.abs(level.get_time_factor() - tf) > 0.001 then
-		level.set_time_factor(tf)
-	end
+	follow_env_factor()
 end
 
-add_event_handler("coop_env", function(payload, from)
-	if from ~= 0 or not (api and api.is_client()) then return end
+-- Invalid data stays refused in trust log mode.
+local function env_request_ok(name, ok, fmt, ...)
+	if coop_trust and not coop_trust.pass(name, ok, fmt, ...) then return false end
+	return ok
+end
+
+local PREBLOWOUT_WARNING = "mods.preblowout_warning"
+local world_events = { [PREBLOWOUT_WARNING] = true, coop_env = true }
+
+function reserve_world_event(name)
+	world_events[name] = true
+end
+
+-- The transport must call this with the original peer before any relay changes the origin to zero.
+function allow_world_event(name, from)
+	if not world_events[name] then return true end
+	return env_request_ok("env_world_sender", from == 0, "event %s from peer %s is reserved for the world",
+		name, tostring(from))
+end
+
+local function bounded_env_number(value, min, max)
+	return type(value) == "number" and value >= min and value <= max
+end
+
+add_event_handler("coop_env", function(payload)
+	if not (api and api.is_client()) then return end
+	if not env_request_ok("env_phase_size", type(payload) == "string" and #payload <= 256,
+		"invalid environment phase packet size") then return end
 	local t = decode(payload)
+	-- The mirror passes elapsed game seconds to CTime and divides by the time factor.
+	if not env_request_ok("env_phase_payload",
+		encode({ s = t.s, p = t.p, sg = t.sg, pg = t.pg, tf = t.tf, c = t.c, own = t.own }) == payload
+		and (t.s == nil or type(t.s) == "boolean") and (t.p == nil or type(t.p) == "boolean")
+		and (t.c == nil or type(t.c) == "boolean") and (t.own == nil or type(t.own) == "boolean")
+		and ((t.sg == nil and t.s ~= true) or bounded_env_number(t.sg, 0, 86400))
+		and ((t.pg == nil and t.p ~= true) or bounded_env_number(t.pg, 0, 86400))
+		and bounded_env_number(t.tf, 0.01, 1000), "invalid environment phase fields") then return end
 	local s, p = t.s == true, t.p == true
 	if s ~= env_cl.s or p ~= env_cl.p or not env_cl.have then
 		env_cl.next_tick = 0 -- a phase change is applied on the next frame, not after the 1 s step
 	end
-	env_cl.s, env_cl.sg = s, tonumber(t.sg) or 0
-	env_cl.p, env_cl.pg = p, tonumber(t.pg) or 0
-	env_cl.tf = tonumber(t.tf)
+	env_cl.s, env_cl.sg = s, t.sg or 0
+	env_cl.p, env_cl.pg = p, t.pg or 0
+	env_cl.tf = t.tf
 	env_cl.cover = t.c ~= false
 	env_cl.own = t.own == true -- phase carries no decision for this player; his level can send one separately
 	if not (s or p) and coop_env_cover then coop_env_cover.clear_client_verdict() end
 	env_cl.at = time_global()
 	env_cl.have = true
 end)
-
--- Validation is also enforced in trust log mode when a request cannot safely be applied.
-local function env_request_ok(name, ok, fmt, ...)
-	if coop_trust and not coop_trust.pass(name, ok, fmt, ...) then return false end
-	return ok
-end
 
 local function env_peer_ok(peer)
 	return type(peer) == "number" and peer > 0 and peer < 0xffffffff and peer % 1 == 0
@@ -990,6 +1049,64 @@ add_event_handler("coop_env_kill", function(payload, from)
 	log("caught outside a shelter by the emission (host decision)")
 	actor:kill(actor)
 end)
+
+-- Preblowout Murder's five sound pairs are spaced by 60 in-game seconds. The world supplies the
+-- current pair even to late joiners. Each player places it around their own actor with the mod's helper.
+local CROW_WARNING = {
+	{ "crow5", "crow4", 140, 220 }, { "crow3", "crow2", 100, 260 }, { "crow1", "crow0", 0, 360 },
+	{ "crow2", "crow3", 280, 440 }, { "crow4", "crow5", 320, 400 },
+}
+
+local function publish_crow_warning(tg)
+	if not (coop_mods_core and coop_mode and coop_mode.decides_world()) then return end
+	if tg < (env_host.warning_next or 0) then return end
+	env_host.warning_next = tg + 1000
+	local mod = coop_mods_core.mod("surge_manager")
+	if not (mod and mod.play_sound_radius and option("alife/event/emission_state", true)) then return end
+	local sm = surge_mgr()
+	if not (sm and sm._state_loaded and not sm.started and not sm.time_forwarded and sm.last_surge_time
+		and type(sm._delta) == "number" and sm.blowout_sounds and sm.blowout_sounds.crow0) then return end
+	local now = game.get_game_time()
+	local remaining = sm._delta - now:diffSec(sm.last_surge_time)
+	if remaining <= 0 or remaining >= 360 then return end
+	local stage = math.min(#CROW_WARNING, math.ceil((360 - remaining) / 60))
+	-- The saved schedule identifies the warning across a restart of the world's Lua state.
+	local y, mo, d, h, mi, s, ms = sm.last_surge_time:get(0, 0, 0, 0, 0, 0, 0)
+	local cycle = string_format("%d-%d-%dT%d:%d:%d.%d/%d", y, mo, d, h, mi, s, ms, sm._delta)
+	coop_mods_core.publish(PREBLOWOUT_WARNING:sub(6), { cycle = cycle, stage = stage })
+end
+
+add_event_handler(PREBLOWOUT_WARNING, function(payload)
+	if not env_request_ok("env_warning_size", type(payload) == "string" and #payload <= 96,
+		"invalid crow warning packet size") then return end
+	local t = decode(payload)
+	local valid = bounded_env_number(t.stage, 1, #CROW_WARNING) and t.stage % 1 == 0
+		and type(t.cycle) == "string" and #t.cycle <= 48
+		and t.cycle:match("^%d%d%d%d%-%d%d?%-%d%d?T%d%d?:%d%d?:%d%d?%.%d%d?%d?/%d+$") ~= nil
+		and encode({ cycle = t.cycle, stage = t.stage }) == payload
+	if not env_request_ok("env_warning_payload", valid, "invalid crow warning fields") then return end
+	if not (coop_mode and coop_mode.is_player_mirror()) then return end
+	env_cl.warning = { cycle = t.cycle, stage = t.stage, at = time_global() }
+end)
+
+local function play_crow_warning(tg)
+	local warning = env_cl.warning
+	if not warning or not db.actor then return end
+	env_cl.warning = nil
+	if env_cl.s or tg - warning.at > 2000 or not env_reaches_here() then return end
+	local levels = level_weathers and level_weathers.valid_levels
+	if levels and levels[level.name()] ~= true then return end
+	local played = env_cl.warning_played
+	if played and played.cycle == warning.cycle and played.stage >= warning.stage then return end
+	local mod = coop_mods_core.mod("surge_manager")
+	local sm = surge_mgr()
+	local sounds = sm and sm.blowout_sounds
+	local stage = CROW_WARNING[warning.stage]
+	if not (mod and mod.play_sound_radius and sounds and sounds[stage[1]] and sounds[stage[2]]) then return end
+	env_cl.warning_played = warning
+	mod.play_sound_radius(sounds[stage[1]], 1000, stage[3], stage[4])
+	mod.play_sound_radius(sounds[stage[2]], 1000, stage[3], stage[4])
+end
 
 -------------------------------------------------------------------------------
 -- Client restrictions (R-9.2 saves, R-6.6 debug tools)
@@ -1207,6 +1324,7 @@ local function actor_on_update()
 	if api.is_host() then
 		if not host_hooks then install_host_hooks() end
 		host_env_tick()
+		publish_crow_warning(tg)
 	elseif api.is_client() and api.is_live() then
 		if not client_patched then install_client_patches() end
 		-- All scripts have registered their answers by the first live tick.
@@ -1219,6 +1337,7 @@ local function actor_on_update()
 			api.send_event("coop_env_req", "", 0)
 		end
 		client_env_tick()
+		play_crow_warning(tg)
 		if plays and (env_cl.s or env_cl.p) and tg >= env_cl.cover_at then
 			env_cl.cover_at = tg + 1000
 			local ok, c = pcall(own_cover)
