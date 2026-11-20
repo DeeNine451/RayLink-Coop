@@ -1,0 +1,36 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+
+local names = {
+	"mods.preblowout_warning",
+	"coop_env",
+	"srv.news_sample",
+	"mods.bounty_t",
+	"coop.op.answer",
+	"coop.dbg.run",
+	"coop.dbg.note",
+	"coop.dbg.say",
+	"coop.dbg.order",
+	"coop_scorch",
+	"mods.rf_freq_r",
+	"coop_rep_map_ack",
+	"npc.comp_recall",
+	"coop_set",
+	"quests.far_do",
+	"npc.comp_adopt",
+	"npc.comp_drop",
+	"coop_brain",
+	"coop_orders",
+	"coop_dao",
+	"coop_sl_news",
+	"coop_fac",
+}
+
+function on_game_start()
+	local api = rawget(_G, "coop")
+	if not api or type(api.reserve_world_event) ~= "function" then return end
+	for _, name in ipairs(names) do
+		if not api.reserve_world_event(name) then
+			printf("! [coop] could not reserve world script event '%s'", name)
+		end
+	end
+end
