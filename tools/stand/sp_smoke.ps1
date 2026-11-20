@@ -31,6 +31,11 @@ function New-Profile([string]$letter) {
     $appdata = Join-Path $Stand $name
     New-Item -ItemType Directory -Force -Path $appdata | Out-Null
     Copy-StandTree -From (Join-Path $Stand 'appdata_t') -To $appdata -ExcludeFiles @('coop_player.key', 'axr_options.ltx') -ExcludeDirs @('savedgames', 'logs', 'raylink', 'screenshots')
+    # The stand runs unattended (a locked desktop at night): a single player window that never gets the focus is not
+    # active, and the probe's steps never came (2026-11-21, twice). Stock's own option, as ms_crash_server sets it.
+    $user = Join-Path $appdata 'user.ltx'
+    $lines = @([IO.File]::ReadAllLines($user, $cp1251) | Where-Object { $_ -notmatch '^\s*g_always_active\s' })
+    Write-StandLines -Path $user -Lines ($lines + 'g_always_active on') -Encoding $cp1251
     $global:LASTEXITCODE = 0
     return $appdata
 }
