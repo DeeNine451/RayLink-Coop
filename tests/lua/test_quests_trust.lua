@@ -7,7 +7,7 @@
 -- Run: tools\test_lua.cmd quests_trust
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party",
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party",
 	"coop_quests_story", "coop_quests_scenes", "coop_quests_missions" }
 
 local function exists(name)

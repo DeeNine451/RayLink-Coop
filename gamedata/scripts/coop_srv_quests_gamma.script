@@ -1,4 +1,4 @@
--- Сервер (srv): GAMMA quest progression and offer context on the world server (docs/MODES.md).
+-- Сервер (srv): GAMMA quest progression on the world server and offer context on both servers (docs/MODES.md).
 local TAG = "quests_gamma"
 local DARKSCAPE = "k01_darkscape"
 local UNDERPASS = "jupiter_underground"
@@ -20,8 +20,9 @@ local NORTH_CACHES = {
 }
 
 local function step(what, fn, ...)
-	local ok, err = pcall(fn, ...)
-	if not ok then coop_mods_core.report(TAG, what, err) end
+	local ok, result = pcall(fn, ...)
+	if ok then return result end
+	coop_mods_core.report(TAG, what, result)
 end
 
 local function world_live()
@@ -170,11 +171,115 @@ local function map_live()
 	return coop_mods_core.active() and coop_mode.leads_here() and not coop_mode.actor_is_player()
 end
 
+-- Reuse the map-roster receiver. Startup may register either adapter first.
+local function watch_map_roster(C)
+	local qc = coop_quests_core
+	local name = "srv_factions_gamma"
+	local rosters = {}
+	local function track(entry)
+		local receive = entry.set
+		entry.set = function(snapshot)
+			receive(snapshot)
+			rosters = type(snapshot) == "table" and snapshot or {}
+		end
+	end
+
+	local entry = qc.shared().down[name]
+	if entry then
+		track(entry)
+	else
+		local share = qc.share()
+		local down = share.down
+		share.down = function(key, ...)
+			down(key, ...)
+			if key == name then
+				track(qc.shared().down[name])
+				share.down = down
+			end
+		end
+	end
+	return function(peer)
+		local roster = rosters[level.name()]
+		if type(roster) ~= "table" then return nil end
+		for _, player in ipairs(C.players()) do
+			if player.id == peer then
+				local faction = roster[player.avatar_id]
+				if type(faction) == "string" and faction ~= "" then return faction end
+				return nil
+			end
+		end
+	end, function() rosters = {} end
+end
+
+local function install_north_picker(C, world)
+	local helper = C.mod("blacklist_helper")
+	local offers = C.mod("coop_quests_offer")
+	if not (helper and offers and offers.requester and type(helper.ShouldBlacklistNorth) == "function") then return end
+	local faction_of, reset_roster
+	if world then
+		faction_of = function(peer) return coop_faction.faction_of(peer) end
+	else
+		faction_of, reset_roster = watch_map_roster(C)
+		C.wrap(offers, "request_ready", "quests_gamma.north_roster", function(original)
+			return function(peer) return original(peer) and faction_of(peer) ~= nil end
+		end)
+	end
+	local live = world and world_live or map_live
+	-- Keep the vendor's immune factions and its own story gate. Only its faction lookup is scoped.
+	C.wrap(helper, "ShouldBlacklistNorth", "quests_gamma.north_faction", function(original)
+		local env = getfenv(original)
+		setfenv(original, setmetatable({ get_actor_true_community = function(...)
+			local peer = live() and offers.requester()
+			return (peer and faction_of(peer)) or env.get_actor_true_community(...)
+		end }, { __index = env }))
+		return original
+	end)
+	local slots, scoped, last_faction, last_blocked
+	C.wrap(offers, "with_talk", "quests_gamma.north_picker_cache", function(original)
+		return function(...)
+			local peer = live() and offers.requester()
+			if not peer then return original(...) end
+			local faction, blocked = faction_of(peer), helper.ShouldBlacklistNorth()
+			if not slots then
+				slots = {}
+				for _, entry in ipairs(NORTH_CACHES) do
+					if C.mod(entry[1]) then
+						local cache, holder, index = C.find_local({ setup = xr_effects[entry[2]] }, entry[3])
+						if type(cache) == "table" then slots[#slots + 1] = { holder, index } end
+					end
+				end
+			end
+			if not scoped or faction ~= last_faction or blocked ~= last_blocked then
+				scoped, last_faction, last_blocked = { blacklist = {} }, faction, blocked
+				for i = 1, #slots do scoped[i] = {} end
+			end
+			local old = { blacklist = helper.TaskBlacklist }
+			helper.TaskBlacklist = scoped.blacklist
+			for i, slot in ipairs(slots) do
+				local _, value = debug.getupvalue(slot[1], slot[2])
+				old[i] = value
+				debug.setupvalue(slot[1], slot[2], scoped[i])
+			end
+			-- with_talk returns a protected-call result. Restore stock caches on either return path.
+			local function restore(called, ...)
+				for i, slot in ipairs(slots) do debug.setupvalue(slot[1], slot[2], old[i]) end
+				helper.TaskBlacklist = old.blacklist
+				if not called then error((...), 0) end
+				return ...
+			end
+			return restore(pcall(original, ...))
+		end
+	end)
+	return reset_roster
+end
+
 function on_game_start()
 	coop_mode.when_srv(function()
 		local C = coop_mods_core
 		local world = coop_mode.decides_world()
 		if not world and not coop_mode.leads_here() then return end
+		local reset_roster = step("install north picker", install_north_picker, C, world)
+		if reset_roster then RegisterScriptCallback("coop_world_back", reset_roster) end
 		local lost = C.mod("dialogs_lostzone")
 		if not world then
 			-- The stock Darkscape cleanup needs the actual online NPCs of that map.
@@ -255,56 +360,6 @@ function on_game_start()
 			end
 		end)
 
-		step("install north picker", function()
-			local helper = C.mod("blacklist_helper")
-			local offers = C.mod("coop_quests_offer")
-			if not (helper and offers and offers.requester and type(helper.ShouldBlacklistNorth) == "function") then return end
-			-- Keep the vendor's immune factions and its own story gate. Only its faction lookup is scoped.
-			C.wrap(helper, "ShouldBlacklistNorth", "quests_gamma.north_faction", function(original)
-				local env = getfenv(original)
-				setfenv(original, setmetatable({ get_actor_true_community = function(...)
-					local peer = world_live() and offers.requester()
-					return (peer and coop_faction.faction_of(peer)) or env.get_actor_true_community(...)
-				end }, { __index = env }))
-				return original
-			end)
-			local slots, scoped, last_faction, last_blocked
-			C.wrap(offers, "with_talk", "quests_gamma.north_picker_cache", function(original)
-				return function(...)
-					local peer = world_live() and offers.requester()
-					if not peer then return original(...) end
-					local faction, blocked = coop_faction.faction_of(peer), helper.ShouldBlacklistNorth()
-					if not slots then
-						slots = {}
-						for _, entry in ipairs(NORTH_CACHES) do
-							if C.mod(entry[1]) then
-								local cache, holder, index = C.find_local({ setup = xr_effects[entry[2]] }, entry[3])
-								if type(cache) == "table" then slots[#slots + 1] = { holder, index } end
-							end
-						end
-					end
-					if not scoped or faction ~= last_faction or blocked ~= last_blocked then
-						scoped, last_faction, last_blocked = { blacklist = {} }, faction, blocked
-						for i = 1, #slots do scoped[i] = {} end
-					end
-					local old = { blacklist = helper.TaskBlacklist }
-					helper.TaskBlacklist = scoped.blacklist
-					for i, slot in ipairs(slots) do
-						local _, value = debug.getupvalue(slot[1], slot[2])
-						old[i] = value
-						debug.setupvalue(slot[1], slot[2], scoped[i])
-					end
-					-- with_talk returns a protected-call result. Restore stock caches on either return path.
-					local function restore(called, ...)
-						for i, slot in ipairs(slots) do debug.setupvalue(slot[1], slot[2], old[i]) end
-						helper.TaskBlacklist = old.blacklist
-						if not called then error((...), 0) end
-						return ...
-					end
-					return restore(pcall(original, ...))
-				end
-			end)
-		end)
 
 		local next_check = 0
 		RegisterScriptCallback("actor_on_update", function()

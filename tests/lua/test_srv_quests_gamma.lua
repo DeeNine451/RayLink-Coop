@@ -25,8 +25,8 @@ local function time_at(seconds)
 	return { seconds = seconds, diffSec = function(self, other) return self.seconds - other.seconds end }
 end
 
-local function base(mode)
-	local M = machine("host", 0)
+local function base(mode, live_map)
+	local M = live_map and machine("client", 0x101) or machine("host", 0)
 	M.mode = mode
 	local e = M.env
 	M.active = mode ~= "none"
@@ -83,12 +83,20 @@ local function base(mode)
 	end
 	load_script(M, "coop_mode")
 	load_script(M, "coop_mods_core")
-	modes.install(e.coop_mode, mode, mode == "srv_world" and { where = function(peer)
-		for _, player in ipairs(M.players) do
-			if player.id == peer and peer ~= 0 then return player.level and "away" or "joining" end
-		end
-		return "away"
-	end } or nil)
+	if live_map then
+		e.coop.is_map_server = function() return true end
+		modes.live(e.coop_mode, function(name) return load_script(M, name) end)
+	else
+		modes.install(e.coop_mode, mode, mode == "srv_world" and {
+			level_request = function(_, payload, from) return "here", payload, from, false end, -- fixture has no bridge
+			where = function(peer)
+				for _, player in ipairs(M.players) do
+					if player.id == peer and peer ~= 0 then return player.level and "away" or "joining" end
+				end
+				return "away"
+			end,
+		} or nil)
+	end
 	return M
 end
 
@@ -234,31 +242,45 @@ local function defense_daily_roll()
 	check(M.rolls() == 4 and defense_packets(M, false) == 0, "both defense types can roll again the following day")
 end
 
-local function north(mode)
+local function north(mode, register_roster_late)
 	print("== m15:4 north picker in " .. mode)
-	local M = base(mode)
+	local M = base(mode, mode == "srv_map")
 	local e = M.env
 	local helper = vendor(M, "blacklist_helper")
+	local stock_blacklist = helper.TaskBlacklist
 	local bounty_cache = {}
 	e.tasks_bounty = {}
 	-- The installed module keeps this cache in an exported effect's closure, not on its module table.
 	e.xr_effects.setup_bounty_task = function()
 		if bounty_cache.map == nil then bounty_cache.map = helper.ShouldBlacklistNorth() and "south" or "north" end
-		return bounty_cache.map
+		if not helper.TaskBlacklist.pool then helper.TaskBlacklist.pool = bounty_cache.map end
+		return helper.TaskBlacklist.pool
 	end
 	local npc = M.new_obj(700, "quest_giver", vec(0, 0, 0), { _stalker = true })
 	e.db.storage[700] = { object = npc, pstor = {} }
+	local generated = 0
 	e.axr_task_manager.generate_available_tasks = function(giver)
+		generated = generated + 1
 		e.axr_task_manager.available_tasks[giver:id()] = { e.xr_effects.setup_bounty_task() }
 	end
 	load_script(M, "coop_quests_core")
 	load_script(M, "coop_quests_offer").on_game_start()
+	if mode == "srv_map" then
+		M.map = "l01_escape"
+		e.coop_faction = { faction_of = function() error("world faction lookup on the map") end }
+		M.new_obj(501, "coop_player_avatar", vec(), { _stalker = true })
+		M.new_obj(502, "coop_player_avatar", vec(), { _stalker = true })
+		if not register_roster_late then load_script(M, "coop_srv_factions_gamma").on_game_start() end
+	end
 	boot(M)
+	if register_roster_late then load_script(M, "coop_srv_factions_gamma").on_game_start() end
 	local function offer(peer)
 		NOW = NOW + 2100
-		M.handlers["quests.offer_req"](e.coop_main.encode({ n = 700, q = 1, peer = 99 }), peer)
+		local before = #M.sent
+		local from = mode == "srv_map" and 0 or peer
+		M.handlers["quests.offer_req"](e.coop_main.encode({ n = 700, q = 1, peer = 99, _peer = peer }), from)
 		local sent = last_sent(M, "quests.offer")
-		return sent and sent.l
+		if #M.sent > before and sent then return sent.l, sent.e end
 	end
 	if mode == "srv_world" then
 		check(offer(1) == "south", "a regular faction gets the restricted pool")
@@ -269,6 +291,25 @@ local function north(mode)
 		check(offer(1) == "north", "unlocking the north also invalidates the restricted cache")
 		M.infos.yan_labx16_switcher_primary_off = nil
 		check(helper.ShouldBlacklistNorth() == true, "the requester context is cleared when the offer returns")
+	elseif mode == "srv_map" then
+		local roster = e.coop_quests_core.shared().down.srv_factions_gamma
+		local _, reason = offer(2)
+		check(generated == 0 and reason == "faction", "the map waits for the requester's world-published faction")
+		roster.set({ l01_escape = { [501] = "stalker", [502] = false }, jupiter = { [502] = "monolith" } })
+		check(offer(1) == "south", "a known stalker uses the local map's south pool")
+		_, reason = offer(2)
+		check(generated == 1 and reason == "faction", "an unknown faction on this map cannot use another map's roster")
+		roster.set({ l01_escape = { [501] = "stalker", [502] = "monolith" } })
+		check(offer(2) == "north", "Monolith uses the north pool on the same NPC after the stalker")
+		check(offer(1) == "south", "the next stalker request cannot reuse the Monolith picker or blacklist cache")
+		M.infos.yan_labx16_switcher_primary_off = true
+		check(offer(1) == "north", "unlocking the north invalidates the scoped map caches")
+		M.infos.yan_labx16_switcher_primary_off = nil
+		check(helper.TaskBlacklist == stock_blacklist and next(stock_blacklist) == nil and next(bounty_cache) == nil
+			and helper.ShouldBlacklistNorth(), "the map restores the stock caches and faction after generation")
+		fire(M, "coop_world_back")
+		_, reason = offer(2)
+		check(generated == 4 and reason == "faction", "after world restart the map waits for the replacement roster")
 	elseif mode == "hostplay" then
 		check(offer(1) == "south" and offer(2) == "south", "co-op offers still use the host's stock north filter")
 	else
@@ -294,7 +335,7 @@ end
 
 for _, mode in ipairs(modes.names()) do
 	if mode == "srv_world" then lost_zone(); defense(); defense_daily_roll(); north(mode) end
-	if mode == "srv_map" then darkscape_map() end
+	if mode == "srv_map" then darkscape_map(); north(mode); north(mode, true) end
 	if mode == "hostplay" or mode == "none" then north(mode); stock_lifecycle(mode) end
 end
 

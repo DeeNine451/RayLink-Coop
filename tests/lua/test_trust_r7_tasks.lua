@@ -12,7 +12,7 @@
 -- bodies). Run: tools\test_lua.cmd trust_r7_tasks
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
 local SE, STORY, SQUADS = {}, {}, {}
 
 local function setup(M)

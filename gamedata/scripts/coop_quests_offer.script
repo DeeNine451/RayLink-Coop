@@ -1,14 +1,14 @@
 --[[
-	Anomaly Coop - task offers prepared by the host (gamedata\scripts\coop_quests_offer.script), W4 "quests".
+	Anomaly Coop - task offers prepared where the player stands (gamedata\scripts\coop_quests_offer.script), W4 "quests".
 	Ports the offer half of xrRazom's xrr_patch_quests + xrr_quest_serialize + xrr_patch_pda_taskboard.
 	SPEC R-7.3 (texts and targets are computed by the host), R-7.8 (quest dialogs work for every player).
 
 	Why: an NPC's "any work?" offer runs the task's on_job_descr / fetch_func effects (pick a target
 	squad, a bounty, a stash, a fetch item, a delivery recipient) when the text is shown. On a client
 	these read a frozen ALife copy, and their world side (pinned target squads, spawns) never reaches
-	the host. So the host builds the offer:
+	the host. So the co-op host or the map server builds the offer:
 	  client: the dialog window opens (GUI_on_show "Dialog") -> quests.offer_req {n = npc, k = kind}
-	  host:   generate_available_tasks + on_job_descr + fetch_func for every offered task, as if its
+	  leader: generate_available_tasks + on_job_descr + fetch_func for every offered task, as if its
 	          actor talked to that NPC (talk shims below), and sends per task the task vars it made and
 	          the offer lines it drew (quests.offer_t), then the ordered list (quests.offer).
 	  client: generate_available_tasks uses the host's list (tasks the group already has are left out),
@@ -237,8 +237,8 @@ local last_req = {} -- "peer:npc" -> time
 -- A give request (coop_tasks ops.give) carries the task vars his dialog prepared. They count as the host's own facts only where
 -- they are what the host offered him (coop_tasks check task_give_offer). offer_here keeps, per player, task and NPC, the vars it
 -- sent (serialized: a copy that nothing changes later), with his character (a peer slot may come back as another player). Kept
--- until the task is given to him, for OFFER_KEEP_MS at most, OFFERS_MAX per player (the oldest go first). The process that answers
--- offer_req is the one that runs the give: the host of a co-op, the world server of a server (its offers over the far view).
+-- until the task is given to him, for OFFER_KEEP_MS at most, OFFERS_MAX per player (the oldest go first). In Server mode the
+-- map server's cache is local to that process. The world server still judges a give using its existing no-offer rules.
 local OFFER_KEEP_MS = 3600000
 local OFFERS_MAX = 256
 local made_offers = {} -- peer -> { n, tasks = { [task id] = { [npc id] = { s = serialized vars, at, char } } } }
@@ -341,16 +341,25 @@ local request_peer
 -- The transport peer while the Core builds an offer. Mode adapters may read it synchronously.
 function requester() return request_peer end
 
-local function offer_here(t, from)
+-- A mode adapter can report that its inputs for this requester have not arrived yet.
+function request_ready(_) return true end
+
+local function offer_here(t, from, relayed)
 	stats.req_in = stats.req_in + 1
-	local npc_id, seq = tonumber(t.n), tonumber(t.q) or 0
+	local npc_id, seq = tonumber(t.n), tonumber(t.q)
 	-- round 7 (the review of round 6: bounds on every number from a client): the NPC is a whole object id 1..65534, else none; the
 	-- sequence number his answer carries back is a whole number too
 	if not (npc_id and npc_id >= 1 and npc_id <= 65534 and npc_id == math.floor(npc_id)) then npc_id = nil end
-	if not (seq >= 0 and seq <= 1e9 and seq == math.floor(seq)) then seq = 0 end
+	local valid_seq = seq and seq >= 0 and seq <= 1e9 and seq == math.floor(seq)
+	if not valid_seq then seq = 0 end
 	local kind = t.k == "sim" and "sim" or "dyn"
 	local npc = npc_id and level.object_by_id(npc_id)
 	local function refuse(why)
+		-- These checks are mandatory in every trust mode. Pass records why the request failed.
+		local trust = coop_trust
+		if trust and type(trust.pass) == "function" then
+			trust.pass("offer_request", false, "peer %d, NPC %d, sequence %d: %s", from, npc_id or 0, seq, why)
+		end
 		stats.refused = stats.refused + 1
 		-- round 6 (S3 of the round 5 review): his machine now makes this NPC's offers itself; an older offer of the host kept for
 		-- him is no longer what his dialog shows
@@ -358,12 +367,15 @@ local function offer_here(t, from)
 		qc.send("offer", { n = npc_id or 0, q = seq, k = kind, e = why, l = "" }, from)
 	end
 	if not (npc and talker(npc) and npc:alive()) then return refuse("npc") end
+	if not valid_seq then return refuse("seq") end
 	local key = tostring(from) .. ":" .. npc_id
 	if last_req[key] and now() - last_req[key] < REQ_GAP then return refuse("rate") end -- W5: answer, or a board batch waits
-	last_req[key] = now()
 	local av = qc.avatar_obj(from)
-	local max = t.b and MAX_DIST_BOARD or MAX_DIST_DIALOG
+	if relayed and not (av and from ~= 0 and from ~= qc.self_peer()) then return refuse("avatar") end
+	local max = t.b == true and MAX_DIST_BOARD or MAX_DIST_DIALOG
+	last_req[key] = now()
 	if av and npc:position():distance_to_sqr(av:position()) > max * max then return refuse("far") end
+	if not request_ready(from) then return refuse("faction") end
 
 	local previous = request_peer
 	request_peer = from
@@ -392,7 +404,10 @@ local function offer_here(t, from)
 		if d.bounty then msg.bt = d.bounty end
 		qc.send("offer_t", msg, from)
 	end
-	qc.send("offer", { n = npc_id, q = seq, k = kind, l = table_concat(list, ","), c = #list, f = far and 1 or nil }, from)
+	local sent = qc.send("offer", { n = npc_id, q = seq, k = kind, l = table_concat(list, ","), c = #list, f = far and 1 or nil }, from)
+	if sent and relayed and t.b == true and #list > 0 then
+		qc.log(TAG, "board reply peer=%d npc=%d seq=%d tasks=%d", from, npc_id, seq, #list)
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -428,10 +443,11 @@ function request_offer(npc, kind, board)
 	for q, inc in pairs(incoming) do
 		if now() - inc.at > 60000 then incoming[q] = nil end -- never answered
 	end
-	incoming[seq] = { npc = id, tasks = {}, at = now() }
+	local host_id = qc.to_host_id(id)
+	incoming[seq] = { npc = id, board_npc = board and host_id or nil, tasks = {}, at = now() }
 	offers[id] = offers[id] or { tasks = {} }
 	offers[id].asked = now()
-	local ok = qc.send("offer_req", { n = qc.to_host_id(id), k = kind, q = seq, b = board and true or nil }, 0)
+	local ok = qc.send("offer_req", { n = host_id, k = kind, q = seq, b = board and true or nil }, 0)
 	if ok then stats.req_out = stats.req_out + 1 end
 	return ok, ok
 end
@@ -470,6 +486,7 @@ function request_offers(npcs, done, board)
 	return true
 end
 
+-- The world server relays a map server's reply with origin 0 (coop_script.cpp, server_on_script_event).
 local function client_on_offer_t(t, from)
 	if from ~= 0 or not qc.is_client() then return end
 	local inc = incoming[tonumber(t.q)]
@@ -511,6 +528,11 @@ local function client_on_offer(t, from)
 	stats.offers_in = stats.offers_in + 1
 	if type(t.e) == "string" then
 		qc.log(TAG, "host refused the offer of #%s: %s", tostring(npc_id), t.e)
+		local o = offers[npc_id]
+		if t.e == "faction" and inc and o and o.q and o.q < q then
+			-- The refresh callback must fall back to stock while the faction is unavailable.
+			offers[npc_id] = { tasks = {}, asked = o.asked }
+		end
 		batch_note(npc_id)
 		return
 	end
@@ -528,6 +550,7 @@ local function client_on_offer(t, from)
 	end
 	offers[npc_id] = {
 		q = q, kind = t.k == "sim" and "sim" or "dyn", list = list, tasks = inc and inc.tasks or {},
+		board_npc = inc and not t.f and inc.board_npc == tonumber(t.n) and inc.board_npc or nil,
 		at = now(), complete = true,
 	}
 	batch_note(npc_id)
@@ -611,14 +634,15 @@ local function client_task_text(a, b)
 	return game.translate_string(r_str(tid, "job_descr") or "st_no_available_task")
 end
 
+local function on_offer_req(payload, from, relayed)
+	local t = qc.decode(payload)
+	if relayed then return offer_here(t, from, true) end -- the map server has the real NPC
+	return qc.with_level_of(from, offer_here, t, from) -- the co-op host, or a world server without a bridge for this player yet
+end
+
 -------------------------------------------------------------------------------
 -- Client wrappers
 -------------------------------------------------------------------------------
-local function host_on_offer_req(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from == 0 then return end
-	return qc.with_level_of(from, offer_here, t, from) -- the NPC stands on his level: its tasks are made here, from what the far view shows
-end
-
 local function patch_client()
 	local a = atm()
 	if a and type(a.generate_available_tasks) == "function" then
@@ -628,6 +652,8 @@ local function patch_client()
 			local id = npc:id()
 			local o = fresh_offer(id, is_sim and "sim" or "dyn")
 			if not o then
+				local previous = offers[id]
+				if previous then previous.board_list = nil end
 				stats.local_gen = stats.local_gen + 1
 				return orig(npc, is_sim, ...)
 			end
@@ -643,6 +669,7 @@ local function patch_client()
 			for _, tid in ipairs(o.list) do
 				if ti[tid] == nil then list[#list + 1] = tid end
 			end
+			if o.board_npc then o.board_list = list end
 			stats.used = stats.used + 1
 		end
 	else
@@ -719,6 +746,16 @@ local function patch_taskboard()
 			if type(pt.get_long_task_description) == "function" then
 				local okd, txt = pcall(pt.get_long_task_description, task_data)
 				if okd then task_data.task_description = txt end
+			end
+			-- The SS verdict needs a row built from the accepted list, after the board's own row filtering.
+			if o.board_list and not o.board_row_logged then
+				for _, tid in ipairs(o.board_list) do
+					if tid == task_data.task_id then
+						qc.log(TAG, "board prepared peer=%d npc=%d seq=%d", qc.self_peer(), o.board_npc, o.q)
+						o.board_row_logged = true
+						break
+					end
+				end
 			end
 		end
 	end
@@ -1137,7 +1174,9 @@ end
 
 function on_game_start()
 	if not qc.engine() then return end
-	qc.on("offer_req", host_on_offer_req, TAG)
+	coop_mode.on_level_request(qc.EVENT_PREFIX .. "offer_req", on_offer_req, function(_, from)
+		return type(from) == "number" and from > 0 and qc.active() and coop_mode.decides_world() and not coop_mode.from_level(from)
+	end)
 	qc.on("offer_t", client_on_offer_t, TAG)
 	qc.on("offer", client_on_offer, TAG)
 	qc.on("made", client_on_made, TAG) -- round 7: the host's own pick of a task he took (tell_made)

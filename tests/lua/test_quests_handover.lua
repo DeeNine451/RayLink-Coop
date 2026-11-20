@@ -10,7 +10,7 @@
 -- Run: tools\test_lua.cmd quests_handover
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story" }
 local DT = "simulation_task_48" -- stock tm_dynamic: on_init_delivery_task(simulation_task_48:false:true:quest_package_4:quest_package_5)
 local FT = "fetch_x"
 

@@ -2,7 +2,7 @@
 -- Run: tools\test_lua.cmd mission_guide
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story",
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story",
 	"coop_quests_missions" }
 
 -- the stock module's shape: two table locals, read and rebound by its functions (GAMMA tasks_guide.script)

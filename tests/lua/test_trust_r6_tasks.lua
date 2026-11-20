@@ -10,7 +10,7 @@
 -- is its records and the far bodies). Run: tools\test_lua.cmd trust_r6_tasks
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
 
 -- The world of the host: ALife records, story ids, squads, smarts. alife_object answers these first.
 local SE = {} -- id -> { alive, section, comm, group }

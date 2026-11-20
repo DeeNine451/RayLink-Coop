@@ -24,6 +24,8 @@ e.pda_taskboard = {
 }
 
 M.players = { { id = 1, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 500 } }
+load_script(M, "coop_mode").on_game_start()
+load_script(M, "coop_hostplay_mode").on_game_start()
 load_script(M, "coop_quests_core")
 load_script(M, "coop_quests_offer")
 e.coop_quests_core.on_game_start()

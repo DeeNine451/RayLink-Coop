@@ -7,7 +7,7 @@
 -- Run: tools\test_lua.cmd dialog_client
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story",
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party", "coop_quests_story",
 	"coop_quests_missions" }
 local PACE_WAIT_MS = 1500
 
