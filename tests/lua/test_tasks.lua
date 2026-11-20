@@ -1,6 +1,6 @@
 -- Anomaly Coop W3c temp test: coop_tasks.script on a simulated host + client (two Lua environments).
 -- Not shipped. Run: tools\test_lua.cmd tasks
-local SCRIPT = "gamedata/scripts/coop_tasks.script"
+local modes = dofile("tests/lua/support/modes.lua")
 dofile("tests/lua/support/stubs.d/money.lua") -- install_money_stubs: coop.money_* of the host ledger (F2 T1)
 dofile("tests/lua/support/luabind_like.lua")
 
@@ -356,18 +356,23 @@ local function machine(role, self_peer)
 		for _, t in ipairs(list) do t.f(unpack(t.p)) end
 	end
 
-	-- load the script like CScriptStorage (module table, __index = globals)
-	local fh = assert(io.open(SCRIPT, "r"))
-	local src = fh:read("*a")
-	fh:close()
-	local f = assert(loadstring(src, "@coop_tasks.script"))
-	local mod = setmetatable({}, { __index = env })
-	env.coop_tasks = mod
-	setfenv(f, mod)
-	f()
-	M.mod = mod
+	-- Load scripts as the engine does (module table with the machine's globals).
+	local function load(name)
+		local f = assert(loadfile("gamedata/scripts/" .. name .. ".script"))
+		local mod = setmetatable({}, { __index = env })
+		env[name] = mod
+		setfenv(f, mod)()
+		return mod
+	end
+	modes.live(load("coop_mode"), load)
+	M.mod = load("coop_tasks")
 	MACHINES[#MACHINES + 1] = M
 	return M
+end
+
+local function server_dialogue(M, levels)
+	M.env.coop.is_dedicated = levels and function() return true end or nil
+	M.env.coop.levels = levels
 end
 
 local function pump()
@@ -1246,7 +1251,7 @@ do
 	-- names no partner. The dialog's exception then holds only for a task without a giver.
 	trust.reset_for_test({ default = "log", task_fail = "refuse", task_cancel = "refuse" })
 	H.env.coop_quests_core = { is_far_peer = function(p) return p == 2 end }
-	H.env.coop.levels = { talking = function(p) return p == 2 end }
+	server_dialogue(H, { talking = function(p) return p == 2 end })
 	H.env.coop.talk_recent = function() return false end -- (the world server has no talk lock of his: he is on another level)
 	C2.talking = true
 	speaker = npc777
@@ -1271,7 +1276,8 @@ do
 	C2.tm:set_task_failed("story_2")
 	pump()
 	check(story.forced_status == nil and failed("task_fail") == 1, "Server: the same 16 s after his last dialog: refused")
-	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_recent = nil, nil, nil
+	server_dialogue(H)
+	H.env.coop_quests_core, H.env.coop.talk_recent = nil, nil
 	C2.talking = false
 	trust.reset_for_test({ default = "log" })
 
@@ -1428,7 +1434,7 @@ do
 	-- target (the partner needs a field in LevelBodyFacts: a protocol change, the owner's decision); one step per dialog.
 	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end }
 	local talking = true
-	H.env.coop.levels = { talking = function(p) return p == 1 and talking end }
+	server_dialogue(H, { talking = function(p) return p == 1 and talking end })
 	H.env.coop.talk_recent = function() return false end -- (the world server holds no talk lock of his)
 	trust.reset_for_test({ default = "log", task_stage = "refuse" })
 	f0 = failed("task_stage")
@@ -1455,7 +1461,8 @@ do
 	tick(H)
 	req(C, "stage", "story_2", ";st=n3;sp=n779")
 	check(story.stage == 3 and failed("task_stage") == f0 + 3, "Server: a new dialog: ok")
-	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_lock_of, H.env.get_story_object_id = nil, nil, stock_lock_of, nil
+	server_dialogue(H)
+	H.env.coop_quests_core, H.env.coop.talk_lock_of, H.env.get_story_object_id = nil, stock_lock_of, nil
 	story.target, story.stage = nil, 0
 	H.env.task_functor, H.env.alife_object, H.env.coop.talk_recent = nil, nil, nil
 	cord.target_functor, cord.current_target = nil, nil
@@ -1499,7 +1506,7 @@ do
 	-- Server: his map server's word "in some dialog"
 	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end }
 	local in_dialog = true
-	H.env.coop.levels = { talking = function(p) return p == 1 and in_dialog end }
+	server_dialogue(H, { talking = function(p) return p == 1 and in_dialog end })
 	req(C, "complete", "cord_2", ";sp=n779")
 	check(turned(cord) and failed("task_complete_talk") == 3, "Server: in some dialog (the partner is not reported there): ok")
 	in_dialog = false
@@ -1510,7 +1517,8 @@ do
 	NOW = NOW + 16000
 	req(C, "complete", "cord_2", ";sp=n779")
 	check(not turned(cord) and failed("task_complete_talk") == 4, "Server: 16 s after his last dialog: refused")
-	H.env.coop_quests_core, H.env.coop.levels = nil, nil
+	server_dialogue(H)
+	H.env.coop_quests_core = nil
 	-- the client's turn-in in a dialog names his partner
 	H.env.coop.talk_recent = function(peer, npc) return peer == 1 and npc == 777 end
 	local npc777c = C.new_obj(777)
@@ -1707,7 +1715,7 @@ end
 
 -- ---------------------------------------------------------------- S5 (A-S5T): the partner of a talk on another level
 -- Server (build 57, protocol 33): the map server of a player's level names the NPC he talks to there (LevelBodyFacts.partner, coop
--- levels.talk_partner); coop_srv_tasks hands it to the Core as the part "talk" (test_srv_tasks). The world server then judges a stage
+-- levels.talk_partner); coop_mode.facts_of hands it to the Core. The world server then judges a stage
 -- step, a turn-in and a dialog's end as the co-op host does: the talk with that NPC now or in the last 15 s. An older engine
 -- reports only whether the player is in a dialog.
 print("== S5 (A-S5T), Server: the NPC a player talks to on a map server's level is named, his steps and turn-ins are judged as in the co-op")
@@ -1742,9 +1750,11 @@ do
 	check(tk ~= nil and st ~= nil and tk.task_giver_id == 777, "(client 1 took a task of NPC 777 and a story task with no giver)")
 	-- client 1 stands on a map server's level: the world server holds no talk lock of his
 	local partner = nil
-	local part = { partner = function(p) return p == 1 and partner or false end }
-	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end, part = function(n) return n == "talk" and part or nil end }
-	H.env.coop.levels = { talking = function(p) return p == 1 and partner ~= nil end }
+	H.env.coop_quests_core = { is_far_peer = function(p) return p == 1 end }
+	server_dialogue(H, {
+		talking = function(p) return p == 1 and partner ~= nil end,
+		talk_partner = function(p) if p == 1 then return partner end end,
+	})
 	H.env.coop.talk_recent = function() return false end
 	trust.reset_for_test({ default = "log", task_stage = "refuse", task_complete_talk = "refuse" })
 
@@ -1781,8 +1791,8 @@ do
 	check(not turned(st) and failed("task_complete_talk") == 2,
 		"Server, partner named: he names 780, his map server says he talks to 781 and his talk with 780 is 16 s old: refused")
 
-	-- An older engine registers a callback with no partner facts.
-	part.partner = function() return nil end
+	-- An older engine has no partner binding.
+	H.env.coop.levels.talk_partner = nil
 	NOW = NOW + 16000
 	partner = 779
 	local f0 = failed("task_stage")
@@ -1791,7 +1801,8 @@ do
 	req("complete", "s5_talk", ";sp=n779")
 	check(turned(tk) and failed("task_complete_talk") == 2, "no partner fact on an older engine: a turn-in in some dialog is still accepted")
 
-	H.env.coop_quests_core, H.env.coop.levels, H.env.coop.talk_recent = nil, nil, nil
+	server_dialogue(H)
+	H.env.coop_quests_core, H.env.coop.talk_recent = nil, nil
 	for _, id in ipairs({ "s5_talk", "s5_story" }) do
 		H.tm.task_info[id], H.engine_tasks[id], C.tm.task_info[id] = nil, nil, nil
 	end

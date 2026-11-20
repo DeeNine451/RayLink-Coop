@@ -79,6 +79,9 @@ end
 local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_tasks", "coop_quests_party" }
 
 local function boot(M)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
+	load_script(M, "coop_srv_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do
 		if M.env[n].on_game_start then M.env[n].on_game_start() end

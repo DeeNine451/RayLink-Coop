@@ -53,6 +53,8 @@ end
 ui_options = { UIOptions = UIO }
 local function new_dlg() return setmetatable({}, { __index = function(_, k) return UIO[k] end }) end
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local s = load_module("coop_settings")
 s.on_game_start()
 

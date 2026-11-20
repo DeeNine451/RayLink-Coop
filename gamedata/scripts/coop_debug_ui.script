@@ -94,7 +94,7 @@ local function trf(id, ...) return client().trf(id, ...) end
 local function remote_operator()
 	local api = rawget(_G, "coop")
 	if not (api and type(api.has_host_rights) == "function" and type(api.operator_command) == "function") then return false end
-	local ok, yes = pcall(function() return not api.is_host() and api.has_host_rights() == true end)
+	local ok, yes = pcall(function() return not coop_mode.decides_world() and api.has_host_rights() == true end)
 	return ok and yes == true
 end
 
@@ -2038,10 +2038,12 @@ function UICoopDebug:BindOverview()
 	-- players: nick, node, level, on feet, RTT
 	local lines = self.c_players.lines
 	local list = safe(function() return coop.players() end) or {}
+	local player_map = coop_mode.hook("levels.level_of_player")
 	for i, l in ipairs(lines) do
 		local pl = list[i]
 		if pl then
-			local lvl = safe(function() return coop.levels.level_of_player(pl.id) end)
+			local lvl = pl.level
+			if player_map then lvl = safe(player_map, pl.id) end
 			local life = safe(function() return coop.life_of(pl.id) end)
 			local standing = life == nil or life == "alive" or life == 0
 			l:SetText(trf("st_coop_dbg_player_line", tostring(pl.nick), tostring(pl.id), text_or_none(lvl),

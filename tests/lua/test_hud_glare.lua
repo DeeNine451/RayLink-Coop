@@ -194,14 +194,18 @@ local function machine(opts)
 		end
 		env.coop = api
 	end
-	local src = assert(readfile(ROOT .. "scripts/coop_hud_glare.script"), "no coop_hud_glare.script")
-	local mod = setmetatable({}, { __index = env })
-	env.coop_hud_glare = mod
-	M.g = mod
-	local f = assert(loadstring(src, "@coop_hud_glare.script"))
-	setfenv(f, mod)
-	f()
-	mod.on_game_start()
+	for _, name in ipairs({ "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_hud_glare" }) do
+		local src = assert(readfile(ROOT .. "scripts/" .. name .. ".script"), "no " .. name .. ".script")
+		local mod = setmetatable({}, { __index = env })
+		env[name] = mod
+		local f = assert(loadstring(src, "@" .. name .. ".script"))
+		setfenv(f, mod)
+		f()
+	end
+	env.coop_hostplay_mode.on_game_start()
+	env.coop_srv_mode.on_game_start()
+	M.g = env.coop_hud_glare
+	M.g.on_game_start()
 	return M
 end
 

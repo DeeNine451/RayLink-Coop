@@ -189,7 +189,7 @@ end
 local INI = ltx(ROOT .. "configs/mod_system_coop.ltx")
 
 -- ---------------------------------------------------------------- the machine
-local SCRIPTS = { "coop_hud_layout", "coop_allies", "coop_allies_map", "coop_core_hud", "coop_hud_markers", "coop_hud_compass", "coop_hud_ping",
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_trust", "coop_hud_layout", "coop_allies", "coop_allies_map", "coop_core_hud", "coop_hud_markers", "coop_hud_compass", "coop_hud_ping",
 	"coop_hud_tc", "coop_menu_options", "modxml_coop_hud" }
 local NET = {} -- machines of the session, by peer id
 local MOUSE_5, CHAT_TEAM = 341, 77
@@ -1640,9 +1640,8 @@ do
 	}
 	H.object(503, vec(1, 0, 0))
 	local E = H.env
-	-- a server's level names, as the Core gets them (coop_quests_core.part "levels", step S4)
-	local levels = { elsewhere_text = function(id) return id == 1 and "on another map: Garbage" or "" end }
-	E.coop_quests_core = { part = function(name) return name == "levels" and levels or nil end }
+	E.coop.levels = { split = function() return true end }
+	E.coop_srv_levels = { elsewhere_text = function(id) return id == 1 and "on another map: Garbage" or "" end }
 	local list = E.coop_core_hud.views(NOW)
 	local far, near
 	for _, v in ipairs(list) do
@@ -1663,7 +1662,7 @@ do
 
 	-- a mirror's record of a player elsewhere stands still: his own status says where he is
 	local placed = {}
-	E.coop.levels = { split = function() return true end, far_place = function(...) placed[#placed + 1] = { ... } end }
+	E.coop.levels.far_place = function(...) placed[#placed + 1] = { ... } end
 	E.alife_object = function(id) return id == 501 and {} or nil end
 	status(H, 1, "alive", 1)
 	E.coop_core_hud.place_far(E.coop_core_hud.views(NOW))

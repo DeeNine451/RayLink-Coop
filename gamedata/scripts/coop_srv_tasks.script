@@ -9,9 +9,7 @@
 	  - a map server's personal effects (event coop_rep_map, from a map server's bridge only): run once per map server, effect epoch
 	    and number (coop_tasks.map_seen, in the save) for the player whose character it names, then answered (coop_rep_map_ack).
 	    Character 0 is the world server's seat, which plays no character: answered, run for nobody. Was coop_tasks.
-	  - the part "talk" of coop_quests_core: the NPC a player on a map server's level talks to there (coop.levels.talk_partner,
-	    LevelBodyFacts.partner, protocol 33). coop_tasks then judges his stage steps, turn-ins and dialog ends as the co-op host
-	    does. An engine without it gives no part: the word "in some dialog" stays vague, as before.
+	  - the recipients of task events sent by or to map servers.
 	  - four effects of a task's end that landed on the world server's ghost (the quest audit 2026-11-13, temp/quest-audit/
 	    functions.md rows 13-16; TZ section 2 "four small cases"):
 	      play_sound_on_actor    (2 tasks, lttz_ms)        the player's machine plays it (coop_tasks.forward_fx)
@@ -28,6 +26,8 @@ local api = rawget(_G, "coop")
 local FORWARDED = { "play_sound_on_actor", "actor_surge_immuned" }
 local RETRY_MS = 1000
 local MAX_PEER = 0xffff
+local MAX_PAYLOAD = 15800
+local MAX_PARAM = 256
 
 -- Split levels, builds 45-49 (coop_srv_quests_far object_there handed the stock smart terrain a stand-in of the new squad). `info` is
 -- taken back when the task is not on and none of the infos its own run sets (`ran`) is here. Once a world: a task dropped later is
@@ -83,6 +83,46 @@ end
 local function players()
 	local ok, list = pcall(api.players)
 	return ok and type(list) == "table" and list or {}
+end
+
+local function map_servers()
+	local ok, list = pcall(function() return api.levels.map_servers() end)
+	return ok and type(list) == "table" and list or {}
+end
+
+local function has_talk_partner()
+	local levels = api.levels
+	return type(levels) == "table" and type(levels.talk_partner) == "function"
+end
+
+local function bridges()
+	local out = {}
+	for _, ms in ipairs(map_servers()) do
+		if type(ms) == "table" and type(ms.bridge) == "number" then out[#out + 1] = ms.bridge end
+	end
+	return out
+end
+
+-- The taker of this map server's task, or a player standing on its map.
+local function player_of_request(from, taker)
+	if type(from) ~= "number" or from < 0x100 then return from end
+	local lid
+	for _, ms in ipairs(map_servers()) do
+		if ms.bridge == from then lid = ms.level end
+	end
+	if not lid then return 0 end
+	local level_of = api.levels.level_of_player
+	if taker and taker ~= 0 and level_of(taker) == lid then return taker end
+	for _, p in ipairs(players()) do
+		if level_of(p.id) == lid then return p.id end
+	end
+	return 0
+end
+
+local function effect_route(effect, character)
+	if not is_map_server() then return nil end
+	effect.i, effect.e = character, state.epoch
+	return "coop_rep_map", 0
 end
 
 local function tmgr()
@@ -153,18 +193,58 @@ end
 
 local function whole(v, lo, hi) return type(v) == "number" and v >= lo and v <= hi and v % 1 == 0 end
 
+local function text_field(v, lo, hi)
+	return type(v) == "string" and #v >= lo and #v <= hi and not v:find("%c")
+end
+
+-- The statistics API takes deltas. Fractional adjustments are valid, infinities and values outside the signed range are not.
+local function stat_value(v)
+	return type(v) == "number" and v >= -2147483648 and v <= 2147483647
+end
+
+local function valid_effect(effect, ct)
+	if not (text_field(effect.f, 1, 80) and text_field(effect.e, 1, 100) and whole(effect.q, 1, 2 ^ 31)
+		and whole(effect.i, 0, 65534) and (effect.t == nil or text_field(effect.t, 0, 128))) then return false end
+	local keys = { k = true, f = true, e = true, q = true, i = true, t = true }
+	if effect.k == "stat" then
+		if effect.f == "rank" or effect.f == "rept" then
+			if not stat_value(effect.n) then return false end
+			keys.n = true
+		else
+			if (effect.r ~= nil and not stat_value(effect.r)) or (effect.p ~= nil and not stat_value(effect.p)) then return false end
+			keys.r, keys.p = true, true
+		end
+	elseif effect.k == "fx" and ct.forward_allowed(effect.f) then
+		for i = 1, 4 do
+			local key = "p" .. i
+			if effect[key] ~= nil and not text_field(effect[key], 0, MAX_PARAM) then return false end
+			keys[key] = true
+		end
+		if effect.f == "actor_surge_immuned" then
+			if effect.p1 ~= nil and effect.p1 ~= "true" and effect.p1 ~= "false" then return false end
+		elseif (effect.f == "drx_sl_change_factions" or effect.f == "play_sound_on_actor")
+			and (effect.p1 == nil or effect.p1 == "") then return false end
+	else
+		return false
+	end
+	for key in pairs(effect) do if not keys[key] then return false end end
+	return true
+end
+
 -- World server: event coop_rep_map from a map server's bridge (the sender comes from the transport): k = "stat" | "fx" (an effect
 -- a player's machine runs), f its name, e the map server's epoch, q its number, i the character; the rest as coop_tasks sends it.
 local function on_map_effect(payload, from)
-	if not coop_mode.decides_world() or type(from) ~= "number" or from < 0x100 or from > MAX_PEER or type(payload) ~= "string" then
-		return
-	end
+	local sender = whole(from, 0x100, MAX_PEER) and coop_mode.from_level(from)
+	if not coop_trust.pass("task_map_effect_sender", sender, "task effect from unexpected peer %s", tostring(from))
+		or not sender then return end
+	local size = type(payload) == "string" and #payload > 0 and #payload <= MAX_PAYLOAD
+	if not coop_trust.pass("task_map_effect_size", size, "invalid task effect size from peer %s", tostring(from))
+		or not size then return end
 	local ct = tasks()
 	local effect = ct.decode_payload(payload)
-	if (effect.k ~= "stat" and not (effect.k == "fx" and ct.forward_allowed(effect.f)))
-		or type(effect.f) ~= "string" or #effect.f > 80
-		or type(effect.e) ~= "string" or #effect.e > 100 or not whole(effect.q, 1, 2 ^ 31)
-		or not whole(effect.i, 0, 65534) then return end
+	local valid = valid_effect(effect, ct)
+	if not coop_trust.pass("task_map_effect_payload", valid, "invalid task effect from peer %s", tostring(from))
+		or not valid then return end
 	local q = effect.q
 	local key = tostring(from) .. ":" .. effect.e .. ":" .. tostring(q)
 	local seen = ct.map_seen()
@@ -181,9 +261,13 @@ end
 
 -- Map server: the world server's answer; that effect is off the list.
 local function on_map_effect_ack(payload, from)
-	if from ~= 0 or not is_map_server() then return end
-	local q = tonumber(payload)
-	if not q then return end
+	local sender = from == 0
+	if not coop_trust.pass("task_map_ack_sender", sender, "task effect ACK from unexpected peer %s", tostring(from))
+		or not sender then return end
+	local q = type(payload) == "string" and #payload <= 10 and tonumber(payload) or nil
+	local valid = whole(q, 1, 2 ^ 31)
+	if not coop_trust.pass("task_map_ack_payload", valid, "invalid task effect ACK from peer %s", tostring(from))
+		or not valid then return end
 	for _, wait in pairs(tasks().fx_pending()) do
 		for i, e in ipairs(wait) do
 			if e.q == q then
@@ -245,33 +329,24 @@ function on_game_start()
 		if state.started then return end
 		state.started = true
 		local ct = tasks()
+		local world = coop_mode.decides_world()
+		local map = is_map_server()
 		for _, fname in ipairs(FORWARDED) do ct.forward_allow(fname) end
+		coop_quests_core.set_part("task_delivery", {
+			bridges = bridges,
+			player_of_request = player_of_request,
+			effect_route = effect_route,
+			has_talk_partner = has_talk_partner,
+		})
+		if map then state.epoch = tostring(os.time()) .. ":" .. tostring(time_global()) .. ":" .. tostring({}) end
 		local cm = rawget(_G, "coop_main") or coop_main
 		if cm and cm.add_event_handler then
-			cm.add_event_handler("coop_rep_map", guarded("map personal effect", on_map_effect))
-			cm.add_event_handler("coop_rep_map_ack", guarded("map effect answer", on_map_effect_ack))
+			if world then cm.add_event_handler("coop_rep_map", guarded("map personal effect", on_map_effect)) end
+			if map then cm.add_event_handler("coop_rep_map_ack", guarded("map effect answer", on_map_effect_ack)) end
 		else
 			log("! coop_main.add_event_handler not found: a map server's personal effects are not taken")
 		end
 		RegisterScriptCallback("actor_on_update", actor_on_update)
-
-		-- World server: the talk partner of a player on a map server's level (the part "talk" of coop_quests_core)
-		if coop_mode.decides_world() then
-			local qc = rawget(_G, "coop_quests_core") or coop_quests_core
-			local l = api.levels
-			local partner = function() return nil end
-			if type(l) == "table" and type(l.talk_partner) == "function" then
-				-- The world object id last reported by the map server, or false when the engine names nobody.
-				partner = function(peer)
-					local ok, id = pcall(l.talk_partner, peer)
-					return ok and tonumber(id) or false
-				end
-			else
-				log("this engine does not name the partner of a talk on a map server's level: steps and turn-ins there stay judged "
-					.. "by \"in some dialog\"")
-			end
-			qc.set_part("talk", { partner = partner })
-		end
 
 		-- A ghost (world server, map server): the four effects that landed on it
 		if not ghost() then return end

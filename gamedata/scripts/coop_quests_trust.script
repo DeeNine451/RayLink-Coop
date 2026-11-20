@@ -325,7 +325,7 @@ end
 
 local function on_update()
 	local core = qc()
-	if not (core and core.is_host and core.is_host()) then return end
+	if not (core and core.active() and coop_mode.decides_world()) then return end
 	local now = now_ms()
 	if now < next_look then return end
 	next_look = now + LOOK_MS
@@ -363,12 +363,11 @@ end
 
 -- May player `peer` see task `id`? No audience record (every task outside a split-levels world): yes.
 local function sees(id, peer)
-	local core = qc()
-	local aud = core and core.part("audience") -- a server's task audience (coop_srv_task_audience), nil in the co-op
-	if type(aud) ~= "table" or type(aud.sees_character) ~= "function" then return true end
-	local ct = core.mod("coop_tasks")
+	local sees_character = coop_mode.hook("task_audience.sees_character")
+	if not sees_character then return true end
+	local ct = rawget(_G, "coop_tasks") or coop_tasks
 	local c = ct and type(ct.character_of) == "function" and ct.character_of(peer)
-	local ok, r = pcall(aud.sees_character, id, c)
+	local ok, r = pcall(sees_character, id, c)
 	return not ok or r == true
 end
 
@@ -688,7 +687,7 @@ end
 local function save_state(m)
 	if type(m) ~= "table" then return end
 	local core = qc()
-	if core and core.is_host and not core.is_host() then return end
+	if not (core and core.active() and coop_mode.decides_world()) then return end
 	-- round 4: the keys whose value is the host's own (an empty list too: it says no other value is)
 	own_init()
 	local facts = {}
@@ -743,8 +742,8 @@ local function talked(peer, id)
 	local core = qc()
 	local api = rawget(_G, "coop")
 	if core and core.is_far_peer and core.is_far_peer(peer) then
-		local l = api and api.levels
-		return l == nil or l.talking == nil or l.talking(peer) == true
+		local facts = coop_mode.facts_of(peer)
+		return facts == nil or facts.talking ~= false
 	end
 	local recent = api and api.talk_recent
 	if type(recent) ~= "function" then return true end -- an engine without the talk locks: the place alone

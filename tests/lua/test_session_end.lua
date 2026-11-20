@@ -14,6 +14,8 @@ local RU, EN = table_of("rus"), table_of("eng")
 local T = EN
 game = { translate_string = function(id) return T[id] or id end }
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local ui = load_module("coop_ui")
 local function box(info)
 	ui.GUI = nil

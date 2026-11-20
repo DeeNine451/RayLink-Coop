@@ -30,9 +30,13 @@ local function world(M)
 	e.level.name = function() return M.level_name end
 end
 
-local SCRIPTS = { "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_srv_levels_tables", "coop_tasks", "coop_quests_story" }
+local SCRIPTS = { "coop_trust", "coop_quests_core", "coop_srv_levels_share", "coop_srv_quests_far", "coop_srv_levels_tables",
+	"coop_tasks", "coop_quests_story", "coop_srv_quests_story" }
 
 local function boot(M)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
+	load_script(M, "coop_srv_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do
 		if M.env[n].on_game_start then M.env[n].on_game_start() end
@@ -44,6 +48,7 @@ local Ms = machine("client", BRIDGE)
 Hm.my_level, Ms.my_level = 1, 2
 Hm.level_name, Ms.level_name = "l01_escape", "k00_marsh"
 world(Hm); world(Ms)
+Hm.env.coop.is_dedicated = function() return true end
 Ms.env.coop.is_map_server = function() return true end
 Hm.players = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, is_self = false, avatar_id = 500 } }
 Ms.players = { { id = 1, is_self = false, avatar_id = 500 } }

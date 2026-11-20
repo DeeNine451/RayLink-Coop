@@ -6,31 +6,18 @@
 --     until the world server answers (was coop_tasks' coop_rep_map / coop_rep_map_ack, tested in test_tasks_sync);
 --   - character 0 on a server is the world server's seat, which plays no character: its effects are nobody's, the map server drops
 --     them at once instead of sending them up every second for good;
---   - the part "talk": the NPC a player on a map server's level talks to (coop.levels.talk_partner, protocol 33);
+--   - the NPC a player on a map server's level talks to (coop_mode.facts_of, protocol 33);
 --   - the player's sound, truce and offer goodwill, plus delivery of the task-end surge flag clear (level logic grants no player immunity).
 -- Real scripts over the quests harness: a world server (peer 0, -coop_dedicated), a player on a map server's level (peer 1, character
 -- 500) and that map server (bridge 0x101). Run: tools\test_lua.cmd srv_tasks
 dofile("tests/lua/support/harness_quests.lua")
+local modes = dofile("tests/lua/support/modes.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_reward_group", "coop_tasks", "coop_quests_story", "coop_srv_quests_core", "coop_srv_tasks" }
+local SCRIPTS = { "coop_trust", "coop_quests_core", "coop_reward_group", "coop_tasks", "coop_quests_story",
+	"coop_srv_quests_core", "coop_srv_tasks", "coop_srv_quests_story" }
 local BRIDGE = 0x101
 
--- the facade coop_mode as the live layers answer (docs\contracts\coop_mode_api.md section 2), for the Core and the server script
-local function facade(M, answers)
-	local f = {}
-	for k, v in pairs(M.facade_stub) do f[k] = v end
-	f.actor_is_player = function() return answers.player end
-	f.seat_plays = function(peer)
-		if peer == M.self_peer and not answers.player then return false end
-		for _, p in ipairs(M.players or {}) do if p.id == peer then return true end end
-		return false
-	end
-	f.leads_here = function() return answers.leads == true end
-	M.env.coop_mode = f
-	return f
-end
-
-local function world(M, answers)
+local function world(M)
 	local e = M.env
 	M.ObjMT.money = function(self) return self._money or 0 end
 	M.stats, M.rank, M.rept = {}, 0, 0
@@ -49,6 +36,10 @@ local function world(M, answers)
 	e.xr_effects.stalker_ceasefire = function() M.ceasefire[#M.ceasefire + 1] = e.get_actor_true_community() end
 	e.xr_effects.drx_sl_change_factions = function(a, n, p) M.faction = p[1] end
 	e.xr_effects.decrease_rep = function(a, n, p) e.game_statistics.increment_reputation(-tonumber(p[1])) end
+	M.story_goodwill = {}
+	e.xr_effects.dec_faction_goodwill_to_actor = function(a, _, p)
+		M.story_goodwill[a:id()] = { faction = p[1], amount = tonumber(p[2]) }
+	end
 	e.get_actor_true_community = function() return "stalker" end -- the ghost's
 	M.goodwill = { [0] = { freedom = 0 }, [500] = { freedom = 1200 } }
 	e.relation_registry = { community_goodwill = function(comm, id) return (M.goodwill[id] or {})[comm] or 0 end }
@@ -61,10 +52,11 @@ local function world(M, answers)
 	}
 	for _, id in ipairs({ "snd_t", "def_t", "cf_t", "talk_t", "task_fanat_training_1", "cs_task0_ambush_renegade_story",
 		"cs_task0_ambush_renegade_story2" }) do M.ini[id] = {} end
-	return facade(M, answers)
 end
 
 local function boot(M)
+	local function load(name) return load_script(M, name) end
+	modes.live(load("coop_mode"), load)
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do
 		local m = M.env[n]
@@ -81,7 +73,7 @@ end
 print("== co-op: the server's task code never starts")
 do
 	local Co = machine("host", 0)
-	world(Co, { player = true, leads = true })
+	world(Co)
 	Co.players = { { id = 0, is_self = true, avatar_id = 0 } }
 	Co.infos.fanat_training_start_done = true -- a dialog closed by its info, in a co-op world
 	boot(Co)
@@ -91,7 +83,7 @@ do
 	check(Co.env.xr_effects.play_sound_on_actor == Co.stock.sound and Co.env.xr_effects.actor_surge_immuned == Co.stock.surge
 		and Co.env.xr_effects.stalker_ceasefire == Co.stock.ceasefire
 		and Co.env.xr_conditions.is_faction_friend_to_actor == Co.stock.friend, "the four effects stay the stock's")
-	check(Co.env.coop_quests_core.part("talk") == nil, "no part \"talk\"")
+	check(Co.env.coop_mode.facts_of(1) == nil, "no remote dialogue facts in co-op")
 	check(Co.infos.fanat_training_start_done == true and Co.env.db.storage[0].pstor.coop_lost_gives == nil,
 		"no world is healed of lost gives in the co-op")
 	drop_machine(Co)
@@ -102,15 +94,15 @@ print("== setup: a world server, a player on a map server's level, that map serv
 local Hm = machine("host", 0)
 local Cm = machine("client", 1)
 local Ms = machine("client", BRIDGE)
-world(Hm, { player = false })
-world(Cm, { player = true })
-world(Ms, { player = false, leads = true })
+world(Hm)
+world(Cm)
+world(Ms)
 local partner_of = {}
 local function levels(M)
 	M.env.coop.levels = {
 		split = function() return true end,
 		my_level = function() return M == Hm and 1 or 2 end,
-		level_of_player = function(peer) return peer == 1 and 2 or nil end,
+		level_of_player = function(peer) return peer == 1 and 2 or peer == 2 and 3 or nil end,
 		bridge_of_player = function(peer) return peer == 1 and BRIDGE or nil end,
 		map_servers = function() return { { bridge = BRIDGE, level = 2 } } end,
 		talking = function(peer) return partner_of[peer] ~= nil end,
@@ -123,7 +115,7 @@ Ms.env.coop.is_map_server = function() return true end
 Hm.new_obj(500, "coop_player_avatar", vec(10, 0, 10), { _stalker = true })
 Ms.new_obj(500, "coop_player_avatar", vec(10, 0, 10), { _stalker = true })
 Hm.new_obj(777, "stalker_trader", vec(12, 0, 10), { _stalker = true })
-Hm.players = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, is_self = false, avatar_id = 500, nick = "anna" } }
+Hm.players = { { id = 1, is_self = false, avatar_id = 500, nick = "anna" } }
 Cm.players = { { id = 1, is_self = true, avatar_id = 0, nick = "anna" } }
 Ms.players = { { id = 1, is_self = false, avatar_id = 500, nick = "anna" } }
 Hm.env.coop_faction = { faction_of_character = function(id) return id == 500 and "freedom" or nil end }
@@ -133,6 +125,48 @@ Hm.infos.fanat_training_start_done = true
 boot(Hm); boot(Cm); boot(Ms)
 check(Hm.env.coop_srv_tasks ~= nil and Hm.handlers.coop_rep_map ~= nil, "(the world server takes the map servers' effects)")
 check(Ms.handlers.coop_rep_map_ack ~= nil, "(the map server takes the world server's answers)")
+
+print("== a story choice on the map affects the world server's player characters")
+do
+	Hm.new_obj(501, "coop_player_avatar", vec(20, 0, 20), { _stalker = true })
+	Hm.players[2] = { id = 2, avatar_id = 501, nick = "boris" }
+	Ms.env.xr_logic.pick_section_from_condlist(nil, nil, { src = "%=dec_faction_goodwill_to_actor(dolg:50)%" })
+	pump()
+	local change = Hm.story_goodwill[500]
+	check(change and change.faction == "dolg" and change.amount == 50, "the world server applies the map's story choice to the player")
+	local second = Hm.story_goodwill[501]
+	check(second and second.faction == "dolg" and second.amount == 50, "the world server also applies the story choice to the player on another map")
+	check(next(Ms.story_goodwill) == nil and Hm.story_goodwill[0] == nil, "neither server ghost gets the faction change")
+	Hm.players[2] = nil
+end
+
+print("== story shares check the transport and envelope before decoding")
+do
+	local main = Hm.env.coop_main
+	local decode, reads = main.decode, 0
+	main.decode = function(payload) reads = reads + 1; return decode(payload) end
+	local on_share = Hm.handlers["quests.share"]
+	local good = main.encode({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "17" })
+	on_share(good, BRIDGE + 1)
+	check(reads == 0, "an unregistered map sender does not enter the story decoder")
+	on_share(good .. string.rep(";", 15801), BRIDGE)
+	check(reads == 0, "an oversized story packet does not enter the decoder")
+	local trust = Hm.env.coop_trust.status()
+	check(trust.story_share_sender and trust.story_share_sender.failed == 1, "the story sender refusal reaches trust")
+	check(trust.story_share_payload and trust.story_share_payload.failed == 1, "the story size refusal reaches trust")
+	for i = 1, 8 do
+		local packet = { f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "17" }
+		packet["p" .. i] = i % 2 == 1 and string.rep("x", 257) or true
+		on_share(main.encode(packet), BRIDGE)
+	end
+	on_share(main.encode({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "1e999" }), BRIDGE)
+	trust = Hm.env.coop_trust.status()
+	check(trust.story_share_payload and trust.story_share_payload.failed == 10, "all eight story arguments and numeric range reach trust")
+	check(Hm.story_goodwill[500].amount == 50, "invalid story arguments never change the player's goodwill")
+	on_share(good, BRIDGE)
+	check(Hm.story_goodwill[500].amount == 17, "valid story arguments reach the player")
+	main.decode = decode
+end
 
 -------------------------------------------------------------------------------
 print("== a world hurt by a give that died: the info of the dialog is taken back, once (was coop_tasks)")
@@ -196,6 +230,10 @@ do
 	check(acks > 0 and ack_count() == acks + 1 and Cm.rept == before - 25, "a duplicate is answered without a second application")
 	if packet then Hm.handlers.coop_rep_map(packet, 1); pump() end
 	check(Cm.rept == before - 25, "a player's machine cannot pass for a map server")
+	if packet then Hm.handlers.coop_rep_map(packet, BRIDGE + 1); pump() end
+	check(Cm.rept == before - 25 and ack_count() == acks + 1, "an unregistered bridge cannot apply an effect or get an ACK")
+	local sender_check = Hm.env.coop_trust.status().task_map_effect_sender
+	check(sender_check and sender_check.failed == 2, "both invalid senders reach coop_trust")
 	local saved = {}
 	Hm.env.coop_tasks.save_effects(saved)
 	Hm.env.coop_tasks.load_effects(saved)
@@ -258,6 +296,10 @@ do
 	for _ = 1, 3 do NOW = NOW + 1100 fire(Ms, "actor_on_update") end
 	check(sends() == n0, "and nothing waits on the map server's list for it")
 	Hm.env.coop_tasks.with_character(0, function() Hm.env.xr_effects.drx_sl_change_factions(Hm.actor, nil, { "dolg" }) end)
+	local hrank, mrank = Hm.rank, Ms.rank
+	Hm.env.game_statistics.increment_rank(4)
+	Ms.env.game_statistics.increment_rank(12)
+	check(Hm.rank == hrank and Ms.rank == mrank, "rank with no recipient is discarded by both server ghosts")
 	check(Hm.faction == nil, "the world server's own logic: no faction change of its ghost either")
 	-- a seat 0 that plays a character (the facade says so): its effects are his, peer 0's
 	Ms.env.coop_mode.seat_plays = function(peer) return peer == 0 or peer == 1 end
@@ -289,37 +331,46 @@ do
 end
 
 -------------------------------------------------------------------------------
-print("== the part \"talk\": the NPC a player on a map server's level talks to (protocol 33)")
+print("== the facade reports who the player talks to on a map server's level (protocol 33)")
 do
 	local T = Hm.env.coop_tasks
-	local tp = Hm.env.coop_quests_core.part("talk")
-	check(type(tp) == "table" and type(tp.partner) == "function", "the world server gives the part")
+	local facts_of = Hm.env.coop_mode.facts_of
+	check(Hm.env.coop_quests_core.part("talk") == nil, "the old talk part is no longer installed")
 	partner_of[1] = 777
-	check(tp and tp.partner(1) == 777, "his partner as his map server says (coop.levels.talk_partner)")
+	check(facts_of(1).partner == 777, "his partner as his map server says (coop.levels.talk_partner)")
 	check(not T._talk_vague(1) and T._spoke_to(1, 777) and not T._spoke_to(1, 778), "only the reported partner was spoken to")
 	partner_of[1] = nil
-	check(tp and tp.partner(1) == false and not T._talk_vague(1), "nobody is a definite answer")
+	check(facts_of(1).partner == false and not T._talk_vague(1), "nobody is a definite answer")
 	check(T._spoke_to(1, 777), "a confirmed talk stays recent after the dialog closes")
 	NOW = NOW + 16000
 	check(not T._spoke_to(1, 777), "the recent talk expires after fifteen seconds")
-	for _, id in ipairs({ 1.5, 65535 }) do
+	for _, id in ipairs({ 0, 1.5, 65535 }) do
 		partner_of[1] = id
-		check(not T._talk_vague(1) and not T._spoke_to(1, id), "invalid partner is a definite negative: " .. id)
+		check(facts_of(1).partner == nil, "the facade drops invalid partner id " .. id)
+		check(not T._talk_vague(1) and not T._spoke_to(1, 777), "an invalid partner is a definite rejection: " .. id)
 	end
 	partner_of[1] = 65534
 	check(T._spoke_to(1, 65534), "the highest valid NPC id can be a partner")
 	partner_of[1] = nil
-	local read_partner = tp.partner
-	tp.partner = function() error("no partner report") end
+	local read_partner = Hm.env.coop.levels.talk_partner
+	Hm.env.coop.levels.talk_partner = nil
 	Hm.env.coop.levels.talking = function() return true end
-	check(T._talk_vague(1) and T._spoke_to(1, 777), "a failed partner callback falls back to the general dialog fact")
-	tp.partner = read_partner
+	check(T._talk_vague(1) and T._spoke_to(1, 777), "a missing partner callback falls back to the general dialog fact")
+	local delivery = Hm.env.coop_quests_core.part("task_delivery")
+	local binding_available = delivery.has_talk_partner
+	delivery.has_talk_partner = function() error("no partner report") end
+	local ok, vague, spoke = pcall(function() return T._talk_vague(1), T._spoke_to(1, 777) end)
+	check(ok and vague and spoke, "a throwing partner callback still falls back to the general dialog fact")
+	delivery.has_talk_partner = binding_available
+	Hm.env.coop.levels.talk_partner = function() error("engine partner binding failed") end
+	check(not T._talk_vague(1) and not T._spoke_to(1, 777), "a failed engine partner read stays a definite answer, as at HEAD")
+	Hm.env.coop.levels.talk_partner = read_partner
 	Hm.env.coop.levels.talking = function(peer) return partner_of[peer] ~= nil end
-	check(Ms.env.coop_quests_core.part("talk") == nil and Cm.env.coop_quests_core.part("talk") == nil,
-		"not on a map server, not on a player's machine")
+	check(Ms.env.coop_mode.facts_of(1) == nil and Cm.env.coop_mode.facts_of(1) == nil,
+		"the map server and player read their local objects")
 	-- An older engine gives the general dialog fact only.
 	local Old = machine("host", 0x55)
-	world(Old, { player = false })
+	world(Old)
 	Old.env.coop.is_dedicated = function() return true end
 	Old.env.coop.levels = {
 		split = function() return true end, my_level = function() return 1 end,
@@ -328,8 +379,8 @@ do
 	}
 	Old.players = { { id = 0x55, is_self = true, avatar_id = 0 } }
 	boot(Old)
-	local old_talk = Old.env.coop_quests_core.part("talk")
-	check(old_talk and old_talk.partner(1) == nil, "an older engine registers a partner callback that reports no facts")
+	local old_talk = Old.env.coop_mode.facts_of(1)
+	check(old_talk and old_talk.partner == nil and old_talk.talking, "an older engine reports the general dialog fact only")
 	check(Old.env.coop_tasks._talk_vague(1) and Old.env.coop_tasks._spoke_to(1, 777), "an older engine still accepts the general dialog fact")
 	drop_machine(Old)
 end
@@ -378,6 +429,45 @@ do
 	local s0 = #Cm.sounds
 	Cm.handlers.coop_trw("k=sfx;f=sstalker_ceasefire;q=n9999", 0)
 	check(#Cm.ceasefire == 0 and #Cm.sounds == s0, "a forwarded effect his machine does not allow: not run")
+end
+
+print("== malformed map effects are refused before delivery or acknowledgement")
+do
+	local packet = { k = "stat", f = "rank", e = "bounds", q = 1, i = 500 }
+	local cases = {
+		{ f = "rank", n = false },
+		{ f = "rept", n = "5" },
+		{ f = "rept", n = 2 ^ 31 },
+		{ f = "tasks_completed", r = 2 ^ 31 },
+		{ f = "tasks_completed", p = "90" },
+		{ f = "tasks_completed", p = -2 ^ 32 },
+		{ f = "tasks_completed", t = 4 },
+		{ f = "tasks_completed", t = string.rep("x", 129) },
+		{ k = "fx", f = "play_sound_on_actor", p1 = true },
+		{ k = "fx", f = "play_sound_on_actor", p1 = "sound", p2 = string.rep("x", 257) },
+		{ k = "fx", f = "play_sound_on_actor", p1 = "sound", p3 = 4 },
+		{ k = "fx", f = "play_sound_on_actor", p1 = "sound", p4 = string.rep("x", 257) },
+		{ k = "fx", f = "actor_surge_immuned", p1 = "maybe" },
+		{ k = "fx", f = "drx_sl_change_factions", p1 = "freedom\000extra" },
+	}
+	local sent = #Hm.sent
+	local rank, rept, count, sounds = Cm.rank, Cm.rept, #Cm.stats, #Cm.sounds
+	for i, fields in ipairs(cases) do
+		local effect = {}
+		for k, v in pairs(packet) do effect[k] = v end
+		for k, v in pairs(fields) do effect[k] = v end
+		effect.q = i
+		Hm.handlers.coop_rep_map(Hm.env.coop_main.encode(effect), BRIDGE)
+	end
+	local trust = Hm.env.coop_trust.status().task_map_effect_payload
+	check(trust and trust.failed == #cases, "each malformed effect reaches trust")
+	check(#Hm.sent == sent, "no invalid effect is forwarded or acknowledged")
+	pump()
+	check(Cm.rank == rank and Cm.rept == rept and #Cm.stats == count and #Cm.sounds == sounds, "no invalid effect reaches the player")
+	packet.n, packet.t = -0.5, string.rep("x", 128)
+	Hm.handlers.coop_rep_map(Hm.env.coop_main.encode(packet), BRIDGE)
+	pump()
+	check(Cm.rank == rank - 0.5 and #Hm.sent == sent + 2, "a corrected retry forwards one fractional stat and is acknowledged")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

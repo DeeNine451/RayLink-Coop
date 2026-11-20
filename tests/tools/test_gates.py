@@ -1366,6 +1366,21 @@ def test_stand_head_profile_writes_the_mode_cvars_from_head(work):
     assert again.returncode == 0 and (stand / "appdata_t/user.ltx").read_bytes() == text
 
 
+def test_stand_head_profile_removes_the_srv_names_the_engine_saves(work):
+    # review A-REV-E-1 finding 7 (FIX-AREV1): the engine saves the map-server settings under their srv_* names only
+    # (coop_srv_console.cpp CCC_SrvOldName); a profile line of those names comes from an earlier run and goes too, so the
+    # template's lines are the profile's only mode lines
+    root, stand = scenario_repo(work)
+    write(stand, "appdata_t/user.ltx", "bind jump kSPACE\r\nsrv_max_map_servers 2\r\nsrv_map_servers_rev 0\r\n"
+                                       "srv_mapserver_linger 5\r\ncoop_nick tester\r\n")
+    done = stand_head(root, "profile", "--stand", str(stand), "--backup", str(work / "backup"))
+    assert done.returncode == 0, done.stdout
+    text = (stand / "appdata_t/user.ltx").read_bytes()
+    assert b"srv_max_map_servers" not in text and b"srv_map_servers_rev" not in text and b"srv_mapserver_" not in text, text
+    assert b"coop_max_map_servers 6\r\n" in text and b"coop_mapserver_linger 600\r\n" in text, text
+    assert text.startswith(b"bind jump kSPACE\r\n") and b"coop_nick tester\r\n" in text, text
+
+
 def test_the_checkers_the_runner_imports_are_part_of_the_stand_digest(work):
     # S3: stand_head imports check_gates.py and check_layers.py (the dirty check, the digests)
     assert {"tools/check_gates.py", "tools/check_layers.py"} <= set(gates.SCENARIO_PATHS)

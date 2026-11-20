@@ -286,6 +286,8 @@ RegisterScriptCallback("on_option_change", function() OPTION_CHANGES = OPTION_CH
 -- the scripts under test (the engine's _G.__index loads the catalog and the record when the first one asks)
 local sc = load_script_file("coop_game_schema")
 local rc = load_script_file("coop_game_record")
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_script_file("coop_mode"), load_script_file)
 local cs = load_script_file("coop_settings")
 local gs = load_script_file("coop_game_settings")
 load_script_file("coop_economy_core")

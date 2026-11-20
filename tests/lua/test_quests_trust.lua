@@ -7,7 +7,7 @@
 -- Run: tools\test_lua.cmd quests_trust
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party",
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party",
 	"coop_quests_story", "coop_quests_scenes", "coop_quests_missions" }
 
 local function exists(name)
@@ -228,16 +228,17 @@ print("== quest_take: a task the player may not see")
 do
 	Hm.tm.task_info.secret_t = { id = "secret_t", stage = 0 }
 	Hm.env.save_var(Hm.actor, "secret_t_fetch", "secret_doc")
-	-- a server's task audience, as the Core gets it (coop_quests_core.part "audience", step S4)
-	Hm.env.coop_quests_core.set_part("audience", {
-		record = function(id) if id == "secret_t" then return { t = 999, inn = { [999] = true } } end end,
+	local dedicated = Hm.env.coop.is_dedicated
+	Hm.env.coop.is_dedicated = function() return true end
+	Hm.env.coop_srv_task_audience = {
 		sees_character = function(id, c) if id == "secret_t" then return c == 999 end return true end,
-	})
+	}
 	Hm.give_item(Hm.actor, "secret_doc")
 	local before = trust_lines(Hm, "quest_take")
 	ask("take", { s = "secret_doc", n = 1 })
 	check(trust_lines(Hm, "quest_take") == before + 1, "a task out of his audience asks for it: logged")
-	Hm.env.coop_quests_core.set_part("audience", nil)
+	Hm.env.coop.is_dedicated = dedicated
+	Hm.env.coop_srv_task_audience = nil
 end
 
 print("== quest_take: refuse mode stops the take")

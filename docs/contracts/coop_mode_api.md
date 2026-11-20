@@ -5,17 +5,23 @@ Source: `gamedata/scripts/coop_mode.script` (Core), `coop_hostplay_mode.script` 
 rules: `docs/MODES.md` sections 3-4. Works on today's engine (no new engine API).
 
 Changed 2026-11-19 (A-S4D, the lead's option (a)): **the srv layer answers in a process started with `-coop_dedicated`
-from the process's start**, before its session, not only in an active session. Before, a world server was answered by
-"none" until its session started (after its world was up, `HostAutostart`), so `when_srv` ran there only after the world
-and its save had loaded. What changed: the "Which layer answers" rule and the world server's role below; the world server
-column now holds before its session too (row "before its session"); `publish` there sends nothing before the session;
-section 4: on a world server `when_srv` functions run at load. Every other process is answered as before (a co-op host,
-a co-op client, a map server and a server player before their session: "none"). The facade (`coop_mode.script`), the
-hostplay layer and the answer sets of the tests did not change.
+from `coop_srv_mode.on_game_start` on** (axr_main's file order; before it the facade answers none), before its session,
+not only in an active session. Before, a world server was answered by "none" until its session started (after its world
+was up, `HostAutostart`), so `when_srv` ran there only after the world and its save had loaded. What changed: the "Which
+layer answers" rule and the world server's role below; the world server column now holds before its session too (row
+"before its session"); `publish` there sends nothing before the session; section 4: on a world server `when_srv`
+functions run at load. Every other process is answered as before (a co-op host, a co-op client, a map server and a
+server player before their session: "none"). The facade (`coop_mode.script`), the hostplay layer and the answer sets of
+the tests did not change.
 
 Changed 2026-11-20 (A-S6-IF, through the lead's brief): **section 7**, the answers the S6 groups ask: in Lua `hook`,
 `facts_of`, `far`, `share_up`, `share_down` (and three optional layer fields); in C++ `Mode::level()` / `LevelSide` and the
 world-side `Mode` members, plus two process hooks of `Layer`. Nothing before section 7 changed in behaviour.
+
+Changed 2026-11-20 (review A-REV-E-1, finding 4; wording only): the srv layer of a world server answers from
+`coop_srv_mode.on_game_start` on, not from the process's start: axr_main loads every script, then runs `on_game_start` in
+file order, so a Core script's file level, or its `on_game_start` that runs before `coop_srv_mode`'s, gets the "none"
+answers there. Section 7.3: the hook `levels.bridge_of_player` (B-REV F5).
 
 ## 1. Rules for callers
 
@@ -42,10 +48,11 @@ the "none" answer without asking a layer.
 | `group_travels()` | bool | the group moves between maps together |
 
 Answers per process (live layers; the test sets model the first, third, fourth and last column). The world server column
-holds from the process's start (A-S4D): before its session the engine gives it no role (`is_host()` false), no seat
-(`self_id()` -1) and no rows of `coop.players()`, and its answers do not depend on them:
+holds from `coop_srv_mode.on_game_start` on (A-S4D; axr_main's file order; before it the facade answers none): before
+its session the engine gives it no role (`is_host()` false), no seat (`self_id()` -1) and no rows of `coop.players()`,
+and its answers do not depend on them:
 
-| | co-op host | co-op client | world server (`-coop_dedicated`, from its start) | map server | server player | none |
+| | co-op host | co-op client | world server (`-coop_dedicated`, from `coop_srv_mode.on_game_start`) | map server | server player | none |
 |---|---|---|---|---|---|---|
 | `where(self)` | here | here | away (ghost) | away (ghost) | here | away |
 | `where(p)` | here; joining before his character is in the world | same | away; joining before he is placed | here on its map, away elsewhere, joining unplaced | here on my map, away elsewhere | away |
@@ -71,8 +78,9 @@ can stay listed for a moment after its connection closed (an exact transport-dis
 engine's own question; not done).
 
 Which layer answers (today's predicates, read only by the layer scripts):
-- srv: `coop.is_dedicated()` (a process started with `-coop_dedicated`: the world server) from the process's start, before,
-  during and after its session (A-S4D); or an active session and (`coop.is_map_server()` or `coop.levels.split()`). World
+- srv: `coop.is_dedicated()` (a process started with `-coop_dedicated`: the world server) from `coop_srv_mode.on_game_start`
+  on (axr_main's file order; before it the facade answers none), before, during and after its session (A-S4D); or an
+  active session and (`coop.is_map_server()` or `coop.levels.split()`). World
   server role = `coop.is_dedicated()` or (`coop.is_host()` and not a map server). Until S2 a playing host of a split session
   (the hybrid) is answered by srv from the same predicates.
 - hostplay: active session and none of the above.
@@ -86,7 +94,8 @@ Which layer answers (today's predicates, read only by the layer scripts):
   server answers `decider_of(joining player)` = This (here: other). The C++ choice makes `on_host_level(p)` exactly
   `where(p) != Away` (review A-S4C F3). Nobody calls these C++ answers yet; S6 converts code against **this** Lua table and
   settles the C++ one to it first (S6 unit A-S6-T). A fourth difference since A-S4D: before its session a world server's
-  C++ `mode()` is still none (it is set at `start_host`), while the Lua srv layer answers from the process's start.
+  C++ `mode()` is still none (it is set at `start_host`), while the Lua srv layer answers from `coop_srv_mode.on_game_start`
+  on.
 
 ### Server parts in `coop_quests_core` (S4, A-S4ML; accepted by the lead 2026-11-19)
 
@@ -260,7 +269,7 @@ when `mode()` is still none, so these two are not `Mode` members.
 
 ### 7.2 Lua (`coop_mode.*`)
 
-| call | co-op host / client | world server (from its start) | map server | server player | none |
+| call | co-op host / client | world server (from `coop_srv_mode.on_game_start`) | map server | server player | none |
 |---|---|---|---|---|---|
 | F-HOOK `hook(name)` → function / nil | nil | the server's function (7.3) | same | same | nil |
 | F-BODY `facts_of(peer)` → `{ talking, partner }` / nil | nil | `talking` = `coop.levels.talking(peer)` (nil: the engine lacks it), `partner` = `coop.levels.talk_partner(peer)` or false (nil: the engine lacks it) | nil | nil | nil |
@@ -297,6 +306,7 @@ when `mode()` is still none, so these two are not `Mode` members.
 | `levels.far_place` | `coop.levels.far_place` | `api.levels.far_place` |
 | `levels.module` | a function that returns the module `coop_srv_levels` | `rawget(_G, "coop_levels")` |
 | `levels.level_of_player` | `coop.levels.level_of_player` | `coop.levels.level_of_player` |
+| `levels.bridge_of_player` | `coop.levels.bridge_of_player` | new (B-REV F5; Core caller `coop_mods_xchg_nimble`) |
 | `context` | a function → `{ role = "mapserver" / "host" / "client", split = true }` | `coop_main` `context_now` |
 
 A function is looked up when it is asked: nil when its script or function is not there. A hook name in a Core line is a

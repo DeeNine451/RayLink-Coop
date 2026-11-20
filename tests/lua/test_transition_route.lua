@@ -138,6 +138,15 @@ local function machine(opts)
 				return nil
 			end,
 		}
+		local function load_mode_script(name)
+			local mode = setmetatable({}, { __index = env })
+			env[name] = mode
+			local path = ROOT .. "scripts/" .. name .. ".script"
+			local f = assert(loadstring(readfile(path), "@" .. path))
+			setfenv(f, mode)()
+			return mode
+		end
+		dofile("tests/lua/support/modes.lua").live(load_mode_script("coop_mode"), load_mode_script)
 	end
 	local src = readfile(ROOT .. "scripts/coop_transition_route.script")
 	local mod = setmetatable({}, { __index = env })
@@ -329,15 +338,12 @@ check(#MW.asked == 1, "a route of the new level is seen without waiting for the 
 -- ================================================================ a scripted level change
 print("== ChangeLevel: co-op board, server solo exits")
 do
-	local LEVEL_OF = { [10] = "l02_garbage", [20] = "l13u_warlab" }
 	local Mc = machine()
 	Mc.env.ChangeLevel = function(pos, lvid, gvid, dir, anim) Mc.fx[#Mc.fx + 1] = { what = "change", gv = gvid, anim = anim } end
 	Mc.R.on_game_start()
-	Mc.env.game_graph = function() return { vertex = function(_, v) return { level_id = function() return v end } end } end
-	Mc.env.alife = function() return { level_name = function(_, l) return LEVEL_OF[l] end } end
 	Mc.split, Mc.players = true, { { id = 1 }, { id = 2 } } -- peer 0 is the world server ghost
 	Mc.env.coop.players = function() return Mc.players end
-	Mc.env.coop.levels = { split = function() return Mc.split end, gate_of = function(n) return n == "l13u_warlab" and "together" or "free" end }
+	Mc.env.coop.levels = { split = function() return Mc.split end }
 	local function trip(gv, anim)
 		Mc.fx = {}
 		Mc.env.ChangeLevel({}, 1, gv, {}, anim)

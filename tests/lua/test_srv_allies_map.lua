@@ -4,6 +4,7 @@ MODE = "client"
 dofile("tests/lua/support/stubs_mods.lua")
 local modes = dofile("tests/lua/support/modes.lua")
 local facade = load_script("coop_mode")
+local server_layer = load_script("coop_srv_mode").LAYER
 local levels = load_script("coop_srv_levels")
 
 local PEER, AVATAR = 2, 502
@@ -59,6 +60,7 @@ modes.each(facade, function(name, set)
 	-- map. Keep the engine's private elsewhere field out of the HUD fixture.
 	local where = "away"
 	set.where = function(peer) return peer == PEER and where or "here" end
+	set.hook = server_layer.hook
 	coop.is_player = set.actor_is_player
 	local map = load_script("coop_allies_map")
 	local hud = load_script("coop_core_hud")

@@ -200,6 +200,8 @@ coop = {
 	},
 }
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local client = load_module("coop_debug_client")
 local dui = load_module("coop_debug_ui")
 client.on_game_start()

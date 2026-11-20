@@ -51,7 +51,7 @@ end
 
 local function live()
 	if not api then return false end
-	local ok, on = pcall(function() return api.is_active() and (api.is_host() or api.is_live()) end)
+	local ok, on = pcall(function() return api.is_active() and (coop_mode.decides_world() or api.is_live()) end)
 	return ok and on == true
 end
 

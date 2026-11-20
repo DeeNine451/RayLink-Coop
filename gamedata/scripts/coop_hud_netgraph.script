@@ -186,13 +186,8 @@ end
 -------------------------------------------------------------------------------
 local function live()
 	if not api then return false end
-	local ok, on = pcall(function() return api.is_active() and (api.is_host() or api.is_live()) end)
+	local ok, on = pcall(function() return api.is_active() and (coop_mode.decides_world() or api.is_live()) end)
 	return ok and on == true
-end
-
-local function is_host()
-	local ok, h = pcall(api.is_host)
-	return ok and h == true
 end
 
 local function players_list()
@@ -354,7 +349,7 @@ function UICoopNetgraph:Refresh(tg)
 	for _, b in ipairs(self.buckets) do frames, ms = frames + b.f, ms + b.ms end
 	local fps = fps_of(frames, ms)
 
-	local host = is_host()
+	local host = api.is_active() and coop_mode.decides_world()
 	local list = players_list()
 	local sum = summarize(list, host, not host and server_link() or nil)
 	local none = tr(STR_NONE, "-")

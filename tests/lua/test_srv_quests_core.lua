@@ -46,7 +46,7 @@ do
 		"remote quest facts wait for the server layer")
 	M.env.coop.is_dedicated = function() return true end
 	load_script(M, "coop_srv_mode").on_game_start()
-	check(#q.characters() == 0 and q.actor_is_nobody(), "world server excludes its ghost actor")
+	check(#q.characters() == 0 and not M.env.coop_mode.actor_is_player(), "world server excludes its ghost actor")
 	check(q.is_far_peer(1) and not q.is_far_peer(3) and q.held_there(target),
 		"world server uses the player's reported map and the held squad's map")
 	local body, peer, d = q.nearest_body(target, true)
@@ -79,7 +79,7 @@ do
 	load_script(M, "coop_srv_mode").on_game_start()
 	local q = M.env.coop_quests_core
 	local body, peer = q.nearest_body(target, true)
-	check(body == avatar and peer == 1 and #q.characters() == 1 and q.actor_is_nobody(),
+	check(body == avatar and peer == 1 and #q.characters() == 1 and not M.env.coop_mode.actor_is_player(),
 		"map server uses the live avatar and excludes its ghost actor")
 	check(not q.is_far_peer(1) and not q.held_there(target), "a map server treats its own map as local")
 end
@@ -94,7 +94,7 @@ do
 	local q = M.env.coop_quests_core
 	M.env.coop.levels.split = function() error("co-op quest queries must not inspect split levels") end
 	local ok, body, peer, d = pcall(q.nearest_body, target, true)
-	check(ok and body == M.actor and peer == 0 and d == 0 and not q.actor_is_nobody(),
+	check(ok and body == M.actor and peer == 0 and d == 0 and M.env.coop_mode.actor_is_player(),
 		"co-op host decides quest proximity using its own live actor")
 	local saved = q.body_for_character(501)
 	local item = saved and saved:object("wpn_ak74")

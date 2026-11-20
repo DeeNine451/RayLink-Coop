@@ -91,7 +91,6 @@ local function role(new_name, old_name)
 	return ok and yes == true
 end
 
-local function is_world_server() return role("is_world_server", "is_host") end
 local function is_player() return role("is_player", "is_client") end
 
 local tostring, tonumber, type, pairs, ipairs, pcall = tostring, tonumber, type, pairs, ipairs, pcall
@@ -307,20 +306,23 @@ function join_spawn()
 			if ok then v = r end
 		end
 	end
-	if api and api.is_dedicated and api.is_dedicated() then return "faction_start" end -- nobody starts on the service level
+	if coop_mode.decides_world() and not coop_mode.seat_plays(0) then return "faction_start" end -- nobody starts on the service level
 	return v == "faction_start" and "faction_start" or "host"
 end
 
 -- Host check of the gear a new character asks for, against the WORLD's faction (never the one a client or the engine
 -- names: protocol 9) with the host's own config and economy tier:
 -- { faction, items = {sec, ...} (free kit + bought), money } | nil, reason ("faction", "items", "points").
+local MAX_BUYS, MAX_CHOICE_WORD = 64, 64 -- CharChoiceMsg::kMaxBuy, kMaxCharName
+local MAX_PLAYER_SLOT = 16 -- coop_protocol.h kMaxPlayers
+
 function plan_kit(buy)
 	local faction = world_faction()
 	local eco = host_eco()
 	local kit = read_kit(faction, eco)
 	if not kit then return nil, "faction" end
 	local buys = explode(type(buy) == "string" and buy or "")
-	if #buys > 64 then return nil, "items" end
+	if #buys > MAX_BUYS then return nil, "items" end
 	local ok, why = check_buys(kit, buys, budget(eco))
 	if not ok then return nil, why end
 	local items = {}
@@ -425,8 +427,7 @@ end
 
 -- Host: the start of a new character of `faction` (start_for with the host's level, its story mode, its camps).
 function host_start(faction)
-	local mode = module_of("coop_mode")
-	local own_levels = mode and not mode.actor_is_player()
+	local own_levels = not coop_mode.actor_is_player()
 	local actor = not own_levels and db and db.actor
 	local level = actor and level_of(actor:game_vertex_id())
 	if level == nil and not own_levels then return nil end
@@ -443,13 +444,17 @@ end
 -------------------------------------------------------------------------------
 -- Host
 -------------------------------------------------------------------------------
+local function world_in_session()
+	return api and api.is_active() and coop_mode.decides_world()
+end
+
 function is_new(proxy_id)
 	return proxy_id ~= nil and se_load_var(proxy_id, nil, NEW_VAR) == true
 end
 
 -- se_stalker_on_spawn (host only, [callbacks_host]): a proxy made just now is a new character.
 local function se_stalker_on_spawn(se)
-	if not is_world_server() then return end
+	if not world_in_session() then return end
 	local ok, sec = pcall(function() return se:section_name() end)
 	if ok and sec == PROXY_SECTION then
 		se_save_var(se.id, se:name(), NEW_VAR, true)
@@ -547,22 +552,58 @@ local function apply_kit(npc, community, items, keep)
 	return #old, n
 end
 
+local function audit_choice_refusal(from, why)
+	if coop_trust then coop_trust.pass("menu.new_character", false, "peer %s: %s", tostring(from), why) end
+end
+
+local function refuse_choice(from, why)
+	audit_choice_refusal(from, why)
+	return reply(from, { ok = false, reason = why })
+end
+
+local function choice_word(v)
+	return type(v) == "string" and #v <= MAX_CHOICE_WORD and v:match("^[A-Za-z0-9_.%-]+$") ~= nil
+end
+
+local function valid_purchase_list(buy)
+	if buy == nil or buy == "" then return true end
+	if type(buy) ~= "string" or #buy > MAX_BUYS * (MAX_CHOICE_WORD + 1) then return false end
+	local count = 0
+	for section in (buy .. ","):gmatch("(.-),") do
+		count = count + 1
+		if count > MAX_BUYS or not choice_word(section) then return false end
+	end
+	return true
+end
+
 local function on_new_character(payload, from)
-	if not is_world_server() or type(from) ~= "number" then return end
+	if not world_in_session() then return audit_choice_refusal(from, "no active world authority") end
+	if not (type(from) == "number" and from >= 0 and from <= MAX_PLAYER_SLOT and from == math.floor(from)) then
+		return audit_choice_refusal(from, "invalid sender")
+	end
+	if not coop_mode.seat_plays(from) then
+		if from == 0 then return audit_choice_refusal(from, "sender does not play") end
+		return refuse_choice(from, "no_character")
+	end
+	if type(payload) ~= "string" then return refuse_choice(from, "items") end
 	local t = decode(payload)
+	if t.faction == nil and t.buy == nil then return refuse_choice(from, "items") end
+	-- The client's faction is only a hint for the log. World data chooses the actual faction and kit.
+	if t.faction ~= nil and not choice_word(t.faction) then return refuse_choice(from, "faction") end
+	if not valid_purchase_list(t.buy) then return refuse_choice(from, "items") end
 	if from == 0 then
 		-- F3a T6: the host player's choice is the same event a remote client sends, from node 0, and is answered the same way:
 		-- his character is the host's actor (host_choose_self), not a proxy
 		local ok, money_or_why, given, faction = host_choose_self(t.faction, t.buy)
 		if ok then return reply(from, { ok = true, faction = faction, money = money_or_why, items = given }) end
+		if money_or_why ~= "busy" then return refuse_choice(from, money_or_why) end
 		return reply(from, { ok = false, reason = money_or_why })
 	end
 	local proxy = api.avatar_of(from)
-	if not proxy then return reply(from, { ok = false, reason = "no_character" }) end
-	if not is_new(proxy) then return reply(from, { ok = false, reason = "not_new" }) end
-	-- protocol 9: what the client sent in t.faction is not read, the character is the world's
+	if not proxy then return refuse_choice(from, "no_character") end
+	if not is_new(proxy) then return refuse_choice(from, "not_new") end
 	local plan, why = plan_kit(t.buy)
-	if not plan then return reply(from, { ok = false, reason = why }) end
+	if not plan then return refuse_choice(from, why) end
 	local npc = level.object_by_id(proxy)
 	if not npc then return reply(from, { ok = false, reason = "busy" }) end
 	local faction = plan.faction
@@ -662,7 +703,7 @@ end
 -- Plan 2026-11-12 stage 5: `exact` true is the creator's character (coop_join.cpp host_make_creator): no points check (plan_kit), the
 -- record's creator gives the money and, when it is a start of the faction, the start (creator.map); `buy` is not read.
 function host_plan_character(peer, faction, buy, exact)
-	if not is_world_server() then return { ok = false, reason = "busy" } end
+	if not world_in_session() then return { ok = false, reason = "busy" } end
 	local plan, why
 	if exact == true then plan, why = exact_plan(peer) else plan, why = plan_kit(buy) end
 	if not plan then
@@ -692,7 +733,7 @@ end
 -- Plan 2026-11-12 stage 5: `exact` true, the creator's character: the items, the ammo and the money of exact_plan (the record's creator),
 -- not the faction's kit; `kit` false still wins (a retired key starts with nothing).
 function host_make_character(peer, proxy, faction, buy, kit, exact)
-	if not is_world_server() then return false, "busy" end
+	if not world_in_session() then return false, "busy" end
 	local bare = kit == false
 	local plan, why
 	if exact == true and not bare then plan, why = exact_plan(peer) else plan, why = plan_kit(bare and "" or buy) end
@@ -762,7 +803,7 @@ local function host_nick()
 		if p.is_host == true or (p.is_host == nil and p.id == 0) then return tostring(p.nick or "?") end
 	end
 	local ok, world = pcall(function()
-		if type(api.is_dedicated) == "function" and api.is_dedicated() == true then return true end
+		if coop_mode.decides_world() and not coop_mode.seat_plays(0) then return true end
 		local link = type(api.server_link) == "function" and api.server_link() or nil
 		return type(link) == "table" and link.plays == false
 	end)
@@ -1529,7 +1570,7 @@ end
 -- -coop_autochoose flag, exactly as a client's does. `renew` tells that Lua state this is a new character after the old one
 -- retired. Answered by menu.new_character from node 0 (on_new_character -> host_choose_self), then menu.char_result.
 function host_offer_self()
-	if not is_world_server() then return false end -- F3a T7: only the world server offers (as host_choose_self answers)
+	if not world_in_session() then return false end -- F3a T7: only the world server offers (as host_choose_self answers)
 	local eco = host_eco()
 	local bare = se_load_var(SELF_ID, nil, BARE_VAR) == true
 	local ok, why = api.send_event("menu.char_offer", encode({ eco = eco, points = bare and 0 or budget(eco), nick = host_nick(),
@@ -1544,7 +1585,7 @@ end
 -- the mark cleared. True, money, items given, faction | false, reason.
 -- Protocol 9: the faction is the world's whatever `asked` says (the window shows it, nothing to pick).
 function host_choose_self(asked, buy)
-	if not is_world_server() then return false, "busy" end
+	if not world_in_session() then return false, "busy" end
 	if not is_new(SELF_ID) then return false, "not_new" end
 	local actor = db and db.actor
 	if not actor then return false, "busy" end
@@ -1581,7 +1622,7 @@ end
 -- window, or -coop_autochoose's answer). `kit` (Ruling F3-10): 1 with the host's coop_hardcore_new_kit on, 0 = a bare new
 -- character (nil: an engine before F3-10).
 function host_new_character(kit)
-	if not is_world_server() then return end
+	if not world_in_session() then return end
 	se_save_var(SELF_ID, nil, NEW_VAR, true)
 	se_save_var(SELF_ID, nil, BARE_VAR, tonumber(kit) == 0 or nil)
 	log("the host's character is out of the run: he chooses a new one")
@@ -1598,7 +1639,7 @@ local function actor_on_update()
 	local t = now_ms()
 	if t < next_tick then return end
 	next_tick = t + TICK_MS
-	if is_world_server() then
+	if world_in_session() then
 		local ok, err = pcall(host_tick)
 		if not ok then log("! host tick: %s", tostring(err)) end
 	end

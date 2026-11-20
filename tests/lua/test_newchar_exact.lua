@@ -36,6 +36,7 @@ coop = {
 	is_world_server = function() return true end,
 	is_player = function() return false end,
 	is_dedicated = function() return true end,
+	self_id = function() return 0 end,
 	players = function() return PLAYERS end,
 	send_event = function() return true end,
 	game = { world_faction = function() return "" end },
@@ -60,6 +61,8 @@ function RegisterScriptCallback() end
 function AddScriptCallback() end
 axr_main = { config = config_stub() }
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local mc = load_module("coop_menu_char")
 local function reset()
 	CREATED = {}

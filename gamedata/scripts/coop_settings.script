@@ -501,8 +501,8 @@ local function host_tick(t)
 	host.dirty = false
 	-- nobody to tell; the baseline is refreshed when asked. A world server is in no row of coop.players() (plan 2026-11-12
 	-- s.1.2 #35): one client is somebody; an ordinary host counts its own row
-	local dedicated = type(api.is_dedicated) == "function" and api.is_dedicated() == true
-	if players_count() < (dedicated and 1 or 2) then return end
+	local min_players = coop_mode.seat_plays(0) and 2 or 1
+	if players_count() < min_players then return end
 	host_flush_delta()
 end
 
@@ -921,7 +921,7 @@ local op_state = { sent = 0, answers = 0, window = nil }
 
 local function operator_mode()
 	if not (api and type(api.has_host_rights) == "function") then return false end
-	local ok, yes = pcall(function() return not api.is_host() and api.has_host_rights() == true end)
+	local ok, yes = pcall(function() return not coop_mode.decides_world() and api.has_host_rights() == true end)
 	return ok and yes == true
 end
 
@@ -1262,10 +1262,26 @@ end
 
 local last_request = {} -- host: peer -> time of its last full-settings request (W5: at most every 2 s)
 
+local function refuse_settings_request(from, why)
+	if coop_trust then coop_trust.pass("coop_set_req", false, "peer %s: %s", tostring(from), why) end
+end
+
 local function on_settings_request(payload, from)
-	if not (api and api.is_host()) or type(from) ~= "number" or from == 0 then return end
+	if not (api and api.is_active() and coop_mode.decides_world()) then
+		return refuse_settings_request(from, "no active world authority")
+	end
+	if not (type(from) == "number" and from > 0 and from < 0xffffffff and from == math.floor(from)) then
+		return refuse_settings_request(from, "invalid sender")
+	end
+	-- A map server asks for the same settings when its Lua state loads.
+	if not (coop_mode.seat_plays(from) or coop_mode.from_level(from)) then
+		return refuse_settings_request(from, "sender is not a player or registered map")
+	end
+	if payload ~= "" then return refuse_settings_request(from, "expected an empty request") end
 	local tg = now_ms()
-	if last_request[from] and tg - last_request[from] < 2000 and tg >= last_request[from] then return end
+	if last_request[from] and tg - last_request[from] < 2000 and tg >= last_request[from] then
+		return refuse_settings_request(from, "request sent too soon")
+	end
 	last_request[from] = tg
 	host_flush_delta() -- the others get what changed since the baseline, the newcomer gets the baseline
 	if host_send(host.last or {}, "full", from) then stats.full_out = stats.full_out + 1 end
@@ -1302,13 +1318,13 @@ local function actor_on_update()
 		log("session ended: own settings are used again")
 		fire_option_change()
 	end
-	if api.is_host() then host_tick(t) end
+	if api.is_active() and coop_mode.decides_world() then host_tick(t) end
 end
 
 local function on_option_change()
 	rules_changed()
 	if firing or not api then return end
-	if api.is_host() then
+	if api.is_active() and coop_mode.decides_world() then
 		host.dirty = true
 	elseif client_mode and ov then
 		-- Something changed a host-owned difficulty factor locally (an addon, a menu we did not hook): undo it.
@@ -1330,7 +1346,7 @@ end
 -------------------------------------------------------------------------------
 function print_status()
 	if not api then return end
-	if api.is_host() then
+	if api.is_active() and coop_mode.decides_world() then
 		local base = host.last and count(host.last) or 0
 		log("host: baseline %d value(s), sent full %d, delta %d, too long %d", base, stats.full_out, stats.delta_out,
 			stats.oversize)

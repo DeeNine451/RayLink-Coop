@@ -48,7 +48,7 @@ local function tr(id, fallback)
 end
 
 local function live()
-	return api ~= nil and api.is_active() and (api.is_host() or api.is_live())
+	return api ~= nil and api.is_active() and (coop_mode.decides_world() or api.is_live())
 end
 
 local function players()
@@ -239,12 +239,13 @@ end
 local function cmd_go()
 	if not api then return end
 	-- the host's right (plan 2026-11-12 s.2.3): the host here, or the operator of a world server, who asks the server
-	local rights = api.is_host() or call("has_host_rights") == true
+	local decides = api.is_active() and coop_mode.decides_world()
+	local rights = decides or call("has_host_rights") == true
 	if not rights then
 		system(tr("st_coop_core_go_host_only", "Only the host can move the group."))
 		return
 	end
-	if not api.is_host() then
+	if not decides then
 		local ok, why = call("operator_command", "/go")
 		if ok ~= true then
 			log("! /go: the operator's command was not sent (%s)", tostring(why))

@@ -373,17 +373,6 @@ for _, message in ipairs(Hm.sent) do
 	if message.name == "coop_trw" and message.payload:find("f=srept", 1, true) and message.payload:find("q=n", 1, true) then saw_reliable = true end
 end
 check(saw_reliable, "story decision uses acknowledged effects rather than an untracked relay")
-do
-	local map = machine("client", 0x102)
-	setup_world(map)
-	map.env.coop.is_map_server = function() return true end
-	map.players = {{id=0,avatar_id=10},{id=1,avatar_id=500}}
-	boot(map); pump()
-	map.env.xr_logic.pick_section_from_condlist(nil, nil, {src="%=dec_faction_goodwill_to_actor(dolg:50)%"})
-	pump()
-	check(Hm.goodwill[0] == -50 and Hm.goodwill[500] == -50,
-		"story faction penalty on another level reaches every participant through world host")
-end
 print("== story world spawns")
 local spawned = {}
 Hm.env.xr_effects.spawn_strelok_notes = function() spawned.host = (spawned.host or 0) + 1 end

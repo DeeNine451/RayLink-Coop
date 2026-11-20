@@ -56,10 +56,10 @@ local function start(M, W, role, map)
 		end,
 		setup_companion_logic = function(npc) npc:give_info_portion("npcx_is_companion") end,
 	}
-	E.coop_quests_core = { share = function() return {
-		up = function(key, get, set) M.share_up_key, M.share_up, M.hear = key, get, set end,
-		down = function(key, get, set) M.share_down_key, M.share_down, M.give = key, get, set end,
-	} end }
+	E.coop_quests_core = {
+		share_up = function(key, get, set) M.share_up_key, M.share_up, M.hear = key, get, set end,
+		share_down = function(key, get, set) M.share_down_key, M.share_down, M.give = key, get, set end,
+	}
 	load_script(M, "coop_npc_players")
 	load_script(M, "coop_trust").reset_for_test({ default = "log" })
 	local mode = load_script(M, "coop_mode")

@@ -79,12 +79,6 @@ local function in_session()
 	return ok and active == true
 end
 
-local function is_host()
-	if not api then return false end
-	local ok, host = pcall(api.is_host)
-	return ok and host == true
-end
-
 -------------------------------------------------------------------------------
 -- Texts
 -------------------------------------------------------------------------------
@@ -165,7 +159,7 @@ end
 -------------------------------------------------------------------------------
 -- The hint of a refusal: st_coop_saves_auto_host|client for a save, load_host|client for a load.
 local function refusal_key(kind)
-	return (kind == "load" and "load_" or "auto_") .. (is_host() and "host" or "client")
+	return (kind == "load" and "load_" or "auto_") .. (coop_mode.decides_world() and "host" or "client")
 end
 
 -- The rollback death mode: saves work as in the stock game, the host's to make and load.
@@ -185,7 +179,7 @@ local function on_before_save_input(flags, typ, label)
 	if saves_open() then
 		if rollback_on_its_way() then
 			flags.ret = true
-		elseif not is_host() then
+		elseif not coop_mode.decides_world() then
 			flags.ret = true
 			if typ == 2 and coop_mods_core.to_host("save_req", {}) then hint("asked") else hint("host_only") end
 		elseif api.life_of(0) ~= "alive" then -- the engine's actor stands in for him: such a save loads to a black screen
@@ -202,7 +196,7 @@ end
 local function on_before_load_input(dik, bind, flags)
 	if type(flags) ~= "table" or not in_session() then return end
 	if saves_open() then
-		if is_host() and not rollback_on_its_way() then return end
+		if coop_mode.decides_world() and not rollback_on_its_way() then return end
 		flags.ret = true
 		hint("host_only")
 		return
@@ -234,7 +228,7 @@ local function wrap_main_menu()
 		local ok, orig = pcall(function() return cls[fname] end)
 		if ok and type(orig) == "function" and menu_wrappers[fname] ~= orig then
 			local function wrapper(self, ...)
-				if in_session() and (not (saves_open() and is_host()) or rollback_on_its_way()) then
+				if in_session() and (not (saves_open() and coop_mode.decides_world()) or rollback_on_its_way()) then
 					hint(saves_open() and "host_only" or refusal_key(kind), self)
 					return
 				end
@@ -430,7 +424,7 @@ end
 -- Host in a session, a real autosave (or, with game_id, a save of that game) that is in the folder and not damaged: the
 -- same command the stock Load dialog gives in a running game.
 function restore(name, game_id)
-	if not (in_session() and is_host()) then return false, "not_host" end
+	if not (in_session() and coop_mode.decides_world()) then return false, "not_host" end
 	local slot = parse_slot(name)
 	if not slot and not (game_id and save_of_game(name, game_id)) then return false, "bad_name" end
 	local e = slot and find_autosave(name) or (not slot and find_save(name)) or nil
@@ -633,8 +627,10 @@ end
 function print_status()
 	local wrapped = 0
 	for _ in pairs(menu_wrappers) do wrapped = wrapped + 1 end
+	local active = in_session()
 	log("saves: session %s, host %s | autosave wrapper %s, menu entries wrapped %d",
-		in_session() and "yes" or "no", is_host() and "yes" or "no", autosave_wrapper and "on" or "off", wrapped)
+		active and "yes" or "no", active and coop_mode.decides_world() and "yes" or "no",
+		autosave_wrapper and "on" or "off", wrapped)
 end
 
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an error here

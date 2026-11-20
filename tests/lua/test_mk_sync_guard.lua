@@ -85,7 +85,8 @@ end
 -- A call whose guard is its caller, with the place that proves it.
 local THROUGH_CALLER = {
 	["coop_world_weather.script:sync_set"] = function(src)
-		return src:find("if P.is_map_server() then\n\t\tpatch_class()", 1, true) ~= nil
+		local tick = src:match("local function tick%(%)(.-)\nend")
+		return tick and tick:find("if coop_mode.decides_world() then\n\t\tif wm then host_tick(wm) end\n\t\twet_host_tick()", 1, true) ~= nil
 	end,
 }
 
@@ -177,8 +178,9 @@ do
 	local surv = read("engine/src/xrGame/coop/coop_survival.cpp") or ""
 	local rules = surv:match("death::Rules console_rules%(%)(.-)\n}\n") or ""
 	check(rules:find("friendly_fire", 1, true) ~= nil and rules:find("finish_downed", 1, true) ~= nil, "the party's rules are read from the console of the world server")
-	local on_msg = surv:match("void on_rules_msg%(.-\n}\n") or ""
-	check(on_msg:find("g_coop_friendly_fire", 1, true) ~= nil and on_msg:find("set_finish_downed", 1, true) ~= nil, "a map server takes them")
+	local map_rules = surv:match("void map_on_rules%(.-\n}\n") or surv:match("void on_rules_msg%(.-\n}\n") or ""
+	check(map_rules:find("g_coop_friendly_fire", 1, true) ~= nil and map_rules:find("set_finish_downed", 1, true) ~= nil,
+		"a map server takes them")
 end
 
 print("== server clients have no playing world host")

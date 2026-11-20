@@ -25,8 +25,8 @@
 	  come over the wire). Server: step 1 on the world server, step 2 on the map server of his level; the world server
 	  tells the map servers the hold (mods.nim_held, only when it leads no map), the map server tells the world server
 	  the result (mods.nim_done, only when it keeps no money). The Core asks coop_mode only: decides_world() (the money
-	  is here), leads_here() (the map step is here), actor_is_player(), seat_plays(peer) (a sender that plays nobody is
-	  a map server).
+	  is here), leads_here() (the map step is here), actor_is_player(), seat_plays(peer) (a hold's sender plays),
+	  from_level(peer) and hook("levels.bridge_of_player") (a result's sender is the map server of that player's map).
 
 	A hold on the keeper of the money ("<peer>|<op>", op = the player's "<peer>:<world epoch>:<n>"):
 	  (none) --nim_hold, a known upgrade, balance >= price, the price taken--> HELD
@@ -50,8 +50,11 @@
 	gun), nimble_trader (the dialog's NPC alive within 15 m of his character). Always on (coop_trust.guard): the op ids,
 	the kind (an upgrade of this file whose price this process's copy of the mod has), the gun (online here, in his
 	inventory, a source section of that upgrade: it is what the exchange spends), the hold (known, fresh, applied once,
-	its price), the sender of nim_hold (a seat that plays), of nim_held (peer 0: coop_mods_core side "client") and of
-	nim_done (a seat that plays nobody: a map server). The keeper of the money: the balance, the hold.
+	its price), the sender of nim_hold (a seat that plays), of nim_held (peer 0: coop_mods_core side "client"; the event
+	is reserved for the world, coop_main.reserve_world_event) and of nim_done (a map server's bridge, coop_mode.from_level,
+	and the one of player p's map, the srv layer's hook levels.bridge_of_player: B-REV F5). A gun step that names a hold not
+	known here closes that op in the sender's own marks (at most 8, never evicted: a step beyond them is refused with no
+	mark and no refund report; B-REV F6, rv_FIX-NIMBLE B2). The keeper of the money: the balance, the hold.
 	Wire (host numbering): mods.nim_hold { o, g } player -> keeper (limit 6 at once, 1 a second); mods.nim_hold_r
 	{ o, ok, why | m } keeper -> player; mods.nim_held { p, h, g, m } keeper -> map servers; mods.nim_done { p, h, c }
 	map server -> keeper (c = 1 commit, 0 refund; limit 60, 30 a second); the gun step is coop_mods_xchg's mods.xchg
@@ -81,7 +84,8 @@ local SWEEP_MS = 1000
 local OP_MAX, WHY_MAX = 40, 32
 local MAX_PRICE = 10000000
 local MAX_OPEN = 3       -- holds of one player waiting for their map step
-local MAX_KNOWN = 512
+local MAX_KNOWN = 512    -- holds the keeper announced, for every player
+local MAX_CLOSED = 8     -- one sender's gun steps that named a hold not known here (his own ops only)
 local REACH_M = 15
 local PART_VAL = 60      -- the mod's part_val (NimbleTrade.script :24) when its local cannot be read
 
@@ -239,8 +243,35 @@ end
 -------------------------------------------------------------------------------
 -- The decider of the map: the holds it may apply
 -------------------------------------------------------------------------------
-local known = {} -- "<peer>|<op>" -> { kind, price, at, state = known | claimed | used | closed }
+local known = {} -- "<peer>|<op>" -> { kind, price, at, state = known | claimed | used | closed }: holds the keeper announced
 local known_n = 0
+-- B-REV F6: the gun steps of a sender that named a hold not known here, apart from `known`: closed for good (a hold of that
+-- op that comes later is never applied), at most MAX_CLOSED per sender, never evicted (rv_FIX-NIMBLE B2), kept KEEP_MS. One
+-- player's steps without a hold fill only his own marks, never the table of the holds of the others.
+local closed_by = {} -- peer -> { [op] = at }
+
+local function closed(peer, op)
+	local m = closed_by[peer]
+	return m ~= nil and m[op] ~= nil
+end
+
+-- True: closed now (or already), so its refund may be reported. False: he has MAX_CLOSED marks already; nothing is marked
+-- and nothing reported (rv_FIX-NIMBLE B2: a mark is never evicted, because each one stands for a refund already reported
+-- and its hold must never apply after it). The keeper's REFUND_MS timer gives such a hold back, or a hold of that op that
+-- comes later is applied and paid once.
+local function close_unknown(peer, op)
+	local m = closed_by[peer]
+	if not m then
+		m = {}
+		closed_by[peer] = m
+	end
+	if m[op] then return true end
+	local n = 0
+	for _ in pairs(m) do n = n + 1 end
+	if n >= MAX_CLOSED then return false end
+	m[op] = time_global()
+	return true
+end
 
 local function note(key, k)
 	if known[key] then return false end
@@ -253,6 +284,7 @@ local function note(key, k)
 end
 
 local function note_held(peer, op, kind, price)
+	if closed(peer, op) then return end -- its gun step came first: closed, its refund reported
 	note(tostring(peer) .. "|" .. op, { kind = kind, price = price, at = time_global(), state = "known" })
 end
 
@@ -333,13 +365,17 @@ local function reserve(t, from, who)
 	if not trust_guard("nimble_apply_shape", valid_op(op) and u ~= nil, "player #%d: an upgrade without a hold or a kind", from) then
 		return nil, "bad"
 	end
+	if closed(from, op) then
+		stats.unpaid = stats.unpaid + 1
+		return nil, "unpaid" -- a step of his named it without a hold here: refused, its refund reported then
+	end
 	local key = tostring(from) .. "|" .. op
 	local k = known[key]
 	if not k then
-		-- no hold here (it never came, or not yet): closed for good, and the keeper gives it back if it has it
+		-- no hold here (it never came, or not yet): closed for good in his own marks, and the keeper gives it back if it has it;
+		-- beyond his MAX_CLOSED marks nothing is marked or reported (the keeper's own timer gives that hold back)
 		stats.unpaid = stats.unpaid + 1
-		note(key, { kind = kind, price = 0, at = time_global(), state = "closed" })
-		report(from, op, false)
+		if close_unknown(from, op) then report(from, op, false) end
 		return nil, "unpaid"
 	end
 	if k.state ~= "known" then
@@ -471,10 +507,21 @@ local function hold_from_wire(t, from)
 	hold(t, from, function(ans) C().to_peer(from, V_HOLD_R, ans) end)
 end
 
--- mods.nim_done, side "world": the result of a map step. The sender is the transport's peer: a seat that plays a
--- character cannot have run a map step (the delivery boundary, always on).
+-- The bridge of the map server that leads player `peer`'s map, as this process knows it (the srv layer's hook
+-- levels.bridge_of_player); nil: none, or no layer answers it (the co-op).
+local function bridge_of(peer)
+	local f = coop_mode.hook("levels.bridge_of_player")
+	if not f then return nil end
+	local ok, v = pcall(f, peer)
+	v = ok and tonumber(v) or nil
+	return whole(v, 1, 65535) and v or nil
+end
+
+-- mods.nim_done, side "world": the result of a map step. The sender is the transport's peer: only the map server of
+-- player p's map ran his map step (coop_mode.from_level: a map server's bridge; bridge_of(p): the one of his map). A word
+-- of any other process would give his price back or keep it: dropped in every trust mode (B-REV F5).
 local function done_from_wire(t, from)
-	local leader = whole(from, 1, 65535) and not coop_mode.seat_plays(from)
+	local leader = whole(from, 1, 65535) and coop_mode.from_level(from)
 	if not trust_guard("nimble_done_sender", leader, "peer %s sent the result of an upgrade, it leads no map", tostring(from)) then
 		stats.dropped = stats.dropped + 1
 		return
@@ -482,6 +529,11 @@ local function done_from_wire(t, from)
 	if not coop_mode.decides_world() then return end
 	local ok = whole(t.p, 0, 65535) and valid_op(t.h) and (t.c == 0 or t.c == 1)
 	if not trust_guard("nimble_done_shape", ok, "peer %s sent the result of an upgrade with bad fields", tostring(from)) then
+		return
+	end
+	if not trust_guard("nimble_done_level", bridge_of(t.p) == from,
+		"peer %s sent the result of an upgrade of player #%d, it leads another map", tostring(from), t.p) then
+		stats.dropped = stats.dropped + 1
 		return
 	end
 	settle(t.p, t.h, t.c == 1)
@@ -698,6 +750,12 @@ local function sweep(now)
 			known_n = known_n - 1
 		end
 	end
+	for peer, m in pairs(closed_by) do
+		for op, at in pairs(m) do
+			if now - at > KEEP_MS then m[op] = nil end
+		end
+		if next(m) == nil then closed_by[peer] = nil end
+	end
 end
 
 local function actor_on_update()
@@ -742,6 +800,8 @@ function on_game_start()
 	local ok_mod, has = pcall(function() return mod() ~= nil end)
 	if not (ok_mod and has) then return end -- the mod is not installed: nothing to do
 	local steps = {
+		-- B-REV F7: mods.nim_held is the world's word only; a relay must not make another process's copy look like it
+		function() coop_main.reserve_world_event("mods." .. V_HELD) end,
 		function() C().on(V_HOLD, hold_from_wire, "world") end,
 		function() C().on(V_HOLD_R, function(t) on_hold_answer(t) end, "player") end,
 		function() C().on(V_HELD, held_from_wire, "client") end,

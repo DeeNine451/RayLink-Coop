@@ -1,7 +1,8 @@
 ; The mode cvars of the stand's profiles (docs/MODES.md section 10, mark integrity S2 of the third review).
 ; tools/stand/stand_head.py (deploy, and `profile` before every scenario) removes every mode cvar line (coop_split_levels,
 ; coop_world_server, coop_story_together, coop_soft_host_move, coop_max_map_servers, coop_map_servers_rev,
-; coop_mapserver_*) from <stand>\<folder>\user.ltx and writes the lines of the folder's section below instead: the mode a
+; coop_mapserver_*, and srv_max_map_servers, srv_map_servers_rev, srv_mapserver_*: the names the engine saves since review
+; A-REV-E-1 finding 7) from <stand>\<folder>\user.ltx and writes the lines of the folder's section below instead: the mode a
 ; stand process runs in comes from HEAD, never from what an earlier run (or a hand) left in the profile. A mark names this
 ; file's digest (profile_sha256), and this folder is part of the scenario digest: an edit here is an Ядро change.
 ; Values as the stand ran them on 2026-11-18. appdata_t is the test player's profile; the scenarios copy the host's and

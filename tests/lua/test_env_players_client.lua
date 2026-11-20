@@ -79,6 +79,7 @@ psi_storm_manager = { CPsiStormManager = CPsi, get_psi_storm_manager = function(
 
 -------------------------------------------------------------------------------
 print("== env_players_client")
+dofile("tests/lua/support/modes.lua").live(load_script_file("coop_mode"))
 load_coop_main()
 coop_main.on_game_start()
 local sm = surge_manager.get_surge_manager()

@@ -61,7 +61,7 @@ struct ModeCase
 	// A-S6-IF (S6)
 	bool has_level_side = false; // level() is a LevelSide (a map server)
 	bool level_filter = false; // the players of other maps: reaches, led_elsewhere, to_level_of, join_save, join_from_bridge, level_ready
-	bool delivers_links = false; // deliver_links reaches a link (the host player, the bridges, a map server's world)
+	bool delivers_links = false; // deliver_links reaches a link (the co-op host's player, the world server's bridges; a map server has none)
 	bool server_loading_line = false; // load_text names the map server of the level
 	bool level_ghost = false; // ghost_said and on_world_live are the level's (its actor is a ghost on a map it leads)
 };
@@ -82,9 +82,10 @@ inline const std::vector<ModeCase>& mode_cases()
 		{"world_server", {false, true, false, false, coop::dedicated_roles()}, Where::Away, Where::Away, Where::Away, Where::Joining,
 			Where::Joining, Decider::Nobody, Decider::Other, Decider::Other, Decider::This, Decider::Nobody, true, false, false, true, true,
 			false, false},
-		// a map server: leads its map, its actor a ghost; the world server decides the world
+		// a map server: leads its map, its actor a ghost; the world server decides the world. No link: its bridge carries its level
+		// session, which has no LocalLink (review A-REV-E-1, finding 2); its reports go up through up()
 		{"map_server", {false, false, true, false, coop::map_server_roles()}, Where::Away, Where::Here, Where::Away, Where::Joining,
-			Where::Away, Decider::Nobody, Decider::This, Decider::Other, Decider::This, Decider::Nobody, true, true, true, false, true, true,
+			Where::Away, Decider::Nobody, Decider::This, Decider::Other, Decider::This, Decider::Nobody, true, true, true, false, false, true,
 			true},
 		// a player of a server world: his map's server decides, the world server's seat is nobody's character
 		{"server_client", {true, false, false, false, coop::client_roles()}, Where::Here, Where::Here, Where::Away, Where::Here,

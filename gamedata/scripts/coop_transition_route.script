@@ -158,10 +158,7 @@ end
 
 -- Co-op waits for the group before a scripted level change can fade.
 function trip_waits()
-	if not session_on() then return false end
-	local lv = api.levels
-	local ok, split = pcall(function() return lv and lv.split and lv.split() end)
-	if ok and split then return false end
+	if not session_on() or not coop_mode.group_travels() then return false end
 	local okp, list = pcall(api.players)
 	return okp and type(list) == "table" and #list > 1
 end

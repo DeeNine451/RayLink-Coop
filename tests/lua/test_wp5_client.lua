@@ -12,6 +12,7 @@ local pre_view = from_script("ui_extra", "return function() bump('pre_view') end
 RegisterScriptCallback("actor_on_update", pre_host)
 RegisterScriptCallback("actor_on_update", pre_view)
 
+dofile("tests/lua/support/modes.lua").live(load_script_file("coop_mode"))
 load_coop_main()
 check(DEV_DEBUG == false, "DEV_DEBUG forced off on the client")
 

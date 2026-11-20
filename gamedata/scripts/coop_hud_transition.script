@@ -146,7 +146,7 @@ end
 -------------------------------------------------------------------------------
 local function live()
 	if not api then return false end
-	local ok, on = pcall(function() return api.is_active() and (api.is_host() or api.is_live()) end)
+	local ok, on = pcall(function() return api.is_active() and (coop_mode.decides_world() or api.is_live()) end)
 	return ok and on == true
 end
 
@@ -263,10 +263,11 @@ local function dist_text(d)
 	return string_format(tr("st_coop_transition_row_dist", "%d m"), math_floor(d + 0.5))
 end
 
--- A server's level names (coop_quests_core.part "levels", coop_srv_levels); nil in the co-op, where nobody is on another map.
+-- The map names and gates available to this process.
 local function levels_module()
-	local qc = rawget(_G, "coop_quests_core")
-	local ok, v = pcall(function() return qc and qc.part and qc.part("levels") end)
+	local read = coop_mode.hook("levels.module")
+	if not read then return nil end
+	local ok, v = pcall(read)
 	return ok and type(v) == "table" and v or nil
 end
 
@@ -832,7 +833,9 @@ local function fade_for_the_go(trip)
 	if not (lv and lv.add_pp_effector) then return end
 	-- a trip left the stock callback out with its fade (coop_transition_route): the world server's scripts hear it now
 	local send = rawget(_G, "SendScriptCallback")
-	if trip and send and api and api.is_host and api.is_host() then pcall(send, "on_before_level_changing") end
+	if trip and send and api and api.is_active() and coop_mode.decides_world() then
+		pcall(send, "on_before_level_changing")
+	end
 	local ok, err = pcall(lv.add_pp_effector, FADE_PPE, FADE_ID, false)
 	if ok then
 		stats.fades = stats.fades + 1

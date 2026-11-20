@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <utility>
+#include <vector>
 
 // X-Ray's PCH provides these types when the engine includes coop_script.h.
 using u8 = uint8_t;
@@ -47,6 +48,7 @@ namespace coop
 constexpr PeerId kGuest = 1;
 constexpr PeerId kListener = 2;
 constexpr PeerId kBridge = 0x101;
+struct PeerInfo { PeerId id = kInvalidPeer; };
 
 class Session
 {
@@ -61,6 +63,7 @@ public:
         return nullptr;
     }
     const PeerId* local() const { return host_plays ? &kHostPeer : nullptr; }
+    std::vector<PeerInfo> peers() const { return {PeerInfo{kGuest}, PeerInfo{kListener}}; }
     bool joined(PeerId from) const { return peer(from) || (from == kBridge && bridge_joined); }
 };
 

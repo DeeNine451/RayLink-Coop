@@ -7,7 +7,8 @@
 -- Run: tools\test_lua.cmd tasks_sync
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_reward_group", "coop_tasks", "coop_quests_news", "coop_quests_pda" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_quests_core", "coop_reward_group",
+	"coop_tasks", "coop_quests_news", "coop_quests_pda" }
 
 local function setup_world(M)
 	local e = M.env
@@ -77,6 +78,9 @@ local function setup_world(M)
 end
 
 local function boot(M)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
+	load_script(M, "coop_srv_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do M.env[n].on_game_start() end
 	fire(M, "actor_on_first_update")
@@ -778,8 +782,6 @@ print("== reputation and rank with no recipient on a server ghost")
 do
 	local map = machine("client", 0x101)
 	setup_world(map)
-	local ghost = { actor_is_player = function() return false end, seat_plays = function() return false end }
-	map.env.coop_mode = ghost
 	map.env.coop.is_map_server = function() return true end
 	map.players = {{id=1,avatar_id=500}}
 	boot(map); pump()
@@ -789,16 +791,15 @@ do
 	map.env.game_statistics.increment_rank(12)
 	pump()
 	check(map.rept == ghost_rept and map.rank == ghost_rank, "nobody's reputation and rank on a map server's ghost")
-	local dedicated, mode = Hm.env.coop.is_dedicated, Hm.env.coop_mode
+	local dedicated = Hm.env.coop.is_dedicated
 	Hm.env.coop.is_dedicated = function() return true end
-	Hm.env.coop_mode = ghost
 	local world_rept, world_rank = Hm.rept, Hm.rank
 	Hm.env.game_statistics.increment_reputation(9)
 	Hm.env.game_statistics.increment_rank(4)
 	map.env.coop_tasks.with_character(0, function() map.env.game_statistics.increment_reputation(-15) end)
 	pump()
 	check(Hm.rept == world_rept and Hm.rank == world_rank, "nor on a world server's ghost, from its own logic or a map server's")
-	Hm.env.coop.is_dedicated, Hm.env.coop_mode = dedicated, mode
+	Hm.env.coop.is_dedicated = dedicated
 end
 
 print("== deferred guide fine follows the original character")

@@ -22,6 +22,13 @@ local function boot(set, peer, occupant)
 	E.coop.levels = {
 		split = function() return set:sub(1, 3) == "srv" end,
 		bridge_of_player = function(p) return p == 2 and MACHINES[bridge + 1] and bridge + 1 or bridge end,
+		map_servers = function()
+			local list = {}
+			for id = bridge, bridge + 1 do
+				if MACHINES[id] then list[#list + 1] = { bridge = id, level = id - bridge + 1 } end
+			end
+			return list
+		end,
 	}
 	local players = E.coop.players
 	E.coop.players = function()
@@ -69,7 +76,7 @@ local function boot(set, peer, occupant)
 	E.gameplay_disguise = { is_actor_disguised = function() return false end }
 
 	load_mod(E, "smr_civil_war")
-	for _, n in ipairs({ "coop_mods_core", "coop_npc_players", "coop_trust", "coop_credit", "coop_tasks",
+	for _, n in ipairs({ "coop_mods_core", "coop_npc_players", "coop_trust", "coop_credit", "coop_quests_core", "coop_tasks",
 		"coop_npc_compat", "coop_npc_disguise" }) do load_script(M, n) end
 	E.coop_npc_compat.on_game_start()
 	E.smr_civil_war.on_game_start()

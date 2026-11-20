@@ -138,14 +138,14 @@ local function patch_class()
 	if not cls then return end
 	patch_method(cls, "change_period", function(orig)
 		return function(self, ...)
-			if P.is_client() or P.is_map_server() then return end -- the cycle is the world server's
+			if P.active() and not coop_mode.decides_world() then return end -- the cycle belongs to the world decider
 			return orig(self, ...)
 		end
 	end)
 	local function selecting(orig)
 		return function(self, ...)
 			if weather_policy.choose then return weather_policy.choose(orig, self, ...) end
-			if (weather_policy.draw or P.is_client()) and select_from_snapshot(self, ...) then return end
+			if (weather_policy.draw or coop_mode.is_player_mirror()) and select_from_snapshot(self, ...) then return end
 			return orig(self, ...)
 		end
 	end
@@ -177,12 +177,6 @@ local function wet_release()
 	if not own then return end
 	exec_console_cmd(WET_CMD .. " " .. own.text)
 	own = nil
-end
-
--- Rain on a server client's map is local to that map.
-local function follows_host()
-	local mode = rawget(_G, "coop_mode") or coop_mode
-	return mode == nil or mode.group_travels()
 end
 
 local function faster(base, gap)
@@ -222,26 +216,15 @@ end
 -------------------------------------------------------------------------------
 local next_tick = 0
 
--- The map authority applies the world forecast through the renderer supplied by
--- its policy. The stock selector can also take the cycle and preset alone.
-local cycle_seen = nil
-
-local function map_server_tick(wm)
-	if weather_policy.draw then
-		local have, file_changed = apply(wm)
-		if have then
-			weather_policy.draw(wm, false)
-			if file_changed then wm:set_brightness_boosts() end
-		end
-		return
-	end
+local cycle_seen
+local function draw_stock_forecast(wm)
 	local t = sync_get(KEY_STATE)
 	if type(t) ~= "table" then return end
-	local sig = table.concat({ tostring(t.c), tostring(t.p), tostring(t.lw) }, "|")
+	local kind = tostring(t.lw)
+	local sig = table.concat({ tostring(t.c), tostring(t.p), kind }, "|")
 	if sig == cycle_seen then return end
 	cycle_seen = sig
 	wm.cycle, wm.preset = t.c, t.p
-	local kind = tostring(t.lw)
 	wm.transition_period = kind:find("_transition", 1, true) ~= nil
 	wm.pre_blowout_period = kind:find("_pre_blowout", 1, true) ~= nil
 	wm:select_weather(false)
@@ -250,20 +233,29 @@ end
 
 local function tick()
 	local wm = manager()
-	if P.is_map_server() then
-		patch_class()
-		if wm then map_server_tick(wm) end
-	elseif P.is_host() then
+	if coop_mode.decides_world() then
 		if wm then host_tick(wm) end
 		wet_host_tick()
-	elseif P.client_live() then
-		patch_class()
-		if wm then
-			local have, file_changed = apply(wm)
-			if have and file_changed then wm:set_brightness_boosts() end
-		end
-		if follows_host() then wet_client_tick() else wet_release() end
+		return
 	end
+
+	local draw = weather_policy.draw
+	local follows_world = coop_mode.leads_here()
+	if not (draw or follows_world or P.client_live()) then return end
+	patch_class()
+	if follows_world and not draw then
+		if wm then draw_stock_forecast(wm) end
+		return
+	end
+	if wm then
+		local have, file_changed = apply(wm)
+		if have then
+			if draw then draw(wm, false) end
+			if file_changed then wm:set_brightness_boosts() end
+		end
+	end
+	-- Rain on a server player's map is local to that map.
+	if coop_mode.group_travels() then wet_client_tick() else wet_release() end
 end
 
 local function actor_on_update()

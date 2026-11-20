@@ -34,6 +34,10 @@
 	    pba_<kind>_floor   (guard)  a world action keeps its minimum interval per owner (always on)
 	    pba_<kind>_rate    (trust)  the time since his last accepted request of the kind
 	    pba_<kind>_duration (trust) d within the kind's bound; d is cut to the bound in every mode
+	    pba_blow_lamp      (guard)  B-REV F2, the death lamp's explosion: a death lamp his living character carried was released
+	                                on this process in the last 3 s (his sacrifice asks it to; server_entity_on_unregister),
+	                                or one from a box, a corpse or an NPC within 15 m of him (the loot window; rv_FIX-PBA
+	                                R2), one explosion a lamp (always on)
 	  Network text never becomes a format string or a log line; ids and kinds are checked before they are used.
 
 	m08:4  ability states. The owner's machine reads the mod's own state twice a second and sends the changes:
@@ -83,9 +87,12 @@ local STUN_RANGE = 8 -- metres: the mod stuns a monster within 2 m or the one th
 local DIE_KEY = "af_death_lamp_die" -- PBA af_lucifer.sacrifice_artefact: add_timed_effect(1.8, nil, nil, die, nil, DIE_KEY)
 local BLOW = "ied_new_blow" -- the charge die() creates at the player
 local LUCIFER = "af_lucifer"
+local LAMP = "af_death_lamp" -- B-REV F2: the artefact whose sacrifice arms die() (sacrifice_artefact releases it)
+local LAMP_MS = 3000 -- a released lamp of his allows one explosion this long (die() runs 1.8 s after the release, plus latency)
+local MAX_LAMPS = 4 -- unspent lamps kept per player
 local RESERVED = { k = true, q = true, t = true, n = true, d = true, o = true, ids = true }
 
-local st = { sent = 0, decided = 0, refused = 0, states = 0, stuns = 0, blows = 0, reactions = 0 }
+local st = { sent = 0, decided = 0, refused = 0, states = 0, stuns = 0, blows = 0, reactions = 0, lamps = 0 }
 
 local function whole(v, lo, hi)
 	return type(v) == "number" and v == v and v >= lo and v <= hi and v == math_floor(v)
@@ -111,6 +118,7 @@ local specs = {} -- kind -> spec
 local once = {} -- peer -> the last operation applied (always on)
 local last = {} -- peer -> kind -> time_global() of his last accepted request
 local by_peer, by_id = {}, {} -- states: peer -> { peer, id = his character, ends = { kind = time_global() } }; id -> the same
+local lamps = {} -- B-REV F2: peer -> time_global() of each release of a death lamp of his, unspent, oldest first
 
 function serve(kind, spec)
 	if type(kind) ~= "string" or not kind:match("^[%l_]+$") or #kind > 16 or type(spec) ~= "table"
@@ -297,7 +305,7 @@ end
 -- Ends what ran out; forgets players who left the session or this map, and everything once the session is over.
 local function sweep(now)
 	if not C().active() then
-		by_peer, by_id, once, last = {}, {}, {}, {}
+		by_peer, by_id, once, last, lamps = {}, {}, {}, {}, {}
 		return
 	end
 	local present = { [C().self_peer()] = true }
@@ -320,6 +328,10 @@ local function sweep(now)
 	end
 	for peer in pairs(last) do
 		if not present[peer] then last[peer] = nil end
+	end
+	for peer, list in pairs(lamps) do
+		while list[1] and now - list[1] > LAMP_MS do table.remove(list, 1) end
+		if not (present[peer] and list[1]) then lamps[peer] = nil end
 	end
 end
 
@@ -466,8 +478,78 @@ end
 -------------------------------------------------------------------------------
 -- m08:7 the death lamp's reaction: the explosion on the decider, the personal effect finished once
 -------------------------------------------------------------------------------
--- The decider: the charge at his character (never a position from the network), exploded once it is online.
+-- B-REV F2, the decider: a death lamp a living player carried is released here (his sacrifice asks this process to release
+-- it: coop_requests.cpp host_destroy). server_entity_on_unregister runs inside the release: an offline item is still in its
+-- parent (alife_simulator_base2.cpp unregister_object); an online one has already left it on the server side
+-- (xrServer_process_event_destroy.cpp: Process_event_reject first), while its game object still has the parent until this
+-- process reads the reject later. One unspent lamp of his for LAMP_MS. rv_FIX-PBA R2: the mod offers the sacrifice in the
+-- loot window too (a box, a corpse, a companion he loots: PBA check_lucifer_condition, modes inventory and loot), so a lamp
+-- whose holder is no player counts for every living player within 15 m of that holder (coop_requests.cpp kReachRange);
+-- a credit only sets off one charge at the requester's own character.
+local lamp_released_for
+local function lamp_released(se)
+	if se == nil or not C().active() then return end
+	local ok, sec, parent, id = pcall(function() return se:section_name(), se.parent_id, se.id end)
+	if not (ok and sec == LAMP and whole(id, 1, MAX_ID)) or not coop_mode.leads_here() then return end
+	local holder = nil
+	if whole(parent, 0, MAX_ID) then
+		holder = parent
+	else
+		local okp, p = pcall(function()
+			local obj = level.object_by_id(id)
+			local par = obj and obj:parent()
+			return par and par:id()
+		end)
+		holder = okp and whole(p, 0, MAX_ID) and p or nil
+	end
+	holder = holder and C().root_of(holder)
+	if whole(holder, 0, MAX_ID) and not C().is_player(holder) then
+		-- rv: the mod's sacrifice works in the loot window too (a box, a corpse, a companion he loots): every living player
+		-- within the engine's reach of that holder (coop_requests.cpp kReachRange 15 m)
+		local okp, pos = pcall(function()
+			local o = level.object_by_id(holder)
+			if o then return o:position() end
+			local s2 = alife():object(holder)
+			return s2 and s2.position
+		end)
+		holder = nil
+		if okp and pos then
+			for _, p in ipairs(C().player_objects()) do
+				local okd, d2 = pcall(function() return p.obj:position():distance_to_sqr(pos) end)
+				if okd and type(d2) == "number" and d2 <= 225 then lamp_released_for(p.obj:id()) end
+			end
+		end
+	end
+	lamp_released_for(holder)
+end
+
+lamp_released_for = function(holder)
+	if not (whole(holder, 0, MAX_ID) and C().is_player(holder)) then return end
+	local obj = level.object_by_id(holder)
+	local peer = C().peer_of(holder)
+	if not (obj and obj:alive() and type(peer) == "number") then return end -- a dead player sacrifices nothing
+	local list = lamps[peer]
+	if not list then
+		list = {}
+		lamps[peer] = list
+	end
+	if #list >= MAX_LAMPS then table.remove(list, 1) end
+	list[#list + 1] = time_global()
+	st.lamps = st.lamps + 1
+end
+
+-- The decider: the charge at his character (never a position from the network), exploded once it is online. B-REV F2: only
+-- for a death lamp of his released in the last LAMP_MS, one charge a lamp (always on: the Lucifer stays in his inventory
+-- and proves nothing; the request may come after his own self hit killed him, so it does not ask that he lives).
 local function blow_apply(r)
+	local list = lamps[r.from]
+	local now = time_global()
+	while list and list[1] and now - list[1] > LAMP_MS do table.remove(list, 1) end
+	if not coop_trust.guard("pba_blow_lamp", list ~= nil and list[1] ~= nil,
+		"player #%d: a death lamp's explosion with no death lamp of his released", r.from) then
+		return refused()
+	end
+	table.remove(list, 1)
 	local a = r.owner
 	local se = alife_create(BLOW, a:position(), a:level_vertex_id(), a:game_vertex_id())
 	if not se then return end
@@ -528,6 +610,7 @@ local function install_blow(pba)
 		end
 	end)
 	serve("blow", { items = { [LUCIFER] = true }, alive = false, floor = 5000, every = 10000, apply = blow_apply })
+	RegisterScriptCallback("server_entity_on_unregister", lamp_released)
 end
 
 -- Seraphim: the mod releases the artefact in the same call, so "down" is told before it runs.
@@ -584,8 +667,16 @@ end
 local function status()
 	local n = 0
 	for _ in pairs(by_peer) do n = n + 1 end
-	return string.format("sent %d | decided %d (refused %d): states %d, stuns %d, explosions %d | players with a state %d | "
-		.. "own death lamp reactions %d", st.sent, st.decided, st.refused, st.states, st.stuns, st.blows, n, st.reactions)
+	return string.format("sent %d | decided %d (refused %d): states %d, stuns %d, explosions %d (death lamps released here %d) "
+		.. "| players with a state %d | own death lamp reactions %d", st.sent, st.decided, st.refused, st.states, st.stuns,
+		st.blows, st.lamps, n, st.reactions)
+end
+
+-- Tests and coop_status: unspent death lamps here.
+function _state()
+	local n = 0
+	for _, list in pairs(lamps) do n = n + #list end
+	return { lamps = n }
 end
 
 -- on_game_start never throws (axr_main runs every script's on_game_start in one unprotected loop).

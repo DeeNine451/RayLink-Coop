@@ -84,7 +84,6 @@ end
 -- Public helpers
 -------------------------------------------------------------------------------
 function is_active() return api ~= nil and api.is_active() end
-function is_host() return api ~= nil and api.is_host() end
 function is_client() return api ~= nil and api.is_client() end
 
 local function esc(s)
@@ -897,7 +896,7 @@ end
 
 add_event_handler("coop_env_req", function(_, from)
 	if not env_request_ok("env_phase_sender", env_peer_ok(from), "invalid phase requester %s", tostring(from)) then return end
-	if api and api.is_host() then env_host.next_send = 0 end
+	if api and api.is_active() and coop_mode and coop_mode.decides_world() then env_host.next_send = 0 end
 end)
 
 -- Host: a client's own shelter, reported while an emission or a psi storm runs (player_in_cover).
@@ -1228,17 +1227,13 @@ end
 -- object classes, not callbacks, so the domain filter does not cover them.
 -- F3a (docs\SPLIT_LEVELS.md section 4): a map server runs the jobs of its level's smarts, the NPCs there are its own; who respawns
 -- where stays the world server's: its offline world creates the squads, and they come over through the transfers.
-local function leads_level()
-	return api ~= nil and api.is_client() and api.is_mirror ~= nil and not api.is_mirror()
-end
-
 local function patch_smart_terrain_binder()
 	local m = bind_smart_terrain
 	local cls = m and m.smart_terrain_binder
 	if not (cls and type(cls.update) == "function") then return end
 	local orig = cls.update
 	cls.update = function(self, delta)
-		if api and api.is_client() and not leads_level() then
+		if coop_mode and coop_mode.is_player_mirror() then
 			object_binder.update(self, delta)
 			return
 		end
@@ -1248,7 +1243,7 @@ local function patch_smart_terrain_binder()
 	if se and type(se.try_respawn) == "function" then
 		local orig_respawn = se.try_respawn
 		se.try_respawn = function(self, ...)
-			if leads_level() then return end
+			if coop_mode and coop_mode.leads_here() and not coop_mode.decides_world() then return end
 			return orig_respawn(self, ...)
 		end
 	end
@@ -1283,9 +1278,11 @@ function context_line(t)
 end
 
 local function context_now()
+	local answer = coop_mode and coop_mode.hook("context")
+	local mode_context = answer and answer()
+	local role = mode_context and mode_context.role or (coop_mode and coop_mode.decides_world() and "host" or "client")
 	local list = {}
-	local ms = api.is_client() and not actor_plays()
-	if not ms then -- a map server has a copy of the tasks at most
+	if not (coop_mode and coop_mode.leads_here() and not coop_mode.decides_world()) then -- the map only has copies
 		local tm = rawget(_G, "task_manager") or task_manager
 		local mgr = tm and tm.get_task_manager and tm.get_task_manager()
 		if mgr and type(mgr.task_info) == "table" then
@@ -1293,9 +1290,8 @@ local function context_now()
 			table.sort(list)
 		end
 	end
-	local l = api.levels
-	return { role = ms and "mapserver" or api.is_host() and "host" or "client", level = level.name(), players = #(api.players() or {}),
-		split = l ~= nil and l.split ~= nil and l.split() == true, protocol = api.protocol and api.protocol() or 0, quests = list }
+	return { role = role, level = level.name(), players = #(api.players() or {}), split = mode_context and mode_context.split,
+		protocol = api.protocol and api.protocol() or 0, quests = list }
 end
 
 local function context_tick(tg)
@@ -1321,7 +1317,7 @@ local function actor_on_update()
 	next_tick = tg + 250
 	debug_gate_tick()
 	local plays = actor_plays()
-	if api.is_host() then
+	if api.is_active() and coop_mode and coop_mode.decides_world() then
 		if not host_hooks then install_host_hooks() end
 		host_env_tick()
 		publish_crow_warning(tg)
@@ -1363,11 +1359,12 @@ STATUS_MODULES = {
 }
 
 function print_status()
-	local role = not api and "no engine API" or api.is_host() and "host" or api.is_client() and "client" or "off"
+	local decides = api and api.is_active() and coop_mode and coop_mode.decides_world()
+	local role = not api and "no engine API" or decides and "host" or api.is_client() and "client" or "off"
 	-- the callback router's counters are the engine's ([coop] routes lines), the shim's own line is coop_route's
 	log("role %s, client mode %s | caught lua errors %d, events in %d (%d handler errors), chat %d",
 		role, tostring(client_mode), stats.errors, stats.events_in, stats.event_errors, stats.chat)
-	if api and api.is_host() then
+	if decides then
 		log("emission sync: phase '%s', emission #%d", tostring(env_host.sig), env_host.serial)
 	elseif env_cl.have then
 		log("emission mirror: emission %s (%.0f game s), psi-storm %s (%.0f game s), cover %s, last state %d ms ago, errors %d",

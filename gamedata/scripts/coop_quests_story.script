@@ -151,7 +151,7 @@ local function params_flat(p, t)
 	return t
 end
 
-local function params_of(t)
+function params_of(t)
 	local p = {}
 	for i = 1, 8 do
 		local v = t["p" .. i]
@@ -201,7 +201,7 @@ local function patch_condlist_effects()
 					end
 					return orig(actor, npc, p, ...)
 				end
-				if qc.is_map_server() and (SHARE[name] ~= nil or PERSONAL_STORY[name]) then
+				if coop_mode.leads_here() and not coop_mode.decides_world() and (SHARE[name] ~= nil or PERSONAL_STORY[name]) then
 					-- its actor is a ghost: the reward of the group is the world server's to hand out
 					if qc.in_condlist() and story_scope() then
 						qc.send("share", params_flat(p, { f = name }), 0)
@@ -239,31 +239,16 @@ local function patch_condlist_effects()
 	end
 end
 
-local SHARE_AGAIN_MS = 3000
-local shares_seen = {} -- world server: "bridge|effect|parameters" -> when it last came
+-- The story effects the authority can apply for the group.
+function shared_effect(name)
+	if type(name) ~= "string" or (SHARE[name] == nil and not PERSONAL_STORY[name]) then return nil end
+	local effects = qc.mod("xr_effects")
+	local f = effects and effects[name]
+	return type(f) == "function" and f or nil
+end
 
--- World server: a condlist on a map server's level gave a story reward.
-local function host_on_share(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from < 0x100 or type(t.f) ~= "string"
-		or (SHARE[t.f] == nil and not PERSONAL_STORY[t.f]) then return end
-	local f = qc.mod("xr_effects") and xr_effects[t.f]
-	if type(f) ~= "function" then return end
-	local p = params_of(t)
-	-- A map server has an info it gave only after this server's echo: a line `{-x} %+x =reward(...)%` of its logic can run again
-	-- inside that round trip, and each run says "share" (the quest audit, 2026-11-13, R1). The same reward with the same
-	-- parameters from the same level within a moment is that one reward.
-	local key = from .. "|" .. t.f .. "|" .. table.concat(p, "|")
-	local t_now = time_global()
-	local last = shares_seen[key]
-	shares_seen[key] = t_now
-	if last and t_now - last < SHARE_AGAIN_MS then
-		stats.share_again = (stats.share_again or 0) + 1
-		return
-	end
-	for k, at in pairs(shares_seen) do
-		if t_now - at >= SHARE_AGAIN_MS then shares_seen[k] = nil end
-	end
-	if PERSONAL_STORY[t.f] then
+function apply_shared_effect(name, f, p)
+	if PERSONAL_STORY[name] then
 		for _, id in ipairs(ct().participant_ids()) do
 			ct().with_character(id, function()
 				local body = ct().recipient_body(ct().reward_peer() or 0)
@@ -273,7 +258,7 @@ local function host_on_share(t, from)
 		return
 	end
 	f(db.actor, nil, p)
-	share_reward(t.f, p)
+	share_reward(name, p)
 end
 
 -- Client: a story effect for this player's own actor (rank, reputation, random rifle, ...).
@@ -721,7 +706,9 @@ end
 local function patch_ghost_relations()
 	local xc = qc.mod("xr_conditions")
 	if not xc then return end
-	local function of_ghost(actor) return actor ~= nil and qc.is_map_server() and actor:id() == 0 end
+	local function of_ghost(actor)
+		return actor ~= nil and not coop_mode.actor_is_player() and coop_mode.leads_here() and actor:id() == 0
+	end
 	local function wrap(name, answer)
 		local f = xc[name]
 		if type(f) ~= "function" then return end
@@ -770,7 +757,6 @@ function on_game_start()
 	qc.register_host_action("helmet", host_helmet)
 	qc.register_host_action("flash", host_on_flash)
 	qc.on("relay", client_on_relay, TAG)
-	qc.on("share", host_on_share, TAG)
 	RegisterScriptCallback("actor_on_before_hit", client_before_hit)
 	RegisterScriptCallback("actor_on_update", client_dao_update)
 	RegisterScriptCallback("actor_on_first_update", install)

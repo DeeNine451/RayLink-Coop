@@ -5,3 +5,18 @@
 ; default: every check without a line of its own.
 [coop_trust]
 default = log
+; Checks whose request is dropped whatever this setting says (a malformed or unauthorized packet): "refuse" only makes the
+; log say what happens. Build 57, S6 integration.
+quest_bribe_hit_sender = refuse
+quest_bribe_hit_community = refuse
+quest_act_sender = refuse
+quest_act_relay_peer = refuse
+quest_act_relay_action = refuse
+quest_act_fields = refuse
+quest_act_action = refuse
+pda_announce_sender = refuse
+pda_announce_nick = refuse
+pda_achv_name = refuse
+pda_ency_section = refuse
+level_request_sender = refuse
+level_request_peer = refuse

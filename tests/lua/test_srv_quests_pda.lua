@@ -133,5 +133,40 @@ for _, flag in ipairs({ false, true }) do
 	check(#sent_to(MS, "quests.ency") == 2, label .. ": the map server does not send the world's article back")
 end
 
+do
+	local W = world(true)
+	local ency = W.handlers["quests.ency"]
+	local achv = W.handlers["quests.achv"]
+	local forged = string.rep("A", 49) -- the transport accepts nicks of at most 48 bytes
+	ency(H.encode({ s = ARTICLE, n = "Impostor" }), BRIDGE + 1)
+	achv(H.encode({ a = ACHV, n = "Impostor" }), BRIDGE + 1)
+	check(not W.unl[ARTICLE] and not W.achv[ACHV] and #W.sent == 0,
+		"an unregistered bridge cannot apply or forward either PDA announcement")
+
+	ency(H.encode({ s = ARTICLE, n = forged }), BRIDGE)
+	achv(H.encode({ a = ACHV, n = forged }), BRIDGE)
+	ency(H.encode({ s = ARTICLE, n = false }), BRIDGE)
+	achv(H.encode({ a = ACHV, n = "" }), BRIDGE)
+	check(not W.unl[ARTICLE] and not W.achv[ACHV] and #W.sent == 0,
+		"a registered bridge cannot apply or forward malformed nicknames")
+	local trust = W.env.coop_trust.status()
+	check(trust.pda_announce_sender and trust.pda_announce_sender.failed == 2
+		and trust.pda_announce_nick and trust.pda_announce_nick.failed == 4,
+		"each rejected PDA sender or nickname reaches the trust ledger")
+
+	ency(H.encode({ s = ARTICLE, n = "Impostor" }), 1)
+	achv(H.encode({ a = ACHV, n = "Impostor" }), 1)
+	local articles = sent_to(W, "quests.ency")
+	local achievements = sent_to(W, "quests.achv")
+	check(#articles == 1 and articles[1].t.n == "Ann" and #achievements == 1 and achievements[1].t.n == "Ann",
+		"the world takes a player's nickname from the transport's player row")
+
+	local longest = string.rep("A", 48)
+	ency(H.encode({ s = ARTICLE2, n = longest }), BRIDGE)
+	ency(H.encode({ s = ARTICLE3 }), BRIDGE)
+	check(W.unl[ARTICLE2] and W.shown[#W.shown - 1].nick == longest and W.unl[ARTICLE3],
+		"a registered map can report a transport-sized nickname or omit it if no player is available")
+end
+
 print(string.format("== %d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then error("failures") end

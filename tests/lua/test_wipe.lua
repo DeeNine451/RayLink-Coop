@@ -77,6 +77,8 @@ local function mini_ini(sections)
 	return o
 end
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_script("coop_mode"), load_script)
 coop_wipe.on_game_start()
 
 -- ------------------------------------------------------------------ the shipped table

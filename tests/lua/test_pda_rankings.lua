@@ -102,6 +102,8 @@ local function shown(w) local n = 0 for i = 1, OWN do if w.rows[i] then n = n + 
 
 -- boot: coop_quests_pda wraps the pda functions on actor_on_first_update, ours on the first actor_on_update after it
 local function boot(M, with_fix)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
 	load_script(M, "coop_quests_core").on_game_start()
 	load_script(M, "coop_quests_pda").on_game_start()
 	if with_fix then load_script(M, "coop_pda_rankings").on_game_start() end

@@ -154,6 +154,7 @@ local HOOK_OF_SCRIPT = {
 local HOOK_OF_ENGINE = { -- coop.levels.*
 	["levels.level_of_player"] = "level_of_player",
 	["levels.far_place"] = "far_place",
+	["levels.bridge_of_player"] = "bridge_of_player", -- B-REV F5: the bridge of a player's map (the world server's answer)
 }
 local HOOK_MADE = {
 	-- the server's level names and gates (coop_srv_levels: name, elsewhere, map_of, ...)
@@ -197,12 +198,21 @@ local function far() return mod("coop_srv_quests_far") end
 
 local function level_request(name, payload, from)
 	if map_server() then
-		-- only the world server passes a request on, with the player in it
+		-- only the world server passes a request on, with the player in it; a refusal is counted before the drop (both
+		-- were always dropped: coop_trust only says so, mod_system_coop_trust.ltx refuses them)
 		local m = main()
-		if from ~= 0 or not m then return "drop" end
+		if not m then return "drop" end
+		local trust = mod("coop_trust")
+		if from ~= 0 then
+			if trust then trust.pass("level_request_sender", false, "%s from peer %s: not the world server", tostring(name), tostring(from)) end
+			return "drop"
+		end
 		local t = m.decode(payload)
 		local peer = tonumber(t._peer)
-		if not peer then return "drop" end
+		if not peer then
+			if trust then trust.pass("level_request_peer", false, "%s from the world server: no player", tostring(name)) end
+			return "drop"
+		end
 		t._peer = nil
 		return "here", m.encode(t), peer, true
 	end

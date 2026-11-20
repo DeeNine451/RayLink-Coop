@@ -216,7 +216,7 @@ local function machine(self_peer, opts)
 		}
 	end
 	env.coop_core_hud = { set_revive = function(peer, frac, by) M.panel[#M.panel + 1] = { peer = peer, frac = frac, by = by } end }
-	for _, name in ipairs({ "coop_allies", "coop_hud_revive" }) do
+	for _, name in ipairs({ "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_allies", "coop_hud_revive" }) do
 		local src = readfile(ROOT .. "scripts/" .. name .. ".script")
 		local mod = setmetatable({}, { __index = env })
 		env[name] = mod
@@ -231,6 +231,8 @@ local function machine(self_peer, opts)
 			end
 		end
 	end
+	env.coop_hostplay_mode.on_game_start()
+	env.coop_srv_mode.on_game_start()
 	M.A, M.R = env.coop_allies, env.coop_hud_revive
 	for _, name in ipairs({ "coop_allies", "coop_hud_revive" }) do
 		local m = env[name]

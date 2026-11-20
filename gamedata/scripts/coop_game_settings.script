@@ -686,7 +686,8 @@ local function at_now()
 			end
 			-- alone: this machine's own player. Not a world server: its own seat plays no character and is in no list of players
 			-- (docs\plans\2026-11-12-split-levels-native.md section 1), nobody was there
-			local world_server = type(api.is_dedicated) == "function" and api.is_dedicated() == true
+			-- (S6: the facade's answer; HEAD read coop.is_dedicated: only the world server decides the world without seat 0 playing)
+			local world_server = coop_mode.decides_world() and not coop_mode.seat_plays(0)
 			if #players == 0 and not world_server and type(info.nick) == "string" and info.nick ~= "" then players[1] = info.nick end
 		end
 	end

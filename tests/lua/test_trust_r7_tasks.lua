@@ -12,7 +12,7 @@
 -- bodies). Run: tools\test_lua.cmd trust_r7_tasks
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
 local SE, STORY, SQUADS = {}, {}, {}
 
 local function setup(M)
@@ -112,6 +112,7 @@ local function take_all(sec)
 	end
 end
 local function server(on, talking)
+	Hm.env.coop.is_dedicated = on and function() return true end or nil
 	if on then
 		Hm.env.coop_quests_core.is_far_peer = function(p) return p == 1 end
 		Hm.env.coop.levels = { talking = function(p) return p == 1 and (talking == nil or talking()) end }

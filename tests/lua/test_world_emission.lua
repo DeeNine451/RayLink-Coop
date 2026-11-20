@@ -59,6 +59,7 @@ local pm = setmetatable({ _state_loaded = true, started = false }, CPsi)
 pm:initialize()
 psi_storm_manager = { CPsiStormManager = CPsi, get_psi_storm_manager = function() return pm end }
 
+dofile("tests/lua/support/modes.lua").live(load_script_file("coop_mode"))
 load_coop_main()
 coop_main.on_game_start()
 TF = 10

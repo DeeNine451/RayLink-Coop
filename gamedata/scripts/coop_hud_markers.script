@@ -123,7 +123,7 @@ end
 
 local function live()
 	if not in_session() then return false end
-	local ok, on = pcall(function() return api.is_host() or api.is_live() end)
+	local ok, on = pcall(function() return (coop_mode.decides_world() and api.is_active()) or api.is_live() end)
 	return ok and on == true
 end
 

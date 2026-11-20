@@ -13,15 +13,11 @@
 	Answers: true, {msg = "...", id = ...} | false, "<code>" | true, "forwarded" (a map server runs it; the end comes as coop.dbg.note).
 
 	Where (coop_debug_cmds .where): ws - here. player_level - the authority of the player's level: here when this process leads it
-	(P.player(peer).here), else coop.dbg.run to the bridge of his level. target_level - the authority of the object's level: here, or
-	for kill / release the far order of the far view (coop_srv_quests_far: quests.far_do, it retries and falls back to the record), else
-	coop.dbg.run.
+	(P.player(peer).here), else the level dispatcher. target_level - here, a far order (kill / release), or the level dispatcher.
 	A squad or an object at a smart: the authority of the smart's level when players stand there, else the WS makes it offline.
 
 	Events (flat tables, coop_main.encode):
-		coop.dbg.run   WS -> bridge   { _c = cmd, _peer = player, _rid = number, <checked args> }; a map server takes it from 0 only
-		coop.dbg.done  bridge -> WS   { rid, ok, msg, code, id }
-		coop.dbg.note  WS -> player   { ok, msg, code, cmd, rid }: how a forwarded request ended (the F7 window shows it)
+		The level dispatcher handles coop.dbg.run, coop.dbg.done and coop.dbg.note.
 		coop.dbg.say   WS -> all      { nick, cmd, text }: the announcement "[debug] <nick>: <text>" in the chat feed (B.5), shown here
 		                              too when this process has a player; a machine takes it from 0 only
 		coop.dbg.order WS -> player   { k = "level", name }: the player's machine runs the stock level change (package 3 handles it)
@@ -45,9 +41,11 @@ local HANDLERS = {
 	spawn = { name = "coop.dbg.spawn", burst = 10, per_sec = 2 },
 	target = { name = "coop.dbg.target", burst = 10, per_sec = 2 },
 }
-EV_RUN, EV_DONE, EV_NOTE, EV_SAY = "coop.dbg.run", "coop.dbg.done", "coop.dbg.note", "coop.dbg.say"
-local PENDING_MS = 60000
+local EV_SAY = "coop.dbg.say"
 local DEBUG_INFO = "debug_mode_flag_on"
+local LAST_PLAYER_PEER = 16 -- kMaxPeerSlots - 1 (coop_protocol.h)
+local MAX_NICK_BYTES = 128
+local MAX_SAY_BYTES = 2048
 
 local function fmt(f, ...)
 	local ok, s = pcall(string_format, f, ...)
@@ -71,20 +69,6 @@ local function call(f, ...)
 	return ok and v or nil
 end
 
-local function is_world_server()
-	if not api then return false end
-	if type(api.is_world_server) == "function" then return call(api.is_world_server) == true end
-	return call(api.is_host) == true and call(api.is_map_server) ~= true
-end
-
-local function is_map_server() return api ~= nil and call(api.is_map_server) == true end
-
-local function has_player()
-	if not api then return false end
-	if type(api.is_player) == "function" then return call(api.is_player) == true end
-	return true
-end
-
 -- coop.debug.state() of the contract: a table {on, source, serial} (or a bare boolean)
 function debug_on()
 	local d = api and api.debug
@@ -95,44 +79,10 @@ function debug_on()
 	return s == true
 end
 
-local function say(line)
+function say(line)
 	log("%s", line)
 	local d = api and api.debug
 	if d and d.say then pcall(d.say, line) end
-end
-
-local function levels() return api and type(api.levels) == "table" and api.levels or nil end
-
-local function split()
-	local l = levels()
-	return l ~= nil and call(l.split) == true
-end
-
-local function led_here()
-	if not split() then return true end
-	return false
-end
-
-local function bridge_of_level(lid)
-	local l = levels()
-	local list = l and call(l.map_servers)
-	if type(list) ~= "table" then return nil end
-	for _, ms in ipairs(list) do
-		if ms.level == lid then return ms.bridge end
-	end
-	return nil
-end
-
--- the server's far view (coop_quests_core.part "far", coop_srv_quests_far), nil in the co-op
-local function far_part()
-	local qc = rawget(_G, "coop_quests_core")
-	return qc and qc.part and qc.part("far") or nil
-end
-
-local function level_of_object(id)
-	local far = far_part()
-	if far and far.level_of_id then return call(far.level_of_id, id) end
-	return nil
 end
 
 -------------------------------------------------------------------------------
@@ -154,15 +104,19 @@ end
 
 function announce(by, id, text)
 	say(fmt("[debug] %s: %s", tostring(by), tostring(text)))
-	P().send(EV_SAY, { nick = by, cmd = id, text = text }, -1)
+	coop_mode.publish(EV_SAY, { nick = by, cmd = id, text = text })
 	-- the WS's own Lua gets no copy of its broadcast: its player (the host player) is shown here
-	if has_player() then show(by, text) end
+	if coop_mode.actor_is_player() then show(by, text) end
 end
 
 local function on_say(payload, from)
-	if from ~= 0 then return end
+	local trusted = from == 0
+	if not coop_trust.pass("debug_say_sender", trusted, "debug announcement from peer %s", tostring(from)) or not trusted then return end
 	local t = P().decode(payload)
-	show(t.nick or "?", t.text or "")
+	local valid = type(t.nick) == "string" and #t.nick <= MAX_NICK_BYTES and R().get(t.cmd) ~= nil
+		and type(t.text) == "string" and #t.text <= MAX_SAY_BYTES
+	if not coop_trust.pass("debug_say_payload", valid, "invalid debug announcement from peer %s", tostring(from)) or not valid then return end
+	show(t.nick, t.text)
 end
 
 -------------------------------------------------------------------------------
@@ -201,8 +155,8 @@ function ids_text(ids)
 end
 
 local function role_name()
-	if is_world_server() then return "the world server" end
-	if is_map_server() then return "a map server" end
+	if coop_mode.decides_world() then return "the world server" end
+	if coop_mode.leads_here() then return "a map server" end
 	return "this process"
 end
 
@@ -218,7 +172,7 @@ local function log_made(ctx, id, rid)
 end
 
 -- -> ok, result | false, code[, why]
-local function execute(c, id, a, peer, by, rid)
+function execute(c, id, a, peer, by, rid)
 	local pl = peer ~= nil and P().player(peer) or nil
 	local ctx = { a = a, peer = peer, pl = pl, by = by }
 	if c.args.t then
@@ -246,83 +200,15 @@ local function line_of(r)
 end
 
 -------------------------------------------------------------------------------
--- Forwarding to a map server (B.6, B.10)
--------------------------------------------------------------------------------
-local pending = {} -- rid -> { requester = peer | nil (console), by, id, at }
-local next_rid = 0
-
-local function forward(bridge, id, a, peer, requester, by)
-	if not bridge then return false, "other_level" end
-	for rid, p in pairs(pending) do
-		if time_global() - p.at > PENDING_MS then pending[rid] = nil end
-	end
-	next_rid = next_rid + 1
-	local t = {}
-	for k, v in pairs(a) do t[k] = v end
-	t._c, t._peer, t._rid = id, peer, next_rid
-	if not P().send(EV_RUN, t, bridge) then return false, "failed" end
-	pending[next_rid] = { requester = requester, by = by, id = id, at = time_global() }
-	log("%s from %s (peer %s) forwarded to #%s (rid %d): sec %s n %s at %s", id, tostring(by), tostring(peer), tostring(bridge),
-		next_rid, tostring(a.sec), tostring(a.n), tostring(a.at))
-	return true, "forwarded"
-end
-
--- a map server: the WS passes a player's request of its level
-local function on_run(payload, from)
-	if from ~= 0 or not is_map_server() then return end
-	local t = P().decode(payload)
-	local id, peer, rid = t._c, tonumber(t._peer), tonumber(t._rid)
-	t._c, t._peer, t._rid = nil, nil, nil
-	local c = R().get(id)
-	if not (c and rid) then return end
-	local ok, a, why = R().validate(id, t)
-	local res_ok, r, code
-	log("%s rid %d for peer %s taken from the world server", tostring(id), rid, tostring(peer))
-	if ok then
-		res_ok, r, code = execute(c, id, a, peer, "#" .. tostring(peer), rid)
-	else
-		res_ok, r = false, a
-	end
-	local done = { rid = rid, ok = res_ok == true }
-	if res_ok then
-		done.msg = line_of(r)
-		if type(r) == "table" and type(r.id) == "number" then done.id = r.id end
-	else
-		done.code = tostring(r)
-		done.msg = tostring(r)
-	end
-	P().send(EV_DONE, done, 0)
-end
-
--- the WS: a map server says how it ended
-local function on_done(payload, from)
-	if not is_world_server() or type(from) ~= "number" or from < 0x100 then return end
-	local t = P().decode(payload)
-	local rid = tonumber(t.rid)
-	local p = rid and pending[rid]
-	if not p then
-		log("! coop.dbg.done rid %s from #%s: no such request waits (answered already, or older than %d s)", tostring(t.rid),
-			tostring(from), PENDING_MS / 1000)
-		return
-	end
-	pending[rid] = nil
-	local ok = t.ok == true
-	log("%s rid %d done by #%s: %s %s (id %s)", tostring(p.id), rid, tostring(from), ok and "ok" or "refused",
-		tostring(ok and t.msg or t.code), tostring(t.id))
-	if ok then announce(p.by, p.id, t.msg or p.id) end
-	if p.requester ~= nil then
-		P().send(EV_NOTE, { ok = ok, msg = t.msg or "", code = not ok and (t.code or "failed") or nil, cmd = p.id, rid = rid }, p.requester)
-	else
-		say(fmt("coop_dbg %s: %s", p.id, ok and tostring(t.msg) or tostring(t.code or "failed")))
-	end
-end
-
--------------------------------------------------------------------------------
 -- Where a command runs (B.6) and the checks before (B.5 steps 4-6)
 -------------------------------------------------------------------------------
-local function smart_level(se_smart)
-	local ok, lid = pcall(function() return game_graph():vertex(se_smart.m_game_vertex_id):level_id() end)
-	return ok and lid or nil
+-- A dispatcher can return nil for a smart that should be handled here (offline).
+local function level_dispatch(kind)
+	if kind ~= "smart" then return false, "other_level" end
+end
+
+function set_level_dispatch(fn)
+	level_dispatch = fn
 end
 
 -- -> ok, result | false, code
@@ -345,16 +231,15 @@ local function dispatch(c, id, a, peer, requester, by)
 	if where == "ws" then return execute(c, id, a, peer, by) end
 
 	if where == "target_level" then
-		local lid = level_of_object(a.t)
-		if lid == nil or led_here(lid) then return execute(c, id, a, peer, by) end
-		local bridge = bridge_of_level(lid)
+		local far = coop_mode.far()
+		local lid = call(far.level_of_id, a.t)
+		if lid == nil then return execute(c, id, a, peer, by) end
 		if c.far then
-			-- a map server's object: kill and release go as the far order (quests.far_do); it falls back to the record
-			local far = far_part()
-			if not (far and far.order and far.order(a.t, c.far)) then return false, "failed" end
+			-- Kill and release use the far order, which falls back to the record.
+			if not far.order(a.t, c.far) then return false, "failed" end
 			return true, { msg = fmt("%s %s ordered", id, tostring(a.t)) }
 		end
-		return forward(bridge, id, a, peer, requester, by)
+		return level_dispatch("target", lid, id, a, peer, requester, by)
 	end
 
 	-- player_level
@@ -362,11 +247,9 @@ local function dispatch(c, id, a, peer, requester, by)
 		local smrt = R().smart_by_name(a.sm)
 		local se_smart = smrt and alife_object(smrt.id)
 		if not se_smart then return false, "bad_args" end
-		local lid = smart_level(se_smart)
-		local l = levels()
-		local players = l and call(l.players_on, lid) or 0
-		if lid == nil or led_here(lid) or (tonumber(players) or 0) == 0 then return execute(c, id, a, peer, by) end
-		return forward(bridge_of_level(lid), id, a, peer, requester, by)
+		local ok, r = level_dispatch("smart", se_smart, id, a, peer, requester, by)
+		if ok ~= nil then return ok, r end
+		return execute(c, id, a, peer, by)
 	end
 	if id == "tp_to_player" then
 		local other = P().player(a.p)
@@ -374,8 +257,7 @@ local function dispatch(c, id, a, peer, requester, by)
 		if other.level ~= pl.level then return false, "other_level" end
 	end
 	if pl.here then return execute(c, id, a, peer, by) end
-	local l = levels()
-	return forward(l and call(l.bridge_of_player, peer), id, a, peer, requester, by)
+	return level_dispatch("player", peer, id, a, peer, requester, by)
 end
 
 -- the end of a request: log and the announcement
@@ -391,35 +273,46 @@ end
 -------------------------------------------------------------------------------
 -- Requests of the players (B.5)
 -------------------------------------------------------------------------------
+local function refuse_request(class, from, code)
+	coop_trust.pass("debug_request", false, "%s request from peer %s refused: %s", class, tostring(from), code)
+	return false, code
+end
+
 -- -> ok, result (coop.sync answer)
 function serve(class, from, args)
-	if type(args) ~= "table" then return false, "bad_args" end
-	if class ~= "view" and not debug_on() then return false, "debug_off" end
-	if tonumber(args.v) ~= R().VERSION then return false, "old_client" end
+	if type(args) ~= "table" then return refuse_request(class, from, "bad_args") end
+	if class ~= "view" and not debug_on() then return refuse_request(class, from, "debug_off") end
+	if tonumber(args.v) ~= R().VERSION then return refuse_request(class, from, "old_client") end
 	local id = args.cmd
 	local c = R().get(id)
-	if not c or c.class ~= class then return false, "unknown_cmd" end
+	if not c or c.class ~= class then return refuse_request(class, from, "unknown_cmd") end
+	if type(from) ~= "number" or from < 0 or from > LAST_PLAYER_PEER or from % 1 ~= 0 then
+		return refuse_request(class, from, "no_player")
+	end
 	local pl = P().player(from)
-	if not pl then return false, "no_player" end
+	if not pl then return refuse_request(class, from, "no_player") end
 	local ok, a = R().validate(id, args)
-	if not ok then return false, a end
+	if not ok then return refuse_request(class, from, a) end
 	local by = pl.nick or ("#" .. tostring(from))
 	local res_ok, r, code = dispatch(c, id, a, from, from, by)
 	-- the command ran (or was refused) already: a broken log or announcement must not turn its answer into "handler error"
 	local fin_ok, fin_err = pcall(finish, id, by, res_ok, r, code)
 	if not fin_ok then P().report("debug", "announce " .. tostring(id), fin_err) end
-	if not res_ok then return false, tostring(r) end
+	if not res_ok then return refuse_request(class, from, tostring(r)) end
 	return true, r
 end
 
 local function install_handlers()
 	local sync = api and api.sync
 	if not (sync and sync.handler) then return end
-	if call(api.is_client) == true or is_map_server() then return end
+	-- Native sync registration checks authority even before the Lua mode layer has started.
 	for class, h in pairs(HANDLERS) do
 		local ok, why = sync.handler(h.name, function(peer, args) return serve(class, peer, args) end)
-		if ok == false then log("! %s: no handler (%s)", h.name, tostring(why)) end
-		if sync.limit then sync.limit(h.name, h.burst, h.per_sec) end
+		if ok then
+			if sync.limit then sync.limit(h.name, h.burst, h.per_sec) end
+		elseif why ~= "host only" then
+			log("! %s: no handler (%s)", h.name, tostring(why))
+		end
 	end
 end
 
@@ -512,7 +405,7 @@ local function run_console(line, op)
 	local p, why = parse(line)
 	if not p then return "coop_dbg: " .. tostring(why) end
 	if p.cmd == "help" then return help_text(p.args.cmd) end
-	if not is_world_server() then return "coop_dbg: the world server's console only" end
+	if not (api and api.is_active() and coop_mode.decides_world()) then return "coop_dbg: the world server's console only" end
 	if not debug_on() then return "coop_dbg: debug_off (coop_debug on first)" end
 	local c = R().get(p.cmd)
 	if not c then return "coop_dbg: unknown_cmd " .. p.cmd end
@@ -586,7 +479,7 @@ end
 -- Debug on marks the world (owner decision 1, as the stock -dbg does: S/game_statistics.script 248)
 -------------------------------------------------------------------------------
 local function mark_world(on)
-	if not (is_world_server() and (on or debug_on())) then return end
+	if not (api.is_active() and coop_mode.decides_world() and (on or debug_on())) then return end
 	local ok, err = pcall(function()
 		if not has_alife_info(DEBUG_INFO) then
 			give_info(DEBUG_INFO)
@@ -603,7 +496,7 @@ end
 local function on_first_update()
 	mark_world()
 	-- respawns switched off by debug stay off in this save (alife_storage_manager state); the override is gone with the old Lua
-	if is_world_server() then
+	if api.is_active() and coop_mode.decides_world() then
 		pcall(function()
 			local s = alife_storage_manager.get_state()
 			if s and s.stop_respawns then R().respawns_hook() end
@@ -616,8 +509,6 @@ function on_game_start()
 	if not api then return end
 	local m = cmain()
 	if m and m.add_event_handler then
-		m.add_event_handler(EV_RUN, on_run)
-		m.add_event_handler(EV_DONE, on_done)
 		m.add_event_handler(EV_SAY, on_say)
 	end
 	RegisterScriptCallback("coop_debug_changed", on_debug_changed)

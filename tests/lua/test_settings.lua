@@ -153,6 +153,11 @@ local function load_module(W, name)
 	return W[name]
 end
 
+local modes = dofile("tests/lua/support/modes.lua")
+local function start_mode(W)
+	modes.live(load_module(W, "coop_mode"), function(name) return load_module(W, name) end)
+end
+
 -- deliver events sent by `from_w` (peer id from_id) to `to_w`, for those addressed to to_id
 local function deliver(from_w, from_id, to_w, to_id)
 	local n = 0
@@ -187,6 +192,8 @@ local Cl = make_world("client",
 		["my_mod/general/key_heal"] = "55" },
 	{ g = { type = 1, hit_power = 1, thirst = true }, e = { type = 1, buy = 1 } })
 
+start_mode(H)
+start_mode(Cl)
 local hs = load_module(H, "coop_settings")
 local cs = load_module(Cl, "coop_settings")
 hs.on_game_start()
@@ -342,6 +349,7 @@ end
 -- level load: a new Lua state on the client restores from the stash before any network message
 local C2 = make_world("client", { ["gameplay/general/max_tasks"] = "2" }, {}, { g = {}, e = {} })
 C2.STASH = Cl.STASH
+start_mode(C2)
 local cs2 = load_module(C2, "coop_settings")
 check(C2.ui_options.get("gameplay/general/max_tasks") == 8, "stash restores the host's values at load time")
 cs2.on_game_start()
@@ -360,6 +368,8 @@ local big = {}
 for i = 1, 3000 do big[string.format("big_mod/page_%d/loot_value_%d", i % 7, i)] = tostring(i * 1.5) end
 local H3 = make_world("host", {}, big, { g = { hit_power = 1 }, e = {} })
 local C3 = make_world("client", {}, {}, { g = {}, e = {} })
+start_mode(H3)
+start_mode(C3)
 local hs3 = load_module(H3, "coop_settings")
 load_module(C3, "coop_settings")
 hs3.on_game_start()

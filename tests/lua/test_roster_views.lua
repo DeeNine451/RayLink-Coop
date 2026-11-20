@@ -38,6 +38,8 @@ local function set_roster(mode, roster, operator)
 	OPS = {}
 end
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_script_file("coop_mode"), load_script_file)
 local chat = load_script_file("coop_core_chat")
 local SYS = {}
 chat.system = function(t) SYS[#SYS + 1] = tostring(t) end

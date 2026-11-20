@@ -1,0 +1,4 @@
+-- srv: the server's own table is the server layer's to read
+function split_now()
+	return srv.split() and srv.dedicated_new_world() and coop.dedicated_new_world()
+end

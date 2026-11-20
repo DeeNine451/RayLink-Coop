@@ -1,0 +1,22 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- Review A-REV-E-1 finding 1: a Core script reads the server's predicates through the global table srv.* (A-S4H)
+function run_on_server_only()
+	if srv.split() then return "server" end
+	if srv.dedicated_new_world() then return "new world" end
+	if coop.dedicated_new_world() then return "new world (the old copy)" end
+	local s = srv
+	if s.split() then return "aliased" end
+	if _G.srv.split() then return "through _G" end
+	if _G["srv"].split() then return "indexed" end
+	local t = rawget(_G, "srv")
+	if srv:split() then return "a method" end
+	return t and "co-op"
+end
+local function on_server() return srv.split() end
+function ask() if on_server() then return 1 end end
+-- not the table: a constructor key, a field, a string, a longer name, a comment srv.split()
+local KNOWN = { hostplay = true, srv = true }
+function names(t)
+	local text = "srv.split() in a string is not code"
+	return t.srv, KNOWN.srv, text, coop_mode.when_srv ~= nil, t["srv"]
+end

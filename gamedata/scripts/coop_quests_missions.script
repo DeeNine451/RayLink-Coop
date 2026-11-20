@@ -293,8 +293,9 @@ end
 local function talked_recently(from, npc)
 	local api = qc.engine()
 	if qc.is_far_peer(from) then -- his talk lock is on the map server, which reports it with his place
-		local l = api.levels
-		return l.talking == nil or l.talking(from) == true
+		if not coop_mode.decides_world() then return false end
+		local facts = coop_mode.facts_of(from)
+		return facts == nil or facts.talking ~= false
 	end
 	local recent = api and api.talk_recent
 	if type(recent) ~= "function" then return true end -- an engine without the talk locks: the reach check alone
@@ -467,7 +468,7 @@ end
 local function host_trade(from, t)
 	local dm = qc.mod("death_manager")
 	if not dm or paced(from, "trade:" .. tostring(t.n)) then return end
-	local npc = talk_partner(from, tonumber(t.n), "trade")
+	local npc = talk_partner(from, t.n, "trade")
 	if not (npc and IsStalker(npc)) then return end
 	local id = npc:id()
 	local known = dm.get_items_by_npc(id)
@@ -508,7 +509,7 @@ local function player_id(obj)
 	return player_ids[id] and id or nil
 end
 
-local function leads_level() return qc.is_host() or qc.is_map_server() end
+local function leads_level() return qc.active() and (coop_mode.decides_world() or coop_mode.leads_here()) end
 
 local function on_enemy_eval(obj, enemy, flags)
 	if flags.override or not player_id(enemy) or not leads_level() then return end
@@ -528,26 +529,17 @@ local function on_npc_hit(npc, amount, dir, who)
 	if not (xb and type(xb.npc_on_hit_callback) == "function") then return end
 	local comm = character_community(npc)
 	pcall(xb.npc_on_hit_callback, comm)
-	if qc.is_map_server() then qc.send("bribe_hit", { c = comm }, 0) end -- the ceasefire is in the world server's save
-end
-
--- The world server: a player broke a ceasefire on a map server's level.
-local function on_bribe_hit(t, from)
-	if not qc.is_host() or type(from) ~= "number" or from < 0x100 or type(t.c) ~= "string" then return end
-	local xb = qc.mod("xr_bribe")
-	if xb and type(xb.npc_on_hit_callback) == "function" then pcall(xb.npc_on_hit_callback, t.c) end
+	if not coop_mode.decides_world() then qc.send("bribe_hit", { c = comm }, 0) end -- the ceasefire is in the world server's save
 end
 
 -- A ceasefire is bought on the world server (the relay) and holds on every level: a map server gets the table.
 local function share_ceasefires()
-	local share = qc.share and qc.share() -- the Core keeps the tables, a server's share carries them (coop_srv_levels_share)
-	if not share then return end
 	local function data()
 		local m = qc.mod("xr_bribe")
 		local v = m and coop_mods_core.find_local(m, "M_DATA")
 		return type(v) == "table" and v or nil
 	end
-	share.down("bribe", data, function(v)
+	coop_mode.share_down("bribe", data, function(v)
 		local mine = data()
 		if not mine then return end
 		for k in pairs(mine) do mine[k] = nil end
@@ -613,7 +605,7 @@ local function patch_slht_rewards()
 			end
 		end
 	end
-	local m = qc.is_host() and slht_table()
+	local m = qc.active() and coop_mode.decides_world() and slht_table()
 	if m and type(us.reward_table) == "table" then m.slht_reward_table = us.reward_table end -- the stock puts it there when it saves
 end
 
@@ -665,7 +657,7 @@ local TISSUE_COUNT = "yan_ecolog_semenov_task_1_tissue_count"
 
 -- The world server's: the counter is in its actor's pstor. A kill on a map server's level comes by the death relay (coop_srv_quests_far).
 local function monster_on_death(victim, killer)
-	if not (qc.is_host() and victim and killer) then return end
+	if not (qc.active() and coop_mode.decides_world() and victim and killer) then return end
 	local ok, kid = pcall(function() return killer:id() end)
 	if not (ok and qc.is_character_id(kid) and IsMonster(victim)) then return end
 	if not get_story_object("yan_ecolog_semenov") then return end
@@ -874,7 +866,7 @@ local function patch_guide_timers()
 	if type(activate) == "function" then
 		m.activate = function(...)
 			local result = { activate(...) }
-			if qc.is_host() then
+			if qc.active() and coop_mode.decides_world() then
 				local job = guide_table("curr_guid")
 				if job then
 					job.coop_taker = ct().reward_peer() or 0
@@ -891,7 +883,7 @@ local function patch_guide_timers()
 			m[name] = function(...)
 				local job = guide_table("curr_guid")
 				local peer = job and job.coop_taker
-				if not (qc.is_host() and job) then return f(...) end
+				if not (qc.active() and coop_mode.decides_world() and job) then return f(...) end
 				peer = peer or 0
 				job.coop_character = job.coop_character or ct().character_of(peer)
 				local character = job.coop_character
@@ -920,7 +912,7 @@ local function patch_guide_timers()
 end
 
 local function actor_on_update()
-	if qc.is_host() then
+	if qc.active() and coop_mode.decides_world() then
 		local ok, err = pcall(host_guide_tick)
 		if not ok then qc.report(TAG, "guide", err) end
 	end
@@ -971,7 +963,6 @@ function on_game_start()
 	qc.register_host_action("stash", host_stash)
 	qc.register_host_action("trade", host_trade)
 	qc.register_host_action("delivery", host_delivery)
-	qc.on("bribe_hit", on_bribe_hit, TAG)
 	qc.on("kill", client_on_kill, TAG)
 	qc.on("guide", client_on_guide, TAG)
 	qc.on("trade", client_on_trade, TAG)
@@ -981,8 +972,7 @@ function on_game_start()
 	if not ok then qc.report(TAG, "guide map", err) end
 	ok, err = pcall(share_ceasefires)
 	if not ok then qc.report(TAG, "ceasefires", err) end
-	-- a server's death relay calls it (coop_srv_quests_far); the Core keeps the list
-	if qc.add_death_listener then qc.add_death_listener("monster_on_death_callback", monster_on_death) end
+	coop_mode.far().add_death_listener("monster_on_death_callback", monster_on_death)
 	RegisterScriptCallback("on_enemy_eval", on_enemy_eval)
 	RegisterScriptCallback("npc_on_hit_callback", on_npc_hit)
 	RegisterScriptCallback("monster_on_death_callback", monster_on_death)

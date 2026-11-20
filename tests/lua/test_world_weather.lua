@@ -41,11 +41,12 @@ local function stock_weathers(M, seed)
 	end
 	function cls:get_curr_weather() return self.cycle end
 	local wm = setmetatable({ cycle = "clear", preset = "p0", weather_file = "p0", curr_weather = "p0", next_weather = "p0",
-		levelWeather = "atmosfear_clear", last_hour = 12 }, cls)
+		levelWeather = "atmosfear_clear", weatherType = "atmosfear", last_hour = 12 }, cls)
 	E.level_weathers = { WeatherManager = cls, get_weather_manager = function() return wm end }
 	M.hour, M.wet, M.rain = 12, 0, 0
 	E.level.get_time_hours = function() return M.hour end
 	E.level.rain_wetness = function() return M.wet end
+	E.level.set_weather = function(file) M.set_weather = file end
 	E.weather = { get_value_numric = function(n) return n == "rain_density" and M.rain or 0 end }
 	return wm
 end
@@ -100,7 +101,7 @@ do
 	check(H.sync_sets == sets, "the host writes the state only when it changed")
 end
 
--- a map server: the cycle is the world server's, the sky of its level its own (docs\SPLIT_LEVELS.md 7b)
+-- A map server applies and draws the outdoor forecast under the server weather policy.
 print("== the weather of a map server")
 do
 	local H, C = world_pair()
@@ -119,6 +120,8 @@ do
 	local WH, WC = load_script(H, "coop_world_weather"), load_script(C, "coop_world_weather")
 	WH.on_game_start()
 	WC.on_game_start()
+	C.env.coop_main.set_env_policy = function() end -- this harness exercises weather only
+	load_script(C, "coop_srv_world").on_game_start()
 	step(H, C)
 	H.hour, C.hour = 13, 13
 	wh:update()
@@ -126,7 +129,7 @@ do
 	check(C.periods == nil, "a map server rolls no period of its own")
 	step(H, C)
 	check(wc.cycle == wh.cycle and wc.preset == wh.preset, "the cycle is the world server's")
-	check(C.set_weather == wc.preset, "and the stock picks this level's weather from it")
+	check(C.set_weather == wh.weather_file, "the map server draws the world forecast")
 	local picks = C.selects
 	step(H, C)
 	check(C.selects == picks, "an unchanged cycle picks nothing")

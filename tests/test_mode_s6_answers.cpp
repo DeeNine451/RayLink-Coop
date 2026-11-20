@@ -188,9 +188,8 @@ const std::map<std::string, HookRow>& s6_real_rows()
 		        "return level_bridge(peer) != kInvalidPeer;", "~net::to_peer(bridge, type, payload, lane); return true;",
 		        "return mapserver::is_bridge(from);", "~entities::host_send_place(bridge, &proxy); return true;",
 		        "return mapserver::host_ready(level);", "", "return nullptr;", "return false;"}},
-		{"MapServerMode",
-		    {"return &map_level_side();", "return levels::passes_to(type, peer);",
-		        "Session& s = mgr().session(); if (s.local()) s.send(kHostPeer, lane, type, payload);", "return false;", "return false;",
+		{"MapServerMode", // no link (review A-REV-E-1, finding 2: its level session has no LocalLink)
+		    {"return &map_level_side();", "return levels::passes_to(type, peer);", "", "return false;", "return false;",
 		        "return false;", "return false;", "return true;", "world::host_scan_proxies();",
 		        "return server_load_text(screen_level, world_up);", "return ghost::about_actor(s);"}},
 		{"ServerClientMode",
@@ -376,8 +375,9 @@ TEST(s6_world_server_answers)
 
 TEST(s6_map_server_answers)
 {
-	// its side of its level; every player of its session on its map; its link up to the world; its ghost's word is its players'
-	s6_check_fake("map_server", {true, true, 1, false, false, false, true, 1, true, true});
+	// its side of its level; every player of its session on its map; no link (its reports go up through up()); its ghost's word is
+	// its players'
+	s6_check_fake("map_server", {true, true, 0, false, false, false, true, 1, true, true});
 	s6_check_real("MapServerMode");
 }
 

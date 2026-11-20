@@ -70,7 +70,6 @@ local function role(new_name, old_name)
 	return ok and yes == true
 end
 
-local function is_world_server() return role("is_world_server", "is_host") end -- world logic: the session notice, /go
 local function is_player() return role("is_player", "is_client") end -- the player's own screen: the fade of a group move
 local function is_mirror() return role("is_mirror", "is_client") end -- the Lua state is a copy of the host's
 
@@ -293,7 +292,7 @@ local function roster_tick()
 		roster = now
 		if role("is_player", "is_active") and api.stash_get and api.stash_get(STASH_SEEN) ~= "1" then -- a dedicated host has no one to tell
 			if api.stash_set then api.stash_set(STASH_SEEN, "1") end
-			if is_world_server() then
+			if coop_mode.decides_world() then
 				notice(tr("st_coop_core_session_host", "You are hosting a co-op session."))
 			else
 				notice(string_format(tr("st_coop_core_session_client", "Connected to the co-op session of %s."),
@@ -340,7 +339,7 @@ end
 -- Host: /go in the chat: the group goes now through the exit somebody waits at (the engine's coop_accept_transition says
 -- when nobody does).
 function accept_transition()
-	if not is_world_server() then return false end
+	if not (api and api.is_active() and coop_mode.decides_world()) then return false end
 	if vote and time_global() - vote.at < 600000 then
 		api.send_event(EV_MOVING, codec().encode({ nick = vote.nick }), -1)
 		vote = nil
@@ -370,7 +369,7 @@ local function actor_on_update()
 		roster_owners = false
 		return
 	end
-	if not live() and not is_world_server() then return end -- a dedicated host plays nothing and still keeps the roster
+	if not live() and not coop_mode.decides_world() then return end -- a dedicated host plays nothing and still keeps the roster
 	if is_mirror() and not after_load_done and db.actor then
 		local ok, err = pcall(client_after_load)
 		if not ok then log("! own state after the world load: %s", tostring(err)) end

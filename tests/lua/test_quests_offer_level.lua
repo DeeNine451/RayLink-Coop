@@ -119,10 +119,10 @@ end
 local function world_server()
 	local world = boot(machine("host", 0), "srv_world")
 	local opened = 0
-	world.env.coop_quests_core.set_part("far", {
+	world.env.coop_srv_quests_far = {
 		in_scope = function() return {} end,
 		with_level_of = function(_, fn, ...) opened = opened + 1 return fn(...) end,
-	})
+	}
 	request(world, 0, PLAYER)
 	request(world, BRIDGE, PLAYER)
 	check(#world.sent == 0 and not world.gen_calls and opened == 0, "the world only routes requests from players")
@@ -165,9 +165,9 @@ local function map_server()
 		requester = map.env.coop_quests_offer.requester()
 		actor:give_talk_message2("Map task", "Offer from the real NPC", "map_icon")
 	end
-	map.env.coop_quests_core.set_part("far", {
+	map.env.coop_srv_quests_far = {
 		with_level_of = function() error("a map request tried to open a far view") end,
-	})
+	}
 	request(map, PLAYER, PLAYER)
 	request(map, 0)
 	check(map.gen_calls == nil and #map.sent == 0, "the map only accepts a request relayed by the world with a player")

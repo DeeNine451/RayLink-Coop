@@ -962,18 +962,19 @@ do
 	W = { items = {}, holders = {}, next_id = 2000, moves = 0, infos = {}, talked = {}, created = {}, client_seen = {} }
 	local function share_stub(M)
 		M.ups, M.downs = {}, {}
-		-- the Core keeps the shared tables (coop_quests_core.share, step S4), a server's share carries them
-		M.env.coop_quests_core = { share = function() return {
-			up = function(n, get, set) M.ups[n] = { get = get, set = set } end,
-			down = function(n, get, set) M.downs[n] = { get = get, set = set } end,
-		} end }
+		-- Capture what the facade registers for the server to carry.
+		M.env.coop_quests_core = {
+			share_up = function(n, get, set) M.ups[n] = { get = get, set = set } end,
+			share_down = function(n, get, set) M.downs[n] = { get = get, set = set } end,
+		}
 	end
-	-- the world server, on another level
-	local Wd = machine("host", 0, { [0] = 0, [1] = PROXY })
+	-- The world server keeps the ledger in its save.
+	local Wd = machine("host", 0, { [1] = PROXY })
+	Wd.env.coop.is_dedicated = function() return true end
 	Cm = nil
 	H = Wd
 	holder(Wd, Wd.env.db.actor, 0)
-	env(Wd, "l01_escape")
+	env(Wd, "fake_start")
 	host_alife(Wd)
 	share_stub(Wd)
 	local WA = load_script(Wd, "coop_arena")

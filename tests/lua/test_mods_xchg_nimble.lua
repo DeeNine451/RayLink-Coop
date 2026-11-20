@@ -162,10 +162,25 @@ else
 	check(started, "on_game_start does not throw (" .. tostring(why_not) .. ")")
 end
 local OVERRIDES = nil
+-- the world server's maps: the bridges it has (coop_mode.from_level) and the bridge of each player's map (the srv layer's hook
+-- levels.bridge_of_player = coop.levels.bridge_of_player); player 3 stands on no map server's map
+local BRIDGE_OF = { [1] = BRIDGE, [2] = BRIDGE2 }
+local function bridge_of_player(peer) return BRIDGE_OF[peer] end
 if name == "srv_world" then
-	OVERRIDES = { seat_plays = function(peer) return peer ~= 0 and peer ~= BRIDGE and peer ~= BRIDGE2 end }
+	OVERRIDES = {
+		seat_plays = function(peer) return peer ~= 0 and peer ~= BRIDGE and peer ~= BRIDGE2 end,
+		from_level = function(from) return from == BRIDGE or from == BRIDGE2 end,
+		hook = function(n) if n == "levels.bridge_of_player" then return bridge_of_player end return nil end,
+	}
 end
 modes.install(coop_mode, name, OVERRIDES)
+
+-- B-REV F7: mods.nim_held is the world's word only (the keeper of the money to the map servers): reserved, so the Lua ingress
+-- refuses it from any other sender; mods.nim_done goes the other way and is not
+coop_trust.reset_for_test({ default = "refuse" })
+check(N ~= nil and coop_main.allow_world_event("mods.nim_held", BRIDGE2) == false
+	and coop_main.allow_world_event("mods.nim_held", 0) == true and coop_main.allow_world_event("mods.nim_done", BRIDGE) == true,
+	"mods.nim_held is reserved for the world (coop_main.reserve_world_event), mods.nim_done is not")
 coop_trust.reset_for_test({ default = "log" })
 
 -------------------------------------------------------------------------------
@@ -425,6 +440,9 @@ elseif name == "hostplay" then
 	ev("nim_done", { p = 1, h = "1:7:61", c = 0 }, 1)
 	check(BOOK[1] == 850000 and counter("nimble_done_sender").failed == 1,
 		"co-op host: a player's nim_done is dropped: he cannot get the price of an upgrade back")
+	ev("nim_done", { p = 1, h = "1:7:61", c = 0 }, BRIDGE)
+	check(BOOK[1] == 850000 and counter("nimble_done_sender").failed == 2,
+		"co-op host: a nim_done from a peer in a map server's range is dropped too (the co-op has no map servers)")
 	ev("nim_held", { p = 1, h = "1:7:65", g = "coonan", m = 1 }, 1)
 	x = apply({ o = "1:7:66", h = "1:7:65", g = "coonan", w = g5:id(), n = 600 }, 1)
 	check(x.why == "unpaid" and not gone(g5), "co-op host: a player's nim_held is not taken: no hold of his own making")
@@ -433,6 +451,35 @@ elseif name == "hostplay" then
 	check(BOOK[1] == 1000000, "co-op host: the open holds went back after 60 s")
 	release_id(g5:id())
 	for _, o in ipairs({ deagle, worn2 }) do release_id(o:id()) end
+
+	-- B-REV F6: a client's gun steps without a hold (600 at 5 a second: within the xchg limit, within the 5 minutes they
+	-- are kept) close only his own ops; another player's hold still applies
+	local avatar_of = coop.avatar_of
+	coop.avatar_of = function(peer) if peer == 2 then return 501 end return avatar_of(peer) end
+	local _, avatar2 = spawn("coop_player_avatar", vec3(20, 0, 0), nil, { id = 501 })
+	avatar2._kind = "stalker"
+	local full = counter("nimble_known_full").failed
+	for i = 1, 600 do
+		NOW = NOW + 200
+		ev("xchg", { k = "nimble", o = "1:7:" .. (1000 + i), h = "1:9:" .. i, g = "coonan", w = 1, n = 600 }, 1)
+	end
+	local fake = last("mods.xchg_r")
+	check(fake.o == "1:7:1600" and fake.ok == false and fake.why == "unpaid", "co-op host: 600 gun steps without a hold are refused")
+	BOOK[2] = 50000
+	local p2 = gun(501)
+	a = hold_req("2:7:1", 2)
+	x = apply({ o = "2:7:2", h = "2:7:1", g = "coonan", w = p2:id(), n = 600 }, 2)
+	check(a.ok == true and x.ok == true and gone(p2) and has(CAMO, 501) == 1 and BOOK[2] == 0
+		and counter("nimble_known_full").failed == full,
+		"co-op host: after another client's 600 gun steps without a hold, player 2's hold still applies")
+	BOOK[1] = 50000
+	local own = gun(500)
+	local camos = has(CAMO, 500)
+	hold_req("1:7:1700", 1)
+	x = apply({ o = "1:7:1701", h = "1:7:1700", g = "coonan", w = own:id(), n = 600 }, 1)
+	check(x.ok == true and gone(own) and has(CAMO, 500) == camos + 1 and BOOK[1] == 0,
+		"co-op host: ... and so does his own next real hold")
+	coop.avatar_of = avatar_of
 
 	---------------------------------------------------------------------------
 	-- the co-op host's own player (peer 0): both steps here, nothing on the wire
@@ -584,6 +631,45 @@ elseif name == "srv_world" then
 	ev("nim_done", { p = 1, h = "1:7:9", c = 1 }, BRIDGE)
 	check(BOOK[1] == 0 and BOOK[2] == 50000, "world server: the refund of one does not touch the other")
 
+	-- B-REV F5: only the map server of his map settles a player's hold, in every trust mode (always on)
+	for i, tm in ipairs({ "log", "refuse", "off" }) do
+		coop_trust.reset_for_test({ default = tm })
+		local function op(n) return "1:7:" .. (100 + 10 * i + n) end
+		BOOK[1] = 50000
+		hold_req(op(0), 1)
+		ev("nim_done", { p = 1, h = op(0), c = 0 }, BRIDGE2)
+		check(BOOK[1] == 0, "world server (" .. tm .. "): a map server that is not his map's cannot give his hold back")
+		ev("nim_done", { p = 1, h = op(0), c = 1 }, BRIDGE)
+		ev("nim_done", { p = 1, h = op(0), c = 0 }, BRIDGE)
+		check(BOOK[1] == 0, "world server (" .. tm .. "): ... his map's server commits it, a refund after that gives nothing")
+		BOOK[1] = 50000
+		hold_req(op(1), 1)
+		ev("nim_done", { p = 1, h = op(1), c = 1 }, BRIDGE2)
+		ev("nim_done", { p = 1, h = op(1), c = 0 }, BRIDGE)
+		check(BOOK[1] == 50000, "world server (" .. tm .. "): another map's commit does not keep the price of a failed upgrade")
+		hold_req(op(2), 1)
+		ev("nim_done", { p = 1, h = op(2), c = 0 }, 0x105)
+		check(BOOK[1] == 0, "world server (" .. tm .. "): a peer that is no map server's bridge settles nothing")
+		ev("nim_done", { p = 1, h = op(2), c = 0 }, BRIDGE)
+		check(BOOK[1] == 50000, "world server (" .. tm .. "): ... his map's server does")
+	end
+	check(counter("nimble_done_level").failed == 0 and counter("nimble_done_sender").failed == 0,
+		"world server: the trust mode off counts nothing")
+	coop_trust.reset_for_test({ default = "log" })
+	ev("nim_done", { p = 1, h = "1:7:9", c = 0 }, BRIDGE2)
+	ev("nim_done", { p = 1, h = "1:7:9", c = 0 }, 0x105)
+	check(counter("nimble_done_level").failed == 1 and counter("nimble_done_level").guard == true
+		and counter("nimble_done_sender").failed == 1, "world server: the two refusals are counted as guards")
+	-- a player on no map server's map: nobody settles his hold, the keeper gives it back in 60 s
+	BOOK[3] = 50000
+	hold_req("3:7:1", 3)
+	ev("nim_done", { p = 3, h = "3:7:1", c = 1 }, BRIDGE)
+	check(BOOK[3] == 0, "world server: a hold of a player on no map server's map ...")
+	tick(30000)
+	tick(31000)
+	tick(1100)
+	check(BOOK[3] == 50000, "world server: ... is settled by nobody and given back after 60 s")
+
 	-- the gun step is not decided here: it goes to the map server of his map
 	local g = gun(500)
 	local commits = #CREATED
@@ -638,6 +724,27 @@ elseif name == "srv_world" then
 	tick(10500)
 	check(type(HUD) == "string" and HUD:find("no longer available") ~= nil, "server player: ... no answer in 10 s is told")
 	MODE, SELF = "host", 0
+	modes.install(coop_mode, "srv_world", OVERRIDES)
+
+	---------------------------------------------------------------------------
+	-- the real srv layer (coop_srv_mode) of a world server: from_level from coop.levels.map_servers, the hook
+	-- levels.bridge_of_player = coop.levels.bridge_of_player (B-REV F5)
+	---------------------------------------------------------------------------
+	local levels = coop.levels
+	coop.levels = {
+		map_servers = function() return { { bridge = BRIDGE, level = 3 }, { bridge = BRIDGE2, level = 4 } } end,
+		bridge_of_player = function(peer) return BRIDGE_OF[peer] end,
+	}
+	modes.live(coop_mode)
+	check(coop_mode.hook("levels.bridge_of_player") == coop.levels.bridge_of_player and coop_mode.from_level(BRIDGE2)
+		and not coop_mode.from_level(0x105) and coop_mode.decides_world(), "real srv layer: the world server's answers")
+	BOOK[1] = 50000
+	a = hold_req("1:7:200", 1)
+	ev("nim_done", { p = 1, h = "1:7:200", c = 0 }, BRIDGE2)
+	check(a.ok == true and BOOK[1] == 0, "real srv layer: the map server of another map cannot give his hold back")
+	ev("nim_done", { p = 1, h = "1:7:200", c = 0 }, BRIDGE)
+	check(BOOK[1] == 50000, "real srv layer: the map server of his map can")
+	coop.levels = levels
 	modes.install(coop_mode, "srv_world", OVERRIDES)
 
 -------------------------------------------------------------------------------
@@ -724,6 +831,85 @@ elseif name == "srv_map" then
 		"map server: one gun named by two holds: one upgrade, the other hold refunded")
 	for _, id in ipairs(later) do release_id(id) end
 	tick()
+
+	-- B-REV F6: player 1's gun steps naming holds that do not exist (600 at 5 a second: within the xchg limit, within the
+	-- 5 minutes they are kept) close only his own ops; the hold the world server announced for player 2 still applies.
+	-- rv_FIX-NIMBLE B2: his marks are never evicted; a step beyond his 8 marks gets no mark and no refund report
+	NOW = NOW + 301000 -- the marks of his steps above expire (KEEP_MS)
+	tick(1100)
+	local avatar_of = coop.avatar_of
+	coop.avatar_of = function(peer) if peer == 2 then return 501 end return avatar_of(peer) end
+	local _, avatar2 = spawn("coop_player_avatar", vec3(20, 0, 0), nil, { id = 501 })
+	avatar2._kind = "stalker"
+	local full = counter("nimble_known_full").failed
+	nd = dones()
+	for i = 1, 600 do
+		NOW = NOW + 200
+		ev("xchg", { k = "nimble", o = "1:7:" .. (1000 + i), h = "1:9:" .. i, g = "coonan", w = 1, n = 600, _peer = 1 }, 0)
+	end
+	d = last("mods.nim_done")
+	check(dones() == nd + 8 and d.p == 1 and d.h == "1:9:8" and d.c == 0,
+		"map server: 600 gun steps without a hold are refused; only his first 8 (his marks) report a refund")
+	held(2, "2:7:1")
+	local p2 = gun(501)
+	x = apply({ o = "2:7:2", h = "2:7:1", g = "coonan", w = p2:id(), n = 600 }, 2)
+	d = last("mods.nim_done")
+	check(x.ok == true and gone(p2) and has(CAMO, 501) == 1 and d.p == 2 and d.h == "2:7:1" and d.c == 1
+		and counter("nimble_known_full").failed == full,
+		"map server: after another player's 600 gun steps without a hold, player 2's hold still applies")
+	local own = gun(500)
+	held(1, "1:7:1700")
+	x = apply({ o = "1:7:1701", h = "1:7:1700", g = "coonan", w = own:id(), n = 600 }, 1)
+	check(x.ok == true and gone(own) and has(CAMO, 500) == 3, "map server: ... and so does his own next real hold")
+	-- his marked steps without a hold stay closed: a hold of one of them that comes later is not applied
+	local late = gun(500)
+	held(1, "1:9:8")
+	x = apply({ o = "1:7:1702", h = "1:9:8", g = "coonan", w = late:id(), n = 600 }, 1)
+	check(x.why == "unpaid" and not gone(late), "map server: a hold that comes after his gun step without it is still not applied")
+	-- rv_FIX-NIMBLE B2: a step beyond his marks reported no refund; a hold for it that comes later is applied and paid once
+	nd = dones()
+	held(1, "1:9:600")
+	x = apply({ o = "1:7:1703", h = "1:9:600", g = "coonan", w = late:id(), n = 600 }, 1)
+	d = last("mods.nim_done")
+	check(x.ok == true and gone(late) and d.p == 1 and d.h == "1:9:600" and d.c == 1 and dones() == nd + 1,
+		"rv_FIX-NIMBLE B2: a hold for his step beyond his marks (no refund reported) is applied, its commit reported once")
+	local again = gun(500)
+	x = apply({ o = "1:7:1704", h = "1:9:600", g = "coonan", w = again:id(), n = 600 }, 1)
+	check(x.why == "unpaid" and not gone(again) and dones() == nd + 1, "rv_FIX-NIMBLE B2: ... and only once")
+	coop.avatar_of = avatar_of
+
+	-- rv_FIX-NIMBLE B2 (probe R1): his gun step names his hold before the hold reaches this map server: refused, its refund
+	-- reported, the op closed in his marks. His further steps without a hold never evict that mark: the hold that comes
+	-- later (its money already given back by the world server) is never applied, so the upgrade is never free.
+	NOW = NOW + 301000
+	tick(1100)
+	local g9 = gun(500)
+	nd = dones()
+	x = apply({ o = "1:7:2000", h = "1:7:1999", g = "coonan", w = g9:id(), n = 600 }, 1)
+	d = last("mods.nim_done")
+	check(x.why == "unpaid" and d.h == "1:7:1999" and d.c == 0 and dones() == nd + 1,
+		"rv_FIX-NIMBLE B2 R1: a step before its hold is refused, the refund of that hold reported")
+	for i = 1, 12 do apply({ o = "1:7:" .. (2000 + i), h = "1:8:" .. i, g = "coonan", w = g9:id(), n = 600 }, 1) end
+	check(dones() == nd + 8, "rv_FIX-NIMBLE B2 R1: of 12 more steps without a hold, only the 7 his marks take report a refund")
+	held(1, "1:7:1999")
+	x = apply({ o = "1:7:2030", h = "1:7:1999", g = "coonan", w = g9:id(), n = 600 }, 1)
+	check(x.why == "unpaid" and not gone(g9),
+		"rv_FIX-NIMBLE B2 R1: a hold whose refund this map server reported is never applied, after 12 more steps of his")
+	-- probe R1c: the same burst in one frame (one time stamp, 1 + n steps)
+	for _, n in ipairs({ 8, 12, 19 }) do
+		local base = 5000 + n * 100
+		local H = "1:7:" .. base
+		NOW = NOW + 301000
+		tick(1100)
+		local function step(o, h) ev("xchg", { k = "nimble", o = o, h = h, g = "coonan", w = 1, n = 600, _peer = 1 }, 0) end
+		step("1:7:" .. (base + 1), H)
+		for i = 1, n do step("1:7:" .. (base + 1 + i), "1:8:" .. (base + i)) end
+		held(1, H)
+		local g3 = gun(500)
+		local x3 = apply({ o = "1:7:" .. (base + 50), h = H, g = "coonan", w = g3:id(), n = 600 }, 1)
+		check(x3.why == "unpaid" and not gone(g3),
+			"rv_FIX-NIMBLE B2 R1c: one frame, 1 + " .. n .. " steps: the hold whose refund was reported is never applied")
+	end
 end
 
 done("mods_xchg_nimble@" .. name)

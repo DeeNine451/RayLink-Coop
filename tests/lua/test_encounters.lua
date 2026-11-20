@@ -432,10 +432,10 @@ do
 	check(OVER == true, "coop_arena forgets the fighter of the fight: his gear waits for him")
 end
 
-print("== split levels: the Bar is a map server's, the world server stands at Agroprom")
+print("== server: the world server rolls back a fight led by the Bar map server")
 do
 	local BRIDGE = 0x101
-	local LEVELS = { "l03_agroprom", "l05_bar" }
+	local LEVELS = { "fake_start", "l05_bar" }
 	local W, E, enc = make_world()
 	local Mk, F, mk_enc = make_world("client", BRIDGE)
 	E.coop.is_dedicated = function() return true end
@@ -537,14 +537,14 @@ do
 	E.SIMBOARD = { smarts_by_names = { trc_sim_9 = { id = 33, position = vec(500, 0, 5) } }, smarts = { [33] = { squads = { [800] = true } } } }
 	local through
 	local stand_in = make_obj(801, 500, 0, 5, { set_health_ex = function(self, v) self._hp = v end })
-	E.coop_quests_core.with_target = function(id, peer, what, fn, ...)
+	E.coop_srv_quests_far = { with_target = function(id, peer, what, fn, ...)
 		through = id
 		local real = E.level.object_by_id
 		E.level.object_by_id = function(i) return i == id and stand_in or real(i) end
 		local ok, err = pcall(fn, ...)
 		E.level.object_by_id = real
 		if not ok then error(err, 0) end
-	end
+	end }
 	both(3)
 	body.position = vec(2000, 0, 5)
 	both(25)

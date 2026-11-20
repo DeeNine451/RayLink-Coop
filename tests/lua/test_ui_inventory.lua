@@ -45,6 +45,8 @@ local function new_inventory(mode)
 	return ui
 end
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local ui_mod = load_module("coop_ui")
 ui_mod.on_game_start()
 check(ui_inventory.UIInventory.UpdateCharacter ~= nil and ui_inventory.UIInventory.coop_ui_MoneyTo ~= nil, "UIInventory patched")

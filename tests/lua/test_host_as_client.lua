@@ -33,7 +33,7 @@ local ROLES = {
 	client = { mode = "client", host = false, client = true, world = false, player = true, mirror = true },
 	names_world = { mode = "host", host = false, client = false, world = true, player = true, mirror = false, dedicated = true },
 	names_mirror = { mode = "client", host = false, client = false, world = false, player = true, mirror = true },
-	not_world = { mode = "host", host = true, client = false, world = false, player = true, mirror = false },
+	not_world = { mode = "host", host = true, client = false, world = false, player = false, mirror = false, map_server = true, split = true },
 	dedicated = { mode = "host", host = true, client = false, world = true, player = false, mirror = false, dedicated = true },
 	map_server = { mode = "host", host = true, client = false, world = false, player = false, map_server = true, split = true },
 	server_player = { mode = "client", host = false, client = true, world = false, player = true, split = true },
@@ -523,6 +523,7 @@ end)
 -- =================================================================== coop_core_player
 local function load_player(role)
 	world(role)
+	modes.live(load_script("coop_mode"), load_script)
 	coop_core_player, coop_main = nil, nil
 	load_script("coop_main")
 	load_script("coop_core_player")
@@ -586,6 +587,7 @@ end)
 -- =================================================================== coop_core_hud
 local function load_hud(role)
 	world(role)
+	modes.live(load_script("coop_mode"), load_script)
 	coop_core_hud, coop_allies, coop_allies_map, coop_main = nil, nil, nil, nil
 	load_script("coop_main")
 	load_script("coop_core_hud")
@@ -691,6 +693,10 @@ local function set_menu_role(name)
 	coop.is_world_server = answer(CUR.world)
 	coop.is_player = answer(CUR.player)
 	coop.is_mirror = answer(CUR.mirror)
+	coop.is_dedicated = answer(CUR.dedicated == true)
+	coop.is_map_server = answer(CUR.map_server == true)
+	coop.self_id = answer(CUR.mode == "client" and 1 or 0)
+	coop.levels = CUR.split and { split = answer(true) } or nil
 end
 coop_main = { handlers = {} }
 function coop_main.encode(t) pn = pn + 1; local k = "p" .. pn; local c = {}; for a, b in pairs(t) do c[a] = b end; PAYLOADS[k] = c; return k end
@@ -785,6 +791,7 @@ end
 
 local function load_menu_char(role)
 	set_menu_role(role)
+	modes.live(load_module("coop_mode"), load_module)
 	SENT, NEWS, RELEASED, CREATED, SEVARS, STASH = {}, {}, {}, {}, {}, {}
 	for i = #MONEY_CALLS, 1, -1 do MONEY_CALLS[i] = nil end
 	CALLBACKS = {}

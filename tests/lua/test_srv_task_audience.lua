@@ -1,14 +1,14 @@
 -- A task's audience in a split-levels world (docs\plans\2026-11-16-task-audience.md A, C): coop_srv_task_audience decides who sees a
 -- task when it is given, coop_tasks sends its states, lists and news only to them (and to the map servers' bridges), refuses
 -- the requests of the others and shares its rewards only among them. Without split levels, or on an engine without the
--- filter, everything is as before. Step S4: it starts from coop_mode.when_srv (the harness' facade runs it on a server machine),
--- hands itself to coop_tasks and coop_quests_trust as coop_quests_core.part("audience"), and does nothing in the co-op; coop_tasks
+-- filter, everything is as before. It starts from coop_mode.when_srv, supplies the tasks' audience and the trust hook,
+-- and does nothing in the co-op; coop_tasks
 -- asks may_take of coop_conditions_stock (a server's storyline puts its own there).
 -- Run: tools\test_lua.cmd srv_task_audience
 dofile("tests/lua/support/harness_quests.lua")
 local modes = dofile("tests/lua/support/modes.lua")
 
-local SCRIPTS = { "coop_reward_group", "coop_tasks", "coop_srv_task_audience" }
+local SCRIPTS = { "coop_reward_group", "coop_tasks", "coop_srv_tasks", "coop_srv_task_audience" }
 local BRIDGE = 0x101
 
 local W = {
@@ -98,10 +98,15 @@ e.alife_object = function(id) return SE[id] or stock_alife_object(id) end
 for _, id in ipairs({ "t_side1", "t_side2", "t_side3", "t_free", "t_gated", "t_none", "t_monster", "t_off", "t_noeng", "t_thr",
 	"t_gw", "drx_sl_bar_task_1", "lttz_hb_task", "drx_sl_esc_m_trader_cf_task_1", "t_money", "t_group" }) do Hm.ini[id] = {} end
 
+local function start_modes(M)
+	local function load(name) return load_script(M, name) end
+	local facade = load("coop_mode")
+	facade.on_game_start()
+	modes.live(facade, load)
+end
 local function load_world(name) return load_script(Hm, name) end
-local facade = load_world("coop_mode")
-facade.on_game_start()
-modes.live(facade, load_world)
+start_modes(Hm)
+load_world("coop_trust")
 load_world("coop_quests_core")
 load_world("coop_srv_quests_core").on_game_start()
 for _, n in ipairs(SCRIPTS) do load_script(Hm, n) end
@@ -663,6 +668,7 @@ do
 	ce.coop.is_dedicated = function() return false end
 	ce.coop.is_map_server = function() return false end
 	ce.coop.story_task_audience = function() return true end
+	start_modes(C)
 	load_script(C, "coop_quests_core")
 	for _, n in ipairs(SCRIPTS) do load_script(C, n) end
 	local before = {}
@@ -670,12 +676,12 @@ do
 	ce.coop_srv_task_audience.on_game_start()
 	local added = 0
 	for name, list in pairs(C.callbacks) do added = added + #list - (before[name] or 0) end
-	check(added == 0 and #C.srv_waiting == 1, "the co-op host: no callback, no save, no load; its when_srv waits for ever")
+	check(added == 0, "the co-op host: no audience callback, save or load registered")
 	check(ce.coop_quests_core.part("audience") == nil, "no part for the Core")
 	ce.coop_tasks.on_game_start()
 	check(ce.coop_tasks.task_audience() == nil, "coop_tasks: no audience, every task is everybody's")
 	tick(C)
-	check(#C.srv_waiting == 1, "a frame of the co-op runs nothing of it")
+	check(ce.coop_quests_core.part("audience") == nil, "a frame of the co-op runs nothing of it")
 end
 
 -- A-S4D (the lead's option (a)): the server layer answers in a -coop_dedicated process from its start, before its session
@@ -690,6 +696,7 @@ local function world_before_session(m_data)
 	se.coop.story_task_audience = function() return true end
 	se.coop_faction = { split_mode = function() return on end, faction_of_character = function() return nil end }
 	se.alife_storage_manager = { get_state = function() return m_data end }
+	start_modes(S)
 	load_script(S, "coop_quests_core")
 	for _, n in ipairs(SCRIPTS) do load_script(S, n) end
 	se.coop_srv_task_audience.on_game_start()
@@ -701,7 +708,7 @@ print("== S4: a world server reads its save, which it loads before its session (
 do
 	local S, session = world_before_session({}) -- a fresh Lua state's m_data at on_game_start: no audience yet
 	local A2 = S.env.coop_srv_task_audience
-	check(#S.srv_waiting == 0 and #(S.callbacks.load_state or {}) == 1, "before the session: registered at load")
+	check(#(S.callbacks.load_state or {}) == 1, "before the session: registered at load")
 	fire(S, "load_state", saved()) -- the stock load (CALifeStorageManager_load), still before the session
 	session()
 	tick(S)

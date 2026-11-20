@@ -108,6 +108,7 @@ psi_storm_manager = { CPsiStormManager = CPsi, get_psi_storm_manager = function(
 
 -------------------------------------------------------------------------------
 print("== client_never_ends_emission")
+dofile("tests/lua/support/modes.lua").live(load_script_file("coop_mode"))
 load_coop_main()
 -- "actor_effects" is an owner-domain script: its callbacks run on a client
 local observer = from_script("actor_effects", [[return function(typ, obj, name)

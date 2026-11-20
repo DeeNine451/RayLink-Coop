@@ -1,0 +1,74 @@
+-- Server (srv): the world server receives story rewards reported by its map servers.
+
+local SHARE_AGAIN_MS = 3000
+local MAX_PAYLOAD = 15800 -- coop_quests_core.send
+local MAX_PARAM = 256
+local NUMERIC_PARAMS = {
+	reward_money = { 1 }, reward_exact_money = { 1 }, reward_random_money = { 1, 2 },
+	reward_random_money_by_dist = { 2, 3, 4 },
+	increase_rank = { 1 }, decrease_rank = { 1 }, increase_rep = { 1 }, decrease_rep = { 1 },
+	inc_faction_goodwill_to_actor = { 2 }, dec_faction_goodwill_to_actor = { 2 },
+}
+local shares_seen = {}
+
+local function valid_params(t)
+	for key, value in pairs(t) do
+		if key ~= "f" and (not key:match("^p[1-8]$") or type(value) ~= "string"
+			or #value > MAX_PARAM or value:find("%c")) then return false end
+	end
+	local numeric = NUMERIC_PARAMS[t.f]
+	if numeric then
+		for _, i in ipairs(numeric) do
+			local value = t["p" .. i]
+			if value ~= nil then
+				local n = tonumber(value)
+				if not (n and n >= -2147483648 and n <= 2147483647) then return false end
+			end
+		end
+	end
+	return true
+end
+
+local function on_share(payload, from)
+	local sender = coop_mode.from_level(from)
+	if not coop_trust.pass("story_share_sender", sender, "story reward from unexpected peer %s", tostring(from))
+		or not sender then return end
+	if type(payload) ~= "string" or #payload == 0 or #payload > MAX_PAYLOAD then
+		coop_trust.pass("story_share_payload", false, "invalid story reward size from peer %s", tostring(from))
+		return
+	end
+
+	local t = coop_quests_core.decode(payload)
+	local story = coop_quests_story
+	local f = type(t.f) == "string" and #t.f <= 80 and story.shared_effect(t.f)
+	local valid = type(f) == "function" and valid_params(t)
+	if not coop_trust.pass("story_share_payload", valid, "invalid story reward from peer %s", tostring(from))
+		or not valid then return end
+
+	-- A map server may run the same reward again while it waits for the world's info echo.
+	local p = story.params_of(t)
+	local key = from .. "|" .. t.f .. "|" .. table.concat(p, "|")
+	local now = time_global()
+	local last = shares_seen[key]
+	shares_seen[key] = now
+	if last and now - last < SHARE_AGAIN_MS then return end
+	for k, at in pairs(shares_seen) do
+		if now - at >= SHARE_AGAIN_MS then shares_seen[k] = nil end
+	end
+	story.apply_shared_effect(t.f, f, p)
+end
+
+function on_game_start()
+	coop_mode.when_srv(function()
+		if not coop_mode.decides_world() then return end
+		local main = rawget(_G, "coop_main") or coop_main
+		if not (main and main.add_event_handler) then
+			coop_quests_core.log("story", "! coop_main.add_event_handler not found: share is not handled")
+			return
+		end
+		main.add_event_handler("quests.share", function(payload, from)
+			local ok, err = pcall(on_share, payload, from)
+			if not ok then coop_quests_core.report("story", "share", err) end
+		end)
+	end)
+end

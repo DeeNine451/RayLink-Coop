@@ -66,6 +66,9 @@ Ms.players = { { id = 1, is_self = false, avatar_id = 500 } }
 for _, id in ipairs({ 500, 700, 720, 730 }) do Ms.new_obj(id, "x" .. id, vec(10, 0, 10)) end
 
 local function boot(M)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
+	load_script(M, "coop_srv_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do
 		if M.env[n].on_game_start then M.env[n].on_game_start() end
@@ -135,6 +138,8 @@ do
 	local stock_release = function(se) end
 	C.env.alife_release = stock_release
 	local stock_alife = C.env.alife
+	load_script(C, "coop_mode")
+	load_script(C, "coop_hostplay_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(C, n) end
 	for _, n in ipairs(SCRIPTS) do
 		local m = C.env[n]
@@ -143,7 +148,7 @@ do
 	fire(C, "actor_on_first_update")
 	tick(C)
 	local qc, far = C.env.coop_quests_core, C.env.coop_srv_quests_far
-	check(#C.srv_waiting == 2 and qc.part("far") == nil, "its when_srv and the share's wait; the Core has no far view")
+	check(qc.part("far") == nil and C.env.coop_mode.far().in_scope() == nil, "the co-op receives the far-view stub")
 	check(C.env.alife_release == stock_release and C.env.alife == stock_alife and C.env.safe_release_manager.release ~= nil
 		and C.callbacks.actor_on_update == nil and C.handlers["quests.far_do"] == nil,
 		"nothing of the stock is wrapped, no callback, no event")

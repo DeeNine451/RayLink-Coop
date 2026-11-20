@@ -866,3 +866,23 @@ SESSION_SRV_TODAY = {
 def test_r8_the_frozen_session_callers_only_shrink():
     assert set(check.SESSION_SRV_FROZEN) <= SESSION_SRV_TODAY
     assert all(n == 1 for n in check.SESSION_SRV_FROZEN.values())
+
+
+# --- review A-REV-E-1 (temp/w9rev/A-REV-E-1.md), finding 1: the server's Lua table srv.* -------------------------------
+
+SRV_CORE = "gamedata/scripts/coop_probe_srvtable.script"
+
+
+def test_the_server_table_srv_is_a_mode_check_outside_the_server_layer(work, capsys):
+    # srv/coop_srv_script.cpp makes the global table srv in every Lua state (A-S4H): srv.split(), srv.dedicated_new_world()
+    # and an alias `local s = srv` got past L1, and so did coop.dedicated_new_world(). Ядро reading it is L1 (a wrapper
+    # too), a stock script L5, the co-op layer L3; the server's layer reads it freely
+    code, out = run(make(work, "l1_srv_table"), capsys)
+    assert code == 1, out
+    found_ = set(violations(out))
+    assert {(p, n, r) for p, n, r in found_ if p == SRV_CORE} == {
+        (SRV_CORE, n, "L1") for n in (4, 5, 6, 7, 9, 10, 11, 12, 15, 16)}, out  # 8: s.split() (its alias line is 7)
+    assert ("gamedata/scripts/coop_hostplay_srvtable.script", 3, "L3") in found_, out
+    assert ("engine/gamedata/scripts/xr_srvtable.script", 3, "L5") in found_, out
+    assert not [v for v in found_ if v[0] == "gamedata/scripts/coop_srv_table.script"], out
+    assert len([v for v in found_ if v[0] != SRV_CORE]) == 2, out

@@ -335,6 +335,14 @@ for _, set in ipairs(modes.names()) do
 	local function n_dots() return dots and dots._state and dots._state().dots or -1 end
 	local thistle_mon = pba.artefact_on_monster_before_hit_functions
 	local thistle_npc = pba.artefact_on_npc_before_hit_functions
+	-- B-REV F1: his hit as the decider applies it. The engine runs the victim's before-hit chain there with his character as
+	-- the draftsman (a client's forwarded hit: coop_requests.cpp host_hit; the host player's own: his actor), at the power his
+	-- machine's chain left (the Thistle's halving included).
+	local function landed(victim, power, who)
+		as_decider()
+		local h = hit({ power = power, type = hit.fire_wound, draftsman = who or remote, weapon_id = wpn:id() })
+		SendScriptCallback(IsMonster(victim) and "monster_on_before_hit" or "npc_on_before_hit", victim, h, 0, { ret_value = true })
+	end
 
 	if set ~= "none" then
 		---------------------------------------------------------------------------------------------------------------
@@ -352,6 +360,7 @@ for _, set in ipairs(modes.names()) do
 			and b1.d == 7 and b1.s == 1, "m08:5: the bleeding is a request with its target, artefact and the mod's own amount (7 s)")
 		pba.TEST_PROCESS()
 		check(REFUSED == refused0 and near(dog.health, 1), "m08:5: nothing touches the client's copy of the creature")
+		landed(dog, s_hit.power) -- his hit reaches the decider (sent at his frame's end, before his script events)
 		if raw1 then deliver(raw1) end
 		run(8000)
 		check(dog._dh == 71 and near(dog.health, 1 - 71 * 0.0028),
@@ -377,6 +386,7 @@ for _, set in ipairs(modes.names()) do
 		local b2, raw2 = last_cmd("bleed")
 		check(sent_count() == sent0 + 1 and b2 and b2.t == dog:id() and near(b2.b, 0.4 * 0.0045 * 0.75) and b2.d == 3.5,
 			"m24:2: the confirmed bleeding goes to the decider (Momopate's amount and 3.5 s)")
+		landed(dog, s_hit.power)
 		if raw2 then deliver(raw2) end
 		local ticks0 = dog._dh or 0
 		run(1000)
@@ -399,6 +409,7 @@ for _, set in ipairs(modes.names()) do
 		NOW = NOW + 600
 		thistle_mon.af_repei(actor, 1, { repei:id() }, { "af_repei" }, dog2, shot(0.8), 0, {})
 		local _, raw3 = last_cmd("bleed")
+		landed(dog2, 0.4)
 		if raw3 then deliver(raw3) end
 		run(1000)
 		check(dog2._alive == false and dog2._killed_by == PROXY,
@@ -410,6 +421,7 @@ for _, set in ipairs(modes.names()) do
 		NOW = NOW + 600
 		thistle_mon.af_repei(actor, 1, { repei:id() }, { "af_repei" }, inv, shot(0.8), 0, {})
 		local _, raw4 = last_cmd("bleed")
+		landed(inv, 0.4)
 		if raw4 then deliver(raw4) end
 		run(300)
 		check(inv._killed_by ~= PROXY, "m24:2: an invulnerable creature is never killed by the request")
@@ -420,10 +432,33 @@ for _, set in ipairs(modes.names()) do
 			fresh(bandit)
 			NOW = NOW + 600
 			sent0 = sent_count()
+			landed(bandit, 0.4, actor) -- his own hit's chain: the decider's book sees it before the Thistle here
 			thistle_npc.af_repei(actor, 1, { host_repei:id() }, { "af_repei" }, bandit, shot(0.8), 0, {})
 			run(3600)
 			check(sent_count() == sent0 and bandit._dh == 36 and near(bandit.health, 1 - 36 * 0.4 * 0.0045 * 0.75),
 				"co-op: the host's own direct PBA stalker hit bleeds locally (36 ticks)")
+			-- the other order of the same chain: the Thistle first, his hit's record after it
+			fresh(bandit)
+			NOW = NOW + 600
+			thistle_npc.af_repei(actor, 1, { host_repei:id() }, { "af_repei" }, bandit, shot(0.8), 0, {})
+			landed(bandit, 0.4, actor)
+			run(4000)
+			check(bandit._dh == 36, "B-REV F1 co-op: the host's own bleeding asked before his hit's record waits for it (36 ticks)")
+			-- rv_integA probe N2: the host's own stalker hit in G.A.M.M.A.: grok_bo hands PBA its own power (head 3.65 x ap 0.75 x 1.1 x
+			-- difficulty 1.3 x ammo ~1.2 = ~4.7 times the engine's power that note_hit saw first)
+			for _, tm in ipairs({ "log", "refuse" }) do
+				coop_trust.reset_for_test({ default = tm })
+				local amt0 = trust_failed("pba_bleed_amount")
+				fresh(bandit)
+				NOW = NOW + 600
+				landed(bandit, 0.8 / 4.7, actor)
+				thistle_npc.af_repei(actor, 1, { host_repei:id() }, { "af_repei" }, bandit, shot(0.8), 0, {})
+				run(3600)
+				check(bandit._dh == 36 and near(bandit.health, 1 - 36 * 0.4 * 0.0045 * 0.75) and trust_failed("pba_bleed_amount") == amt0,
+					"rv_integA N2 (" .. tm .. "): the host's own grok-powered stalker bleed is the mod's own, no cheat line (dh "
+					.. tostring(bandit._dh) .. ", health " .. tostring(bandit.health) .. ", amount fails +" .. (trust_failed("pba_bleed_amount") - amt0) .. ")")
+			end
+			coop_trust.reset_for_test({ default = "log" })
 		end
 
 		-- several procs within the pacing gap go as one request (the shared verb's budget), the same total
@@ -472,12 +507,18 @@ for _, set in ipairs(modes.names()) do
 		-- forged bleedings
 		---------------------------------------------------------------------------------------------------------------
 		forget()
-		local function bleed_of(target, extra, wait)
+		-- a request on `target`; first his hit of it on the decider (power, default 1.0; false: none)
+		local function bleed_of(target, extra, wait, power)
 			NOW = NOW + (wait or 500)
+			local o = type(target) == "number" and OBJ[target] or nil
+			if power ~= false and o then landed(o, power or 1.0) end
 			local t = { k = "bleed", q = next_q(), t = target, n = 1, i1 = repei:id(), b = 0.001, d = 3.5, s = 1 }
 			for k, v in pairs(extra or {}) do t[k] = v end
 			deliver(forged(t))
 		end
+		-- the bound one hit of his gives with Momopate's Thistle and one artefact: the power before his Thistle halved it
+		-- (power / hit_coeff) times the mod's loss a tick per power, times 2 for the order of the other perks' changes
+		local function per_hit(power) return power / 0.5 * (0.5 * 0.0045 * 0.75) * 2 end
 		fresh(boar)
 		boar.health = 100
 		bleed_of(boar:id(), { d = 1e9 })
@@ -488,9 +529,9 @@ for _, set in ipairs(modes.names()) do
 		boar.health = 100
 		bleed_of(boar:id(), { b = 10 })
 		run(200)
-		local cap = 50 * 0.5 * 0.0045 * 0.75
+		local cap = per_hit(1.0)
 		check(near(boar._last_dh, -cap) and trust_failed("pba_bleed_amount") >= 1,
-			"m24:2: a forged amount is cut to the mod's formula for his artefacts and a hit of 50, counted")
+			"m24:2: a forged amount is cut to the mod's formula for his artefacts and his hit's power, counted")
 		run(5000)
 		local before = n_dots()
 		bleed_of(boar:id(), { b = 0 / 0 })
@@ -522,6 +563,163 @@ for _, set in ipairs(modes.names()) do
 			"m24:2: refuse mode: an interval of 250 ms is accepted")
 		run(4000)
 		coop_trust.reset_for_test({ default = "log" })
+
+		---------------------------------------------------------------------------------------------------------------
+		-- B-REV F1 (BLOCKER): a bleeding needs his own recent hits of that creature on the decider (always-on guard
+		-- pba_bleed_hit); the procs are cut to those hits, the amount to their power, and the hits are spent
+		---------------------------------------------------------------------------------------------------------------
+		for _, mode in ipairs({ "refuse", "log", "off" }) do
+			forget()
+			coop_trust.reset_for_test({ default = mode })
+			local hit0 = trust_failed("pba_bleed_hit")
+			-- probe B1: his own Thistle carried, a dog 1000 m away he never shot, the largest stack
+			local lone = creature("dog_weak", vec3(1000, 0, 0), "monster", { health = 1 })
+			NOW = NOW + 1000
+			deliver(forged({ k = "bleed", q = next_q(), t = lone:id(), n = 1, i1 = repei:id(), b = 1.0, d = 3.5, s = 16 }))
+			run(1500)
+			check(lone._alive ~= false and lone._dh == nil and n_dots() == 0
+				and (mode == "off" or trust_failed("pba_bleed_hit") == hit0 + 1),
+				"B-REV F1 (" .. mode .. "): a bleeding of a creature 1000 m away he never hit kills nothing, dropped")
+			-- probe B1b: one proc within the old bound (s = 1, a hit of 50): before the fix its 15th tick killed
+			local lone2 = creature("dog_weak", vec3(1200, 0, 0), "monster", { health = 1 })
+			NOW = NOW + 1000
+			deliver(forged({ k = "bleed", q = next_q(), t = lone2:id(), n = 1, i1 = repei:id(), b = 0.0699, d = 3.5, s = 1 }))
+			run(8000)
+			check(lone2._alive ~= false and lone2._dh == nil, "B-REV F1 (" .. mode .. "): one s = 1 request with no hit kills nothing")
+			-- his hit of another creature, and another's hit of this one, are not his hit of this one
+			local a, b2c = creature("dog_weak", vec3(3, 0, 3), "monster"), creature("dog_weak", vec3(3, 0, 4), "monster")
+			landed(a, 1.0)
+			landed(b2c, 1.0, actor) -- the host player's own (co-op) / the map server's ghost, nobody's (server)
+			bleed_of(b2c:id(), nil, 500, false)
+			run(1500)
+			check(b2c._dh == nil and a._dh == nil, "B-REV F1 (" .. mode .. "): neither his hit of another creature nor another's hit counts")
+			-- a hit older than HIT_KEEP_MS (15 s) does not count
+			local old = creature("dog_weak", vec3(3, 0, 5), "monster")
+			landed(old, 1.0)
+			bleed_of(old:id(), nil, 15100, false)
+			run(1500)
+			check(old._dh == nil, "B-REV F1 (" .. mode .. "): a hit of his 15.1 s before the request does not count")
+		end
+		coop_trust.reset_for_test({ default = "log" })
+		forget()
+		-- his hit, then the request: applied once; the same hit cannot carry a second request
+		local shot1 = creature("dog_weak", vec3(3, 0, 6), "monster")
+		bleed_of(shot1:id(), { b = 0.001 })
+		run(400)
+		local t1 = shot1._dh or 0
+		local hit0 = trust_failed("pba_bleed_hit")
+		bleed_of(shot1:id(), { b = 0.001 }, 500, false)
+		run(4500)
+		check(t1 > 0 and shot1._dh == 36 and trust_failed("pba_bleed_hit") == hit0 + 1,
+			"B-REV F1: his hit carries one bleeding; a second request on the same hit is dropped")
+		-- the request before his hit (his frame sends the hit first, the decider may apply it a frame later): it waits up to 1 s
+		local late = creature("dog_weak", vec3(3, 0, 7), "monster")
+		bleed_of(late:id(), { b = 0.001 }, 500, false)
+		run(300)
+		landed(late, 1.0)
+		run(4000)
+		check(late._dh == 36, "B-REV F1: a request that arrives before its hit waits for it (36 ticks)")
+		local later = creature("dog_weak", vec3(3, 0, 8), "monster")
+		hit0 = trust_failed("pba_bleed_hit")
+		bleed_of(later:id(), { b = 0.001 }, 500, false)
+		run(1200)
+		landed(later, 1.0)
+		run(4000)
+		check(later._dh == nil and trust_failed("pba_bleed_hit") == hit0 + 1, "B-REV F1: ... but not longer than 1 s")
+		-- the amount: up to his hits' power; the procs: up to his hits
+		local weak = creature("dog_weak", vec3(3, 0, 9), "monster")
+		local amount0 = trust_failed("pba_bleed_amount")
+		bleed_of(weak:id(), { b = 1.0 }, 500, 0.2)
+		run(200)
+		check(near(weak._last_dh, -per_hit(0.2)) and trust_failed("pba_bleed_amount") == amount0 + 1,
+			"B-REV F1 log mode: an amount over his hit's power is cut to it, counted")
+		local two = creature("dog_weak", vec3(3, 0, 10), "monster")
+		landed(two, 1.0)
+		bleed_of(two:id(), { b = 1.0, s = 16 }, 500, 1.0)
+		run(200)
+		check(near(two._last_dh, -2 * per_hit(1.0)), "B-REV F1: a stack of 16 on two hits of his is cut to those two hits")
+		hit0 = trust_failed("pba_bleed_hit")
+		bleed_of(two:id(), { b = 0.001 }, 500, false)
+		run(1200)
+		check(trust_failed("pba_bleed_hit") == hit0 + 1, "B-REV F1: ... and both hits are spent")
+		run(4000)
+		coop_trust.reset_for_test({ default = "refuse" })
+		local weak2 = creature("dog_weak", vec3(3, 0, 11), "monster")
+		bleed_of(weak2:id(), { b = 1.0 }, 500, 0.2)
+		run(1500)
+		check(weak2._dh == nil, "B-REV F1 refuse mode: an amount over his hit's power is refused")
+		coop_trust.reset_for_test({ default = "log" })
+
+		---------------------------------------------------------------------------------------------------------------
+		-- rv_FIX-PBA R1: a pack fight. His machine sends one creature's batch every 0.5 s, oldest first (bleed_flush), so
+		-- the 6th creature hit in one frame is asked about 2.5 s after its hit: the decider keeps his hits HIT_KEEP_MS
+		-- (15 s >= 24 bleedings * 0.5 s + transport), and the always-on pba_bleed_hit never drops an honest bleeding
+		---------------------------------------------------------------------------------------------------------------
+		do
+			-- his frame: his Thistle on his hit of `victim` (the power before it), the hit forwarded to the decider at once
+			local function owner_hit(victim, p)
+				as_owner()
+				local h = shot(p)
+				thistle_mon.af_repei(actor, 1, { repei:id() }, { "af_repei" }, victim, h, 0, {})
+				landed(victim, h.power)
+			end
+			-- every request his machine sent and the decider has not had yet goes to it, oldest first
+			local function pump()
+				for _, e in ipairs(SENT) do
+					if e.name == "mods.pba_cmd" and e.target == 0 and not e._pack then
+						e._pack = true
+						deliver(e)
+					end
+				end
+			end
+			-- one Lua state plays both machines: the decider's part of the shared update (its ticks) acts as the decider
+			local real_ch, real_kill = GO.change_health, GO.kill
+			local decider_part = false
+			function GO:change_health(v)
+				local m = MODE
+				if decider_part then MODE = "host" end
+				real_ch(self, v)
+				MODE = m
+			end
+			function GO:kill(w)
+				local m = MODE
+				if decider_part then MODE = "host" end
+				real_kill(self, w)
+				MODE = m
+			end
+			local function step(ms)
+				for _ = 1, math.floor(ms / 100) do
+					as_owner()
+					decider_part = true
+					tick(100)
+					decider_part = false
+					pump()
+				end
+			end
+			as_owner()
+			for _ = 1, 10 do tick(600) end -- nothing of the tests above waits on his machine
+			for _, e in ipairs(SENT) do e._pack = true end
+			for _, N in ipairs({ 6, 8 }) do
+				forget()
+				coop_trust.reset_for_test({ default = "log" })
+				local hit0 = trust_failed("pba_bleed_hit")
+				local pack = {}
+				NOW = NOW + 5000
+				for i = 1, N do
+					pack[i] = creature("dog_weak", vec3(10 + i, 0, 20), "monster", { health = 1 })
+					owner_hit(pack[i], 0.8)
+				end
+				pump()
+				step(6000)
+				local bled = 0
+				for i = 1, N do if pack[i]._dh then bled = bled + 1 end end
+				check(bled == N and trust_failed("pba_bleed_hit") == hit0,
+					"rv_FIX-PBA R1: " .. N .. " creatures hit in one frame all bleed (" .. bled .. " of " .. N
+					.. "); the always-on pba_bleed_hit never fails")
+			end
+			GO.change_health, GO.kill = real_ch, real_kill
+			coop_trust.reset_for_test({ default = "log" })
+		end
 
 		-- a bleeding outlives its shooter on the map: its kill falls to the engine's last hitter
 		forget()
@@ -559,6 +757,7 @@ for _, set in ipairs(modes.names()) do
 			local dog4 = creature("dog_weak", vec3(1, 0, 1), "monster", { health = 0.0007 })
 			sent0 = sent_count()
 			NOW = NOW + 600
+			landed(dog4, 0.4, actor)
 			thistle_mon.af_repei(actor, 1, { host_repei:id() }, { "af_repei" }, dog4, shot(0.8), 0, {})
 			check(sent_count() == sent0 and n_effects() == 0, "co-op: the host's own bleeding goes to the decider function directly")
 			run(300)

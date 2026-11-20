@@ -27,6 +27,7 @@ function CPsi:kill_objects_at_pos(pos, fate) PSI_KILLS[#PSI_KILLS + 1] = { pos =
 function CPsi:kill_crows_at_pos() CROWS = CROWS + 1 end
 
 print("== env_players_host")
+dofile("tests/lua/support/modes.lua").live(load_script_file("coop_mode"))
 load_coop_main()
 coop_main.on_game_start()
 local sm = surge_manager.get_surge_manager()

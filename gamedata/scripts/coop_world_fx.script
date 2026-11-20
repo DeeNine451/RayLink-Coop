@@ -102,9 +102,7 @@ end
 
 -- The level a far view of the world server looks at, nil outside one: a task's point is on that level.
 local function far_level()
-	local qc = rawget(_G, "coop_quests_core")
-	local far = qc and qc.part and qc.part("far") -- a server's far view, nil in the co-op
-	local scope = far and far.in_scope and far.in_scope()
+	local scope = coop_mode.far().in_scope()
 	return scope and scope.id or nil
 end
 
@@ -127,9 +125,9 @@ local function cast_level(name, args)
 	-- Mk: the engine takes it to the players of its level (l_broadcast)
 	local s = api and api.sync
 	if not s then return false end
-	local l = api.levels
-	local level = l and l.my_level and l.my_level()
-	return told(s.broadcast(name, args, level and { level = level } or nil))
+	-- The guarded engine getter returns nil while the world is being built or torn down.
+	local id = api.my_level and api.my_level()
+	return told(s.broadcast(name, args, id and { level = id } or nil))
 end
 
 local function relaying() return host_on and muted == 0 end

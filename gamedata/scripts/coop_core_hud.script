@@ -41,6 +41,8 @@ local tostring, tonumber, type, ipairs, pairs, pcall = tostring, tonumber, type,
 local math_max, math_min, math_floor = math.max, math.min, math.floor
 
 local EV_STATUS = "core.status"
+local STATUS_COORD_MAX = 1000000 -- same world coordinate bound as coop_main's environment reports
+local MAX_PLAYER_SLOT = 16 -- coop_protocol.h kMaxPlayers
 local STATUS_MS = 1000 -- check own status this often
 local STATUS_KEEPALIVE_MS = 5000 -- resend an unchanged status
 local PANEL_MS = 500 -- party panel refresh (2 Hz)
@@ -140,9 +142,8 @@ local function send_status(tg)
 		local b = allies().engine_bleed(0)
 		if b then t.b = math_min(b, 3600) end
 	end
-	-- Split levels: a mirror's record of a player on another map stands still, his status says where he is (place_far)
-	local lv = api.levels
-	if lv and lv.split and lv.split() then
+	-- When the world seat is away, mirrors need the player's reported position to move his offline record.
+	if coop_mode.where(0) == "away" then
 		local pos = actor:position()
 		t.x, t.y, t.z = math_floor(pos.x + 0.5), math_floor(pos.y + 0.5), math_floor(pos.z + 0.5)
 		t.l, t.g = actor:level_vertex_id(), actor:game_vertex_id()
@@ -155,23 +156,54 @@ local function send_status(tg)
 	end
 end
 
+local function audit_status_refusal(from, why)
+	if coop_trust then coop_trust.pass(EV_STATUS, false, "peer %s: %s", tostring(from), why) end
+end
+
+local function status_number(value, min, max)
+	local n = tonumber(value)
+	if n and n >= min and n <= max then return n end
+end
+
+local function status_text(value, limit, pattern, from, why)
+	if value == nil then return "" end
+	if type(value) == "string" and #value <= limit and value:match(pattern) then return value end
+	audit_status_refusal(from, why)
+	return ""
+end
+
 local function on_status(payload, from)
-	if type(from) ~= "number" or not allies() then return end
-	local t = codec().decode(payload)
-	local h = tonumber(t.h)
-	local s = t.s
-	if not (h and h >= 0 and h <= 1 and allies().is_wire_state(s)) then
-		stats.status_bad = stats.status_bad + 1
-		return
+	if not (type(from) == "number" and from >= 0 and from <= MAX_PLAYER_SLOT and from == math_floor(from)) then
+		return audit_status_refusal(from, "invalid sender")
 	end
-	local f = type(t.f) == "string" and #t.f <= 40 and t.f:match("^[%w_]*$") and t.f or ""
-	local i = type(t.i) == "string" and #t.i <= 96 and t.i:match("^[%w_\\/%.]*$") and t.i or ""
-	local b = tonumber(t.b)
-	b = (s == "down" and b and b >= 0 and b <= 3600) and math_floor(b) or nil
+	if not allies() then return end
+	if type(payload) ~= "string" then return audit_status_refusal(from, "invalid payload") end
+	local t = codec().decode(payload)
+	local h = status_number(t.h, 0, 1)
+	local s = t.s
+	if not (h and allies().is_wire_state(s)) then
+		stats.status_bad = stats.status_bad + 1
+		return audit_status_refusal(from, "invalid health or state")
+	end
+	local f = status_text(t.f, 40, "^[%w_]*$", from, "invalid community")
+	local i = status_text(t.i, 96, "^[%w_\\/%.]*$", from, "invalid portrait")
+	local b
+	if t.b ~= nil then
+		local bleed = s == "down" and status_number(t.b, 0, 3600)
+		if bleed then b = math_floor(bleed) else audit_status_refusal(from, "invalid bleed timer") end
+	end
 	local st = { h = h, s = s, f = f, i = i, b = b, at = time_global() }
-	local x, y, z, lv, gv = tonumber(t.x), tonumber(t.y), tonumber(t.z), tonumber(t.l), tonumber(t.g)
-	if x and y and z and lv and gv and lv >= 0 and gv >= 0 and gv < 65535 then
-		st.x, st.y, st.z, st.l, st.g = x, y, z, lv, gv
+	-- A position is optional, but all five fields are needed to move the offline record.
+	if t.x ~= nil or t.y ~= nil or t.z ~= nil or t.l ~= nil or t.g ~= nil then
+		local x = status_number(t.x, -STATUS_COORD_MAX, STATUS_COORD_MAX)
+		local y = status_number(t.y, -STATUS_COORD_MAX, STATUS_COORD_MAX)
+		local z = status_number(t.z, -STATUS_COORD_MAX, STATUS_COORD_MAX)
+		local lv, gv = status_number(t.l, 0, 0xffffffff), status_number(t.g, 0, 0xfffe)
+		if x and y and z and lv and lv == math_floor(lv) and gv and gv == math_floor(gv) then
+			st.x, st.y, st.z, st.l, st.g = x, y, z, lv, gv
+		else
+			audit_status_refusal(from, "invalid position or vertex")
+		end
 	end
 	status[from] = st
 	stats.status_in = stats.status_in + 1
@@ -201,9 +233,8 @@ end
 
 -- "On another map: <name>" for a player the mode layer says is away.
 local function elsewhere_of(peer)
-	local qc = rawget(_G, "coop_quests_core")
-	local lv = qc and qc.part and qc.part("levels") -- a server's level names (coop_srv_levels)
-	local text = lv and lv.elsewhere_text and lv.elsewhere_text(peer)
+	local read = coop_mode.hook("levels.elsewhere_text")
+	local text = read and read(peer)
 	return text and text ~= "" and text or nil
 end
 
@@ -212,15 +243,13 @@ function views(tg)
 	local A = allies()
 	local list, by_avatar = {}, {}
 	local actor = db.actor
-	local mode = rawget(_G, "coop_mode")
 	for _, p in ipairs(players()) do
 		if not p.is_self and type(p.id) == "number" then
 			local st = status[p.id]
 			local state, bleed = A.state_of(p, st, tg)
 			local fresh = st and (tg - st.at) <= A.STATUS_STALE_MS
 			local obj, id = avatar_of(p)
-			-- Older callers without the facade supplied the per-player location in their roster.
-			local away = (mode and mode.where(p.id) == "away") or (not mode and p.elsewhere == true)
+			local away = coop_mode.where(p.id) == "away"
 			local far_id = not obj and away and far_avatar(p) or nil
 			local icon = st and st.i ~= "" and st.i or nil
 			if not icon and obj then
@@ -249,13 +278,13 @@ end
 local far_placed = {}
 
 function place_far(list)
-	local lv = api and api.levels
-	if not (lv and lv.far_place) then return end
+	local place = coop_mode.hook("levels.far_place")
+	if not place then return end
 	for _, v in ipairs(list) do
 		local st = v.far_id and status[v.peer]
 		if st and st.g and far_placed[v.peer] ~= st then
 			far_placed[v.peer] = st
-			pcall(lv.far_place, v.far_id, st.x, st.y, st.z, st.l, st.g)
+			pcall(place, v.far_id, st.x, st.y, st.z, st.l, st.g)
 		end
 	end
 end

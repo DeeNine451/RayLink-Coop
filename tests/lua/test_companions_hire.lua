@@ -222,10 +222,13 @@ local function stock(M)
 	end
 	-- the share of the server (coop_srv_levels_share carries what the Core registered)
 	M.share = { up = {}, down = {} }
-	E.coop_quests_core = { share = function() return {
-		up = function(name, get, set) M.share.up[name] = { get = get, set = set } end,
-		down = function(name, get, set) M.share.down[name] = { get = get, set = set } end,
-	} end }
+	local function up(name, get, set) M.share.up[name] = { get = get, set = set } end
+	local function down(name, get, set) M.share.down[name] = { get = get, set = set } end
+	E.coop_quests_core = {
+		share_up = up,
+		share_down = down,
+		share = function() return { up = up, down = down } end,
+	}
 end
 
 -- the real mods' functions of this machine

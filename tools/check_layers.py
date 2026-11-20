@@ -38,6 +38,9 @@ Rules (ids as in docs/MODES.md section 5):
       Lua (review A-S4ML B4): a server part's presence used as a mode test (coop_quests_core.part(...) compared with
       nil, a condition of if / while / not / and / or, type(...) of it; a getter of one; a local part's presence kept
       as a value); calling a part's function is allowed
+      Lua (review A-REV-E-1, finding 1): any use of the server's global table srv (srv.x, srv["x"], srv:x, the table as
+      a value `local s = srv`, _G.srv, _G["srv"], rawget(_G, "srv")) and dedicated_new_world; a stock script's use is
+      L5, the co-op layer's L3, the server layer's own
   L2  Ядро uses an overloaded role: C++ is_host( is_client( is_map_authority( has_role(ProcessRole::WorldClient);
       Lua is_world_server( is_host(; and wrappers of those (taint as L1)
   L3  a reference across layers: Ядро or stock -> srv / hostplay, srv <-> hostplay. C++ #include of a file of that
@@ -46,7 +49,8 @@ Rules (ids as in docs/MODES.md section 5):
       layer (`lua_getglobal(L, "coop_dedicated")`), `extern` of a global only that layer defines; Lua `coop_x.fn` /
       mod("coop_x") / rawget(_G, "coop_x") / _G["coop_x"] / module_of / call_module of a script of that layer (also from
       the stock Lua roots), and a plain string that is exactly a script's name (a dispatch table `{ "coop_x" }` read
-      through rawget(_G, name); review 3, C6). The facade coop_mode is allowed. And a srv / hostplay file that defines a
+      through rawget(_G, name); review 3, C6). The facade coop_mode is allowed. A hostplay script that uses the server's
+      Lua table srv (as L1 reads it; review A-REV-E-1, finding 1). And a srv / hostplay file that defines a
       member of a class only Ядро or stock define (`bool coop::FarPolicy::keep_online(...)`: Ядро calls it through an
       object), a member function or a static data member (`u32 FarLimits::squads_per_player = 4;`, C8)
   L4  a default argument or a default member of type bool in an Ядро file whose name has a mode word (level, split,
@@ -222,11 +226,21 @@ CPP_MODE = re.compile(
 )
 # a probe of the command line for a mode key (the keys are the launcher's contract, docs/MODES.md section 6)
 MODE_KEY = re.compile(r"""["']-coop_(?:mapserver|dedicated|host|operator|hidden|stage)\b""")
+# The server's Lua table srv.* (srv/coop_srv_script.cpp makes it in every Lua state, A-S4H): the server layer's own
+# predicates. Any use of the global outside that layer is a mode check, whatever it reads (review A-REV-E-1, finding 1:
+# srv.split(), srv.dedicated_new_world() and `local s = srv` got through): srv.x / srv["x"] / srv:x, the table as a value
+# (`= srv`, `f(srv)`), _G.srv and _G["srv"] (read as _G.srv by lua_norm). Not the table: a field (t.srv), a constructor
+# key or an assignment target (`{ srv = true }`, `srv = x`), a longer name (when_srv). A local named srv reads as the
+# table too: a Core script does not name one so. rawget(_G, "srv") is in its strings: LUA_SRV_NAMED.
+LUA_SRV_TABLE = r"(?<![\w.:])srv\b(?!\s*=(?!=))|\b_G\s*\.\s*srv\b"
+LUA_SRV_NAMED = re.compile(r"""\brawget\s*\(\s*_G\s*,\s*(["'])srv\1""")
 LUA_MODE = re.compile(
     r"\bis_map_server\b|\bis_dedicated\b|\blevels\s*\.\s*split\b|\bapi\s*\.\s*levels\b|\bactor_is_nobody\b"
     r"|\blevel_of_player\b|\bmap_servers\b|(?<![A-Za-z0-9])story_together\b|\bon_host_level\b|\bled_by_host_process\b"
     r"|\bhost_character_elsewhere\b|\bbody_facts\b|\bghost_actor\b|\bis_bridge\b|\bworld_server_now\b|\bgame_split\b"
+    r"|\bdedicated_new_world\b|" + LUA_SRV_TABLE
 )
+LUA_SRV = re.compile(LUA_SRV_TABLE)
 CPP_ROLE = re.compile(r"\bis_host\s*\(|\bis_client\s*\(|\bis_map_authority\s*\("
                       r"|\bhas_role\s*\(\s*ProcessRole\s*::\s*WorldClient\b")
 LUA_ROLE = re.compile(r"\bis_world_server\s*\(|\bis_host\s*\(")
@@ -303,7 +317,7 @@ LIT_CPP_MODE = ("is_map_server", "is_world_server", "dedicated", "g_coop_", "spl
                 "mapserver", "leads_my_level", "world_server_now", "has_role", "-coop_")
 LIT_LUA_MODE = ("is_map_server", "is_dedicated", "split", "levels", "actor_is_nobody", "level_of_player", "map_servers",
                 "story_together", "on_host_level", "led_by_host_process", "host_character_elsewhere", "body_facts",
-                "ghost_actor", "is_bridge", "world_server_now", "-coop_")
+                "ghost_actor", "is_bridge", "world_server_now", "-coop_", "dedicated_new_world", "srv")
 LIT_CPP_ROLE = ("is_host", "is_client", "is_map_authority", "has_role")
 LIT_LUA_ROLE = ("is_world_server", "is_host")
 LIT_STOCK = ("coop", "has_role", "split", "story_together", "ghost_actor", "on_host_level", "host_character_elsewhere",
@@ -2445,6 +2459,8 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                 candidates |= lines_with(("coop_",)) | (lines_naming(src.aliases) if src.aliases else set())
             if layer == "stock":
                 candidates |= lines_with(LIT_LUA_MODE)
+            if layer == "hostplay":
+                candidates |= lines_with(("srv",))
             if layer == "srv":
                 candidates |= lines_with(LIT_LUA_REGISTER + ("function",))
             for number in sorted(candidates):
@@ -2457,7 +2473,7 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                     variants += [rewrite_lua(line, here), rewrite_lua(normed, here)]
                 if layer == "core":
                     hit = next((h for h in (LUA_MODE.search(v) for v in variants) if h), None) \
-                        or MODE_KEY.search(with_strings)
+                        or MODE_KEY.search(with_strings) or LUA_SRV_NAMED.search(with_strings)
                     if hit:
                         add("L1", number, f"'{hit.group(0)}'")
                     else:
@@ -2477,9 +2493,16 @@ def scan_model(model: Model, keys: list[tuple[int, str, str]], keys_path: str) -
                             add("L2", number, "an alias of a role")
                 if layer == "stock":
                     # a stock-patch script runs in every process: a mode name in it is a stock hook (as L5 in C++)
-                    hit = next((h for h in (LUA_MODE.search(v) for v in variants) if h), None)
+                    hit = next((h for h in (LUA_MODE.search(v) for v in variants) if h), None) \
+                        or LUA_SRV_NAMED.search(with_strings)
                     if hit:
                         add("L5", number, f"'{hit.group(0)}'")
+                if layer == "hostplay":
+                    # the co-op layer reads the engine's coop.*: the server's table is the other layer's (A-REV-E-1, 1)
+                    hit = next((h for h in (LUA_SRV.search(v) for v in variants) if h), None) \
+                        or LUA_SRV_NAMED.search(with_strings)
+                    if hit:
+                        add("L3", number, f"names the server's table srv ('{hit.group(0)}', srv/coop_srv_script.cpp)")
                 if layer in ("core", "srv", "hostplay", "stock"):
                     refs: set[str] = set()
                     for v in variants:

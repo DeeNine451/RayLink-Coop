@@ -99,6 +99,9 @@ Ms.env.db.zone_by_name[ZONE] = zone
 Hm.env.db.actor._pos = vec(-500, 0, -500) -- the world server's ghost stands on its own level, far from every zone of jupiter
 
 local function boot(M)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
+	load_script(M, "coop_srv_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do
 		if M.env[n].on_game_start then M.env[n].on_game_start() end

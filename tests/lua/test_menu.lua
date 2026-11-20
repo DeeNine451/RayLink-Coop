@@ -164,6 +164,8 @@ function standard_games()
 end
 
 print("== coop_menu: validation")
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local m = load_module("coop_menu")
 check(m.check_nick("  Strelok ") == "Strelok", "nick trimmed")
 check(m.check_nick("") == nil and m.check_nick(string.rep("a", 33)) == nil, "nick length 1..32")

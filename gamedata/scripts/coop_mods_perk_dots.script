@@ -29,10 +29,20 @@
 	         instead (its target and bleeding_hit are the effect's own upvalues) and asked for. Procs within 0.5 s of the
 	         last request are merged. A batch reaching 16 procs goes as soon as 250 ms have passed since the last request
 	         (the shared verb's budget: 4 a second). Further procs start a separate batch.
-	         The decider (checks: pba_bleed_shape guard, pba_bleed_duration and pba_bleed_amount trust, pba_bleed_dots guard):
-	         d up to the active Thistle's effect_time (Momopate 3.5 s, PBA 7 s), cut to it in every mode; b up to the mod's
-	         formula for his verified count and a hit of 50 (grok_bo's own bound for a bullet) times s, cut to it in every mode;
-	         at most 24 bleedings of one player at once. A tick every 100 ms, floor(d * 10 + 0.5) + 1 of them, as the mod's
+	         The decider (checks: pba_bleed_shape guard, pba_bleed_duration trust, pba_bleed_dots guard, pba_bleed_hit guard,
+	         pba_bleed_amount trust): d up to the active Thistle's effect_time (Momopate 3.5 s, PBA 7 s), cut to it in every
+	         mode; at most 24 bleedings of one player at once, running or waiting.
+	         B-REV F1: a bleeding is tied to his own hits. The decider keeps a book of the hits it applies for players (its
+	         npc_on_before_hit / monster_on_before_hit with a player's character as the draftsman: a client's forwarded hit,
+	         coop_requests.cpp host_hit, or the host player's own): creature, power (at most 50, grok_bo's own bound for a
+	         bullet), time; 512 a character, for 15 s. A bleeding needs his unspent hits of that creature from the last 15 s, an
+	         always-on guard (his machine holds a proc up to 0.5 s for each creature waiting before it, oldest first: 24
+	         bleedings at once wait up to 12 s, plus the transport; rv_FIX-PBA R1). A request that comes
+	         before its hit (his frame sends the hit first, the decider may apply it a frame later, the world server relays
+	         both) waits for it up to 1 s, then is dropped. s is cut to those hits; b to the mod's own amount for their power
+	         before his Thistle halved it (power / hit_coeff * the loss a tick per power for his verified count), times 2 for
+	         the other perks' changes of the power on either machine (the order of the callbacks is not fixed), cut to it in
+	         every mode. The hits a bleeding used are spent. A tick every 100 ms, floor(d * 10 + 0.5) + 1 of them, as the mod's
 	         100 ms loop runs an effect up to the cycle after its end; a dead or missing target ends it. The tick that would
 	         kill is npc:kill(his character) while that character is his and here (the kill is his: perks, tasks,
 	         statistics), else the mod's own change_health (the engine credits the last hitter); an invulnerable creature
@@ -75,6 +85,11 @@ local MAX_DOTS = 24 -- bleedings of one player at once
 local BLEED_GAP_MS = 500 -- normal interval for a partial batch
 local BLEED_MIN_MS = 250 -- minimum interval for a full batch and the decider's rate check
 local BLEED_RANGE = 1500 -- the engine's own range for a player's bullet (coop_requests.cpp kFireRange)
+local HIT_KEEP_MS = 15000 -- B-REV F1, rv_FIX-PBA R1: a hit of his counts for a bleeding this long, at least MAX_DOTS *
+                          -- BLEED_GAP_MS + transport (his machine sends one creature's batch every 0.5 s, oldest first)
+local HIT_WAIT_MS = 1000 -- a bleeding asked before the decider applied its hit waits for it this long
+local MAX_HITS = 512 -- hits kept per player character
+local HIT_SLACK = 2 -- other perks may change his hit's power before or after the book sees it
 local CHAIN_MS = 2000 -- the owner tells his Chain ticks this often
 local CHAIN_HEAL = 0.0015 -- PBA af_chelust: heal_companion:change_health(0.0015) a tick (perk_based_artefacts.script:2833)
 local MAX_CHAIN_TICKS = 25
@@ -86,7 +101,7 @@ local SWEEP_MS = 1000
 local TIMERS = { "add_simple_timed_effect", "s_event" } -- PBA's function and Momopate's alias of it (momopate_pba_tweaks.script:4)
 
 local st = { bleeds_out = 0, bleeds = 0, ticks = 0, kills = 0, heals_out = 0, heals = 0, heals_none = 0, kicks_out = 0,
-	kicks_held = 0, kicks = 0, refused = 0 }
+	kicks_held = 0, kicks = 0, refused = 0, no_hit = 0 }
 local abil = nil -- coop_mods_perk_abilities (G7-2): cmd / serve
 
 local function whole(v, lo, hi)
@@ -112,6 +127,36 @@ end
 -- The decider: bleeding (m08:5 :1619, m24:2 :474)
 -------------------------------------------------------------------------------
 local dots = {} -- { peer, owner = his character id, target = creature id, b = loss a tick, left = ticks, next_at }
+local hits = {} -- B-REV F1: player's character id -> his hits applied here, oldest first: { target, power, at, used }
+local waiting = {} -- bleedings asked before their hit: { peer, owner, target, b, s, d, count, till }
+
+-- The decider's book: a hit this process applies whose draftsman is a player's character (a client's forwarded hit, the
+-- host player's own). npc_on_before_hit / monster_on_before_hit; the hit itself is not changed.
+local function note_hit(victim, s_hit)
+	if victim == nil or s_hit == nil or not C().active() then return end
+	local ok, who, target, power = pcall(function() return s_hit.draftsman:id(), victim:id(), s_hit.power end)
+	if not (ok and whole(who, 0, 65534) and whole(target, 1, 65534) and who ~= target and positive(power)) then return end
+	if not (C().is_player(who) and coop_mode.leads_here()) then return end
+	local list = hits[who]
+	if not list then
+		list = {}
+		hits[who] = list
+	end
+	local now = time_global()
+	while list[1] and (list[1].used or now - list[1].at > HIT_KEEP_MS or #list >= MAX_HITS) do table.remove(list, 1) end
+	list[#list + 1] = { target = target, power = math_min(power, HIT_CAP), at = now }
+end
+
+-- His unspent hits of the creature from the last HIT_KEEP_MS, oldest first.
+local function hits_on(owner, target, now)
+	local out = {}
+	local list = hits[owner]
+	if not list then return out end
+	for _, h in ipairs(list) do
+		if not h.used and h.target == target and now - h.at <= HIT_KEEP_MS then out[#out + 1] = h end
+	end
+	return out
+end
 
 -- The loss a tick of one proc at a hit power of 1, by the active Thistle's own numbers on this process.
 local function tick_coeff(props, n)
@@ -123,6 +168,40 @@ local function tick_coeff(props, n)
 	end
 	-- PBA: s_hit.power * -bleed_coeff * artefact_count (perk_based_artefacts.script:1614)
 	return (tonumber(props.bleed_coeff) or 0) * n
+end
+
+-- B-REV F1: a bleeding w against his hits. False: none yet and it may still wait; true: applied or refused.
+local function bleed_settle(w, now, last)
+	local mine = hits_on(w.owner, w.target, now)
+	if mine[1] == nil and not last then return false end
+	if not coop_trust.guard("pba_bleed_hit", mine[1] ~= nil, "player #%d: a bleeding of a creature he has not hit", w.peer) then
+		st.no_hit = st.no_hit + 1
+		refused()
+		return true
+	end
+	local props = props_of("af_repei")
+	local hc = props and tonumber(props.hit_coeff)
+	if not positive(hc) then hc = 1 end
+	local k = math_min(w.s, #mine)
+	local power = 0
+	for i = 1, k do power = power + mine[i].power end
+	local cap = power / hc * tick_coeff(props, w.count) * HIT_SLACK
+	if w.peer == C().self_peer() and coop_mode.actor_is_player() and w.b > cap then
+		cap = w.b -- the decider's own player (the co-op host): his chain ran here (grok_bo hands PBA its own power, rv_integA N2)
+	end
+	if not positive(cap) then -- no Thistle known here
+		refused()
+		return true
+	end
+	if not coop_trust.pass("pba_bleed_amount", w.b <= cap, "player #%d: a bleeding over the mod's own for his hits", w.peer) then
+		refused()
+		return true
+	end
+	for i = 1, k do mine[i].used = true end
+	dots[#dots + 1] = { peer = w.peer, owner = w.owner, target = w.target, b = math_min(w.b, cap),
+		left = math_floor(w.d * 10 + 0.5) + 1, next_at = now + TICK_MS }
+	st.bleeds = st.bleeds + 1
+	return true
 end
 
 local function bleed_apply(r)
@@ -138,23 +217,36 @@ local function bleed_apply(r)
 		r.from) then
 		return refused()
 	end
-	local d = math_min(t.d or bound, bound)
-	local cap = math_min(t.s or 1, MAX_STACK) * HIT_CAP * tick_coeff(props, r.count)
-	if cap <= 0 then return refused() end -- no Thistle known here
-	if not coop_trust.pass("pba_bleed_amount", t.b <= cap, "player #%d: a bleeding over the mod's own for his artefacts",
-		r.from) then
-		return refused()
-	end
+	if tick_coeff(props, r.count) <= 0 then return refused() end -- no Thistle known here
 	local n = 0
 	for _, dot in ipairs(dots) do
 		if dot.peer == r.from then n = n + 1 end
 	end
+	for _, w in ipairs(waiting) do
+		if w.peer == r.from then n = n + 1 end
+	end
 	if not coop_trust.guard("pba_bleed_dots", n < MAX_DOTS, "player #%d: too many bleedings at once", r.from) then
 		return refused()
 	end
-	dots[#dots + 1] = { peer = r.from, owner = r.owner:id(), target = r.target:id(), b = math_min(t.b, cap),
-		left = math_floor(d * 10 + 0.5) + 1, next_at = time_global() + TICK_MS }
-	st.bleeds = st.bleeds + 1
+	local now = time_global()
+	local w = { peer = r.from, owner = r.owner:id(), target = r.target:id(), b = t.b, s = math_min(t.s or 1, MAX_STACK),
+		d = math_min(t.d or bound, bound), count = r.count, till = now + HIT_WAIT_MS }
+	if not bleed_settle(w, now, false) then waiting[#waiting + 1] = w end
+end
+
+-- The bleedings that wait for their hit: settled once the hit is in the book, dropped after HIT_WAIT_MS.
+local function settle_waiting(now)
+	local i = 1
+	while i <= #waiting do
+		local w = waiting[i]
+		local ok, done = pcall(bleed_settle, w, now, now >= w.till)
+		if not ok then C().report("perk_dots", "bleeding wait", done) end
+		if ok and not done then
+			i = i + 1
+		else
+			table.remove(waiting, i)
+		end
+	end
 end
 
 local function invulnerable(obj)
@@ -517,9 +609,13 @@ end
 -------------------------------------------------------------------------------
 local function sweep(now)
 	if not C().active() then
-		dots, chain_at, pending, full_bleeds, ball_mark = {}, {}, {}, {}, {}
+		dots, chain_at, pending, full_bleeds, ball_mark, hits, waiting = {}, {}, {}, {}, {}, {}, {}
 		chain_st.ticks = 0
 		return
+	end
+	for who, list in pairs(hits) do
+		local newest = list[#list]
+		if not newest or now - newest.at > HIT_KEEP_MS then hits[who] = nil end
 	end
 	local present = { [C().self_peer()] = true }
 	for _, p in ipairs(C().players()) do
@@ -545,6 +641,7 @@ local function update()
 			local ok, e = pcall(chain_flush, now)
 			if not ok then C().report("perk_dots", "Chain request", e) end
 		end
+		if waiting[1] then settle_waiting(now) end
 		if dots[1] then tick_dots(now) end
 	end
 	if now >= next_sweep then
@@ -555,16 +652,17 @@ local function update()
 end
 
 local function status()
-	return string.format("bleeding: asked %d, here %d (ticks %d, kills %d, running %d) | Chain: asked %d, healed %d "
-		.. "(no companion here %d) | Ball: asked %d, own kicks held %d, kicked here %d | refused %d", st.bleeds_out, st.bleeds,
-		st.ticks, st.kills, #dots, st.heals_out, st.heals, st.heals_none, st.kicks_out, st.kicks_held, st.kicks, st.refused)
+	return string.format("bleeding: asked %d, here %d (ticks %d, kills %d, running %d, waiting for a hit %d, no hit of his %d) "
+		.. "| Chain: asked %d, healed %d (no companion here %d) | Ball: asked %d, own kicks held %d, kicked here %d | refused %d",
+		st.bleeds_out, st.bleeds, st.ticks, st.kills, #dots, #waiting, st.no_hit, st.heals_out, st.heals, st.heals_none,
+		st.kicks_out, st.kicks_held, st.kicks, st.refused)
 end
 
 -- Tests and coop_status: what runs now.
 function _state()
 	local n = #full_bleeds
 	for _ in pairs(pending) do n = n + 1 end
-	return { dots = #dots, pending = n }
+	return { dots = #dots, pending = n, waiting = #waiting }
 end
 
 -- on_game_start never throws (axr_main runs every script's on_game_start in one unprotected loop).
@@ -605,6 +703,8 @@ function on_game_start()
 		RegisterScriptCallback("actor_on_update", update)
 		RegisterScriptCallback("monster_on_before_hit", own_kick)
 		RegisterScriptCallback("npc_on_before_hit", own_kick)
+		RegisterScriptCallback("monster_on_before_hit", note_hit)
+		RegisterScriptCallback("npc_on_before_hit", note_hit)
 	end)
 	step("status", function() C().status_line("perk_dots", status) end)
 end

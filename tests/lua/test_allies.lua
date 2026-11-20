@@ -136,7 +136,7 @@ STR = {}
 for id, text in readfile(ROOT .. "configs/text/eng/st_coop_allies.xml"):gmatch('<string id="([%w_]+)">%s*<text>(.-)</text>') do STR[id] = text end
 
 -- ---------------------------------------------------------------- the machine
-local SCRIPTS = { "coop_hud_layout", "coop_allies", "coop_allies_map", "coop_core_hud", "modxml_coop_allies" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_trust", "coop_hud_layout", "coop_allies", "coop_allies_map", "coop_core_hud", "modxml_coop_allies" }
 
 local function machine(self_peer)
 	local M = { log = {}, cb = {}, spots = {}, spot_ops = {}, hud = {}, players = {}, objects = {}, sent = {},
@@ -223,6 +223,7 @@ local function machine(self_peer)
 		is_active = function() return M.active end,
 		is_host = function() return M.active and self_peer == 0 end,
 		is_live = function() return M.active end,
+		self_id = function() return self_peer end,
 		players = function() return M.players end,
 		send_event = function(name, payload, target)
 			M.sent[#M.sent + 1] = { name = name, payload = payload, target = target }
@@ -267,6 +268,8 @@ local function machine(self_peer)
 		f()
 	end
 	M.allies, M.map, M.hudm, M.modxml = env.coop_allies, env.coop_allies_map, env.coop_core_hud, env.modxml_coop_allies
+	env.coop_hostplay_mode.on_game_start()
+	env.coop_srv_mode.on_game_start()
 	M.hudm.on_game_start()
 	return M
 end

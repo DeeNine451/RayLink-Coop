@@ -225,12 +225,12 @@ Hm.players = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, is_self = fa
 Cm.players = { { id = 1, is_self = true, avatar_id = 0 }, { id = 0, is_self = false, avatar_id = 500 } }
 Cm.actor._pos = vec(4, 0, 0)
 for _, M in ipairs({ Hm, Cm }) do
-	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
-	-- Only offers need the facade here. The mission relay fixture uses the legacy path and its own coop_mods_core stub.
-	local facade = load_script(M, "coop_mode")
+	load_script(M, "coop_mode")
 	load_script(M, "coop_hostplay_mode").on_game_start()
-	M.env.coop_quests_offer.coop_mode = facade
-	M.env.coop_mode = nil
+	load_script(M, "coop_trust")
+	local find_local = M.env.coop_mods_core.find_local
+	load_script(M, "coop_mods_core").find_local = find_local
+	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 end
 
 local RELAY = find_upvalue(Hm.env.coop_quests_missions.on_game_start, "RELAY")

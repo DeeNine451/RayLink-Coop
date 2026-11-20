@@ -175,6 +175,8 @@ function getFS()
 end
 function get_console_cmd(_, key) return key == "coop_nick" and "Strelok" or "" end
 function exec_console_cmd() end
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 -- Optional alternate source under temp/ allows baseline/mutation checks without touching the shared working file.
 local m = load_module("coop_menu", os.getenv("COOP_MENU_INPUT_SCRIPT_DIR"))
 

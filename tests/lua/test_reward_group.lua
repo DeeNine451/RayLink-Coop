@@ -49,6 +49,8 @@ local function setup_world(M)
 end
 
 local function boot(M)
+	load_script(M, "coop_mode")
+	load_script(M, "coop_hostplay_mode").on_game_start()
 	for _, n in ipairs(SCRIPTS) do load_script(M, n) end
 	for _, n in ipairs(SCRIPTS) do M.env[n].on_game_start() end
 	fire(M, "actor_on_first_update")

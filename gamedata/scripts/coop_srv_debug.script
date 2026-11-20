@@ -1,0 +1,154 @@
+-- Server: route debug commands from the world decider to the authority of a map (docs/DEBUG_DESIGN.md B.6, B.10).
+-- coop.dbg.run: world -> map, checked args plus _c, _rid and _peer (0 for a console command without a player).
+-- coop.dbg.done: map -> world, correlated by rid and the transport bridge. coop.dbg.note: world -> requester.
+
+local api = rawget(_G, "coop")
+local EV_RUN, EV_DONE, EV_NOTE = "coop.dbg.run", "coop.dbg.done", "coop.dbg.note"
+local PENDING_MS = 60000 -- a pending request older than this is swept by the next forward (HEAD: never on its result)
+local MAX_REQUEST_ID = 0xffffffff
+local LAST_PLAYER_PEER = 16 -- kMaxPeerSlots - 1 (coop_protocol.h)
+local MAX_OBJECT_ID = 65534 -- 65535 is the engine's invalid id
+local MAX_RESULT_BYTES = 2048 -- coop_debug_server MAX_SAY_BYTES: a longer announcement is dropped by every receiver
+-- The refusal codes a map's on_run can send back: coop_debug_cmds.validate, coop_debug_server.execute and the commands'
+-- own refusals (coop_debug_cmds: story, already, hostage), with the B.5 list and the client's ERROR_CODES around them.
+local RESULT_CODES = { debug_off = true, old_client = true, unknown_cmd = true, bad_args = true, no_player = true,
+	not_standing = true, bad_target = true, player_target = true, too_far = true, bad_vertex = true, other_level = true,
+	cap = true, failed = true, rate_limited = true, busy = true, not_in_world = true, timeout = true, no_target = true,
+	no_section = true, no_point = true, no_session = true, no_engine = true, unknown = true, story = true, already = true,
+	hostage = true }
+local pending = {}
+local next_rid = 0
+
+local function call(fn, ...)
+	if type(fn) ~= "function" then return nil end
+	local ok, result = pcall(fn, ...)
+	if ok then return result end
+end
+
+local function bounded_int(value, lo, hi)
+	local n = tonumber(value)
+	if n and n >= lo and n <= hi and n % 1 == 0 then return n end
+end
+
+local function log(fmt, ...)
+	printf("[coop-dbg] %s", string.format(fmt, ...))
+end
+
+local function levels()
+	local l = api.levels
+	return type(l) == "table" and l or nil
+end
+
+local function bridge_of_level(l, lid)
+	local list = l and call(l.map_servers)
+	if type(list) ~= "table" then return nil end
+	for _, ms in ipairs(list) do
+		if ms.level == lid then return ms.bridge end
+	end
+end
+
+local function smart_level(se_smart)
+	return call(function() return game_graph():vertex(se_smart.m_game_vertex_id):level_id() end)
+end
+
+local function forward(bridge, id, a, peer, requester, by)
+	if not bridge then return false, "other_level" end
+	local now = time_global()
+	for rid, p in pairs(pending) do
+		if now - p.at > PENDING_MS then pending[rid] = nil end
+	end
+	next_rid = next_rid % MAX_REQUEST_ID + 1
+	local rid = next_rid
+	local t = {}
+	for k, v in pairs(a) do t[k] = v end
+	t._c, t._peer, t._rid = id, peer or 0, rid
+	if not coop_npc_players.send(EV_RUN, t, bridge) then return false, "failed" end
+	pending[rid] = { requester = requester, by = by, id = id, at = now, bridge = bridge }
+	log("%s from %s (peer %s) forwarded to #%s (rid %d): sec %s n %s at %s", id, tostring(by), tostring(peer), tostring(bridge),
+		rid, tostring(a.sec), tostring(a.n), tostring(a.at))
+	return true, "forwarded"
+end
+
+local function dispatch(kind, address, id, a, peer, requester, by)
+	local l = levels()
+	local bridge
+	if kind == "player" then
+		bridge = l and call(l.bridge_of_player, address)
+	else
+		local lid = address
+		if kind == "smart" then
+			lid = smart_level(address)
+			local players = lid ~= nil and l and call(l.players_on, lid)
+			if (tonumber(players) or 0) == 0 then return nil end -- the world can place it offline
+		end
+		bridge = bridge_of_level(l, lid)
+	end
+	return forward(bridge, id, a, peer, requester, by)
+end
+
+local function on_run(payload, player, relayed)
+	-- on_level_request has verified the world sender and extracted the player on this process.
+	local t = coop_npc_players.decode(payload)
+	local id, rid = t._c, bounded_int(t._rid, 1, MAX_REQUEST_ID)
+	local peer = bounded_int(player, 0, LAST_PLAYER_PEER)
+	local c = coop_debug_cmds.get(id)
+	local valid = relayed and peer ~= nil and rid ~= nil and c ~= nil and c.where ~= "ws"
+	if not coop_trust.pass("debug_level_run", valid, "invalid debug run %s, rid %s for peer %s", tostring(id),
+		tostring(t._rid), tostring(player)) or not valid then return end
+	if peer == 0 then peer = nil end
+
+	local ok, a = coop_debug_cmds.validate(id, t)
+	log("%s rid %d for peer %s taken from the world server", id, rid, tostring(peer))
+	local res_ok, r = false, a
+	if coop_trust.pass("debug_level_args", ok, "%s rid %d: invalid arguments (%s)", id, rid, tostring(not ok and a or "")) and ok then
+		res_ok, r = coop_debug_server.execute(c, id, a, peer, "#" .. tostring(peer), rid)
+	end
+	local done = { rid = rid, ok = res_ok == true }
+	if res_ok then
+		done.msg = tostring(r.msg or "")
+		if type(r.id) == "number" then done.id = r.id end
+	else
+		done.code = tostring(r)
+		done.msg = done.code
+	end
+	coop_mode.publish(EV_DONE, done)
+end
+
+local function on_done(payload, from)
+	local trusted = type(from) == "number" and coop_mode.from_level(from)
+	if not coop_trust.pass("debug_level_sender", trusted, "invalid debug completion sender %s", tostring(from)) or not trusted then return end
+	local t = coop_npc_players.decode(payload)
+	local rid = bounded_int(t.rid, 1, MAX_REQUEST_ID)
+	local p = rid and pending[rid]
+	-- No age check here (HEAD's parity): a late result of the dispatched bridge still finishes its request until the next
+	-- forward sweeps it. Every field is checked before the request is consumed, so a malformed result cannot use it up.
+	local valid = p ~= nil and p.bridge == from and type(t.ok) == "boolean"
+		and (t.id == nil or bounded_int(t.id, 0, MAX_OBJECT_ID) ~= nil)
+		and (t.msg == nil or (type(t.msg) == "string" and #t.msg <= MAX_RESULT_BYTES))
+		and (t.code == nil or (type(t.code) == "string" and RESULT_CODES[t.code] == true))
+	if not coop_trust.pass("debug_level_done", valid, "unexpected debug completion rid %s from #%s", tostring(t.rid),
+		tostring(from)) or not valid then return end
+
+	pending[rid] = nil
+	local ok = t.ok
+	log("%s rid %d done by #%s: %s %s (id %s)", p.id, rid, tostring(from), ok and "ok" or "refused",
+		tostring(ok and t.msg or t.code), tostring(t.id))
+	if ok then coop_debug_server.announce(p.by, p.id, t.msg or p.id) end
+	if p.requester ~= nil then
+		coop_npc_players.send(EV_NOTE, { ok = ok, msg = t.msg or "", code = not ok and (t.code or "failed") or nil, cmd = p.id, rid = rid }, p.requester)
+	else
+		coop_debug_server.say(string.format("coop_dbg %s: %s", p.id, ok and tostring(t.msg) or tostring(t.code or "failed")))
+	end
+end
+
+function on_game_start()
+	if not api then return end
+	coop_mode.when_srv(function()
+		if coop_mode.decides_world() then
+			coop_debug_server.set_level_dispatch(dispatch)
+			coop_main.add_event_handler(EV_DONE, on_done)
+		elseif coop_mode.leads_here() then
+			coop_mode.on_level_request(EV_RUN, on_run)
+		end
+	end)
+end

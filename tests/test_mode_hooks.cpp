@@ -373,7 +373,8 @@ TEST(mode_hooks_srv_console_names)
 		{
 			const auto it = cmds.find(name);
 			REQUIRE(it != cmds.end());
-			CHECK_EQ(it->second.cls, std::string("CCC_Integer"));
+			// the old name is never saved (review A-REV-E-1, finding 7; tests/test_mode_review_e1.cpp)
+			CHECK_EQ(it->second.cls, std::string(name.rfind("srv_", 0) == 0 ? "CCC_Integer" : "CCC_SrvOldName"));
 			CHECK_EQ(it->second.rest, s.second);
 		}
 	for (const char* what : {"levels_status", "levels_audit"})
@@ -426,7 +427,7 @@ TEST(mode_hooks_srv_lua_table)
 		{"is_dedicated", "dedicated::on()"},
 		{"dedicated_new_world", "dedicated::new_world()"},
 		{"is_map_server", "is_map_server()"},
-		{"is_world_server", "is_world_server()"},
+		{"is_world_server", "dedicated::on() && is_world_server()"}, // false on a co-op host (review A-REV-E-1, finding 5)
 		{"split", "levels::split()"},
 	};
 	std::map<std::string, std::string> got;

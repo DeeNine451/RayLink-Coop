@@ -89,10 +89,10 @@ local function server(w, bridge, before_session)
 		setup_companion_logic = function(npc) npc:give_info_portion("npcx_is_companion") end,
 	}
 	-- Capture the leader share callbacks, the engine boundary for the save's map rows.
-	e.coop_quests_core = { share = function() return {
-		up = function(key, get, set) if key == "comp_leaders" then m.up, m.hear = get, set end end,
-		down = function(key, get, set) if key == "comp_leaders" then m.down, m.give = get, set end end,
-	} end }
+	e.coop_quests_core = {
+		share_up = function(key, get, set) if key == "comp_leaders" then m.up, m.hear = get, set end end,
+		share_down = function(key, get, set) if key == "comp_leaders" then m.down, m.give = get, set end end,
+	}
 	load_script(m, "coop_npc_players")
 	load_script(m, "coop_trust").reset_for_test({ default = "log" })
 	local mode = load_script(m, "coop_mode")

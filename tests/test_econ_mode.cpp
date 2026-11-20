@@ -4,11 +4,12 @@
 #include "support/fake_mode.h"
 
 #include <fstream>
+#include <iterator>
 #include <regex>
 
 namespace
 {
-std::string econ_source(const char* name)
+std::string econ_source(const char* name, const char* function = nullptr)
 {
 	const std::string here = __FILE__;
 	const size_t slash = here.find_last_of("/\\");
@@ -17,7 +18,17 @@ std::string econ_source(const char* name)
 	REQUIRE(in.good());
 	std::ostringstream out;
 	out << in.rdbuf();
-	return std::regex_replace(out.str(), std::regex(R"(\s+)"), " ");
+	std::string source = out.str();
+	if (function)
+	{
+		const size_t start = source.find(function);
+		REQUIRE(start != std::string::npos);
+		// These top-level engine functions close at the start of a line.
+		const size_t end = source.find("\n}", start);
+		REQUIRE(end != std::string::npos);
+		source = std::regex_replace(source.substr(start, end - start), std::regex(R"(//[^\n]*)"), "");
+	}
+	return std::regex_replace(source, std::regex(R"(\s+)"), " ");
 }
 
 void check_guard(const std::string& source, const std::string& guard)
@@ -27,7 +38,7 @@ void check_guard(const std::string& source, const std::string& guard)
 }
 
 void check_econ_answers(const char* name, bool leads_trade, bool decides_world, bool mirror,
-    coop::Where placed, coop::Where away, coop::Where joining)
+    coop::Where placed, coop::Where away, coop::Where joining, bool has_level_side)
 {
 	using namespace coop;
 	const t::ModeCase& row = t::mode_case(name);
@@ -39,6 +50,7 @@ void check_econ_answers(const char* name, bool leads_trade, bool decides_world, 
 
 	CHECK_EQ(mode.leads_level(), leads_trade);
 	CHECK_EQ(mode.decides_world(), decides_world);
+	CHECK_EQ(mode.level() != nullptr, has_level_side);
 	CHECK_EQ(has(mode.roles(), ProcessRole::Mirror), mirror);
 	CHECK_EQ(mode.where(7), placed);
 	CHECK_EQ(mode.where(8), away);
@@ -89,12 +101,49 @@ TEST(econ_world_ledger_asks_for_remote_body_facts)
 	    "dialog::host_lock_of(from) != kNoId || (mode().facts_of(join::proxy_of_peer(from), there) && there.talking)");
 }
 
-#define ECON_ANSWERS_coop_host true, true, false, Where::Here, Where::Here, Where::Joining
-#define ECON_ANSWERS_coop_client false, false, true, Where::Here, Where::Here, Where::Here
-#define ECON_ANSWERS_world_server false, true, false, Where::Away, Where::Away, Where::Joining
-#define ECON_ANSWERS_map_server true, false, false, Where::Here, Where::Away, Where::Joining
-#define ECON_ANSWERS_server_client false, false, true, Where::Here, Where::Away, Where::Here
-#define ECON_ANSWERS_none false, false, false, Where::Away, Where::Away, Where::Away
+TEST(econ_level_balance_reads_keep_the_world_and_level_books_separate)
+{
+	const std::string code = econ_source("coop_money.cpp");
+	check_guard(code, "if (const LevelSide* side = mode().level()) { "
+	                  "if (arg_peer(L, 1, peer) && join::proxy_of_peer(peer) != kNoId) { "
+	                  "side->level_balance(peer, balance); lua_pushnumber(L, lua_Number(balance)); } else lua_pushnil(L);");
+	check_guard(code, "u32 host_balance(PeerId peer) { u32 balance = 0; "
+	                  "if (const LevelSide* side = mode().level()) { side->level_balance(peer, balance); return balance; } "
+	                  "const u16 holder = mode().decides_world() ? holder_of(peer) : kNoId;");
+	check_guard(code, "int l_money_grant_to(lua_State* L) { if (!mode().decides_world())");
+}
+
+TEST(econ_level_balance_changes_and_requests_go_through_the_level_side)
+{
+	const std::string code = econ_source("coop_money.cpp");
+	check_guard(code, "if (LevelSide* side = mode().level()) { side->level_money_change(peer, delta, trade); return true; } "
+	                  "return adjust(peer, delta, why, trade ? Source::Trade : Source::Grant);");
+	check_guard(code, "void host_send_balance(PeerId peer) { if (LevelSide* side = mode().level()) { "
+	                  "side->level_money_change(peer, 0, false);");
+	check_guard(econ_source("coop_trunk.cpp"), "if (p.level == key().level) side->level_balance_heard(p.peer, p.money);");
+}
+
+TEST(econ_item_tell_keeps_the_item_state_broadcast_as_a_terminal_callback)
+{
+	const std::string tell = econ_source("coop_items.cpp", "void level_item_tell(");
+	check_guard(tell, "void level_item_tell(u16 id, const std::string& section, "
+	                  "const std::vector<u8>& blob) { Writer w(blob.size() + section.size() + 16); "
+	                  "write_state(w, id, section.c_str(), 0, blob); net::host_broadcast(Msg::ItemState, w);");
+	const std::regex broadcast(R"(net::host_broadcast\s*\()");
+	CHECK_EQ(std::distance(std::sregex_iterator(tell.begin(), tell.end(), broadcast), std::sregex_iterator()), 1);
+
+	const std::string loot = econ_source("coop_levels_xfer.cpp", "void client_loot(");
+	check_guard(loot, "items::level_item_tell(it->first, section, blob);");
+	const std::regex callback(R"(items::level_item_tell\s*\()");
+	CHECK_EQ(std::distance(std::sregex_iterator(loot.begin(), loot.end(), callback), std::sregex_iterator()), 1);
+}
+
+#define ECON_ANSWERS_coop_host true, true, false, Where::Here, Where::Here, Where::Joining, false
+#define ECON_ANSWERS_coop_client false, false, true, Where::Here, Where::Here, Where::Here, false
+#define ECON_ANSWERS_world_server false, true, false, Where::Away, Where::Away, Where::Joining, false
+#define ECON_ANSWERS_map_server true, false, false, Where::Here, Where::Away, Where::Joining, true
+#define ECON_ANSWERS_server_client false, false, true, Where::Here, Where::Away, Where::Here, false
+#define ECON_ANSWERS_none false, false, false, Where::Away, Where::Away, Where::Away, false
 
 #define ECON_MODE_TEST(name) \
 	TEST(econ_mode_##name) \

@@ -540,7 +540,7 @@ note_let_go = function(squad, dialog_id)
 		last_leader[squad.id] = nil
 	elseif leaders[squad.id] ~= nil then
 		last_leader[squad.id] = leaders[squad.id]
-	elseif P.is_world_server() then
+	elseif P.active() and coop_mode.decides_world() then
 		last_leader[squad.id] = 0
 	end
 end
@@ -576,7 +576,7 @@ end
 local function tell(peer, key, name, nick, about)
 	if peer ~= P.self_peer() then
 		P.send(EV_MSG, { k = key, n = name, w = nick, a = about }, peer)
-	elseif not P.is_map_server() then -- its actor is a ghost, nobody reads it
+	elseif coop_mode.actor_is_player() then
 		show(key, about and nick_of(about) or name, nick)
 	end
 end
@@ -722,7 +722,7 @@ function follows(npc)
 		local lead = leader_of(npc)
 		if lead then return lead end
 	end
-	if not P.is_map_server() then return nil end
+	if not (coop_mode.leads_here() and not coop_mode.decides_world()) then return nil end
 	local cs = axr_companions and axr_companions.companion_squads
 	if type(cs) ~= "table" or next(cs) == nil or not is_companion_squad(squad_of(npc)) then return nil end
 	return (P.nearest(npc))
@@ -1094,7 +1094,7 @@ local function patch_force_talk()
 			P.send(EV_TALK, { i = npc:id(), b = p and p[1] == "true" or false }, peer)
 			return
 		end
-		if not P.is_map_server() then return f(actor, npc, p) end
+		if not (coop_mode.leads_here() and not coop_mode.decides_world()) then return f(actor, npc, p) end
 	end
 end
 
@@ -1348,10 +1348,10 @@ end
 -- or out of a session: the authority of his level (the host) moves them at once, a client asks it (npc.comp_bring); a map server's and a
 -- dedicated host's actor is nobody, single player is FFT's own.
 function bring_mine()
-	if not (installed and P and P.active()) or P.actor_is_nobody() or not fft_allows() then return end
+	if not (installed and P and P.active()) or not coop_mode.actor_is_player() or not fft_allows() then return end
 	if P.client_live() then
 		P.send(EV_BRING, {}, 0)
-	elseif P.is_world_server() and db.actor then
+	elseif coop_mode.decides_world() and db.actor then
 		bring_to(db.actor, squads_led_by(nil))
 	end
 end
@@ -1377,7 +1377,7 @@ end
 -------------------------------------------------------------------------------
 -- Who holds control of this NPC, as this machine knows it; nil: a companion of nobody.
 local function holder_of(npc)
-	if P.is_host() then
+	if P.active() and (coop_mode.decides_world() or coop_mode.leads_here()) then
 		local squad = squad_of(npc)
 		return is_companion_squad(squad) and control_peer(squad) or nil
 	end

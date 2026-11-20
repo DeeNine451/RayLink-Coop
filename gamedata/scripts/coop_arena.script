@@ -89,6 +89,7 @@ local SPOT_TYPE = "secondary_task_location" -- the invitation's map spot on Arni
 local TRIGGER = "bar_arena_triger"
 local ZONE = "bar_arena"
 local FIGHTS = 8
+local MAX_KIT_IDS = 256 -- one loadout report, including items made by stock-call wrappers
 local CUT_WAIT_MS = 30000
 local IN_WAIT_MS = 3000
 local HEAL_GRACE_MS = 15000 -- a ledger older than this whose player stands here with nothing of his running: given back
@@ -132,7 +133,7 @@ end
 local function session() return P ~= nil and P.active() end
 -- The process whose world holds the arena: the host, or the map server of the Bar (what a player asks goes to the one
 -- that leads his level).
-local function authority() return P.is_host() end
+local function authority() return session() and (coop_mode.decides_world() or coop_mode.leads_here()) end
 
 -------------------------------------------------------------------------------
 -- The fight and its fighter (authority)
@@ -443,8 +444,8 @@ end
 local add_kit -- defined with the authority's functions below
 
 local function report_kit(made)
-	if #made == 0 then return end
-	if authority() and not P.is_map_server() then return add_kit(own_id(), made) end
+	if #made == 0 or not coop_mode.actor_is_player() then return end
+	if authority() then return add_kit(own_id(), made) end
 	P.send("arena.kit", { i = table.concat(made, ",") }, 0)
 end
 
@@ -547,7 +548,7 @@ end
 
 -- To the player whose character is `id` here: his own machine plays it. `more`: fields besides f and a.
 go = function(id, what, a, more)
-	if id == own_id() and not P.is_map_server() then return play(what, a, more) end
+	if id == own_id() and coop_mode.actor_is_player() then return play(what, a, more) end
 	local peer = P.peer_of(id)
 	if peer == nil then
 		log("! %s for character %s: he is not in the session", what, tostring(id))
@@ -602,8 +603,8 @@ end
 
 -- This player: his gear waits in the box and no fight holds him.
 local function ask_out()
-	if not (mine and session() and db.actor and level.name() == ARENA_LEVEL) then return end
-	if authority() and not P.is_map_server() then return out_of(own_id()) end
+	if not (mine and session() and db.actor and level.name() == ARENA_LEVEL and coop_mode.actor_is_player()) then return end
+	if authority() then return out_of(own_id()) end
 	P.send("arena.out", {}, 0)
 end
 
@@ -772,7 +773,7 @@ local function route_tip(name, cur, actor, npc, ...)
 	if not authority() then return cur(actor, npc, ...) end
 	local id = tip_fighter(name, npc)
 	local r
-	if id == nil or (id == own_id() and not P.is_map_server()) then
+	if id == nil or (id == own_id() and coop_mode.actor_is_player()) then
 		r = cur(actor, npc, ...)
 	else
 		r = lines_to(id, cur, actor, npc, ...)
@@ -1004,7 +1005,8 @@ end
 
 -- This player's button: to the authority.
 local function ask_start()
-	if authority() and not P.is_map_server() then return start_ask(own_id()) end
+	if not coop_mode.actor_is_player() then return end
+	if authority() then return start_ask(own_id()) end
 	P.send("arena.start", {}, 0)
 end
 
@@ -1148,7 +1150,7 @@ end
 local function route_rank(cur, need, actor, npc, ...)
 	if not (session() and authority()) then return cur(actor, npc, ...) end
 	local o = rank_player()
-	if not o or id_of(o) == own_id() and not P.is_map_server() then return cur(actor, npc, ...) end -- the host himself: stock
+	if not o or id_of(o) == own_id() and coop_mode.actor_is_player() then return cur(actor, npc, ...) end -- the host himself: stock
 	local ok, r = pcall(o.character_rank, o)
 	if not (ok and tonumber(r)) then return cur(actor, npc, ...) end
 	return tonumber(r) > need
@@ -1212,7 +1214,7 @@ end
 -- through the host ledger (coop.money_grant) with his money line (coop_tasks.money_line).
 local function pay(id, n, reloc, first, second)
 	if not (n and n > 0) then return end
-	if id == own_id() and not P.is_map_server() then return reloc(first, second, n) end
+	if id == own_id() and coop_mode.actor_is_player() then return reloc(first, second, n) end
 	local peer = P.peer_of(id)
 	local api = rawget(_G, "coop")
 	local grant = api and api.money_grant
@@ -1256,7 +1258,7 @@ local function prize(kind, taker, first, second)
 	local function battle(name, ...)
 		if name ~= "arena_battles" then return count(name, ...) end
 		for _, id in ipairs(fighters) do
-			if id == own_id() and not P.is_map_server() then count(name, ...) else go(id, "stat", name) end
+			if id == own_id() and coop_mode.actor_is_player() then count(name, ...) else go(id, "stat", name) end
 		end
 	end
 	if reloc then d.relocate_money_to_actor = money end
@@ -1279,8 +1281,10 @@ local function prize(kind, taker, first, second)
 end
 
 local function route_prize(kind, cur, first, second, ...)
-	if paying or not session() then return cur(first, second, ...) end
-	if not authority() or P.is_map_server() then
+	if paying then return cur(first, second, ...) end
+	if not coop_mode.actor_is_player() then return end
+	if not session() then return cur(first, second, ...) end
+	if not authority() then
 		stats.prize_asks = stats.prize_asks + 1
 		P.send("arena.prize", { k = kind }, 0)
 		return
@@ -1387,7 +1391,7 @@ local function patch_cutscene()
 		if session() and is_trigger(self.object) then
 			if authority() then current(self.object) end
 			local me = fighting
-			if authority() and fight then me = is_fighter(own_id()) and not P.is_map_server() end
+			if authority() and fight then me = is_fighter(own_id()) and coop_mode.actor_is_player() end
 			if not me then
 				self.state = "run"
 				self.coop_still = time_global()
@@ -1571,6 +1575,18 @@ local function avatar_of(from)
 	return id ~= nil and obj_of(id) and id or nil
 end
 
+local function kit_ids(csv)
+	if type(csv) ~= "string" or #csv > MAX_KIT_IDS * 6 - 1 then return nil end
+	local ids = {}
+	for token in (csv .. ","):gmatch("([^,]*),") do
+		if #ids == MAX_KIT_IDS or #token > 5 or not token:match("^%d+$") then return nil end
+		local id = tonumber(token)
+		if id < 1 or id > 65534 then return nil end
+		ids[#ids + 1] = id
+	end
+	return ids
+end
+
 local function register_events()
 	P.on("arena.go", function(t)
 		if type(t.f) == "string" then play(t.f, t.a, t) end
@@ -1581,9 +1597,10 @@ local function register_events()
 	end, "host", TAG)
 	P.on("arena.kit", function(t, from)
 		local id = P.avatar_of_peer(from)
-		local made = {}
-		for v in tostring(t.i or ""):gmatch("%d+") do made[#made + 1] = tonumber(v) end
-		if id ~= nil then add_kit(id, made) end
+		local made = id and kit_ids(t.i)
+		local valid = made ~= nil
+		if not coop_trust.pass("arena.kit", valid, "invalid arena kit from peer %s", tostring(from)) or not valid then return end
+		add_kit(id, made)
 	end, "host", TAG)
 	P.on("arena.out", function(_, from)
 		local id = P.avatar_of_peer(from)
@@ -1595,7 +1612,7 @@ local function register_events()
 		fight.cuts = fight.cuts or {}
 		fight.cuts[id] = true
 		for _, f in ipairs(fighters()) do
-			if not fight.cuts[f] and not (f == own_id() and not P.is_map_server()) then return end
+			if not fight.cuts[f] and not (f == own_id() and coop_mode.actor_is_player()) then return end
 		end
 		cut_done = true
 	end, "host", TAG)
@@ -1670,10 +1687,7 @@ end
 -- Split levels: a map server leads the Bar, writes nothing into the save and stops when its level is empty. Its ledger goes up to
 -- the world server (kept in its save) and comes down to the next map server of the Bar, which takes the records it has none of.
 local function share_ledger()
-	local qc = rawget(_G, "coop_quests_core") -- the Core keeps the table, a server's share carries it
-	local share = qc and qc.share and qc.share()
-	if not (share and share.up and share.down) then return end
-	share.up("arena_ledger", function()
+	coop_mode.share_up("arena_ledger", function()
 		if level.name() ~= ARENA_LEVEL or not (got_down or next(ledger)) then return nil end
 		return { list = ledger_list(), based = got_down }
 	end, function(t)
@@ -1689,7 +1703,7 @@ local function share_ledger()
 		for _, r in pairs(by) do list[#list + 1] = r end
 		world_copy = list
 	end)
-	share.down("arena_ledger", function()
+	coop_mode.share_down("arena_ledger", function()
 		return world_copy and { list = world_copy } or nil
 	end, function(t)
 		if got_down or level.name() ~= ARENA_LEVEL or type(t) ~= "table" then return end

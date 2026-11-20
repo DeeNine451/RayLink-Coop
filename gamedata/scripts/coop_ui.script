@@ -379,7 +379,7 @@ local GIVE_AMOUNTS = { 100, 500, 1000, 5000, 10000, 50000 }
 local function session_live()
 	local api = rawget(_G, "coop")
 	if not api then return false end
-	local ok, v = pcall(function() return api.is_active() and (api.is_host() or api.is_live()) end)
+	local ok, v = pcall(function() return api.is_active() and (coop_mode.decides_world() or api.is_live()) end)
 	return ok and v == true
 end
 

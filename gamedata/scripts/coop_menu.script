@@ -278,7 +278,7 @@ local op_list = { state = "idle", saves = {}, why = nil, dlg = nil } -- state: i
 local function is_operator(info)
 	if not (api and type(api.has_host_rights) == "function" and type(api.operator_command) == "function") then return false end
 	if not (info and info.client == true) then return false end
-	local ok, yes = pcall(function() return not api.is_host() and api.has_host_rights() == true end)
+	local ok, yes = pcall(function() return not coop_mode.decides_world() and api.has_host_rights() == true end)
 	return ok and yes == true
 end
 
@@ -2211,7 +2211,7 @@ function UICoopMenu:OnRoll()
 	if not e or e.damaged then return end
 	local op = self.game ~= nil and self.game.operator == true and e.server == true -- an autosave of the world server
 	if not api.is_active() and not op then return self:HostAfter("save", e.name) end
-	if not api.is_host() and not op then
+	if not coop_mode.decides_world() and not op then
 		local sv = saves()
 		self.local_error = sv and sv.text and sv.text("restore_failed_not_host") or tr("st_coop_menu_note_guest")
 		return self:Refresh()
@@ -2272,7 +2272,7 @@ function UICoopMenu:Close()
 	-- F3: a session started while the in-game menu was open: its list (Save / Load / Last save) was built before, and
 	-- nobody saves in a session. End the menu instead of going back to it; the next open builds the right list.
 	-- Host only: a client who connected from the in-game menu is on its way out of this game anyway.
-	if self.session_at_open == false and api.is_host() and level_loaded() then
+	if self.session_at_open == false and api.is_active() and coop_mode.decides_world() and level_loaded() then
 		exec_console_cmd("main_menu off")
 		return
 	end

@@ -408,7 +408,7 @@ end
 
 local function refresh_without_players()
 	-- A map server still has to let a squad go after its last player leaves.
-	return P.is_map_server() and split_levels() ~= nil
+	return coop_mode.leads_here() and not coop_mode.decides_world() and split_levels() ~= nil
 end
 
 local function prune_missing()
@@ -451,8 +451,7 @@ function on_game_start()
 		P.on(EV_ADOPT, on_adopt, nil, TAG)
 		P.on(EV_DROP, on_drop, nil, TAG)
 		P.on(EV_RECALL, on_recall, nil, TAG)
-		local share = coop_quests_core.share()
-		share.up("comp_leaders", leaders_here, leaders_heard)
-		share.down("comp_leaders", all_leaders, leaders_given)
+		coop_mode.share_up("comp_leaders", leaders_here, leaders_heard)
+		coop_mode.share_down("comp_leaders", all_leaders, leaders_given)
 	end)
 end

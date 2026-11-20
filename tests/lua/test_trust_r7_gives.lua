@@ -8,7 +8,7 @@
 -- Run: tools\test_lua.cmd trust_r7_gives
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
 local SE = {}
 local FETCH = { fetch_list = { "artefacts", "supplies", "drink", "weapons" },
 	artefacts = { "af_gold_fish", "af_medusa" }, supplies = { "bread", "salt", "medkit" }, drink = { "vodka" },
@@ -128,9 +128,11 @@ end
 local function server(on)
 	-- (the server's part "far" of coop_quests_core, step S4)
 	if on then
-		Hm.env.coop_quests_core.set_part("far", { in_scope = function() return {} end, with_level_of = function(peer, fn, ...) return fn(...) end })
+		Hm.env.coop.is_dedicated = function() return true end
+		Hm.env.coop_srv_quests_far = { in_scope = function() return {} end, with_level_of = function(peer, fn, ...) return fn(...) end }
 	else
-		Hm.env.coop_quests_core.set_part("far", nil)
+		Hm.env.coop.is_dedicated = nil
+		Hm.env.coop_srv_quests_far = nil
 	end
 end
 local MODES = { { default = "log" }, { default = "refuse" } }

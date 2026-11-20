@@ -64,7 +64,7 @@ for _, set in ipairs(modes.names()) do
 	MODE = set == "none" and "sp" or "host"
 	dofile("tests/lua/support/stubs_mods.lua")
 	for _, name in ipairs({ "on_enemy_eval", "actor_on_weapon_fired", "actor_on_before_hit", "monster_on_before_hit",
-		"npc_on_before_hit" }) do AddScriptCallback(name) end
+		"npc_on_before_hit", "server_entity_on_unregister" }) do AddScriptCallback(name) end
 	hit = setmetatable({ fire_wound = 8, wound = 9, strike = 3, explosion = 5, telepatic = 4, shock = 1 }, { __call = function(_, original)
 		local copy = {}
 		for k, v in pairs(original or {}) do copy[k] = v end
@@ -90,6 +90,14 @@ for _, set in ipairs(modes.names()) do
 			return alife_create(sec, owner[1], owner[2], owner[3])
 		end
 		return create_item(sec, owner, t)
+	end
+	-- B-REV F2: a release on the process that holds the object runs the engine's on_unregister there (alife_simulator_base2.cpp
+	-- unregister_object -> server_entity_on_unregister, the server object still in its parent); a client's release is a
+	-- request to the decider (coop_requests.cpp host_destroy), which releases it the same way
+	local release_item = alife_release_id
+	function alife_release_id(id)
+		if MODE == "host" and SE[id] then SendScriptCallback("server_entity_on_unregister", SE[id], "dynamic") end
+		return release_item(id)
 	end
 
 	-- objects: id 0 = this process's own actor (the client's on the player's machine, the host's on the co-op host),
@@ -247,6 +255,20 @@ for _, set in ipairs(modes.names()) do
 		for _, c in ipairs(CREATED) do if c.sec == "ied_new_blow" then n = n + 1 end end
 		return n
 	end
+	-- B-REV F2: the decider releases a death lamp `holder` carries (his machine's sacrifice asks it to). online: the GE_DESTROY
+	-- path, where the server object leaves its parent before the release and the game object still has it
+	-- (xrServer_process_event_destroy.cpp: Process_event_reject, then alife().release; the client side reads the reject later).
+	local function lamp_released(holder, online, sec)
+		as_decider()
+		local se, o = spawn(sec or "af_death_lamp", vec3(0, 0, 0), holder)
+		if online then
+			local parent = OBJ[holder]
+			o.parent = function() return parent end
+			se.parent_id = 65535
+		end
+		alife_release_id(se.id)
+	end
+	local function lamp_failed() return (coop_trust.status().pba_blow_lamp or { failed = 0 }).failed end
 
 	if set ~= "none" then
 		---------------------------------------------------------------------------------------------------------------
@@ -541,6 +563,9 @@ for _, set in ipairs(modes.names()) do
 		pcall(pba.TEST_PROCESS)
 		check(sent_count("mods.pba_cmd") == n + 1 and self_hits == 1, "m08:7: nothing runs a second time")
 		remote._pos = vec3(7, 0, 7)
+		-- the decider released his lamp at the sacrifice (his machine asked it to), 1.8 s before his request
+		lamp_released(PROXY)
+		NOW = NOW + 1800
 		if rawb then deliver(rawb) end
 		local made = nil
 		for _, c in ipairs(CREATED) do if c.sec == "ied_new_blow" then made = OBJ[c.id] or made end end
@@ -557,12 +582,113 @@ for _, set in ipairs(modes.names()) do
 		deliver(forged({ k = "blow", q = next_q() }))
 		check(blows() == 1, "m08:7: refuse mode: a reaction without Lucifer is refused")
 		coop_trust.reset_for_test({ default = "log" })
+		lamp_released(PROXY)
 		deliver(forged({ k = "blow", q = next_q() }))
 		check(blows() == 2 and coop_trust.status().pba_blow_item and coop_trust.status().pba_blow_item.failed >= 1,
 			"m08:7: log mode: counted, let through (at his own character, once)")
 		run_time_events(200)
 		coop_trust.reset_for_test({ default = "log" })
 		remote._pos = vec3(0, 0, 0)
+
+		---------------------------------------------------------------------------------------------------------------
+		-- B-REV F2: the explosion needs a death lamp of his the decider released in the last 3 s (always-on guard
+		-- pba_blow_lamp), one explosion a lamp; the Lucifer stays in his inventory and proves nothing
+		---------------------------------------------------------------------------------------------------------------
+		for _, mode in ipairs({ "refuse", "log", "off" }) do
+			forget()
+			coop_trust.reset_for_test({ default = mode })
+			local made0, lamp0 = blows(), lamp_failed()
+			for _ = 1, 3 do
+				NOW = NOW + 10001
+				deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+			end
+			check(blows() == made0 and (mode == "off" or lamp_failed() == lamp0 + 3),
+				"B-REV F2 (" .. mode .. "): probe B3, three requests with his Lucifer and no lamp released make no charge, dropped")
+		end
+		coop_trust.reset_for_test({ default = "log" })
+		forget()
+		local made0 = blows()
+		NOW = NOW + 10001
+		lamp_released(PROXY)
+		NOW = NOW + 2900
+		deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+		check(blows() == made0 + 1, "B-REV F2: his lamp released 2.9 s before the request: one charge")
+		run_time_events(200)
+		local lamp1 = lamp_failed()
+		NOW = NOW + 10001
+		lamp_released(PROXY)
+		NOW = NOW + 3100
+		deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+		check(blows() == made0 + 1 and lamp_failed() == lamp1 + 1, "B-REV F2: a release 3.1 s before the request counts no more")
+		-- one lamp, one charge: two lamps released, one request spends one of them
+		NOW = NOW + 10001
+		lamp_released(PROXY)
+		lamp_released(PROXY)
+		check(ab._state().lamps == 2, "B-REV F2: (two lamps of his released)")
+		deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+		check(blows() == made0 + 2 and ab._state().lamps == 1, "B-REV F2: one request, one charge, one lamp spent")
+		run_time_events(200)
+		NOW = NOW + 3100
+		tick(1100)
+		check(ab._state().lamps == 0, "B-REV F2: the other lamp is forgotten after 3 s")
+		-- whose lamp: another's, another artefact, his while he was dead, a release on a process without his map
+		NOW = NOW + 10001
+		-- (rv_FIX-PBA R2: a lamp whose holder is no player counts for the living players within 15 m of that holder, as a
+		-- sacrifice from the loot window; these holders stand farther from him)
+		lamp_released(far:id()) -- a stalker's own lamp, 100 m from him
+		local actor_at = actor._pos
+		actor._pos = vec3(0, 0, 100)
+		lamp_released(0) -- the host player's own (co-op) / the map server's ghost (server)
+		actor._pos = actor_at
+		lamp_released(PROXY, false, "af_compass")
+		remote._alive = false
+		lamp_released(PROXY)
+		remote._alive = nil
+		if set == "srv_world" then
+			as_world()
+			local se = spawn("af_death_lamp", vec3(0, 0, 0), PROXY)
+			alife_release_id(se.id)
+		end
+		lamp1 = lamp_failed()
+		deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+		check(blows() == made0 + 2 and lamp_failed() == lamp1 + 1,
+			"B-REV F2: another's lamp, another artefact, a lamp released while he was dead (or by a world server) give no charge")
+		-- the online release: the server object has left his character, its game object not yet
+		NOW = NOW + 10001
+		lamp_released(PROXY, true)
+		deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+		check(blows() == made0 + 3, "B-REV F2: a lamp released from his online character counts (its game object's parent)")
+		run_time_events(200)
+
+		-- rv_FIX-PBA R2: the mod offers the sacrifice in the loot window too (PBA check_lucifer_condition: modes inventory and
+		-- loot; custom_functor_autoinject override_bags: npc_bag), and the engine lets him release an item from a box or a
+		-- corpse he loots (coop_requests.cpp host_destroy). The lamp's holder is then no player: it counts for the living
+		-- players within 15 m of it (coop_requests.cpp kReachRange), one charge a lamp, never a guard failure.
+		local _, box = spawn("inventory_box", vec3(1, 0, 0), nil, { kind = "box" })
+		local _, far_box = spawn("inventory_box", vec3(20, 0, 0), nil, { kind = "box" })
+		for _, case in ipairs({ { box, false, "a box 1 m from him" }, { corpse, false, "a corpse 2 m from him" },
+			{ box, true, "a box 1 m from him (online release)" } }) do
+			forget()
+			coop_trust.reset_for_test({ default = "refuse" })
+			local made1, lamp2 = blows(), lamp_failed()
+			NOW = NOW + 11000
+			lamp_released(case[1]:id(), case[2])
+			NOW = NOW + 1800
+			deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+			check(blows() == made1 + 1 and lamp_failed() == lamp2,
+				"rv_FIX-PBA R2: a death lamp sacrificed from " .. case[3] .. " gives his one charge, no pba_blow_lamp failure")
+			run_time_events(200)
+		end
+		forget()
+		coop_trust.reset_for_test({ default = "log" })
+		local made2, lamp3 = blows(), lamp_failed()
+		NOW = NOW + 11000
+		lamp_released(far_box:id())
+		NOW = NOW + 1800
+		deliver(forged({ k = "blow", q = next_q(), n = 1, i1 = lucifer:id() }))
+		check(blows() == made2 and lamp_failed() == lamp3 + 1,
+			"rv_FIX-PBA R2: a death lamp released from a box 20 m from him gives no charge")
+		coop_trust.reset_for_test({ default = "log" })
 
 		-- an effect a load brought back (the mod rebuilds it from its saved string) is finished the same way
 		as_owner()

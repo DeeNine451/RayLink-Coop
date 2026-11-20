@@ -1,0 +1,4 @@
+-- hostplay: the co-op layer reads the engine's coop.*, never the server's table
+function server_world()
+	return srv.is_world_server()
+end

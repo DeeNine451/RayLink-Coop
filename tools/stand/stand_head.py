@@ -92,9 +92,12 @@ OURS = ("Anomaly Coop - Engine/", "Anomaly Coop - Core/", "Anomaly Coop - GAMMA/
 PROBE = re.compile(r"^gamedata/scripts/coop_zz_[^/]*\.script$", re.I)
 # the console variables that decide a process's mode (docs/MODES.md section 1): profile removes each of these lines from
 # a stand profile, then writes the template's. Step S2 (docs/plans/2026-11-18-two-modes.md) removed four of them from the
-# engine (REMOVED_CVAR): a profile line of theirs still goes, and the template may not write one.
+# engine (REMOVED_CVAR): a profile line of theirs still goes, and the template may not write one. The engine saves the
+# map-server settings under their srv_* names only (review A-REV-E-1 finding 7, srv/coop_srv_console.cpp): those lines go
+# too, so the template's coop_* lines are the profile's only mode lines.
 MODE_CVAR = re.compile(rb"^[ \t]*(?:coop_split_levels|coop_world_server|coop_story_together|coop_soft_host_move"
-                       rb"|coop_max_map_servers|coop_map_servers_rev|coop_mapserver_\w+)\b")
+                       rb"|coop_max_map_servers|coop_map_servers_rev|coop_mapserver_\w+"
+                       rb"|srv_max_map_servers|srv_map_servers_rev|srv_mapserver_\w+)\b")
 REMOVED_CVAR = re.compile(rb"^[ \t]*(?:coop_split_levels|coop_world_server|coop_story_together|coop_soft_host_move)\b")
 
 

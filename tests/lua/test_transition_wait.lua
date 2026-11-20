@@ -224,6 +224,7 @@ local function machine(self_peer, opts)
 			is_client = function() return M.active and self_peer ~= 0 end,
 			is_live = function() return M.active end,
 			self_id = function() return self_peer end,
+			levels = { split = function() return M.maps ~= nil end },
 			players = function()
 				return { { id = 0, nick = "player_a", is_self = self_peer == 0 }, { id = 1, nick = "player_b", is_self = self_peer == 1 },
 					{ id = 2, nick = "Guest", is_self = self_peer == 2 } }
@@ -236,13 +237,13 @@ local function machine(self_peer, opts)
 		}
 	end
 	env.coop_core_chat = { system = function(text) M.feed[#M.feed + 1] = text end }
-	-- a server's level names, as the Core gets them (coop_quests_core.part "levels", step S4)
-	local levels = { map_of = function(peer) return M.maps and M.maps[peer] or nil end }
-	env.coop_quests_core = { part = function(name) return name == "levels" and levels or nil end }
+	env.coop_srv_levels = { map_of = function(peer) return M.maps and M.maps[peer] or nil end }
 	env.coop_hud_markers = {
 		add_source = function(name, fn, every) M.sources[name] = { fn = fn, every = every } return true end,
 	}
-	for _, name in ipairs(opts.fare and { "coop_allies", "coop_transition_fare", "coop_hud_transition" } or { "coop_allies", "coop_hud_transition" }) do
+	local scripts = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_allies", "coop_hud_transition" }
+	if opts.fare then scripts[#scripts + 1] = "coop_transition_fare" end
+	for _, name in ipairs(scripts) do
 		local src = readfile(ROOT .. "scripts/" .. name .. ".script")
 		local mod = setmetatable({}, { __index = env })
 		env[name] = mod
@@ -257,6 +258,8 @@ local function machine(self_peer, opts)
 			end
 		end
 	end
+	env.coop_hostplay_mode.on_game_start()
+	env.coop_srv_mode.on_game_start()
 	M.A, M.T = env.coop_allies, env.coop_hud_transition
 	for _, name in ipairs({ "coop_allies", "coop_hud_transition" }) do
 		local m = env[name]

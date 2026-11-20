@@ -126,7 +126,7 @@ local function route_of(callback, f)
 end
 
 -- ---------------------------------------------------------------- one machine
-local SCRIPTS = { "coop_main", "coop_core_chat", "coop_core_hud", "coop_core_player", "coop_core_world",
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_main", "coop_core_chat", "coop_core_hud", "coop_core_player", "coop_core_world",
 	"coop_allies", "coop_allies_map", "modxml_coop_allies", "coop_hud_layout" }
 
 local function machine(role, peer, nick, opts)

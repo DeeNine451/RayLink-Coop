@@ -166,6 +166,8 @@ MENU.shown = true
 
 
 print("== coop_menu: the world server's autosaves for its operator (plan 2026-11-12 s.2.3)")
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local m = load_module("coop_menu")
 local function open_window() MENU.cb["btn_coop#17"].f(MENU.cb["btn_coop#17"].obj) end
 local function frames(d, n, ms)

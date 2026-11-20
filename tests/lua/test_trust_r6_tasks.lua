@@ -10,7 +10,7 @@
 -- is its records and the far bodies). Run: tools\test_lua.cmd trust_r6_tasks
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_trust", "coop_quests_trust", "coop_quests_core", "coop_tasks", "coop_quests_offer", "coop_quests_party" }
 
 -- The world of the host: ALife records, story ids, squads, smarts. alife_object answers these first.
 local SE = {} -- id -> { alive, section, comm, group }
@@ -120,6 +120,12 @@ end
 local function hps() return Hm.env.db.storage[0].pstor end
 local giver777 = Hm.new_obj(777, "sim_default_stalker_trader", vec(2, 0, 0), { _stalker = true })
 
+local function server(talking)
+	Hm.env.coop.is_dedicated = talking and function() return true end or nil
+	Hm.env.coop_quests_core.is_far_peer = function(p) return talking ~= nil and p == 1 end
+	Hm.env.coop.levels = talking and { talking = function(p) return p == 1 and talking() end } or nil
+end
+
 -------------------------------------------------------------------------------
 print("== R6 blocker 1, the review's probe T1: a bounty stepped to its stage_complete at its living target")
 do
@@ -182,15 +188,13 @@ do
 	-- Server: the world server's ALife records answer the same (a death on a map server reaches them through its report)
 	tsk.stage = 1
 	SE[4242].alive = true
-	Hm.env.coop_quests_core.is_far_peer = function(p) return p == 1 end
-	Hm.env.coop.levels = { talking = function(p) return p == 1 end }
+	server(function() return true end)
 	req("complete", "bty_t", ";sp=n777")
 	check(not turned(tsk), "Server: the target lives in the world server's records: refused")
 	SE[4242].alive = false
 	req("complete", "bty_t", ";sp=n777")
 	check(turned(tsk), "Server: its death is in the world server's records: the turn-in goes through")
-	Hm.env.coop_quests_core.is_far_peer = function() return false end
-	Hm.env.coop.levels = nil
+	server()
 	drop("bty_t")
 	LOCK = nil
 	trust.reset_for_test({ default = "log" })
@@ -416,8 +420,7 @@ end
 print("== R6 blocker 6, Server: the partner is not reported; the world server's view of the rest decides")
 do
 	trust.reset_for_test({ default = "log", task_complete = "refuse", task_complete_talk = "refuse", task_complete_state = "refuse" })
-	Hm.env.coop_quests_core.is_far_peer = function(p) return p == 1 end
-	Hm.env.coop.levels = { talking = function(p) return p == 1 end }
+	server(function() return true end)
 	local id = "lttz_hb_task_4_1_crossfire"
 	task(id, {})
 	local tsk = give(id, 777)
@@ -440,8 +443,7 @@ do
 	check(turned(tsk), "Server: the barrier, its attackers are dead (the info): ok")
 	Hm.infos.barrier_defense_zombie_finished = nil
 	drop(id)
-	Hm.env.coop_quests_core.is_far_peer = function() return false end
-	Hm.env.coop.levels = nil
+	server()
 	trust.reset_for_test({ default = "log" })
 end
 
@@ -551,8 +553,7 @@ do
 	tsk.status_functor = nil
 	tsk.last_check_task = "complete" -- its state is not what this looks at
 	local in_dialog = true
-	Hm.env.coop_quests_core.is_far_peer = function(p) return p == 1 end
-	Hm.env.coop.levels = { talking = function(p) return p == 1 and in_dialog end }
+	server(function() return in_dialog end)
 	tick(Hm) -- the scan sees him in a dialog
 	in_dialog = false
 	NOW = NOW + 1000
@@ -570,8 +571,7 @@ do
 	tick(Hm)
 	req("complete", "gav_t", ";sp=n777")
 	check(turned(tsk), "a dialog the scan saw 5 s ago: ok")
-	Hm.env.coop_quests_core.is_far_peer = function() return false end
-	Hm.env.coop.levels = nil
+	server()
 	drop("gav_t")
 	trust.reset_for_test({ default = "log" })
 end

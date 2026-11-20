@@ -46,14 +46,6 @@ local function trim(s)
 	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function is_host()
-	if not api then return false end
-	local ok, active = pcall(api.is_active)
-	if not (ok and active == true) then return false end
-	local ok_host, host = pcall(api.is_host)
-	return ok_host and host == true
-end
-
 -- ------------------------------------------------------------------ the table
 local function action_of(value, where)
 	local v = trim(tostring(value or "")):lower()
@@ -159,7 +151,7 @@ local function ready_to_turn_in(id, tsk)
 end
 
 function on_group_wipe()
-	if not is_host() then return end
+	if not (api and api.is_active() and coop_mode.decides_world()) then return end
 	local tm = task_manager.get_task_manager()
 	local info = task_info_of(tm)
 	if not info then
@@ -205,7 +197,7 @@ end
 
 -- Every update: a task failed by a wipe whose stock fail callback has run (stage 255) loses its repeat-timeout record.
 local function on_update()
-	if next(pending) == nil or not is_host() then return end
+	if next(pending) == nil or not (api and api.is_active() and coop_mode.decides_world()) then return end
 	local info = task_info_of(task_manager.get_task_manager())
 	if not info then return end
 	local now = time_global()

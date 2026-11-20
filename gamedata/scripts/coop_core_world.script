@@ -44,6 +44,7 @@ local string_format = string.format
 local tostring, tonumber, type, ipairs, pairs, pcall = tostring, tonumber, type, ipairs, pairs, pcall
 
 local EV_NEWS = "core.news"
+local EV_NEWS_UP = "core.news_up" -- the map's report to the world; only the world can turn it into core.news
 local EV_MLOOT_OPEN = "core.mloot_open" -- client -> host: id
 local EV_MLOOT_STATE = "core.mloot_state" -- host -> client: id, v (0 rest follows, 1 nothing, 2 decayed, 3 busy, 4 roll), i:<sec>=count
 local EV_MLOOT_CLOSE = "core.mloot_close" -- client -> host: id, m (more loot left), n (never rolled) | i:<sec>=count
@@ -88,17 +89,9 @@ local function in_session()
 	return api ~= nil and api.is_active()
 end
 
-local function is_host()
-	return in_session() and api.is_host()
-end
-
-local function map_server()
-	return in_session() and api.is_map_server ~= nil and api.is_map_server() == true
-end
-
--- This process leads a level: what a player asks of it, what happens on it.
+-- The world decider and the process leading the map can both run world logic.
 local function leads_level()
-	return is_host() or map_server()
+	return in_session() and (coop_mode.decides_world() or coop_mode.leads_here())
 end
 
 local function live_client()
@@ -251,9 +244,11 @@ end
 
 -- Host: pass a news on to every client, or to the one player it belongs to.
 local function share(kind, t, peer)
-	local ms = map_server()
-	if news_applying or not (ms or (is_host() and others_online())) then return false end
-	local to = peer or (ms and 0) or -1 -- a map server's news is everybody's: the world server passes it on
+	if news_applying or not in_session() then return false end
+	local decides = coop_mode.decides_world()
+	local leads_for_world = coop_mode.leads_here() and not decides
+	if not (leads_for_world or (decides and others_online())) then return false end
+	local to = peer or (leads_for_world and 0) or -1 -- a map server's news is everybody's: the world server passes it on
 	if said_just_now(t.m or t.id or t.s or t.t, to) then
 		stats.news_repeat = stats.news_repeat + 1
 		return false
@@ -262,7 +257,13 @@ local function share(kind, t, peer)
 		stats.news_limited = stats.news_limited + 1
 		return false
 	end
-	local ok = api.send_event(EV_NEWS, codec().encode(t), to)
+	local ok
+	if leads_for_world then
+		t.peer = peer -- preserve directed news when the world validates it before forwarding
+		ok = coop_mode.publish(EV_NEWS_UP, t)
+	else
+		ok = api.send_event(EV_NEWS, codec().encode(t), to)
+	end
 	if ok then
 		stats.news_out = stats.news_out + 1
 		stats["out_" .. kind] = stats["out_" .. kind] + 1
@@ -789,7 +790,7 @@ local function wrap_pda_check()
 	pda_wrapped = true
 	recipient_pda_charged = charged
 	dev.is_pda_charged = function(...)
-		if scope == "world" and is_host() then return true end
+		if scope == "world" and in_session() and coop_mode.decides_world() then return true end
 		return charged(...)
 	end
 end
@@ -808,68 +809,104 @@ local function install_news()
 		news_report.senders, news_report.class, news_report.methods, news_report.wanted, news_report.aliases)
 end
 
-local function str_arg(v, max)
-	return type(v) == "string" and #v <= (max or 512) and v or nil
+-- Keep the stock senders' units: Radio delays and stock tip showtimes are in milliseconds too.
+local NEWS_SECONDS = { 0, 86400 }
+local NEWS_MS = { 0, 86400000 }
+local NEWS_FIELDS = {
+	dyn = { required = { "m" }, strings = { m = 4000, h = 1000, s = 128, snd = 64, ib = 16 },
+		numbers = { to = NEWS_SECONDS, st = NEWS_SECONDS } },
+	snd = { required = { "f", "s" }, strings = { f = 64, s = 512, p = 128, s2 = 512, ic = 128 },
+		numbers = { d = NEWS_MS } },
+	tip = { required = { "id" }, strings = { id = 4000, s = 128, ic = 128, sid = 128 },
+		numbers = { to = NEWS_SECONDS, st = NEWS_MS } },
+	hud = { required = { "m" }, strings = { m = 1000 },
+		numbers = { ty = { 0, 2147483647, true }, tm = NEWS_SECONDS, clr = { -2147483648, 4294967295, true } } },
+	ggn = { required = { "t", "ic" }, strings = { c = 1000, t = 4000, ic = 128 },
+		numbers = { d = NEWS_MS, sh = NEWS_MS, ty = { 0, 1, true } } },
+}
+
+local function news_fields_valid(t, payload, upload)
+	local fields = NEWS_FIELDS[t.k]
+	for _, key in ipairs(fields.required) do
+		if type(t[key]) ~= "string" then return false end
+	end
+	-- The engine requires a nonempty texture. A dynamic NPC tip uses its sender as the texture.
+	if t.ic == "" or (t.k == "dyn" and t.ib == "npc" and t.s == "") then return false end
+	for key, value in pairs(t) do
+		local max, range = fields.strings[key], fields.numbers[key]
+		if max then
+			if type(value) ~= "string" or #value > max or value:find("\0", 1, true) then return false end
+		elseif range then
+			local n = tonumber(value)
+			if not (n and n >= range[1] and n <= range[2] and (not range[3] or n % 1 == 0)) then return false end
+		elseif key == "peer" and upload then
+			if not (type(value) == "number" and value >= 1 and value <= 16 and value % 1 == 0
+				and coop_mode.seat_plays(value)) then return false end
+		elseif key ~= "k" then
+			return false
+		end
+	end
+	-- The shared decoder silently ignores malformed pairs and can turn an invalid optional number into nil.
+	return codec().encode(t) == payload
 end
 
 -- Client: show one host news with the stock functions (same caption, icon and sound; own language and PDA).
 local function show_news(t)
 	if t.k == "dyn" then
-		local m = str_arg(t.m, 4000)
 		local dev = rawget(_G, "item_device")
 		local pda_ok = not (dev and dev.is_pda_charged) or dev.is_pda_charged(true) -- the stock gate, own PDA
-		if m and pda_ok then
-			dynamic_news_helper.send_tip(m, str_arg(t.h, 1000), tonumber(t.to), tonumber(t.st), str_arg(t.s, 128),
-				str_arg(t.snd, 64), str_arg(t.ib, 16))
+		if pda_ok then
+			dynamic_news_helper.send_tip(t.m, t.h, tonumber(t.to), tonumber(t.st), t.s, t.snd, t.ib)
 		end
 	elseif t.k == "snd" then
-		local f, s = str_arg(t.f, 64), str_arg(t.s, 512)
-		if f and s then
-			local ic = str_arg(t.ic, 128)
-			news_manager.send_sound(ic and stalker_stand_in(ic) or nil, f, str_arg(t.p, 128), s, str_arg(t.s2, 512),
-				tonumber(t.d) or 0)
-		end
+		news_manager.send_sound(t.ic and stalker_stand_in(t.ic) or nil, t.f, t.p, t.s, t.s2, tonumber(t.d) or 0)
 	elseif t.k == "tip" then
-		local id = str_arg(t.id, 4000)
-		if id then
-			local ic = str_arg(t.ic, 128)
-			news_manager.send_tip(db.actor, id, tonumber(t.to), ic and stalker_stand_in(ic) or str_arg(t.s, 128),
-				tonumber(t.st), str_arg(t.sid, 128))
-		end
+		news_manager.send_tip(db.actor, t.id, tonumber(t.to), t.ic and stalker_stand_in(t.ic) or t.s, tonumber(t.st), t.sid)
 	elseif t.k == "hud" then
-		local m = str_arg(t.m, 1000)
-		if m then actor_menu.set_msg(tonumber(t.ty) or 1, m, tonumber(t.tm), tonumber(t.clr)) end
+		actor_menu.set_msg(tonumber(t.ty) or 1, t.m, tonumber(t.tm), tonumber(t.clr))
 	elseif t.k == "ggn" then
-		local text, icon = str_arg(t.t, 4000), str_arg(t.ic, 128)
-		if text and icon then
-			local caption, delay, show, ty = str_arg(t.c, 1000) or "", tonumber(t.d) or 0, tonumber(t.sh) or 5000, tonumber(t.ty)
-			if ty then
-				db.actor:give_game_news(caption, text, icon, delay, show, ty)
-			else
-				db.actor:give_game_news(caption, text, icon, delay, show)
-			end
-			if ty ~= 1 then xr_sound.set_sound_play(AC_ID, "pda_tips") end -- the generator plays it itself on the host
+		local caption, delay, show, ty = t.c or "", tonumber(t.d) or 0, tonumber(t.sh) or 5000, tonumber(t.ty)
+		if ty then
+			db.actor:give_game_news(caption, t.t, t.ic, delay, show, ty)
+		else
+			db.actor:give_game_news(caption, t.t, t.ic, delay, show)
 		end
+		if ty ~= 1 then xr_sound.set_sound_play(AC_ID, "pda_tips") end -- the generator plays it itself on the host
 	end
 end
 
-local function on_news(payload, from)
-	local of_a_map_server = is_host() and type(from) == "number" and from >= 0x100
-	if of_a_map_server then
-		api.send_event(EV_NEWS, payload, -1)
-	elseif from ~= 0 or not live_client() or map_server() then
-		return
-	end
-	if not db.actor then return end
+local function news_ok(name, valid, fmt, ...)
+	if coop_trust and not coop_trust.pass(name, valid, fmt, ...) then return false end
+	return valid
+end
+
+local function on_news(payload, from, event)
+	local upload = event == EV_NEWS_UP
+	local trusted = (upload and coop_mode.from_level(from)) or (not upload and from == 0)
+	if not news_ok("world_news_sender", trusted, "invalid news sender %s", tostring(from)) then return end
+	if not upload and not (live_client() and coop_mode.is_player_mirror()) then return end
+	if not news_ok("world_news_size", type(payload) == "string" and #payload <= 16 * 1024,
+		"invalid news packet size") then return end -- upper bound of a script event
 	local t = codec().decode(payload)
 	local kind = t.k
-	if not NEWS_LIMIT_IN[kind] then
+	if not news_ok("world_news_kind", NEWS_LIMIT_IN[kind] ~= nil, "invalid news kind") then
 		stats.news_bad = stats.news_bad + 1
 		return
 	end
+	if not news_ok("world_news_fields", news_fields_valid(t, payload, upload), "invalid %s news fields", kind) then
+		stats.news_bad = stats.news_bad + 1
+		return
+	end
+	if upload then
+		local peer = t.peer
+		t.peer = nil
+		api.send_event(EV_NEWS, peer and codec().encode(t) or payload, peer or -1)
+		if peer then return end
+	end
+	if not db.actor then return end
 	stats.news_in = stats.news_in + 1
 	stats["in_" .. kind] = stats["in_" .. kind] + 1
-	if not within_limit("in", kind, NEWS_LIMIT_IN[kind]) then
+	if not news_ok("world_news_rate", within_limit("in", kind, NEWS_LIMIT_IN[kind]), "too many %s news packets", kind) then
 		stats.news_limited = stats.news_limited + 1
 		return
 	end
@@ -1130,7 +1167,7 @@ local function install_mutant_loot()
 				if more == nil then more = not is_empty(self.loot) end
 				local t = loot_to_flat(self.loot, { id = host_id(id), m = more and true or false })
 				api.send_event(EV_MLOOT_CLOSE, codec().encode(t), 0)
-			elseif api.is_host() then
+			elseif coop_mode.decides_world() then
 				local obj = obj_mutant or level.object_by_id(id)
 				if obj then edge(id, se_load_var(id, obj:name(), "looted") and true or false) end
 			end
@@ -1165,7 +1202,7 @@ end
 
 -- The world server's whichever level the box stands on: its marks, its radio, its table (a map server tells it a box was filled).
 local function host_on_box_take(payload, from)
-	if not is_host() then return end
+	if not (in_session() and coop_mode.decides_world()) then return end
 	local id = tonumber(codec().decode(payload).id)
 	local tm = rawget(_G, "treasure_manager") or treasure_manager
 	if not (id and tm and type(tm.caches) == "table" and tm.caches[id] == true) then return end
@@ -1236,7 +1273,7 @@ local function host_on_trader_req(payload, from)
 	if not (npc and tm and npc:alive()) then return end
 	-- the stock restock check, now: the client trades the current stock. The supply level reads "the actor" (goodwill, heavy pockets):
 	-- the player at the trader, not this machine's actor (a map server's is a ghost).
-	local P = map_server() and module_of("coop_npc_players")
+	local P = (coop_mode.leads_here() and not coop_mode.decides_world()) and module_of("coop_npc_players")
 	local who = P and P.object_of_peer(from)
 	if who then
 		pcall(P.with_identity, who, tm.update, npc, false)
@@ -1306,6 +1343,8 @@ end
 
 function on_game_start()
 	if not api then return end -- an exe without co-op: nothing of this runs
+	-- Block the native bridge relay from rewriting the sender of the player-facing event to peer 0.
+	if api.reserve_world_event and not api.reserve_world_event(EV_NEWS) then log("! could not reserve %s", EV_NEWS) end
 	install_news()
 	local ok, err = pcall(install_mutant_loot)
 	if not ok then log("! mutant loot sharing not installed: %s", tostring(err)) end
@@ -1318,6 +1357,7 @@ function on_game_start()
 		return
 	end
 	cm.add_event_handler(EV_NEWS, on_news)
+	cm.add_event_handler(EV_NEWS_UP, on_news)
 	cm.add_level_handler(EV_MLOOT_OPEN, on_mloot_open)
 	cm.add_event_handler(EV_MLOOT_STATE, on_mloot_state)
 	cm.add_level_handler(EV_MLOOT_CLOSE, on_mloot_close)

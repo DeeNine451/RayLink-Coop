@@ -97,7 +97,7 @@ end
 
 -- World server in the checkpoint mode: the tasks and their rollback are its own, a map server has a copy.
 local function ruled()
-	if not P.is_world_server() then return false end
+	if not (P.active() and coop_mode.decides_world()) then return false end
 	local f = rawget(_G, "get_console_cmd")
 	if type(f) ~= "function" then return false end
 	local ok, v = pcall(f, 0, "coop_death_mode")
@@ -117,8 +117,7 @@ end
 
 -- The players on a level, wherever it is led: their objects here, their records for those on another level. lvl nil: every level.
 local function bodies_on(lvl)
-	local l = rawget(_G, "coop") and coop.levels
-	if not (l and l.split and l.split() == true) then
+	if coop_mode.group_travels() or not P.active() then
 		if lvl and lvl ~= level.name() then return {} end
 		return P.everyone()
 	end
@@ -377,10 +376,13 @@ end
 
 -- A map server: the fight is off. The infos come by another road: back at sr_idle@idle with one of them still here the trigger would start
 -- the fight again.
-local function on_arena_rolled(t)
-	if not P.is_map_server() then return end
+local function on_arena_rolled(t, from)
+	local n = t.n
+	local valid = from == 0 and coop_mode.leads_here() and not coop_mode.decides_world() and level.name() == ARENA_LEVEL
+		and (n == nil or (type(n) == "number" and n >= 1 and n <= ARENA_FIGHTS and n % 1 == 0))
+	if not coop_trust.pass("enc_arena", valid, "invalid arena rollback from peer %s", tostring(from)) or not valid then return end
 	arena_clear()
-	arena_back = tonumber(t.n) or 0
+	arena_back = n or 0
 end
 
 local function arena_back_tick()
@@ -508,7 +510,8 @@ local function ht_tick()
 end
 
 local function npc_on_before_hit(npc, s_hit)
-	if next(guarded) == nil or not (P.is_host() and npc and s_hit and guarded[npc:id()]) then return end
+	if next(guarded) == nil or not (P.active() and (coop_mode.decides_world() or coop_mode.leads_here())
+		and npc and s_hit and guarded[npc:id()]) then return end
 	s_hit.power = 0
 	stats.guarded_hits = stats.guarded_hits + 1
 end
@@ -530,10 +533,9 @@ local function heal_one(id, kind)
 end
 
 local function heal_tick()
-	local qc = rawget(_G, "coop_quests_core") or coop_quests_core
 	for id, kind in pairs(wounded) do
-		-- on a map server's level: the far view shows it, the change goes there as an order
-		if qc then qc.with_target(id, nil, "a healed enemy", heal_one, id, kind) else heal_one(id, kind) end
+		-- The far view applies the heal on the map that holds the enemy.
+		coop_mode.far().with_target(id, nil, "a healed enemy", heal_one, id, kind)
 	end
 end
 
@@ -545,7 +547,7 @@ local function actor_on_update()
 	local now = time_global()
 	if now < next_tick then return end
 	next_tick = now + TICK_MS
-	if P.is_map_server() then
+	if coop_mode.leads_here() and not coop_mode.decides_world() then
 		arena_back_tick()
 		if map_ruled then
 			local ok, err = pcall(evac_tick)
@@ -574,21 +576,17 @@ function on_game_start()
 	if not rawget(_G, "coop") then return end
 	install_entries()
 	-- the squad a task keeps alive stands on a level a map server may lead: who is held off is the world server's to say
-	local qc = rawget(_G, "coop_quests_core") -- the Core keeps the tables, a server's share carries them
-	local share = qc and qc.share and qc.share()
-	if share then
-		share.down("guarded", function() return guarded end, function(t)
-			for id in pairs(guarded) do guarded[id] = nil end
-			for id in pairs(t) do guarded[id] = true end
-		end)
-		share.down("encounters", function() return { on = ruled() } end, function(t) map_ruled = t.on == true end)
-		share.up("arena_point", function()
-			if level.name() ~= ARENA_LEVEL or not level.patrol_path_exists(ARENA_POINT) then return nil end
-			local p = patrol(ARENA_POINT):point(0)
-			return { x = p.x, y = p.y, z = p.z }
-		end, function(t) arena_at = t end, 30000)
-	end
-	C().on("enc_arena", on_arena_rolled, "client")
+	coop_mode.share_down("guarded", function() return guarded end, function(t)
+		for id in pairs(guarded) do guarded[id] = nil end
+		for id in pairs(t) do guarded[id] = true end
+	end)
+	coop_mode.share_down("encounters", function() return { on = ruled() } end, function(t) map_ruled = t.on == true end)
+	coop_mode.share_up("arena_point", function()
+		if level.name() ~= ARENA_LEVEL or not level.patrol_path_exists(ARENA_POINT) then return nil end
+		local p = patrol(ARENA_POINT):point(0)
+		return { x = p.x, y = p.y, z = p.z }
+	end, function(t) arena_at = t end, 30000)
+	C().on("enc_arena", on_arena_rolled)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("npc_on_before_hit", npc_on_before_hit)
 	C().status_line(TAG, print_status)

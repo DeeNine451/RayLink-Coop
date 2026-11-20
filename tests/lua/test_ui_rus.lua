@@ -6,6 +6,8 @@ local fh = assert(io.open(ROOT .. "configs/text/rus/st_coop_menu.xml", "rb"))
 for id, text in fh:read("*a"):gmatch('<string id="([^"]+)">%s*<text>(.-)</text>') do T[id] = text end
 fh:close()
 game = { translate_string = function(id) return T[id] or id end }
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local ui = load_module("coop_ui")
 local missing = {}
 for i = 1, 60 do missing[#missing + 1] = string.format("gamedata/textures/t%02d.dds", i) end

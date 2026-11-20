@@ -207,6 +207,8 @@ coop_main = {
 
 -------------------------------------------------------------------------------
 print("== files exist")
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local saves = load_module("coop_saves")
 check(type(saves) == "table", "coop_saves loads")
 check(type(saves.list_autosaves) == "function" and type(saves.restore) == "function", "list_autosaves and restore exist")

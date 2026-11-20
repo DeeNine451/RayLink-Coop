@@ -50,8 +50,23 @@ local function held_there(se)
 	return game_graph():vertex(se.m_game_vertex_id):level_id() ~= l.my_level()
 end
 
+-- A map server reports a broken ceasefire to the world server that owns the saved table.
+local function on_bribe_hit(t, from)
+	if not coop_quests_core.active() or not coop_mode.decides_world() then return end
+	local bridged = coop_mode.from_level(from)
+	if not coop_trust.pass("quest_bribe_hit_sender", bridged, "peer %s sent a ceasefire report without leading a map", tostring(from))
+		or not bridged then return end
+	local community = t.c
+	local valid = type(community) == "string" and #community > 0 and #community <= 256
+	if not coop_trust.pass("quest_bribe_hit_community", valid, "peer %s sent a ceasefire report with an invalid community", tostring(from))
+		or not valid then return end
+	local bribe = coop_quests_core.mod("xr_bribe")
+	if bribe and type(bribe.npc_on_hit_callback) == "function" then bribe.npc_on_hit_callback(community) end
+end
+
 function on_game_start()
 	coop_mode.when_srv(function()
+		if coop_mode.decides_world() then coop_quests_core.on("bribe_hit", on_bribe_hit, "missions") end
 		coop_quests_core.set_part("quest_level", {
 			far_body = far_body,
 			add_far_bodies = add_far_bodies,

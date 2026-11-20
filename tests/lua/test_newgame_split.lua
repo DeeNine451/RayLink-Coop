@@ -129,6 +129,8 @@ dlg.character_name:SetText("")
 click(dlg, "btn_start")
 check(MENU.starts == 0 and #STAGED == 0, "empty character name starts and stages nothing")
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local cm = load_module("coop_menu")
 local function menu_for(id)
 	return setmetatable({

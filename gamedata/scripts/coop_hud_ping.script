@@ -41,6 +41,9 @@ MAX_TOTAL = 24
 KEY_DEFAULT = "kF8"
 XML_FILE = "ui_coop_compass.xml"
 local COORD_MAX = 100000
+local LEVEL_NAME_MAX = 64 -- coop_transition.h kMaxLevelName
+local MAX_PLAYER_SLOT = 16 -- coop_protocol.h kMaxPlayers
+local SERIAL_MAX = 0xffffffff
 local SOUND = "interface\\inv_properties"
 local VOLUME = 0.35
 local WORLD_SLOTS = 12
@@ -60,13 +63,8 @@ end
 
 local function live()
 	if not api then return false end
-	local ok, on = pcall(function() return api.is_active() and (api.is_host() or api.is_live()) end)
+	local ok, on = pcall(function() return api.is_active() and (coop_mode.decides_world() or api.is_live()) end)
 	return ok and on == true
-end
-
-local function is_host()
-	local ok, h = pcall(api.is_host)
-	return ok and h == true
 end
 
 local function codec()
@@ -164,7 +162,7 @@ function target_point()
 end
 
 local function host_keep(from, x, y, z, lvl, tg)
-	host_seq = host_seq + 1
+	host_seq = host_seq % SERIAL_MAX + 1
 	local here = level_name()
 	if not (lvl and here) or lvl == here then add_ping(from, host_seq, x, y, z, tg) end
 	local t = { x = r2(x), y = r2(y), z = r2(z), p = from, n = host_seq }
@@ -182,7 +180,7 @@ function request(tg)
 	local p = target_point()
 	if not p then return false, "no_target" end
 	local lvl = level_name()
-	if is_host() then
+	if coop_mode.decides_world() then
 		last_sent = tg
 		stats.sent = stats.sent + 1
 		host_keep(0, p.x, p.y, p.z, lvl, tg)
@@ -203,45 +201,62 @@ local function coords(t)
 	return x, y, z
 end
 
--- x, y, z of a payload on this level, or nil
-local function parse(t)
-	if type(t.l) == "string" then
-		local here = level_name()
-		if here and here ~= t.l then return nil end
-	end
-	return coords(t)
+local function wire_level(name)
+	return name == nil or (type(name) == "string" and #name <= LEVEL_NAME_MAX and name:match("^[A-Za-z0-9_.%-]+$") ~= nil)
+end
+
+local function whole(n, min, max)
+	return type(n) == "number" and n >= min and n <= max and n == math_floor(n)
+end
+
+local function audit_ping_refusal(event, from, why)
+	if coop_trust then coop_trust.pass(event, false, "peer %s: %s", tostring(from), why) end
 end
 
 -- Host: a client's request.
 function on_req(payload, from)
-	if not (api and is_host()) or type(from) ~= "number" or from <= 0 then return end
+	if not (api and api.is_active() and coop_mode.decides_world()) then
+		return audit_ping_refusal(EV_REQ, from, "no active world authority")
+	end
+	if not (whole(from, 1, MAX_PLAYER_SLOT) and coop_mode.seat_plays(from)) then
+		return audit_ping_refusal(EV_REQ, from, "sender is not a remote player")
+	end
+	if type(payload) ~= "string" then return audit_ping_refusal(EV_REQ, from, "invalid payload") end
 	local t = codec().decode(payload)
 	local x, y, z = coords(t)
-	if not x then
+	if not (x and wire_level(t.l)) then
 		stats.bad = stats.bad + 1
-		return
+		return audit_ping_refusal(EV_REQ, from, "invalid coordinates or level name")
 	end
 	local tg = time_global()
 	local last = last_from[from]
 	if last and tg >= last and tg - last < GAP_MS - SLACK_MS then
 		stats.rate = stats.rate + 1
-		return
+		return audit_ping_refusal(EV_REQ, from, "ping sent too soon")
 	end
 	last_from[from] = tg
-	host_keep(from, x, y, z, type(t.l) == "string" and t.l or level_name(), tg)
+	host_keep(from, x, y, z, t.l or level_name(), tg)
 end
 
 -- Client: the host's relay.
 function on_ping(payload, from)
-	if not api or is_host() then return end
+	if not (api and api.is_active()) or coop_mode.decides_world() then
+		return audit_ping_refusal(EV_PING, from, "no active receiver")
+	end
 	if from ~= 0 then
 		stats.foreign = stats.foreign + 1
-		return
+		return audit_ping_refusal(EV_PING, from, "relay did not come from the world")
 	end
+	if type(payload) ~= "string" then return audit_ping_refusal(EV_PING, from, "invalid payload") end
 	local t = codec().decode(payload)
-	local x, y, z = parse(t)
+	local x, y, z = coords(t)
 	local peer, n = tonumber(t.p), tonumber(t.n)
-	if not (x and peer and n and peer >= 0 and peer == math_floor(peer)) then
+	if not (x and wire_level(t.l) and whole(peer, 0, MAX_PLAYER_SLOT) and whole(n, 1, SERIAL_MAX)) then
+		stats.bad = stats.bad + 1
+		return audit_ping_refusal(EV_PING, from, "invalid coordinates, level name, author or serial")
+	end
+	local here = level_name()
+	if t.l and here and t.l ~= here then
 		stats.bad = stats.bad + 1
 		return
 	end

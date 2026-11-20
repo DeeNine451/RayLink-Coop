@@ -330,9 +330,7 @@ end
 -- Is this answer made over the far view: for a level this process does not lead (a world server for every level, the host
 -- of split levels for the others)? There the NPC is a stand-in of its ALife record, not a game object.
 local function over_far_view()
-	local far = qc.part("far") -- a server's far view (coop_srv_quests_far), nil in the co-op
-	if not (far and type(far.in_scope) == "function") then return false end
-	local ok, scope = pcall(far.in_scope)
+	local ok, scope = pcall(coop_mode.far().in_scope)
 	return ok and scope ~= nil
 end
 
@@ -833,7 +831,7 @@ local function giver_npc(giver)
 end
 
 function host_after_give(id, from, giver, got_vars)
-	if not qc.is_host() then return end
+	if not qc.active() or not coop_mode.decides_world() then return end
 	stats.after_give = stats.after_give + 1
 	local on_jd = r_str(id, "on_job_descr") or ""
 	-- the client's dialog brought no task var: the host prepares the task itself

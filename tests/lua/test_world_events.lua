@@ -4,6 +4,10 @@ local expected = {
 	"coop_scorch", "mods.rf_freq_r", "coop_rep_map_ack", "npc.comp_recall",
 	"coop_set", "quests.far_do", "npc.comp_adopt", "npc.comp_drop",
 	"coop_brain", "coop_orders", "coop_dao", "coop_sl_news", "coop_fac",
+	-- S6 integration (A-S6-L-worldb): the player-facing news; a map server reports its news as core.news_up and only the
+	-- world turns it into core.news, so a bridge's core.news is refused before the relay rewrites its sender to 0 - on
+	-- every hosting, including a rehost of the same Lua state after the native session end cleared the reservations
+	"core.news",
 }
 local path = "gamedata/scripts/coop_world_events.script"
 local passed, failed = 0, 0

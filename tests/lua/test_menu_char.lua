@@ -189,6 +189,8 @@ end
 HINT = nil -- the last text the hint window was asked for (nil = hidden)
 function utils_ui.UIHint() return { Update = function(_, txt) HINT = txt end } end
 
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local mc = load_module("coop_menu_char")
 check(coop_main.handlers["menu.char_offer"] and coop_main.handlers["menu.new_character"]
 	and coop_main.handlers["menu.char_result"], "event handlers registered at load")

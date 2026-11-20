@@ -158,7 +158,7 @@ local function patch_check_task()
 		local ref = POSITION_FUNCTORS[self.status_functor]
 		if ref and not (self.status_functor == "gd_task_status_functor" and self.stage == 2) then
 			local who = qc.nearest_body(ref_object(self, ref))
-			if not who and self.status_functor == "spy_task_status_functor" and qc.actor_is_nobody() then
+			if not who and self.status_functor == "spy_task_status_functor" and not coop_mode.actor_is_player() then
 				-- nobody on the spy's level: the stock brings him to "the actor", and the ghost of a seat that plays no character
 				-- stands on no level of the game. The player who took the task is the actor the stock means.
 				local taker = ct().taker and ct().taker(self.id)
@@ -177,8 +177,8 @@ local function patch_check_task()
 		local args = { ... }
 		local verdict = self.last_check_task
 		local function checked()
-			local far = qc.part("far") -- a server's far view (coop_srv_quests_far), nil in the co-op
-			local s = far and far.in_scope()
+			local far = coop_mode.far()
+			local s = far.in_scope()
 			-- on another level "the actor" of a stock functor is the player who stands there
 			local there = s and not fields.position and s.avatar and far.object(s.avatar)
 			if there then
@@ -190,7 +190,7 @@ local function patch_check_task()
 				local okw, e = qc.with_actor(fields, orig, self, tm, unpack(args))
 				if not okw then error(e, 0) end
 			end)
-			if self.last_check_task == "fail" and verdict ~= "fail" and far then far.note_fail(self.id, self) end
+			if self.last_check_task == "fail" and verdict ~= "fail" then far.note_fail(self.id, self) end
 		end
 		-- the level of what it is about, for whoever stands there: one target for everybody, a companion on another level can do it
 		local okc, err = pcall(qc.with_target, target_of(self), ct().taker(self.id), self.id, checked)
@@ -314,8 +314,7 @@ local LOOT_KEY = "bandit1"
 local mirror = { vals = {}, sent = {}, next = 0, players = 0 }
 
 local function split_levels()
-	local l = qc.engine() and qc.engine().levels
-	return l ~= nil and l.split ~= nil and l.split() == true
+	return qc.active() and not coop_mode.group_travels()
 end
 
 -- The values as the stock conditions read them now. A zone: -1 none there, 0 nothing spawned, 1 an artefact spawned. With split levels a
@@ -591,7 +590,7 @@ local function patch_task_types()
 		local orig = tsf.drx_sl_quest_item_task_status
 		tsf.drx_sl_quest_item_task_status = function(tsk, task_id, ...)
 			local r = orig(tsk, task_id, ...)
-			if qc.is_host() and type(task_id) == "string" then
+			if qc.active() and coop_mode.decides_world() and type(task_id) == "string" then
 				-- the item exists already (a reload, another stash): stop creating it every check
 				local var = load_var(db.actor, task_id)
 				if type(var) == "table" and not var.stash_created and var.stash_type then
@@ -646,7 +645,7 @@ local function patch_task_types()
 			if r then return r end
 			local m = coop_mods_core.find_local(psd, "M")
 			-- split levels: the guards are live on the map server, which says so (pump.up_set); a stand-in here has no best_enemy
-			if type(m) == "table" and m.commander_id and pump.hostile[m.commander_id] and qc.is_host() and split_levels() then return true end
+			if type(m) == "table" and m.commander_id and pump.hostile[m.commander_id] and coop_mode.decides_world() and split_levels() then return true end
 			if not party_on() then return r end
 			if type(m) ~= "table" then return r end
 			if m.commander_id and at_player(m.commander_id) then return true end
@@ -853,7 +852,7 @@ local function actor_on_update()
 	if qc.client_live() then
 		local ok, err = pcall(measure_tick)
 		if not ok then qc.report(TAG, "measure", err) end
-	elseif qc.is_host() or qc.is_map_server() then
+	elseif qc.active() and (coop_mode.decides_world() or coop_mode.leads_here()) then
 		local ok, err = pcall(mirror_tick)
 		if not ok then qc.report(TAG, "mirror", err) end
 	end
@@ -931,11 +930,8 @@ function on_game_start()
 	qc.register_host_action("give_npc", host_give_npc)
 	qc.on("rf", client_on_rf, TAG)
 	qc.on("mirror", client_on_mirror, TAG)
-	local share = qc.share and qc.share() -- the Core keeps the tables, a server's share carries them
-	if share then
-		share.down("pump", pump.down_get, pump.down_set)
-		share.up("pump", pump.up_get, pump.up_set, pump.UP_MS)
-	end
+	coop_mode.share_down("pump", pump.down_get, pump.down_set)
+	coop_mode.share_up("pump", pump.up_get, pump.up_set, pump.UP_MS)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_first_update", install)
 end

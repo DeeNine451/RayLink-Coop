@@ -5,7 +5,7 @@
 -- Run: tools\test_lua.cmd taskboard_offer
 dofile("tests/lua/support/harness_quests.lua")
 
-local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_quests_core", "coop_tasks", "coop_quests_offer" }
+local SCRIPTS = { "coop_mode", "coop_hostplay_mode", "coop_srv_mode", "coop_quests_core", "coop_tasks", "coop_quests_offer" }
 
 local function setup_world(M)
 	local e = M.env
@@ -125,12 +125,12 @@ Cm.active = true
 print("== an empty answer made over the far view: the list is made here")
 do
 	local a = Cm.env.axr_task_manager
-	-- the far view of a world server, as much as the offer needs: the handler runs inside it while it is open
-	-- (the server's part "far" of coop_quests_core, step S4)
-	Hm.env.coop_quests_core.set_part("far", {
+	-- The server layer supplies the far view while this fixture models the world server.
+	Hm.env.coop.is_dedicated = function() return true end
+	Hm.env.coop_srv_quests_far = {
 		in_scope = function() return Hm.far_open end,
 		with_level_of = function(peer, fn, ...) return fn(...) end,
-	})
+	}
 	-- an answer with tasks made over the far view is used as before
 	Hm.far_open = { level = "l05_bar" }
 	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)
@@ -148,6 +148,7 @@ do
 	check(Cm.gen_calls == 1, "nothing over the far view: the stock generation runs on the client (" .. tostring(Cm.gen_calls) .. " call)")
 	check(#a.available_tasks[700] == 3, "and its board has the tasks of the NPC here (" .. #a.available_tasks[700] .. ")")
 	-- the host of one level has the real NPC: its empty list is the answer
+	Hm.env.coop.is_dedicated = nil
 	Hm.far_open = nil
 	NOW = NOW + 5000
 	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)

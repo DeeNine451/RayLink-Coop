@@ -557,6 +557,9 @@ end)
 -- The quests group on the harness: coop_quests_core plus what the test loads.
 local function quests(M, names)
 	local E = M.env
+	if not E.coop_mode then
+		modes.live(load_script(M, "coop_mode"), function(name) return load_script(M, name) end)
+	end
 	E.coop_quests_core = load_script(M, "coop_quests_core")
 	E.coop_quests_core.on_game_start()
 	for _, n in ipairs(names) do

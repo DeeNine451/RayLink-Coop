@@ -37,19 +37,12 @@ function active()
 	local ok, v = pcall(api.is_active)
 	return ok and v == true
 end
+-- Compatibility for coop_loot_claim; its callers will migrate in their own unit.
 function is_host() return active() and api.is_host() == true end
 -- F3a: a map server is no player: its logic is its level's (the stock effects run there), it asks nobody for them
 function is_map_server() return active() and api.is_map_server ~= nil and api.is_map_server() == true end
-function is_client() return active() and api.is_client() == true and not is_map_server() end
+function is_client() return coop_mode.is_player_mirror() end
 function client_live() return is_client() and api.is_live() == true end
-local function actor_is_player()
-	return not (coop_mode and coop_mode.actor_is_player) or coop_mode.actor_is_player()
-end
-
--- Compatibility for quest callers that still use the negative form.
-function actor_is_nobody()
-	return not actor_is_player()
-end
 
 function self_peer()
 	if not api then return 0 end
@@ -75,7 +68,7 @@ end
 
 -- The process that leads a level, with at least one other player connected: a map server's logic pays and takes as the host's does.
 function host_party()
-	if not (is_host() or is_map_server()) then return false end
+	if not active() or not (coop_mode.decides_world() or coop_mode.leads_here()) then return false end
 	for _, p in ipairs(players()) do
 		if not p.is_self then return true end
 	end
@@ -300,7 +293,7 @@ end
 function characters()
 	local out = {}
 	-- in a far view the actor of this machine stands elsewhere: coordinates of two levels mean nothing to each other
-	if db and db.actor and actor_is_player() and not far_seen() then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
+	if db and db.actor and coop_mode.actor_is_player() and not far_seen() then out[1] = { obj = db.actor, peer = self_peer(), self = true, id = db.actor:id() } end
 	if not active() then return out end
 	for _, p in ipairs(players()) do
 		if not p.is_self and p.avatar_id then
@@ -428,15 +421,12 @@ function far_item_class:section() return self.item_section end
 function far_item_class:condition() return self.item_condition end
 function far_item_class:get_remaining_uses() return tonumber(ini_sys:r_float_ex(self.item_section, "max_uses")) or 1 end -- no record has them
 
--- What a record has no answer to goes where a stand-in of an NPC goes: the server's far view (part "far": its stand-ins change
--- things by orders), else the record's answers above; a method nobody needed yet is logged once.
+-- The far view can supply methods for the record, including orders to the level that leads it.
 local far_body_class = {}
 far_body_class.__index = function(_, k)
 	local m = rawget(far_body_class, k)
 	if m ~= nil then return m end
-	local far = part("far")
-	if far and far.fallback then return far.fallback(k) end
-	return record_method(k)
+	return coop_mode.far().fallback(k) or record_method(k)
 end
 function far_body_class:id() return self[4] end
 function far_body_class:position() return self[1] end
@@ -566,7 +556,7 @@ function avatar_obj(peer)
 end
 
 -------------------------------------------------------------------------------
--- The far view (the server's part "far", coop_srv_quests_far): what the stock reads of the level it stands on, for one call
+-- The far view: what the stock reads of the level it stands on, for one call
 -------------------------------------------------------------------------------
 -- Installed when this script loads: before tasks_* do, one of them keeps level.object_by_id in a local. Out of a scope they are the stock's.
 local far_view = nil
@@ -629,26 +619,18 @@ local function install_sim_view()
 	end
 end
 
-local function far_mod() return part("far") end
-
--- fn on the level of a player (the far view's with_level_of); the world server's own level, or no split levels: fn as it is.
+-- fn on the level of a player, or on the local map when there is no far view.
 function with_level_of(peer, fn, ...)
-	local far = far_mod()
-	if not far then return fn(...) end
-	return far.with_level_of(peer, fn, ...)
+	return coop_mode.far().with_level_of(peer, fn, ...)
 end
 
 -- fn on the level of a target, for a player who stands there; nobody there: on the level of peer.
 function with_target(id, peer, what, fn, ...)
-	local far = far_mod()
-	if not far then return fn(...) end
-	return far.with_target(id, peer, what, fn, ...)
+	return coop_mode.far().with_target(id, peer, what, fn, ...)
 end
 
 function at_home(fn, ...)
-	local far = far_mod()
-	if not far then return fn(...) end
-	return far.at_home(fn, ...)
+	return coop_mode.far().at_home(fn, ...)
 end
 
 -- A squad held on a map this process does not lead.
@@ -755,6 +737,11 @@ end
 local actions = {} -- name -> fn(from_peer, table)
 local action_stats = { out = 0, in_ = 0, refused = 0 }
 
+-- Non-host player slots in coop_protocol.h (kMaxPlayers). Bridge IDs are separate.
+function remote_player_slot(peer)
+	return type(peer) == "number" and peer >= 1 and peer <= 16 and peer % 1 == 0
+end
+
 -- Host side: fn(from, t) runs inside coop_tasks.run_as(from) (task gives / turn-ins are that player's).
 function register_host_action(name, fn)
 	if type(name) == "string" and type(fn) == "function" then actions[name] = fn end
@@ -771,15 +758,46 @@ end
 
 -- What touches a live NPC or a box of the player's level: its authority runs these (split levels). The rest stays here under the far view:
 -- their data is the save's (xr_bribe, the guide, the stash tables). trade: the stock of an ordinary stalker comes into the NPC there.
+-- Both destinations use quests.act on the wire. The facade can route a whole event, so the action still selects the destination here.
 local LEVEL_ACTIONS = { box = true, trade = true }
 
+local function valid_object_id(id)
+	return type(id) == "number" and id >= 1 and id <= 65534 and id % 1 == 0
+end
+
+local function action_check(name, valid, from)
+	-- Packet shape is mandatory even when the trust policy only logs failures.
+	if coop_trust then coop_trust.pass(name, not not valid, "peer %s sent an invalid quest action", tostring(from)) end
+	if valid then return true end
+	action_stats.refused = action_stats.refused + 1
+	return false
+end
+
 local function host_on_action(t, from)
-	if is_map_server() and from == 0 then
-		from = tonumber(t._peer)
-		t._peer = nil
-	elseif not is_host() or type(from) ~= "number" or from == 0 then
+	if not active() then return end
+	local decides = coop_mode.decides_world()
+	local relayed = not decides and coop_mode.leads_here()
+	if not (relayed or decides) then return end
+	local action = t.a
+	if relayed then
+		if not action_check("quest_act_sender", from == 0, from)
+			or not action_check("quest_act_relay_peer", remote_player_slot(t._peer), from)
+			or not action_check("quest_act_relay_action", LEVEL_ACTIONS[action], from) then return end
+		from = t._peer
+	elseif not action_check("quest_act_sender", remote_player_slot(from), from) then
 		return
-	elseif LEVEL_ACTIONS[t.a] then
+	end
+	t._peer = nil
+
+	if action == "box" then
+		if not action_check("quest_act_fields", valid_object_id(t.b), from) then return end
+		t = { a = action, b = t.b }
+	elseif action == "trade" then
+		local valid = valid_object_id(t.n) and (t.y == 0 or t.y == 1)
+		if not action_check("quest_act_fields", valid, from) then return end
+		t = { a = action, n = t.n, y = t.y }
+	end
+	if not relayed and LEVEL_ACTIONS[action] then
 		local l = api.levels
 		local bridge = l and l.split and l.split() == true and l.bridge_of_player and l.bridge_of_player(from)
 		if bridge then
@@ -788,13 +806,8 @@ local function host_on_action(t, from)
 			return
 		end
 	end
-	if not from then return end
-	local fn = type(t.a) == "string" and actions[t.a]
-	if not fn then
-		action_stats.refused = action_stats.refused + 1
-		log("core", "! unknown host action from #%s: %s", tostring(from), tostring(t.a))
-		return
-	end
+	local fn = type(action) == "string" and actions[action]
+	if not action_check("quest_act_action", fn, from) then return end
 	action_stats.in_ = action_stats.in_ + 1
 	local ct = rawget(_G, "coop_tasks") or coop_tasks
 	local ok, err
@@ -804,7 +817,7 @@ local function host_on_action(t, from)
 	else
 		ok, err = pcall(with_level_of, from, fn, from, t)
 	end
-	if not ok then report("core", "host action " .. tostring(t.a), err) end
+	if not ok then report("core", "host action " .. action, err) end
 end
 
 -------------------------------------------------------------------------------
@@ -822,11 +835,8 @@ function print_status()
 			if not ok then report("core", name .. ".print_status", err) end
 		end
 	end
-	local far = part("far") -- a server's far view
-	if far and type(far.print_status) == "function" then
-		local ok, err = pcall(far.print_status)
-		if not ok then report("core", "far.print_status", err) end
-	end
+	local ok, err = pcall(coop_mode.far().print_status)
+	if not ok then report("core", "far.print_status", err) end
 end
 
 local started = false

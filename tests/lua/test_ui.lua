@@ -112,6 +112,8 @@ local function load_module(name)
 end
 
 print("== coop_ui")
+local modes = dofile("tests/lua/support/modes.lua")
+modes.live(load_module("coop_mode"), load_module)
 local ui = load_module("coop_ui")
 
 local function rows()

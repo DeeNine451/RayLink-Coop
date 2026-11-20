@@ -4,9 +4,9 @@
 dofile("tests/lua/support/harness_quests.lua")
 local modes = dofile("tests/lua/support/modes.lua")
 
-local SCRIPTS = { "coop_quests_core", "coop_srv_quests_core", "coop_srv_levels_share", "coop_srv_quests_far",
+local SCRIPTS = { "coop_trust", "coop_quests_core", "coop_srv_quests_core", "coop_srv_levels_share", "coop_srv_quests_far",
 	"coop_tasks", "coop_srv_tasks", "coop_quests_offer", "coop_quests_party",
-	"coop_quests_story", "coop_quests_missions", "coop_quests_pda" }
+	"coop_quests_story", "coop_srv_quests_story", "coop_quests_missions", "coop_quests_pda" }
 local BRIDGE = 0x101
 local LEVEL_NAMES = { "l01_escape", "k00_marsh" }
 
@@ -630,7 +630,7 @@ do
 	Co.env.IsStalker = Hm.env.IsStalker
 	Co.env.utils_obj = Hm.env.utils_obj
 	boot(Co)
-	check(Co.env.coop_quests_core.actor_is_nobody() == false, "an ordinary host's actor is somebody")
+	check(Co.env.coop_mode.actor_is_player(), "an ordinary host's actor is somebody")
 	local list, place = ask(Co)
 	check(#list == 2 and list[1].n == "server", "the playing host's character keeps its line")
 	check(place == 2, "and counts above the player")
@@ -639,14 +639,14 @@ do
 	check(Co.env.coop_tasks.taker("nowhere_task") == 0, "with nobody to measure to: as before")
 	table.remove(MACHINES) -- the co-op host is a separate session
 	-- a world server: the ghost has no line, no place above anyone
-	check(qc.actor_is_nobody() == true, "a world server's actor is nobody")
+	check(not Hm.env.coop_mode.actor_is_player(), "a world server's actor is nobody")
 	list, place = ask(Hm)
 	local named = false
 	for _, e in ipairs(list) do if e.n == "server" then named = true end end
 	check(not named and #list == 1 and list[1].me == true, "the ghost is not among the lines a client gets")
 	check(place == 1, "the ghost's rank puts nobody lower")
-	check(Ms.env.coop_quests_core.actor_is_nobody() == true, "a map server's actor is nobody")
-	check(Cm.env.coop_quests_core.actor_is_nobody() == false, "a player's actor is somebody")
+	check(not Ms.env.coop_mode.actor_is_player(), "a map server's actor is nobody")
+	check(Cm.env.coop_mode.actor_is_player(), "a player's actor is somebody")
 	ghost._rank, ghost._cname = rank0, name0
 end
 
@@ -809,6 +809,19 @@ print("== a story reward of a map server's logic that comes twice in a moment is
 do
 	local runs = 0
 	Hm.env.xr_effects.reward_item = function(actor, npc, p) runs = runs + 1 end
+	local function report(first, from)
+		local event = Hm.handlers["quests.share"]
+		if event then event(Hm.env.coop_quests_core.encode({ f = "reward_item", p1 = first, _peer = BRIDGE }), from) end
+	end
+	report("medkit", 1)
+	report("medkit", BRIDGE + 1)
+	report("medkit", BRIDGE + 0.5)
+	check(runs == 0, "only a registered bridge can report a reward, regardless of the payload's claimed peer")
+	report(string.rep("%", 15900), BRIDGE)
+	check(runs == 0, "an oversized reward report is dropped")
+	local status = Hm.env.coop_trust.status()
+	check(status.story_share_sender and status.story_share_sender.failed == 3, "invalid bridge senders reach coop_trust")
+	check(status.story_share_payload and status.story_share_payload.failed == 1, "invalid reward payloads reach coop_trust")
 	local function says(first)
 		Ms.env.coop_quests_core.send("share", { f = "reward_item", p1 = first }, 0)
 	end
