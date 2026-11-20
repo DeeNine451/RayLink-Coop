@@ -614,7 +614,10 @@ local function watch_line(w, rid, when)
 		if not had[id] then fresh[#fresh + 1] = id end
 	end
 	local delta = #now_ids - #w.before
-	log("%sspawn_item %s rid %s%s: asked %d, had %d, have %d (%s%d); new ids %s%s", delta ~= w.n and "! " or "", w.sec,
+	-- The answer can come before the item (a client: the decider's copy is still on its way), so at the answer only more
+	-- than asked is a fault; the second look (`when`) decides a missing one too (stand, build 57: "have 0", then "have 1").
+	local wrong = delta > w.n or (when ~= nil and delta ~= w.n)
+	log("%sspawn_item %s rid %s%s: asked %d, had %d, have %d (%s%d); new ids %s%s", wrong and "! " or "", w.sec,
 		tostring(rid or "-"), when or "", w.n, #w.before, #now_ids, delta >= 0 and "+" or "", delta, new_ids_text(fresh),
 		delta < w.n and fitting_guns(w.sec) or "")
 end

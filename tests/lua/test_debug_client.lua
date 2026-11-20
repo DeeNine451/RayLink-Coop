@@ -649,6 +649,14 @@ do
 		l = logged("spawn_item wpn_sil_vihr rid %-")
 		check(l ~= nil and l:find("have 0 %(%+0%)") ~= nil and l:find("guns here that take it: wpn_vihr 1700 %(silencer on: true%)") ~= nil,
 			"a silencer that did not come: the gun it fits and whether it carries one", tostring(l))
+		-- Stand, build 57: on a client the answer comes before the item (the host's copy travels), so "fewer than asked" at
+		-- the answer is not a fault; the second look decides (the first look keeps '!' for more than asked, above)
+		check(l ~= nil and l:find("%] ! ") == nil, "fewer than asked at the answer: no '!' yet", tostring(l))
+		local second = TE[#TE]
+		if second then second.f(unpack(second.args)) end
+		l = logged("spawn_item wpn_sil_vihr rid %-, .*later")
+		check(l ~= nil and l:find("%] ! spawn_item") ~= nil and l:find("have 0 %(%+0%)") ~= nil,
+			"still missing at the second look: the line starts with '!'", tostring(l))
 		client.run("spawn_item", { sec = "wpn_ak74", n = 3, at = "inv" })
 		REQUESTS[#REQUESTS].cb(true, { msg = "wpn_ak74 x3 (inv)" })
 		l = logged("spawn_item wpn_ak74 rid %-: asked 3")
