@@ -99,6 +99,34 @@ function Show-StandLogLines([string]$Path, [string]$Pattern, [int]$Last) {
 
 function Hide-Hex([string]$text) { return ($text -replace '[0-9a-fA-F]{32,}', '<hidden>') }
 
+# A path outside the stand folder (or none).
+function Test-StandForeignPath([string]$Path, [string]$Stand) {
+    $root = [IO.Path]::GetFullPath($Stand).TrimEnd('\', '/') + '\'
+    return (-not $Path -or -not [IO.Path]::GetFullPath($Path).StartsWith($root, [StringComparison]::OrdinalIgnoreCase))
+}
+
+# The games of $Games that run outside the stand: the owner's game stops a stand run at once (tools\stand\run_guarded.ps1).
+# A stand game that is closing has no readable path for a moment (the b57 Server stand, 2026-11-21: four scenarios stopped
+# with no foreign game on the machine). A game without a path counts only while it still runs and the system names no
+# path under the stand for it; what cannot be decided counts (the owner's game first). -PathOf / -IsAlive: for tests.
+function Get-StandForeignGame {
+    param([object[]]$Games, [Parameter(Mandatory = $true)][string]$Stand,
+        [scriptblock]$PathOf = { param($id) (Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue).ExecutablePath },
+        [scriptblock]$IsAlive = { param($id) [bool](Get-Process -Id $id -ErrorAction SilentlyContinue) })
+    foreach ($g in @($Games)) {
+        if (-not $g) { continue }
+        $path = $g.Path
+        if (-not $path) {
+            $gone = $false
+            try { $gone = [bool]$g.HasExited } catch { $gone = $false } # no access: maybe the owner's game, decide below
+            if ($gone) { continue }
+            $path = & $PathOf $g.Id
+            if (-not $path -and -not (& $IsAlive $g.Id)) { continue }
+        }
+        if (Test-StandForeignPath $path $Stand) { $g }
+    }
+}
+
 # ---- writing into a stand (TZ.md R21) -----------------------------------------------------------------------------------
 # The launcher builds the stand (E:\RayLinkGames\GAMMA\game-dev) from hard links to the mods' own files
 # (E:\RayLinkGames\GAMMA\mo2\mods, about 60,700 of 61,800 files). Copy-Item -Force, [IO.File]::WriteAll*, Set-Content,

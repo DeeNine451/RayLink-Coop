@@ -202,7 +202,8 @@ try {
     Join-GuardOwned $job $run
     while (-not $run.HasExited) {
         $games = Get-Process -Name 'AnomalyCoop*', 'RayLinkServer*', 'AnomalyDX*' -ErrorAction SilentlyContinue
-        if ($games | Where-Object { Test-GuardForeign $_.Path $Stand }) {
+        $foreign = @(Get-StandForeignGame -Games $games -Stand $Stand) | Select-Object -First 1
+        if ($foreign) {
             $stopped = $true
             break
         }
@@ -220,7 +221,7 @@ try {
         if ($mutex) { $mutex.Dispose() }
     }
 }
-if ($stopped) { Write-Host 'GUARD: a game outside the stand started, the stand run was stopped' }
+if ($stopped) { Write-Host "GUARD: a game outside the stand started, the stand run was stopped ($($foreign.Name) pid $($foreign.Id): $(if ($foreign.Path) { $foreign.Path } else { 'no path' }))" }
 else {
     Write-Host 'run finished'
     # the runner (tools\stand_common.ps1 Invoke-Scenario) fails a scenario that threw or exited non-zero (review 4, B1)
