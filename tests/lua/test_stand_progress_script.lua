@@ -77,14 +77,18 @@ local function fixture(role, map)
 				assert(not world, "world tried to read a map body")
 				assert(type(id) == "number", "object lookup needs a mapped numeric id")
 				if id == 42 then return actor end
-				if f.corpse_online and id == corpse:id() then return corpse end
+				if f.corpse_online and id == corpse:id() then
+					-- net_Spawn: the game object takes the server entity's rank once, when it comes online
+					if f.online_rank == nil then f.online_rank = f.corpse_rank or false end
+					return corpse
+				end
 			end,
 		},
 		alife_create = function(section, pos, lv, gv)
 			assert((host or bridge) and section == "sim_default_stalker_3" and lv == 12 and gv == 77,
 				"the corpse must be a veteran so its XP needs map facts")
 			f.spawned, f.corpse_position = f.spawned + 1, pos
-			return { id = 81 }
+			return { id = 81, set_rank = function(_, rank) f.corpse_rank = rank end }
 		end,
 		coop = { is_live = function() return f.live end, avatar_of = function(peer) return peer == 4 and 42 end },
 		coop_mode = {
@@ -94,7 +98,14 @@ local function fixture(role, map)
 			where = function(peer) return peer == 4 and not f.away and "here" or "away" end,
 			decider = function(peer) return peer == 4 and (host or bridge) and "this" or "world" end,
 		},
-		ranks = { get_obj_rank_name = function(obj) assert(obj == corpse); return "veteran" end },
+		ranks = {
+			get_rank_interval = function(name) assert(name == "veteran"); return { 15999, 23999 } end,
+			get_obj_rank_name = function(obj)
+				assert(obj == corpse)
+				local rank = f.online_rank
+				return rank and rank >= 15999 and rank < 23999 and "veteran" or "expert"
+			end,
+		},
 		alife_storage_manager = { get_state = function() return { coop_mods_pdata = f.store } end },
 		coop_mods_core = {
 			players = function() return players end,
@@ -168,10 +179,12 @@ run("coop_host_and_map_spawn_once_for_the_present_guest", function()
 		step(f, "spawn")
 		step(f, "spawn")
 		check(f.spawned == 1 and f.killed == 0 and not has(f, "corpse"), role .. "_awaits_online_body")
+		check(f.corpse_rank == 19999, role .. "_pins_the_corpse_rank_to_veteran_before_it_is_online")
 		f.corpse_online = true
 		step(f, "spawn")
 		step(f, "spawn")
 		check(f.killed == 1 and has(f, "corpse map=l01_escape id=901"), role .. "_announces_dead_corpse_in_host_numbering")
+		check(f.online_rank == 19999, role .. "_spawns_the_corpse_online_as_a_veteran")
 	end
 end)
 

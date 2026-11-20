@@ -15,7 +15,8 @@ end
 
 local function fixture(role, wrong_authority)
 	local f = { now = 0, commands = {}, lines = {}, online = true, step = "ready",
-		actor_pos = {x = 0, y = 0, z = 0}, car_pos = {x = 6, y = 0, z = 0}, body_present = true }
+		actor_pos = {x = 0, y = 0, z = 0}, car_pos = {x = 6, y = 0, z = 0}, body_present = true,
+		body_pos = {x = 0, y = 0, z = 0}, car_dir = {x = 1, y = 0, z = 0} }
 	local function vec()
 		return { set = function(self, x, y, z) self.x, self.y, self.z = x, y, z; return self end }
 	end
@@ -25,6 +26,7 @@ local function fixture(role, wrong_authority)
 		position = function() return f.actor_pos end,
 		attach_vehicle = function(_, car, force) assert(force == true); f.holder = car; record("attach") end,
 		get_attached_vehicle = function() return f.holder end,
+		set_actor_position = function(_, p) f.actor_pos = {x = p.x, y = p.y - 0.3, z = p.z}; record("teleport") end,
 	}
 	local physics = {
 		IsActiveEngine = function() return f.engine end,
@@ -36,9 +38,10 @@ local function fixture(role, wrong_authority)
 	local car = {
 		id = function() return 40 end, section = function() return "veh_niva" end,
 		position = function() return f.car_pos end, get_car = function() return physics end,
+		direction = function() return f.car_dir end,
 	}
 	local body = {
-		id = function() return 71 end, position = function() return {x = 0, y = 0, z = 0} end,
+		id = function() return 71 end, position = function() return f.body_pos end,
 		alive = function() return true end, game_vertex_id = function() return 2 end,
 	}
 	local env = setmetatable({
@@ -62,16 +65,17 @@ local function fixture(role, wrong_authority)
 				if id == (role == "ag" and 140 or 40) and f.online then return car end
 			end,
 			vertex_id = function(pos) f.vertex = pos; return 1 end,
+			vertex_position = function() return f.vertex end,
 			vertex_game_vertex_id = function() return 2 end,
 			ray_pick = function(pos, dir, _, _, result)
 				if dir.y == -1 then result.range = pos.y; return true end
-				return false
+				return f.wall and f.wall(pos) or false
 			end,
 			press_action = function(key) assert(key == 17); record("forward") end,
 			release_action = function(key) assert(key == 17); record("stop forward") end,
 		},
 		alife_create = function(section, pos, lv, gv)
-			assert(section == "veh_niva" and math.abs(pos.x - 6) < 0.01 and lv == 1 and gv == 2)
+			assert(section == "veh_niva" and math.abs(pos.x - (f.spawn_x or 6)) < 0.01 and lv == 1 and gv == 2)
 			record("spawn"); return {id = 40}
 		end,
 		coop = {
@@ -110,14 +114,14 @@ local function authority(role)
 	assert(#f.commands == 0)
 	f:tick("ready")
 	assert(f:has((role == "h" and "host" or "map") .. " ready map=l01_escape"))
-	f:tick("spawn")
+	f:tick("spawn 0.000 0.000 0.000")
 	assert(f.commands[1] == "spawn" and f:has("spawned car=40 body=71"))
 	f:tick("prepare")
 	f:tick(nil, 1000)
 	assert(f.commands[2] == "start engine" and f.commands[3] == "coop_status")
 	f.car_pos = {x = 12, y = 0, z = 0}
 	f:tick("drive_sample")
-	assert(f:has("drive moved=6.000"))
+	assert(f:has("drive moved=6.000") and f:has("along=6.000"))
 	f:tick("replica_sample")
 	assert(f:has("authority pos=12.000 0.000 0.000"))
 	f:tick("driver_clear")
@@ -157,6 +161,7 @@ end)
 local function driver()
 	local f = fixture("ag")
 	f:tick("ready")
+	assert(f:has("client placed pos=0.000 0.000 0.000") and #f.commands == 0)
 	f.online = false
 	f:tick("online 40")
 	assert(not f:has("client online"))
@@ -263,6 +268,69 @@ case("An airborne exit fails even within three metres of the car", function()
 	f.actor_pos = {x = 6, y = 1.5, z = 0}
 	f:tick(nil, 5001)
 	assert(f:has("FAIL driver_exit"))
+end)
+
+-- A house around the start: static walls within 8 m of the origin.
+local function house(f)
+	f.wall = function(pos) return pos.x * pos.x + pos.z * pos.z < 64 end
+end
+
+case("A client in a house moves itself to open ground before it reports ready", function()
+	local f = fixture("ag")
+	house(f)
+	f:tick("ready")
+	assert(#f.commands == 0 and not f:has("client ready"))
+	f:tick()
+	assert(f.commands[1] == "teleport" and not f:has("client ready"))
+	assert(math.abs(f.actor_pos.x - 10) < 0.01 and math.abs(f.actor_pos.z) < 0.01)
+	f:tick()
+	assert(f:has("client placed pos=10.000 0.000 0.000") and f:has("client ready map=l01_escape"))
+end)
+
+case("No open ground within 50 m fails the client ready step", function()
+	local f = fixture("ag")
+	f.wall = function() return true end
+	for _ = 1, 120 do f:tick("ready", 100) end
+	assert(f:has("FAIL ready") and f:has("no open ground") and #f.commands == 0)
+end)
+
+case("The authority spawns beside the placed spot only after the body arrives", function()
+	local f = fixture("h")
+	f:tick("ready")
+	f.body_pos = {x = 0, y = 0, z = 0}
+	f:tick("spawn 10.000 0.000 0.000")
+	assert(#f.commands == 0 and not f:has("FAIL"))
+	-- Searched from the printed spot, not from the body 0.2 m off it.
+	f.body_pos, f.car_pos, f.spawn_x = {x = 10.2, y = 0, z = 0}, {x = 16, y = 0, z = 0}, 16
+	f:tick()
+	assert(f.commands[1] == "spawn" and f:has("spawned car=40 body=71 distance=5.800"))
+end)
+
+case("A body that never reaches the placed spot fails the spawn after ten seconds", function()
+	local f = fixture("h")
+	f:tick("ready")
+	f:tick("spawn 10.000 0.000 0.000")
+	f:tick(nil, 10001)
+	assert(f:has("FAIL spawn") and f:has("never reached") and #f.commands == 0)
+end)
+
+case("A car that does not face its checked lane fails the spawn", function()
+	local f = fixture("h")
+	f:tick("ready")
+	f.car_dir = {x = 0, y = 0, z = 1}
+	f:tick("spawn 0.000 0.000 0.000")
+	assert(f:has("FAIL spawn") and f:has("car faces"))
+end)
+
+case("A drive that leaves its lane sideways fails", function()
+	local f = fixture("h")
+	f:tick("ready")
+	f:tick("spawn 0.000 0.000 0.000")
+	f:tick("prepare")
+	f:tick(nil, 1000)
+	f.car_pos = {x = 6, y = 0, z = 6}
+	f:tick("drive_sample")
+	assert(f:has("FAIL drive_sample"))
 end)
 
 for _, name in ipairs({"vehicle_group", "vehicle_server"}) do

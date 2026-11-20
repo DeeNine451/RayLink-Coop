@@ -71,36 +71,76 @@ local function ground_gap(p, ignore)
 	end
 end
 
-local function runway(p, body)
-	-- A fresh ALife car has zero yaw. Check the space around it and in front of it.
-	local forward = vector():set(0, 0, 1)
+-- The car's forward for o_Angle (0, h, 0): the k axis of setHPB(h, 0, 0) is (-sin h, 0, cos h).
+local function heading_forward(h)
+	return vector():set(-math.sin(h), 0, math.cos(h))
+end
+
+local function runway(p, forward, ignore)
+	-- Check the space around the car and 20 m in front of it, along its heading.
+	local side = vector():set(forward.z, 0, -forward.x)
 	for _, x in ipairs({-1.25, 0, 1.25}) do
-		local start = vector():set(p.x + x, p.y + 1, p.z - 2)
-		if level.ray_pick(start, forward, 22, rq_target.rqtStatic, rq_result(), body) then return false end
+		local start = vector():set(p.x + side.x * x - forward.x * 2, p.y + 1, p.z + side.z * x - forward.z * 2)
+		if level.ray_pick(start, forward, 22, rq_target.rqtStatic, rq_result(), ignore) then return false end
 	end
-	for _, z in ipairs({-2, 4, 10, 16, 20}) do
-		local gap = ground_gap(vector():set(p.x, p.y, p.z + z), body)
+	for _, d in ipairs({-2, 4, 10, 16, 20}) do
+		local gap = ground_gap(vector():set(p.x + forward.x * d, p.y, p.z + forward.z * d), ignore)
 		if not gap or math.abs(gap) > 0.8 then return false end
 	end
 	return true
 end
 
-local function spawn_car(body)
-	local p = body:position()
+-- A flat car spot 6 m from `origin` whose lane leads away from it: straight out first, then up to 67.5 degrees off.
+local function find_lane(origin, ignore)
 	for i = 0, 15 do
 		local angle = i * math.pi / 8
-		local near = vector():set(p.x + 6 * math.cos(angle), p.y, p.z + 6 * math.sin(angle))
-		local gap = ground_gap(near, body)
+		local rx, rz = math.cos(angle), math.sin(angle)
+		local near = vector():set(origin.x + 6 * rx, origin.y, origin.z + 6 * rz)
+		local gap = ground_gap(near, ignore)
 		if gap and math.abs(gap) <= 0.6 then
 			local pos = vector():set(near.x, near.y - gap + 0.15, near.z)
 			local lv = level.vertex_id(pos)
-			if lv and lv >= 0 and lv < 4294967295 and runway(pos, body) then
-				local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
-				return assert(alife_create(SECTION, pos, lv, gv), "veh_niva spawn was refused").id
+			if lv and lv >= 0 and lv < 4294967295 then
+				local base = math.atan2(-rx, rz)
+				for _, k in ipairs({0, 1, -1, 2, -2, 3, -3}) do
+					local h = base + k * math.pi / 8
+					if runway(pos, heading_forward(h), ignore) then return pos, lv, h end
+				end
 			end
 		end
 	end
-	error("no clear flat lane for veh_niva 6 m from the client")
+end
+
+local function spawn_car(origin, body)
+	local pos, lv, h = find_lane(origin, body)
+	if not pos then error("no clear flat lane for veh_niva 6 m from the client") end
+	local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
+	local se = assert(alife_create(SECTION, pos, lv, gv), "veh_niva spawn was refused")
+	-- Turn the car onto its lane before it comes online (the stock way: itms_manager.script).
+	se.angle = vector():set(0, h, 0)
+	state.heading = h
+	return se.id
+end
+
+-- The rookie_village start is inside a house. The client moves itself to open ground with a lane.
+local PLACE_RADII = {10, 15, 20, 25, 30, 40, 50}
+
+local function place_candidate(home, n)
+	if n == 1 then return vector():set(home.x, home.y, home.z) end
+	local radius = PLACE_RADII[math.floor((n - 2) / 16) + 1]
+	if not radius then return end
+	local angle = ((n - 2) % 16) * math.pi / 8
+	return vector():set(home.x + radius * math.cos(angle), home.y, home.z + radius * math.sin(angle))
+end
+
+-- Walkable open ground: an AI node with static ground under it.
+local function stand_spot(near)
+	local lv = level.vertex_id(near)
+	if not (lv and lv >= 0 and lv < 4294967295) then return end
+	local node = level.vertex_position(lv)
+	if math.abs(node.x - near.x) > 1 or math.abs(node.z - near.z) > 1 or math.abs(node.y - near.y) > 6 then return end
+	local gap = ground_gap(node, db.actor)
+	if gap and math.abs(gap) <= 0.6 then return vector():set(node.x, node.y - gap, node.z) end
 end
 
 local function start_engine(car)
@@ -130,16 +170,30 @@ function authority_steps.ready()
 	return true
 end
 
-function authority_steps.spawn()
+function authority_steps.spawn(arg, now)
 	if not state.car then
 		local body = player_body()
 		if not body then return end
-		state.car, state.body = spawn_car(body), body:id()
+		local x, y, z = arg:match("^(-?%d+%.%d+) (-?%d+%.%d+) (-?%d+%.%d+)$")
+		assert(x and y and z, "bad client place")
+		-- The client moved itself to open ground and checked a lane from exactly this point.
+		-- Search from the same numbers once its body has arrived here.
+		local place = vector():set(tonumber(x), tonumber(y), tonumber(z))
+		state.deadline = state.deadline or now + 10000
+		local p = body:position()
+		if math.abs(p.x - place.x) > 0.3 or math.abs(p.z - place.z) > 0.3 then
+			assert(now <= state.deadline, string.format("client body %.1f %.1f %.1f never reached %s", p.x, p.y, p.z, arg))
+			return
+		end
+		state.car, state.body = spawn_car(place, body), body:id()
 	end
 	local car, body = car_here(state.car), player_body()
 	if not (car and body) then return end
 	local d = distance(car:position(), body:position())
 	assert(d >= 5.5 and d <= 6.5, string.format("spawn distance %.3f m", d))
+	local dir, want = car:direction(), heading_forward(state.heading)
+	assert(dir.x * want.x + dir.z * want.z >= 0.9,
+		string.format("car faces %.2f %.2f, its lane %.2f %.2f", dir.x, dir.z, want.x, want.z))
 	out("spawned car=%d body=%d distance=%.3f", coop.to_host_id(state.car), coop.to_host_id(state.body), d)
 	return true
 end
@@ -160,7 +214,11 @@ end
 function authority_steps.drive_sample()
 	local p = authority_car():position()
 	local moved = distance(p, state.origin)
-	return measurement(moved >= 5, "drive moved=%.3f pos=%.3f %.3f %.3f", moved, p.x, p.y, p.z)
+	-- Forward input must move the car down the lane that was checked.
+	local lane = heading_forward(state.heading)
+	local along = (p.x - state.origin.x) * lane.x + (p.z - state.origin.z) * lane.z
+	return measurement(moved >= 5 and along >= 0.8 * moved, "drive moved=%.3f pos=%.3f %.3f %.3f along=%.3f",
+		moved, p.x, p.y, p.z, along)
 end
 
 function authority_steps.replica_sample()
@@ -223,7 +281,32 @@ end
 
 local client_steps = {}
 
-function client_steps.ready()
+function client_steps.ready(_, now)
+	if not state.place then
+		-- One candidate per poll: the start spot, then rings of 10..50 m around it.
+		state.home = state.home or copy(db.actor:position())
+		state.tries = (state.tries or 0) + 1
+		local near = place_candidate(state.home, state.tries)
+		assert(near, "no open ground with a car lane within 50 m of the client")
+		local spot = stand_spot(near)
+		if not (spot and find_lane(spot, db.actor)) then return end
+		state.place, state.deadline = spot, now + GRANT_MS
+		if distance(spot, db.actor:position()) > 0.5 then
+			db.actor:set_actor_position(vector():set(spot.x, spot.y + 0.3, spot.z))
+			return
+		end
+	end
+	local p = db.actor:position()
+	local gap = ground_gap(p, db.actor)
+	local landed = math.abs(p.x - state.place.x) <= 1 and math.abs(p.z - state.place.z) <= 1 and gap and math.abs(gap) <= 0.6
+	assert(landed or now <= state.deadline,
+		string.format("client did not land on the lane spot (%.1f %.1f %.1f, ground gap %s)", p.x, p.y, p.z, tostring(gap)))
+	if not landed then return end
+	-- The authority searches from these printed numbers. A lane that does not hold here: the next candidate.
+	local at = vector():set(tonumber(string.format("%.3f", p.x)), tonumber(string.format("%.3f", p.y)),
+		tonumber(string.format("%.3f", p.z)))
+	if not find_lane(at, db.actor) then state.place = nil; return end
+	out("client placed pos=%.3f %.3f %.3f", at.x, at.y, at.z)
 	out("client ready map=%s", level.name())
 	return true
 end

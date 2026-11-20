@@ -62,6 +62,15 @@ local function walk_endpoint(start)
 	end
 end
 
+-- GAMMA's sim_default_stalker_3 profile rolls its rank in 17000..34000 at registration
+-- (character_desc_stalker_3.xml); GAMMA's game_relations rating reads that as veteran or expert.
+-- Pin it on the server entity before the body goes online: every copy spawns with that rank.
+local function veteran_rank()
+	local interval = ranks.get_rank_interval("veteran")
+	assert(type(interval) == "table" and interval[1] < interval[2], "no veteran rank interval")
+	return math.floor((interval[1] + interval[2]) / 2)
+end
+
 local function tester_peer()
 	for _, p in ipairs(coop_mods_core.players()) do
 		if not p.is_self and p.nick == NICK then return p.id end
@@ -82,7 +91,9 @@ local function make_corpse()
 			local lv, ground = vertex(target)
 			if ground and near(ground, target, 1.5) then
 				local gv = level.vertex_game_vertex_id and level.vertex_game_vertex_id(lv) or body:game_vertex_id()
-				corpse_id = assert(alife_create("sim_default_stalker_3", ground, lv, gv), "cannot spawn the veteran").id
+				local se = assert(alife_create("sim_default_stalker_3", ground, lv, gv), "cannot spawn the veteran")
+				se:set_rank(veteran_rank())
+				corpse_id = se.id
 				break
 			end
 		end
@@ -98,7 +109,8 @@ local function make_corpse()
 		return
 	end
 	assert(IsStalker(corpse), "the stand corpse is not a stalker")
-	assert(ranks.get_obj_rank_name(corpse) == "veteran", "the stand corpse must award veteran XP")
+	local rank = ranks.get_obj_rank_name(corpse)
+	assert(rank == "veteran", "the stand corpse must award veteran XP, not " .. tostring(rank))
 	if not near(body:position(), corpse:position(), 5) then return end
 	local host_id = coop_mods_core.hid(corpse_id)
 	assert(object_id(host_id), "cannot translate the corpse id")

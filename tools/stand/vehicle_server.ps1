@@ -115,11 +115,12 @@ try {
         $null = $client.Handle
         $null = Wait-VehicleLine $clientLog '\[coop\] phase loading-world -> live' $JoinTimeoutS
         $ready = Wait-VehicleLine $clientLog "$($mark)client ready map=([a-z0-9_]+)\s*$" 60
+        $placed = Wait-VehicleLine $clientLog "$($mark)client placed pos=((-?\d+\.\d+ ){2}-?\d+\.\d+)\s*$" 5
         $map = [regex]::Escape($ready.Matches[0].Groups[1].Value)
         $authority = Wait-VehicleLine $mapLogs "$($mark)map ready map=$map\s*$" 60
         $authorityLog = $authority.Path
 
-        Set-VehicleStep 'spawn'
+        Set-VehicleStep ('spawn ' + $placed.Matches[0].Groups[1].Value)
         $spawn = Wait-VehicleLine $authorityLog "$($mark)spawned car=(\d{1,5}) body=(\d{1,5}) distance=[\d.]+\s*$" 45
         $car = [int]$spawn.Matches[0].Groups[1].Value
         $body = [int]$spawn.Matches[0].Groups[2].Value
