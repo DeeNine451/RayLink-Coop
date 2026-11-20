@@ -51,7 +51,7 @@ $script:StandNoise = @(
     ($script:StandBang + '\[coop\] map servers: this PC has .* free \(under .*\): an empty map server does not linger(?:, it stops at once)?\s*$') # srv/coop_mapserver.cpp: low-memory policy
     ($script:StandBang + '\[coop\] the host''s level is still precaching after \d+ s \(window without focus\?\): joins go on\s*$') # coop_join.cpp: lets joins proceed
     ($script:StandBang + '\[coop\] the host does not answer \(\d+ ms\): the game waits for it, out after \d+ s\s*$') # coop_manager.cpp: warns at the start of a recoverable wait
-    ($script:StandBang + '\[coop\] stalker \[[^\]]*\] visual \[[^\]]*\]: the torso motion of its active item is not in the visual \(\d+ so far\), the no-item motion plays\s*$') # stalker_animation_manager_update.cpp play_torso (b51, RL-4BXZ-R24J): a GAMMA weapon's motion the NPC visual lacks; stock crashed here, rate-limited
+    ($script:StandBang + '\[coop\] stalker \[[^\]]*\] visual(?: \[[^\]]*(?:\](?:: the torso motion of its active item is not in the visual \(\d+ so far\), the no-item motion plays)?)?)?\s*$') # stalker_animation_manager_update.cpp play_torso (b51, RL-4BXZ-R24J): a GAMMA weapon's motion the NPC visual lacks; stock crashed here, rate-limited. Also the line cut after "visual" or inside its [visual] by a game stopped while writing it
     '^\s*(?:\[[0-9:.]+\] +)?\[coop-game\] ! the record was not read at the world start: switched on late, scripts that cached an option keep the machine''s\s*$' # coop_game_settings.script: save callback loaded the record
 ) -join '|'
 

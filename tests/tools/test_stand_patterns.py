@@ -74,6 +74,8 @@ CASES = (
     ("settings-fallback", "[03:35:57.303] [coop-game] ! the record was not read at the world start: switched on late, scripts that cached an option keep the machine's", False),
     # b57 stand, carry_group client (2026-11-21): the engine's own guard since b51 (RL-4BXZ-R24J), rate-limited
     ("torso-fallback", "! [03:10:20.871]  [coop] stalker [sim_default_stalker_019467] visual [actors\\stalker_neutral\\stalker_neutral_1]: the torso motion of its active item is not in the visual (1 so far), the no-item motion plays", False),
+    # the same line cut where the game was stopped while writing it (companions_group, b57 stand)
+    ("torso-cut", "! [03:33:35.512]  [coop] stalker [sim_default_renegade_228430] visual ", False),
     ("torso-other", "! [03:10:20.871]  [coop] stalker [x] visual [y]: the torso motion broke the frame", True),
 )
 
