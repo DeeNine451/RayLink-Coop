@@ -463,12 +463,12 @@ Release у текущего авторитета → телепорт у СМ �
 | 0x01D2 | `LevelMoveResult` | СМ → игрок | `u32 seq`, `u8 verdict` (0 Go, 1 Together, 2 Refused), `u8 reason` (Cap, Gate, Invalid), `u16 level` | Free | HostOnly |
 | 0x01D3 | `LevelFlush` | СМ → Mk | `u32 round`, `u8 why` (1 Save, 2 Move, 3 Stop, 4 HostMove) | Free | HostOnly |
 | 0x01D4 | `LevelSnapshot` | Mk → СМ | `u16 level`, `u32 round` (0 — поток), раскладка `EntitySnapshot`; полный — блоб `BlobLevelState = 3` | Hold | TrunkOnly |
-| 0x01D5 | `LevelEntity` | Mk → СМ | `u8 op` (Destroy, Parent, Died, State, Item) + раскладка `Entity*`/`ItemState` | Hold | TrunkOnly |
+| 0x01D5 | `LevelEntity` | Mk → СМ | `u8 op` (Destroy, Parent, Died, State, Item) + раскладка `Entity*`/`ItemState`. Для 6 (Report) — `u32 mask, u16 n, n×{u16 id,u32 gen} [, u32 round]` | Hold | TrunkOnly |
 | 0x01D6 | `LevelXferUp` | Mk → СМ | `u8 op` (TakeReq, TakeCommit, ReleasePrepare, ReleaseCommit, SpawnPrepare, Destroy, AbortAck, Snapshot), `u16 id`, `u32 gen`, груз (≤ 32 КБ, иначе блоб) | Hold | TrunkOnly |
 | 0x01D7 | `LevelXferDown` | СМ → Mk | `u8 op` (Grant, Ack, Done, Abort, Drop), `u16 id`, `u32 gen`, груз у Grant | Drop (СМ повторяет) | HostOnly |
 | 0x01D8 | `LevelBrain` | СМ → Mk | `u8 s`, s × {`u16 squad`, `u16 assigned`, `u16 current`, `u8 action`, `u32 stay_ms`, `str scripted`}, `u8 a`, a × {`u16 squad`, `u16 smart`, `u16 old_smart`} | Drop | HostOnly |
 | 0x01D9 | `LevelHash` | Mk → СМ | `u16 level`, `u32 n`, `u64 set`, 32 × `u32` | Drop | TrunkOnly |
-| 0x01DA | `LevelResync` | СМ → Mk | `u8 mask[4]` | Drop | HostOnly |
+| 0x01DA | `LevelResync` | СМ → Mk | `u8 mask[4] [, u32 round]` | Drop | HostOnly |
 | 0x01DB | `Tunnel` | процесс хоста ↔ Mk | `u32 peer`, `u8 flags` (1 всем на карте), `u16 len`, пакет | Free (внутреннее проходит свой `need_of`) | Either + проверка «узел — мост» |
 | 0x01DC | `MapServerState` | Mk → СМ | `u8 state` (Loading, Ready, Draining, Stopped), `u16 level`, `u32 frame_avg_ms`, `u32 frame_max_ms`, `u32 online`, `u32 mem_mb` | Free | TrunkOnly |
 | 0x01DD | `MapServerOrder` | СМ → Mk | `u8 order` (Serve, Drain, Stop), `u16 level` | Free | HostOnly |

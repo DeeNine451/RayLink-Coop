@@ -26,7 +26,10 @@ $scenarios = @(
     @{ Name = 'allymark_server'; Script = 'allymark_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^allymark: PASS$'); Bad = @('^allymark: FAIL\b') },
     @{ Name = 'companions_server'; Script = 'companions_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^companions_server: PASS$'); Bad = @('^companions_server: FAIL\b') },
     @{ Name = 'weather_server'; Script = 'weather_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^weather_server: PASS$'); Bad = @('^weather_server: FAIL\b') },
-    @{ Name = 'cover_server'; Script = 'cover_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^cover_server: PASS$'); Bad = @('^cover_server: FAIL\b') }
+    @{ Name = 'cover_server'; Script = 'cover_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^cover_server: PASS$'); Bad = @('^cover_server: FAIL\b') },
+    @{ Name = 'ms_crash_server'; Script = 'ms_crash_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^ms_crash_server: PASS$'); Bad = @('^ms_crash_server: FAIL\b') },
+    @{ Name = 'save_handover_server'; Script = 'save_handover_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^save_handover_server: PASS$'); Bad = @('^save_handover_server: FAIL\b') },
+    @{ Name = 'creator10_server'; Script = 'creator10_server.ps1'; Args = ''; TagArg = $true; StandArg = '-Stand'; Pass = @('(?m)^creator10_server: PASS$'); Bad = @('^creator10_server: FAIL\b') }
 )
 $code = Invoke-Stand -Mode 'srv' -Scenarios $scenarios -Tag $Tag -Stand $Stand -Only $Only -NoMark:$NoMark
 exit $code

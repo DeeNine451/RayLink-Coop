@@ -361,7 +361,8 @@ def test_mark_of_other_ids_or_other_exe_does_not_count(repos, capsys):
     ((), {"dirty": "7"}, "dirty=7"),                                  # the stand ran an exe of uncommitted code
     (("dirty",), {}, "dirty=missing"),
     ((), {"scenarios": "ded_check"}, "base_server, carry_server, taskboard_ws, phantoms_server, "
-                                 "allymark_server, companions_server, weather_server, cover_server did not run"),  # a part
+                                 "allymark_server, companions_server, weather_server, cover_server, "
+                                 "ms_crash_server, save_handover_server, creator10_server did not run"),  # a part
     (("scenarios",), {}, "did not run"),
     # B12: the scenario files that ran are HEAD's (tools/stand is tracked; a relaxed check is a change of HEAD)
     (("scenarios_sha256",), {}, "scenarios_sha256 missing"),
@@ -404,6 +405,7 @@ def test_stand_runners_list_the_scenarios_the_gate_demands():
 # A scenario of tools/stand that no runner runs is one the gate never demands (the review of round 7, R7:
 # phantoms_server.ps1 of S3 and companions_group.ps1 of F5-CMP-1). Only these are run by no runner, with the reason.
 NOT_A_GATED_SCENARIO = {
+    "soak_hour_server": "one hour: weekly batch, run alone through tools\\stand\\run_guarded.ps1",
     "run_guarded": "the guard every scenario runs under (tools/stand_common.ps1 Invoke-Scenario)",
     "hybrid_save": "the hybrid's save scenario: the hybrid is removed (docs/plans/2026-11-18-two-modes.md), so is it",
 }

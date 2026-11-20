@@ -196,6 +196,20 @@
 - Кооп-ответы функций условий (`coop_scorcher.script:285-289`: `if not split() then return true`) переезжают в Ядро:
   это ответы стока. Серверный скрипт ставит свои версии только внутри `when_srv`.
 
+### Ответы для S6 (A-S6-IF, сборка 57)
+
+Новые ответы, которые просят группы S6, и их замороженные имена — `docs/contracts/coop_mode_api.md` §7: в C++ `Mode::level()` →
+`LevelSide` (деньги, сообщение о предмете, палатки, метка смерти, пиры ствола, события сущностей; есть только у сервера карты,
+остальные отвечают `nullptr`, и Ядро делает это в своих книгах) и члены `Mode` стороны мира (`reaches`, `deliver_links`,
+`led_elsewhere`, `to_level_of`, `join_from_bridge`, `join_save`, `level_ready`, `on_world_live`, `load_text`, `ghost_said`); в Lua
+`coop_mode.hook`, `facts_of`, `far`, `share_up`, `share_down`.
+
+- `place_ghost(objects)` (H-JOIN) и `console_line(line)` (H-SAY) — хуки **слоя** (`Layer`), а не члены `Mode`: сервер мира грузит
+  свой мир и держит консоль **до** своей сессии, когда C++ `mode()` ещё `none`. Ядро спрашивает их через коммутатор
+  `coop::place_ghost(objects)` / `coop::console_line(line)` (`xrGame/coop/coop_mode.cpp`), серверный слой первым; у Коопа и
+  `none` ответ «не моё».
+- Тесты по видам процессов: `tests/test_mode_s6_answers.cpp`, `tests/lua/test_mode_s6_facade.lua`.
+
 ---
 
 ## 5. Автоматическая проверка
@@ -663,7 +677,8 @@ gates: FAIL (3)
 | T | `tools\run_all_tests.cmd` | N и L целиком; оба прошли на чистом дереве, HEAD не сдвинулись и `temp\lua\runlua.exe` собран из исходников сейчас (четвёртое ревью, B5) — пишет `temp\gates\tests.ok` (оба HEAD, `dirty=0`) |
 | LN | `python -I tools\stand\stand_head.py links --stand E:\RayLinkGames\GAMMA\game-dev` | перед выкладкой на стенд: что она заменит, сколько из этого жёсткие ссылки на файлы модов, и нет ли имени, которое сейчас нельзя удалить (Р21); ничего не пишет |
 | SC | `powershell -ExecutionPolicy Bypass -File tools\stand_hostplay.ps1 -Tag b<N>` | стенд Коопа: выкладывает gamedata HEAD, затем `carry_group`, `base_group`, `sil_group`, `squads_group` (отряды рядом с клиентом, R1), `sp_smoke` (одиночная игра без ключей `-coop_`: новая игра, сохранение, загрузка, минута), `companions_group` (круг 8), `cover_group` из `tools\stand`. Пишет `temp\gates\hostplay.ok` |
-| SS | `powershell -ExecutionPolicy Bypass -File tools\stand_srv.ps1 -Tag b<N>` | стенд Сервера: выкладывает gamedata HEAD, затем `ded_check -World new`, `base_server`, `carry_server`, `taskboard_ws`, `phantoms_server` (круг 8), `allymark_server`, `companions_server`, `weather_server`, `cover_server` из `tools\stand`. Пишет `temp\gates\srv.ok` |
+| SS | `powershell -ExecutionPolicy Bypass -File tools\stand_srv.ps1 -Tag b<N>` | стенд Сервера: выкладывает gamedata HEAD, затем `ded_check -World new`, `base_server`, `carry_server`, `taskboard_ws`, `phantoms_server` (круг 8), `allymark_server`, `companions_server`, `weather_server`, `cover_server`, `ms_crash_server`, `save_handover_server`, `creator10_server` из `tools\stand`. Пишет `temp\gates\srv.ok` |
+| Еженедельно | `powershell -ExecutionPolicy Bypass -File tools\stand\run_guarded.ps1 -Script soak_hour_server.ps1 -Out soak_hour_server.out` | `soak_hour_server` — час на двух картах с записью памяти каждого сервера карты. Запускать отдельно на подготовленном стенде Сервера. |
 | R | `python -I tools\release.py --channel dev --build <N> verify` | `check_gates.py <тег>..HEAD --release --layers` (G на той же модели + правило выпуска + exe из HEAD движка) + проверки пакета |
 
 Стенд — только `E:\RayLinkGames\GAMMA\game-dev`. Живая игра владельца не трогается. Файлы стенда — жёсткие ссылки на

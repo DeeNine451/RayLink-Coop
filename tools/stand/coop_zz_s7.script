@@ -1,0 +1,213 @@
+-- A-S7, Dev 57. Installed only for the guarded Server stand. No product events or saved state.
+local WORLD, MOVER, OBSERVER = "s7world", "s7move", "s7stay"
+local MAPS = { l01_escape = true, l02_garbage = true }
+local role, ready, travelling, save_armed, world_server
+local seen, next_poll, map_ids = 0, 0, nil
+
+local function log(fmt, ...)
+	printf("%s", "[s7] " .. string.format(fmt, ...))
+end
+
+local function out(fmt, ...)
+	log(fmt, ...)
+	get_console():execute("flush")
+end
+
+local function whole(value, min, max)
+	return type(value) == "number" and value >= min and value <= max and value % 1 == 0
+end
+
+local function is_world()
+	return world_server and coop.is_live()
+end
+
+local function ids_of(text)
+	if type(text) ~= "string" or #text == 0 or #text > 384 or text:find("[^%d,]") then return end
+	local ids, seen_ids = {}, {}
+	for word in text:gmatch("[^,]+") do
+		local id = tonumber(word)
+		if not whole(id, 1, 65534) or seen_ids[id] or #ids == 64 then return end
+		ids[#ids + 1], seen_ids[id] = id, true
+	end
+	if table.concat(ids, ",") == text then return ids end
+end
+
+local function object_level(object)
+	return game_graph():vertex(object.m_game_vertex_id):level_id()
+end
+
+local function report_objects(ids, bridges)
+	local owners = {}
+	for _, map in ipairs(bridges) do owners[map.bridge] = map.level end
+	local sim = alife()
+	for _, id in ipairs(ids) do
+		local object = sim:object(id)
+		if object then
+			local holder = coop.levels.holder_of(id)
+			local owner = holder and owners[holder] or (not holder and -1 or -2)
+			log("object id=%d section=%s levelid=%d owner=%d", id, object:section_name(), object_level(object), owner)
+		end
+	end
+end
+
+function world_status(seq, audit, selection)
+	if not is_world() or not whole(seq, 1, 2147483647) or type(audit) ~= "boolean" then return false end
+	local ids = selection == nil and {} or ids_of(selection)
+	if selection ~= "auto" and not ids then return false end
+	out("status begin seq=%d", seq)
+	local console = get_console()
+	if audit then console:execute("srv_levels_audit") end
+	console:execute("srv_levels_status")
+	local levels = coop.levels
+	if not map_ids then
+		map_ids = {}
+		for id = 0, 255 do
+			local name = levels.level_name(id)
+			if MAPS[name] then map_ids[name] = id end
+		end
+	end
+	for name, id in pairs(map_ids) do log("world map=%s levelid=%d", name, id) end
+	local bridges = levels.map_servers()
+	if selection == "auto" then ids = {} end
+	for _, map in ipairs(bridges) do
+		log("world bridge peer=%d levelid=%d", map.bridge, map.level)
+		if selection == "auto" then
+			local limit = math.min(#ids + 32, 64)
+			for _, id in ipairs(levels.squads_at(map.bridge)) do
+				if #ids >= limit then break end
+				if levels.holder_of(id) == map.bridge then ids[#ids + 1] = id end
+			end
+		end
+	end
+	if #ids > 0 then report_objects(ids, bridges) end
+	out("status end seq=%d", seq)
+	return true
+end
+
+function arm_save(seq, source, target, peer, character, selection)
+	if not is_world() or not whole(seq, 1, 2147483647) or not whole(source, 0, 255)
+		or not whole(target, 0, 255) or source == target or not whole(peer, 1, 16)
+		or not whole(character, 1, 65534) then return false end
+	local ids = ids_of(selection)
+	if not ids then return false end
+	if not (MAPS[coop.levels.level_name(source)] and MAPS[coop.levels.level_name(target)]) then return false end
+	save_armed = { seq = seq, source = source, target = target, peer = peer, character = character, ids = ids }
+	out("save armed seq=%d", seq)
+	return true
+end
+
+function disarm_save()
+	if not is_world() then return false end
+	save_armed = false
+	return true
+end
+
+-- The active GAMMA storage manager calls save_state in CALifeStorageManager_before_save.
+-- The native transfer journal is serialized on this same stack, before the next network tick.
+local function observe_save()
+	local trip = save_armed
+	if not (trip and is_world()) then return end
+	local creator = alife():object(trip.character)
+	if not creator or object_level(creator) ~= trip.target then return end
+	out("save begin seq=%d from=%d to=%d peer=%d", trip.seq, trip.source, trip.target, trip.peer)
+	get_console():execute("srv_levels_status")
+	report_objects(trip.ids, coop.levels.map_servers())
+	out("save end seq=%d", trip.seq)
+end
+
+local function instruction()
+	local path = getFS():update_path("$fs_root$", "zz_s7_step.txt")
+	local file = io.open(path, "r")
+	if not file then return end -- replacing the file can briefly leave the name absent
+	local line = file:read("*l") or ""
+	file:close()
+	local seq, target, verb, map = line:match("^(%d+)%s+(%w+)%s+(%w+)%s*([%w_]*)%s*$")
+	seq = tonumber(seq)
+	if not whole(seq, 1, 2147483647) or seq <= seen then return end
+	if role == "bridge" and verb == "bridge" and target == "all" and map == "" then
+		return seq, verb
+	end
+	if verb == "sample" and map == "" and (target == role or target == "all") then
+		return seq, verb
+	end
+	if verb == "travel" and target == role and MAPS[map] then
+		return seq, verb, map
+	end
+end
+
+local function bridge_tick()
+	if not coop.is_live() then return end
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+	local seq, verb = instruction()
+	local map, peer = coop.levels.my_level(), coop.self_id()
+	if verb == "bridge" and whole(map, 0, 255) and whole(peer, 257, 263) then
+		seen = seq
+		log("bridge begin seq=%d peer=%d levelid=%d", seq, peer, map)
+		get_console():execute("srv_levels_status")
+		out("bridge end seq=%d", seq)
+	end
+end
+
+local function report(label, actor, map, link, character, map_id)
+	local kits = 0
+	actor:iterate_inventory(function(_, item)
+		if item:section() == "medkit" then kits = kits + 1 end
+	end)
+	out("%s role=%s map=%s peer=%d operator=%d alive=%d kits=%d character=%d levelid=%d", label, role, map,
+		coop.self_id(), link.operator and 1 or 0, actor:alive() and 1 or 0, kits, character, map_id)
+end
+
+local function tick()
+	local actor = db.actor
+	if not (actor and coop.is_live() and coop_mode.is_player_mirror()) then return end
+	local now = time_global()
+	if now < next_poll then return end
+	next_poll = now + 250
+	local link, character = coop.server_link(), coop.to_host_id(0)
+	if not (link and character and character > 0 and character < 65535) then return end
+	local map, map_id = level.name(), coop.levels.my_level()
+	if not (map and map_id) then return end
+	if not ready then
+		ready = true
+		report("ready", actor, map, link, character, map_id)
+	end
+	local seq, verb, goal = instruction()
+	if not seq then return end
+	if verb == "sample" then
+		seen = seq
+		report("sample seq=" .. seq, actor, map, link, character, map_id)
+	elseif map == goal then
+		seen, travelling = seq, nil
+		report("arrival seq=" .. seq, actor, map, link, character, map_id)
+	elseif travelling ~= seq and actor:alive() then
+		travelling = seq
+		out("trip seq=%d role=%s from=%s to=%s", seq, role, map, goal)
+		-- The stock debug trip goes through ChangeLevel and the real server's move decision.
+		if not JumpToLevel(goal) then out("FAIL trip seq=%d could not request %s", seq, goal) end
+	end
+end
+
+function on_game_start()
+	local line = command_line()
+	if type(line) ~= "string" then return end
+	role = line:match("%-coop_probe%s+(%S+)")
+	local map_profile = not role and line:match("%-fsltx%s+zz_s7_[0-9a-f]+[\\/]fsgame_ms[1-7]%.ltx%s")
+	if role ~= WORLD and role ~= MOVER and role ~= OBSERVER and not map_profile then return end
+	coop_mode.when_srv(function()
+		if role == WORLD then
+			world_server = coop_mode.decides_world()
+			if world_server then RegisterScriptCallback("save_state", observe_save) end
+			return
+		end
+		if map_profile then
+			if not coop_mode.leads_here() or coop_mode.actor_is_player() then return end
+			role = "bridge"
+		end
+		RegisterScriptCallback("actor_on_update", function()
+			local ok, err = pcall(role == "bridge" and bridge_tick or tick)
+			if not ok then out("FAIL %s", tostring(err)) end
+		end)
+	end)
+end

@@ -156,6 +156,7 @@ SCENARIOS = {
     "srv": (
         "ded_check", "base_server", "carry_server", "taskboard_ws", "phantoms_server",
         "allymark_server", "companions_server", "weather_server", "cover_server",
+        "ms_crash_server", "save_handover_server", "creator10_server",
     ),
 }
 
