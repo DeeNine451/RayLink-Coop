@@ -3,8 +3,8 @@ rem Anomaly Coop: N and L of docs/MODES.md section 10 in one run, and the gate m
 rem   tools\run_all_tests.cmd          (no arguments: always the full suites)
 rem 1. python -I tools\check_gates.py --tests-mark begin: drops the old tests.ok, records both HEAD ids and how many
 rem    uncommitted files the tests read (product, tests\, the runners) into temp\gates\tests.state
-rem 2. tools\build_tests.cmd (the native tests) and tools\test_lua.cmd (the Lua tests); both start with
-rem    tools\check_layers.py
+rem 2. tools\build_tests.cmd and tools\test_luajit.cmd (the native tests: xrCoop, and the engine's own LuaJIT) and
+rem    tools\test_lua.cmd (the Lua tests); build_tests.cmd and test_lua.cmd start with tools\check_layers.py
 rem 3. python -I tools\check_gates.py --tests-mark write: tests.ok (mode=tests, both HEAD ids, dirty=0, native=0, lua=0)
 rem    only when both exit 0, the tree was clean before and after, neither HEAD moved, and the Lua runner
 rem    temp\lua\runlua.exe holds the stamp of the sources now (review 4, B5: when tools\test_lua.cmd cannot rebuild it,
@@ -30,9 +30,13 @@ type "%STATE%"
 
 call "%ROOT%\tools\build_tests.cmd"
 set "NRC=%ERRORLEVEL%"
+rem The engine's own LuaJIT (tests\luajit, build 57's lua_setupvalue barrier) counts as a native test.
+call "%ROOT%\tools\test_luajit.cmd"
+set "JRC=%ERRORLEVEL%"
+if not "%JRC%"=="0" if "%NRC%"=="0" set "NRC=%JRC%"
 call "%ROOT%\tools\test_lua.cmd"
 set "LRC=%ERRORLEVEL%"
-echo [run_all_tests] native tests: exit %NRC%; Lua tests: exit %LRC%
+echo [run_all_tests] native tests: exit %NRC% (LuaJIT tests: exit %JRC%); Lua tests: exit %LRC%
 
 if /i "%COOP_SKIP_LAYERS%"=="1" (
 	echo [run_all_tests] ******************************************************************************************

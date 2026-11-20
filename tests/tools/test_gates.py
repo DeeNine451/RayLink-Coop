@@ -1277,15 +1277,21 @@ def test_run_all_tests_cmd_writes_tests_ok_only_when_both_suites_pass(repos):
         shutil.copy2(ROOT / "tools" / name, root / "tools" / name)
     write(root, "tools/build_tests.cmd", "@exit /b 0\n")
     write(root, "tools/test_lua.cmd", "@exit /b %STUB_LUA%\n")
+    write(root, "tools/test_luajit.cmd", "@exit /b %STUB_LUAJIT%\n")
     commit(root, "the runners")
     fake_lua_runner(root)
     env = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""))
     env.pop("COOP_SKIP_LAYERS", None)
+    env["STUB_LUAJIT"] = "0"
     mark_path = root / "temp" / "gates" / "tests.ok"
     done = subprocess.run(["cmd", "/c", str(root / "tools" / "run_all_tests.cmd")], capture_output=True, text=True,
                           env=dict(env, STUB_LUA="0"))
     assert done.returncode == 0 and mark_path.is_file(), done.stdout + done.stderr
     assert gates.read_mark(mark_path)["engine_head"] == sh(engine, "rev-parse", "HEAD")
+    # the engine's LuaJIT tests (tools\test_luajit.cmd, build 57's lua_setupvalue barrier) count as native tests
+    done = subprocess.run(["cmd", "/c", str(root / "tools" / "run_all_tests.cmd")], capture_output=True, text=True,
+                          env=dict(env, STUB_LUA="0", STUB_LUAJIT="4"))
+    assert done.returncode == 1 and not mark_path.exists(), done.stdout + done.stderr
     done = subprocess.run(["cmd", "/c", str(root / "tools" / "run_all_tests.cmd")], capture_output=True, text=True,
                           env=dict(env, STUB_LUA="3"))
     assert done.returncode == 1 and not mark_path.exists(), done.stdout + done.stderr
