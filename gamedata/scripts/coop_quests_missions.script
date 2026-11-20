@@ -721,8 +721,13 @@ local function receive_guide_map(t, from)
 	local valid = type(peer) == "number" and peer > 0 and peer < 0x100 and peer % 1 == 0
 		and type(t.l) == "number" and t.l >= 0 and t.l < 65535 and t.l % 1 == 0 and object_id(t.n)
 	local player = valid and coop_npc_players.player(peer)
-	local ok = from_map and player and player.level == t.l and coop_mode.where(peer) == "away"
-	if not coop_trust.pass("g14_guide_map", ok, "no matching map guide fact from #%s", tostring(from)) or not ok then return end
+	-- A client's packet that stands in for a map server: a check of a request, logged before a switch to refuse.
+	if not coop_trust.pass("g14_guide_map", from_map, "a map guide fact from #%s, not a map server", tostring(from))
+		or not from_map then return end
+	-- A map server's fact about a player who is no longer on its level (his level change in flight: the stand, build 57):
+	-- dropped in every mode, a guard; honest play hits it, so it is counted (coop_status) with no line.
+	local ok = player and player.level == t.l and coop_mode.where(peer) == "away"
+	if not coop_trust.guard("g14_guide_map_stale", ok == true) then return end
 	guide.maps[player.level] = { npc = t.n, until_ms = time_global() + GUIDE_FACT_MS }
 end
 

@@ -27,8 +27,10 @@ end
 
 local function sender_record(from)
 	local who = body_here(from)
-	if not coop_trust.pass("sf_player", who ~= nil, "peer %s has no live character on this map", from) then return nil end
-	if not who then return nil end -- No body to attach facts to, including in log mode.
+	-- No body to attach facts to: dropped in every mode, so a guard, not a check of a request. Honest play hits it on every
+	-- level change (facts still in flight from a player who has just left this map: the stand, build 57), so it is
+	-- counted (coop_status) with no line.
+	if not coop_trust.guard("sf_player", who ~= nil) then return nil end
 	local id = who:id()
 	local record = records[from]
 	if not record or record.id ~= id then

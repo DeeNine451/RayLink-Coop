@@ -252,6 +252,18 @@ local function exercise(authority, one, two, who, other, label, local_second)
 	tick(600, one, authority)
 	-- A body removed from this map invalidates its state even when its peer returns promptly.
 	authority.objects[who:id()] = nil
+	-- Facts of a peer with no body here (his level change in flight: the stand, build 57, 2 of 74) are dropped in every
+	-- mode: a guard, counted, with no "[coop-trust] !" line (honest play would write one per level change)
+	local before = E.coop_trust.status().sf_player
+	local failed, lines = before and before.failed or 0, #authority.log
+	one.env.coop_mods_core.to_host("sf_wct", { manual = true })
+	pump()
+	local after, loud = E.coop_trust.status().sf_player, false
+	for i = lines + 1, #authority.log do
+		if tostring(authority.log[i]):find("! sf_player", 1, true) then loud = true end
+	end
+	check(after and after.failed > failed and not loud,
+		label .. " facts of a peer with no body on this map are dropped and counted, with no trust line")
 	tick(100, authority)
 	authority.add(who)
 	check(not safe(who, npc) and observe(authority, npc, who) == baseline, label .. " avatar exit clears facts before its return")

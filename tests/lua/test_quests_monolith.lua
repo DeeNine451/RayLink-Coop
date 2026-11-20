@@ -249,6 +249,19 @@ for _, name in ipairs(modes.names()) do
 			tick(candidate_map)
 			check(count_sent(candidate_map, "mods.g14_guide_map") == 1, label .. " reports a live candidate from its map")
 			pump()
+			-- A map server's fact about a player who has just left its level (his level change in flight: the stand, build
+			-- 57, 1 of 15): dropped, counted, with no "[coop-trust] !" line; a client's packet as above keeps its line
+			local function loud_lines()
+				local n = 0
+				for _, l in ipairs(world.log) do if tostring(l):find("! g14_guide_map", 1, true) then n = n + 1 end end
+				return n
+			end
+			local loud = loud_lines()
+			candidate_map.env.coop_mods_core.publish("g14_guide_map", { p = 2, l = 77, n = 700 })
+			pump()
+			local stale = world.env.coop_trust.status().g14_guide_map_stale
+			check(loud_lines() == loud and stale and stale.failed == 1,
+				label .. " a map server's stale guide fact is dropped and counted, with no trust line")
 			world.env.tasks_guide.prepare_follower()
 			tick(world)
 			pump()
