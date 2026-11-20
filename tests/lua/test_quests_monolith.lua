@@ -257,6 +257,16 @@ for _, name in ipairs(modes.names()) do
 			check(world.tips == 0 and first.tips == 0 and second.tips == 1,
 				label .. " delivers news using each player's PDA")
 			check(guide_dialog(first), label .. " preserves the dialogue for an uncharged player")
+			-- Build 57 stand: an error inside the far scope ("prepare guide: _g.script:2062 ...") left the stock offer
+			-- timer stopped (check_timers stops it before the call), so no guide offer came for the rest of the session
+			-- and the save. Stock re-arms in 15 game minutes on every failed search; the wrapper does the same on an error.
+			local retries = world.retries or 0
+			local squad_of = world.env.get_object_squad
+			world.env.get_object_squad = function() error("a stock error in the far scope") end
+			world.env.tasks_guide.prepare_follower()
+			world.env.get_object_squad = squad_of
+			check(has_log(world, "prepare guide") and (world.retries or 0) == retries + 1,
+				label .. " re-arms the stock offer timer after an error in the far scope")
 		end
 	elseif name == "srv_map" then
 		local m = setup("client", 0x101, name, 2, { [1] = 2 }, { 1 })

@@ -790,6 +790,17 @@ local function fire_option_change()
 	if not ok then log("! on_option_change after the late switch-on: %s", tostring(err)) end
 end
 
+-- The late switch-on's on_option_change goes out once, at the first actor update after the first one, not from this script's
+-- actor_on_first_update: axr_main calls on_game_start by file name, so this handler runs before most scripts finish their own
+-- start-up in theirs. GAMMA's npe_director builds its runners in npe_logging's actor_on_first_update; its on_option_change
+-- before that indexed a nil runner (npe_director.script:1052) and the stock dispatcher stops at the first error, so every
+-- handler after it missed the change (stand, builds 56-57: every level change of a co-op host). The stock game sends
+-- on_option_change only from its options menus, in a level that is up (ui_options, ui_mcm: level.present()).
+local function fire_late_option_change()
+	UnregisterScriptCallback("actor_on_update", fire_late_option_change)
+	if S.fire_pending then fire_option_change() end
+end
+
 -- A new world. The stock game_difficulties builds its factors in its own on_game_load from the save's tables and keeps them. The
 -- stock new game code (ui_mm_faction_select's on_game_load) puts the chosen difficulty and economy into the save's tables AFTER
 -- that: the callbacks run in the order the scripts registered them, by name. Single player never sees it, a new game changes the
@@ -857,7 +868,7 @@ local function first_update_impl()
 	if S.fresh_new then sync_new_world_difficulty() end
 	if S.origin == "card" then apply_record_factors() end
 	mirror_factors()
-	if S.fire_pending then fire_option_change() end
+	if S.fire_pending then RegisterScriptCallback("actor_on_update", fire_late_option_change) end
 	if S.card_pending then
 		S.card_pending = false
 		write_card(S.rec)

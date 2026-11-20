@@ -789,7 +789,15 @@ local function patch_guide_search()
 			local ok, err = pcall(qc.with_level_of, peer, stock, ...)
 			guide.search = nil
 			news.send_tip = send_tip
-			if not ok then qc.report(TAG, "prepare guide", err) end
+			if not ok then
+				qc.report(TAG, "prepare guide", err)
+				-- The stock's check_timers stops the offer timer before this call, and the stock re-arms it in 15 game
+				-- minutes on every failed search: an error here would switch the offers off for the session and the save
+				-- (build 57 stand, the world server).
+				if type(m.g_start_timer) == "function" then
+					pcall(m.g_start_timer, "guid_msg", 0, 0, 15, "tasks_guide", "prepare_follower")
+				end
+			end
 		end
 	end)
 end

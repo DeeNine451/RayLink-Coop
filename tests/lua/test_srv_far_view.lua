@@ -148,6 +148,44 @@ for _, l in ipairs(logged) do
 end
 check(lines == 1, "and is logged once for its name")
 check(qc.far_body(1, 500):other_method() == nil, "a far body takes the same way")
+print("== the stock tells a game object from a record by its fields: a stand-in is a game object")
+-- _g.script alife_object (the stand's line 2062 compares the id with 65535), GAMMA _g_patches.script:728-738 get_object_squad and
+-- dynamic_news_helper get_object_levelname, as tasks_guide.prepare_follower:378,384 call them for the guide the world server found
+-- on a map server's level (build 57: "_g.script:2062: attempt to compare number with function")
+local function stock_alife_object(id)
+	if id == nil or id >= 65535 then return end
+	return alife_object(id)
+end
+local function stock_get_object_squad(object)
+	if not object then return end
+	if object.group_id ~= nil and object.group_id ~= 65535 then return stock_alife_object(object.group_id) end
+	local sim = alife()
+	local se_obj = type(object.id) == "function" and sim:object(object:id())
+	return se_obj and se_obj.group_id ~= nil and se_obj.group_id ~= 65535 and sim:object(se_obj.group_id) or nil
+end
+local function stock_levelname(obj)
+	local gvid = obj.m_game_vertex_id or obj.game_vertex_id and obj:game_vertex_id()
+	if not gvid then return "nil" end
+	assert(type(gvid) == "number", "valid_vertex_id: no matching overload") -- the engine's game_graph takes a number only
+	return alife():level_name(game_graph():vertex(gvid):level_id())
+end
+RECORDS[604] = { id = 604, position = vec(7, 0, 7), m_level_vertex_id = 7, m_game_vertex_id = 20, parent_id = 65535, online = true,
+	group_id = 650 } -- a guide in a squad, online on the level of player 1
+RECORDS[650] = { id = 650, m_game_vertex_id = 20, parent_id = 65535, online = false }
+SIM.object = function(_, id) return RECORDS[id] end
+local g = {}
+qc.with_level_of(1, function()
+	local guide = level.object_by_id(604)
+	g.far = guide and guide.far
+	g.group_id, g.gv_field = guide and guide.group_id, guide and guide.m_game_vertex_id
+	g.ok_squad, g.squad = pcall(stock_get_object_squad, guide)
+	g.ok_level, g.level = pcall(stock_levelname, guide)
+end)
+check(g.far == true, "the guide on that level is a stand-in")
+check(g.group_id == nil and g.gv_field == nil, "group_id and m_game_vertex_id: nil, as a game object's")
+check(g.ok_squad and g.squad == RECORDS[650], "the stock get_object_squad finds his squad by his record: " .. tostring(g.squad))
+check(g.ok_level and g.level == "k00_marsh", "get_object_levelname reads the game vertex by the method: " .. tostring(g.level))
+RECORDS[604], RECORDS[650], SIM.object = nil, nil, nil
 
 print("== an error inside closes the scope")
 local ok, err = pcall(qc.with_level_of, 1, function()

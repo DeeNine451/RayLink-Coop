@@ -721,10 +721,37 @@ SendScriptCallback("load_state", M_DATA)
 check(gs.active() and gs.active().id == L.id and gs.origin() == "save" and GAME.cvars and GAME.cvars.coop_bleedout == "150",
 	"load_state switches the record on and sets the console values")
 check(OPTION_CHANGES == 0, "on_option_change waits for the first update")
+-- GAMMA's npe_director: its on_option_change indexes the runners that npe_logging's actor_on_first_update builds
+-- (npe_on_log_init -> npe_execution_manager_started -> add_runners). axr_main calls on_game_start by file name, so
+-- npe_logging's first-update handler and npe_director's option handler are registered after coop_game_settings' own.
+local npe_ready, npe_errors, after_npe = false, 0, 0
+local function npe_first_update() npe_ready = true end
+local function npe_option_change()
+	if npe_ready then return end
+	npe_errors = npe_errors + 1
+	error("npe_director.script:1052: attempt to index field 'contexts_execution_queue' (a nil value)")
+end
+local function later_option_change() after_npe = after_npe + 1 end
+RegisterScriptCallback("actor_on_first_update", npe_first_update)
+RegisterScriptCallback("on_option_change", npe_option_change)
+RegisterScriptCallback("on_option_change", later_option_change)
+LOG = {}
 first_update()
-check(OPTION_CHANGES == 1, "and is fired once after it")
+check(OPTION_CHANGES == 0 and npe_errors == 0,
+	"not from inside the first update: the scripts registered after this one have not started yet")
+local real_active = coop.is_active
+coop.is_active = function() return false end -- coop_settings' host tick (also on actor_on_update) stays out of this
+SendScriptCallback("actor_on_update")
+check(OPTION_CHANGES == 1 and npe_errors == 0 and after_npe == 1,
+	"fired at the next actor update, after every first-update handler: no handler dies, none after it is skipped")
+check(not table.concat(LOG, "\n"):find("late switch-on", 1, true), "no error line of the late switch-on")
+SendScriptCallback("actor_on_update")
+coop.is_active = real_active
 first_update()
-check(OPTION_CHANGES == 1, "only once")
+check(OPTION_CHANGES == 1 and after_npe == 1, "only once")
+UnregisterScriptCallback("actor_on_first_update", npe_first_update)
+UnregisterScriptCallback("on_option_change", npe_option_change)
+UnregisterScriptCallback("on_option_change", later_option_change)
 -- the same game already active from the world start: nothing to do
 put_save("early", L)
 gs.before_world_start("load", "early")

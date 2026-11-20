@@ -181,12 +181,14 @@ function item_class:position() return self.item_owner and self.item_owner:positi
 function item_class:get_remaining_uses() return tonumber(ini_sys:r_float_ex(self.item_section, "max_uses")) or 1 end
 
 local NUMBERS = { radiation = 0, psy_health = 1, power = 1, morale = 1, bleeding = 0, satiety = 1, alcohol = 0, rank = 0 }
+local RECORD_FIELDS = { group_id = true, m_game_vertex_id = true }
 
 local class = {}
 
 class.__index = function(t, k)
 	local m = rawget(class, k)
 	if m ~= nil then return m end
+	if RECORD_FIELDS[k] then return nil end
 	if k == "health" then
 		local se = se_of(t)
 		local ok, v = pcall(function() return se.health end)
