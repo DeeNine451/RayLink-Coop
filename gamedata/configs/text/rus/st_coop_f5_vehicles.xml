@@ -73,4 +73,13 @@
 	<string id="st_coop_f5_vehicles_released_script">
 		<text>Вас высадили из машины</text>
 	</string>
+	<string id="st_coop_f5_vehicles_ride_on">
+		<text>Вы едете пассажиром: клавиша «Использовать» — выйти</text>
+	</string>
+	<string id="st_coop_f5_vehicles_ride_no_car">
+		<text>Машины здесь нет: вы выходите</text>
+	</string>
+	<string id="st_coop_f5_vehicles_ride_no_seat">
+		<text>Это место здесь неизвестно: вы выходите</text>
+	</string>
 </string_table>

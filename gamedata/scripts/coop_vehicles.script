@@ -1,0 +1,96 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- F5-VEH-6: ask out of the local granted seat before travel. The engine owns the
+-- seat and sends the normal attach/detach callbacks that GAMMA uses for door sounds.
+local api = rawget(_G, "coop")
+local changing = "on_before_level_changing"
+local going_exit_requested = false
+local started = false
+
+local function player_vehicle()
+	if not api or not coop_mode.is_player_mirror() then return end
+	local vehicle = api.vehicle
+	if vehicle and vehicle.status and vehicle.exit then return vehicle end
+end
+
+local function request_exit(vehicle)
+	if vehicle and not going_exit_requested and vehicle.status() then vehicle.exit() end
+end
+
+local function exit_before_travel()
+	request_exit(player_vehicle())
+end
+
+local function on_actor_update()
+	-- The transition board's Going state precedes the group load. The stock
+	-- on_before_level_changing is not sent to clients on that path.
+	local vehicle = api.transition and player_vehicle()
+	local board = vehicle and vehicle.status() and api.transition()
+	if not board or board.state ~= "going" then
+		going_exit_requested = false
+	elseif not going_exit_requested then
+		vehicle.exit()
+		going_exit_requested = true
+	end
+end
+
+local function replace_registered(original, replacement)
+	local router = coop_route
+	local callbacks = router.intercepts()
+	local list = callbacks and callbacks[changing]
+	if not list then return end
+
+	local registered = router.wrapper_of(changing, original)
+	if not registered or list[registered] == nil then registered = original end
+	local priority = list[registered]
+	if priority == nil then return end
+
+	RegisterScriptCallback(changing, replacement)
+	local routed = router.wrapper_of(changing, replacement) or replacement
+	if list[routed] == nil then return end
+	UnregisterScriptCallback(changing, registered)
+	list[routed] = priority
+end
+
+local function install_level_change()
+	local core = coop_mods_core
+	-- axr_main can have loaded the module under the VFS's lowercase filename.
+	local name = rawget(_G, "levelchangecars") and "levelchangecars" or "LevelChangeCars"
+	local cars = core.mod(name)
+	local wrapped, original = core.wrap(cars, changing, "LevelChangeCars before level change", function(orig)
+		return function(...)
+			local vehicle = player_vehicle()
+			request_exit(vehicle)
+			-- The release can arrive before the frame that physically detaches the actor.
+			if vehicle and vehicle.attached() then return end
+			return orig(...)
+		end
+	end)
+	if wrapped then
+		coop_route.inherit_source(cars[changing], original)
+		replace_registered(original, cars[changing])
+	else
+		RegisterScriptCallback(changing, exit_before_travel)
+	end
+end
+
+local function status()
+	local vehicle = player_vehicle()
+	if not vehicle then return end
+	local seat, totals = vehicle.status()
+	return string.format("vehicles: car %s seat %s | requests %d refused %d",
+		seat and seat.car or "none", seat and seat.seat or "none", totals.requests, totals.refused)
+end
+
+local function start_step(name, fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then printf("[coop-vehicles] %s: %s", name, tostring(err)) end
+end
+
+function on_game_start()
+	if started or not (api and api.vehicle) then return end
+	started = true
+	start_step("level change", install_level_change)
+	start_step("group going", RegisterScriptCallback, "actor_on_update", on_actor_update)
+	start_step("world leaving", RegisterScriptCallback, "coop_on_world_leaving", exit_before_travel)
+	start_step("status", function() coop_mods_core.status_line("vehicles", status) end)
+end

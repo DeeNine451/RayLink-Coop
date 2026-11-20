@@ -73,4 +73,13 @@
 	<string id="st_coop_f5_vehicles_released_script">
 		<text>You were taken out of the vehicle</text>
 	</string>
+	<string id="st_coop_f5_vehicles_ride_on">
+		<text>You ride as a passenger: the use key gets you out</text>
+	</string>
+	<string id="st_coop_f5_vehicles_ride_no_car">
+		<text>The vehicle is not here: you get out</text>
+	</string>
+	<string id="st_coop_f5_vehicles_ride_no_seat">
+		<text>This seat is not known here: you get out</text>
+	</string>
 </string_table>

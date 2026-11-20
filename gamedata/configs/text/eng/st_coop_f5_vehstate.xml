@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<!-- Anomaly Coop - vehicles for players (F5-VEH-4, docs/VEHICLES.md): the HUD lines of a player's machine that F5-VEH-4 gives engine/src/xrGame/coop/coop_vehicles_client.cpp. st_coop_f5_vehstate_no_answer: a seat request with no answer for 3 s, the same line in both modes (it replaces st_coop_f5_vehicles_no_answer, which named a map server). -->
+<string_table>
+	<string id="st_coop_f5_vehstate_no_answer">
+		<text>No answer about the vehicle: try again in a moment</text>
+	</string>
+</string_table>

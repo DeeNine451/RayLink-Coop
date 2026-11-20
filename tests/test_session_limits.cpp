@@ -721,7 +721,9 @@ TEST(limits_client_rate_rules)
 		// F3a: a player leaves his level (one request per exit he steps into), and says his loading screen is up
 		{Msg::LevelMove, 4, 1000}, {Msg::LoadReady, 4, 1000},
 		// protocol 31: the operator's console lines (a core message, Session takes the token itself)
-		{Msg::OperatorCommand, 4, 1000}};
+		{Msg::OperatorCommand, 4, 1000},
+		// F5 (F5-VEH-4): a player's seat requests and his car's input, twice their honest top rate (tests/test_vehicle_state.cpp)
+		{Msg::VehicleReq, 8, 125}, {Msg::VehicleInput, 24, 16}};
 	for (const Expected& e : expected)
 	{
 		const limits::RateRule* rule = nullptr;

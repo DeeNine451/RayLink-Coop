@@ -65,7 +65,7 @@ Id сообщений, направление (`MsgSender`) и область (`
 | VehicleReq | игрок → авторитет | Reliable | `u8 op, u16 car, u8 seat` (4) | F у машины / в машине, команда стенда, `coop.vehicle.exit()` |
 | VehicleSeat | авторитет → игроки карты; `refused` — только спросившему | Reliable | `u16 car, u8 seat, u16 character, u8 op, u8 reason` + `3×f32` точка выхода при `released` (7 / 19) | на каждое решение; пришедшему на карту — `granted` на каждое занятое место |
 | VehicleInput | водитель → авторитет | Unreliable (последний побеждает) | `u16 car, u8 seq, u16 held, u8 edges` + `i16 yaw, i16 pitch` при флаге `kAimFollows` (6 / 10) | при изменении и каждые `kInputRepeatMs` = 200 мс, пока он за рулём (нажато что-то или нет); не чаще раза в `kInputMinIntervalMs` = 33 мс |
-| VehicleState | авторитет → игроки карты | Reliable | `u16 car, u8 flags, u8 rpm, i8 gear, u8 health, u8 fuel, u8 damage` (8) | частоту и квантование задаёт F5-VEH-4 (`coop_vehicle_state_rules.h`): при изменении и 2 раза в секунду, пока работает двигатель |
+| VehicleState | авторитет → игроки карты | Reliable | `u16 car, u8 flags, u8 rpm, i8 gear, u8 health, u8 fuel, u8 damage` (8) | F5-VEH-4 (`coop_vehicle_state_rules.h`, `StateCadence`): при изменении, не чаще раза в 100 мс на машину; пока работает двигатель — ещё и обороты 2 раза в секунду; машина, в которой никто не сидел и двигатель не работал, молчит; пришедшему на карту — последнее состояние каждой машины |
 
 Поля и проверки чтения (каждое сообщение длиннее своей раскладки — отказ):
 
@@ -82,6 +82,15 @@ Id сообщений, направление (`MsgSender`) и область (`
 - **VehicleState**: `flags` — двигатель 1, фары 2, ручник 4; `rpm` — `m_current_rpm` от `m_max_rpm`, 0…255; `gear` — −1 задняя,
   0 нейтраль, 1…15; `health` — от 1.0, 0…255; `fuel` — от бака, 0…255; `damage` — стадия 0…3 (`Car.cpp:1075`
   `CDamagableItem::Init(GetfHealth(), 3)`).
+
+Лимиты сессии (`coop_limits.h`, F5-VEH-4; лимит — подряд N, дальше одно в `refill_ms` на клиента):
+
+- VehicleReq `{8, 125}`: честный клиент шлёт не чаще раза в `kRequestMinIntervalMs` = 250 мс (4 в секунду, по одному запросу за
+  раз); строка пускает 8 в секунду, вдвое больше.
+- VehicleInput `{24, 16}`: честный — не чаще раза в `kInputMinIntervalMs` = 33 мс (≈30 в секунду); строка пускает 62.5 в секунду,
+  запас 24 (вдвое больше `kInputBurst`) покрывает рывок лага ≈0.8 с. Это выше шлюза авторитета (`RateGate`, 40 в секунду), поэтому
+  проверка доверия `veh_input_rate` пишет быстрого клиента раньше, чем сессия что-то отбросит.
+- Сервер: строки проверяет сессия сервера мира на соединении игрока, до туннеля; транк повторно не проверяется.
 
 Персонаж (`character`) — id персонажа игрока в нумерации хоста, как в остальных сообщениях карты: прокси у авторитета, актёр на
 машине самого игрока. Совпадение id прокси и актёра клиента после обмена ролей при входе — не проверено, сверяет F5-VEH-3.
@@ -129,7 +138,15 @@ Id сообщений, направление (`MsgSender`) и область (`
 5. **Ввод.** Клавиши водителя на копии (хуки F5-VEH-3 в `CarInput.cpp`): клавиши камеры (`kCAM_1..3`, зум, обзор `OnKeyboardHold`,
    мышь) остаются у него; клавиши езды, двигатель, фары, огонь и кнопка оружия уходят в VehicleInput, к копии не применяются.
 6. **Состояние.** Авторитет шлёт VehicleState (F5-VEH-4); копии играют звук двигателя, фары, выхлоп и частицы повреждений
-   стоковыми методами, физику и здоровье копии не трогают.
+   стоковыми методами, физику и здоровье копии не трогают. Порядок на копии: `SetfFuel`, затем `StartEngine` / `StopEngine`,
+   фары, стадии повреждений (`m_level_applied`, `Play1` / `Play2`), звук переключения (`AscCall(ascSndTransmission)`) только при
+   смене передачи. `ApplyDamage` на копии не зовётся: его стадия 2 взводит `CDelayedActionFuse`, который меняет здоровье копии.
+   Тон двигателя: копия сама переписывает `m_current_rpm` каждым шагом физики, поэтому обороты авторитета ставит хук в
+   `CarSound.cpp` (`copy_sound_scale`, после стокового тона и до его ограничения), переход к новым оборотам — за 500 мс.
+   Куклы сидящих: у игроков кукла (аватар) каждый кадр стоит в `seat_transform` копии с выключенным контроллером и играет
+   `steering_idle_<DriverAnimationType>_0`, как `attach_Vehicle` играет `idles[0]`; модели без позы и место 0 модели без
+   `driver_place` — кукла спрятана, как стоковый владелец. Кто где сидит у игрока — зеркало таблицы (`mirror_seat_of`). На авторитете
+   прокси ставит F5-VEH-2, F5-VEH-4 только даёт позу и не показывает спрятанного.
 7. **Выход.** F в машине: `GEG_PLAYER_DETACH_HOLDER` → `VehicleReq exit` → `exit()`. Разрешён — `free_seat`, для места 0
    «машина без водителя» (раздел 8) и `InputTrack::stop`, прокси снова физический и видимый в точке выхода → `VehicleSeat released`
    с точкой выхода всем.
@@ -137,7 +154,9 @@ Id сообщений, направление (`MsgSender`) и область (`
    (`Car.cpp:2423-2428`, так её берёт `CActor::detach_Vehicle`, `Actor.cpp:1590`); для мест ≥ 1 — дверь места (F5-VEH-5). Сток
    отказывает в выходе, если коробка персонажа не помещается (`ActivateBoxDynamic`, `Actor.cpp:1572-1576`); авторитет вместо
    этого ищет ближайшую свободную точку рядом (F5-VEH-2). Клиент выходит стоковым `detach_Vehicle(true)` и ставит актёра в точку из
-   сообщения, а не в `ExitPosition()` своей копии.
+   сообщения, а не в `ExitPosition()` своей копии. Пассажир (место ≥ 1) не владелец копии: точку из `released` случай Leave
+   клиента передаёт поездке (`ride_exit_point`), и актёр встаёт в неё. Точки нет (потеря места, отказ `NotSeated`, копия ушла) —
+   дверь его места на копии, иначе ближайшая свободная точка рядом той же проверкой, что у авторитета.
 
 ## 6. Вердикты
 
@@ -301,6 +320,11 @@ private (:58-92). Открыты `OnKeyboardPress/Release` (:633-634), `SetParam
   уже «joining», и сообщение до них не доходит.
 - Конец сессии (Manager::stop, потеря сессии): `sync::reset()` зовёт `session_over()` — машины, которые вели клиенты, ставятся как
   после `detach_Actor`, прокси встают, таблица забывается; сообщений нет (rv_F5-VEH-2, блокер 1).
+- Пассажир на машине игрока (rv_F5-VEH-5, блокер 1): хуки стокового актёра работают в любом процессе и мире, а `ride_frame` — только
+  в сессии. Поездка помнит мир, в котором он сел (`join::world_generation()`): поездка другого мира (загрузка, переход) или
+  закончившейся сессии на хуки не отвечает (`riding`, `ride_key`, `ride_hold`, `ride_camera` — false) и забывается. `sync::reset()`
+  зовёт `ride_session_over()` сразу после `session_over()`: сидящий в этом мире живой актёр встаёт без проверки коробки (как
+  стоковый `detach_Vehicle`), поездка забывается. Иначе одиночная игра после такой сессии не давала бы ходить и жать клавиши.
 
 ## 10. Сохранение
 
@@ -320,10 +344,37 @@ private (:58-92). Открыты `OnKeyboardPress/Release` (:633-634), `SetParam
 
 ## 12. Пассажиры (F5-VEH-5)
 
-Мест пассажиров в стоке нет. `configs/coop_vehicles.ltx`: `seats = n`, `seat_<i> = <кость> | <x,y,z>, <курс>`, `exit_<i> = left |
-right | back`; нет строки — у машины одно место. У авторитета прокси пассажира стоит в `seat_transform(car, i)`. На машине игрока
-пассажир — не владелец копии: режим «еду» (контроллер убран как в `attach_Vehicle`, камера с места, ходьба и оружие выключены,
-F — запрос выхода), колбэки модов те же. Стрельбы с мест пассажиров в 58 нет.
+Мест пассажиров в стоке нет. `configs/coop_vehicles.ltx` — секция на каждую секцию машины (17 секций `SCRPTCAR` стокового
+`vehicles.ltx`, в том числе 7 машин grok и `veh_btr`; у GAMMA своих секций машин нет). Грамматика (чистый разбор —
+`xrCoop/coop_vehicle_seats.h`):
+
+- `seats = n` — мест вместе с водительским, 1…8; нет строки — у машины одно место;
+- `seat_<i> = <кость>[, dx, dy, dz][, курс]` или `seat_<i> = <x, y, z>, <курс>`; кость `driver` — `driver_place`, иначе корень;
+- `exit_<i> = left | right | back`; нет строки — сторона, на которой место;
+- `eye = x, y, z` (необязательно) — глаз в пространстве места; без строки — `camera_pos` водителя над его местом.
+
+Число мест модели обрезается на первом месте, кости которого нет в модели (строка в журнале один раз). Цифры мест оценены по
+`driver_place` / `camera_pos` моделей, вживую не видены.
+
+- Авторитет: `seat_count` → `car_seat_count`, `seat_transform` для мест ≥ 1 → `passenger_seat` (XFORM машины на место), точка
+  выхода места → `passenger_exit` (дверь места) (`coop_vehicles_ride.h`, зовёт `coop_vehicles_seat.cpp`).
+- Машина игрока: случай Ride клиента (`coop_vehicles_client.cpp`) держит место в своей записи (`coop.vehicle.status`, выход,
+  освобождение и потеря идут через неё) и зовёт `ride_begin(car, seat, RideLink)`: `still_mine` — запись ещё держит это место,
+  `ask_out` — `VehicleReq exit` в следующий свободный слот. Пассажир — не владелец копии: строки стокового `attach_Vehicle` для
+  актёра (оружие спрятано, контроллер убран, поза водителя, `actor_on_attach_vehicle`), XFORM каждый кадр в месте копии, камера от
+  первого лица в глазу места со свободным взглядом в пределах `[car_firsteye_cam]`, клавиши ходьбы ничего не делают,
+  «Использовать» — запрос выхода (запертый выход стока — ничего). Выход — строки стокового `detach_Vehicle`: в точке авторитета
+  (раздел 5.8), коробка не помещается 3 с — встаёт без проверки. Копии больше нет — встаёт там же, `actor_on_detach_vehicle`
+  уходит прямо в `SendScriptCallback` с nil (флаги `move_effects` / `LevelChangeCars` / YACS сбрасываются; стоковый
+  `bind_stalker_ext.actor_on_detach_vehicle` зовёт `obj:section()` и на nil упал бы ошибкой Lua).
+- Хуки стокового актёра: `Actor.cpp` — `Die` (встаёт, как стоковый водитель), `UpdateCL` (камера места вместо `cam_Update`; режим
+  подбора нескольких предметов закрыт, как `!m_holder`), `shedule_Update` (без управления, физики и покачивания), `canRenderLegs`;
+  `ActorInput.cpp` — нажатие, отпускание, удержание.
+- Моды: `LevelChangeCars` жмёт «Использовать» перед переходом — у пассажира это запрос выхода; `vehicle_attach_sounds` играет
+  звук двери один раз в каждую сторону.
+
+Стрельбы с мест пассажиров в 58 нет. Не поддержано в 58: `detach_vehicle()` скрипта или телепорта (у пассажира `m_holder`
+пуст — поездка вернёт его на место), `get_attached_vehicle()` у пассажира — nil, пересадка с консоли.
 
 ## 13. Пушка машины (БТР)
 
@@ -354,11 +405,14 @@ F — запрос выхода), колбэки модов те же. Стре�
 |---|---|---|
 | F5-VEH-2 | `coop_vehicles_seat.cpp`, `xrCoop/coop_vehicle_drive_rules.h` | `install_server`, `server_frame`, `seated`, `driver_of`, `seat_transform` (место 0), `save_position`, `own_actor_attached/detached`, `own_actor_may_attach`, `print_status` |
 | F5-VEH-3 | `coop_vehicles_client.cpp`, `xrCoop/coop_vehicle_input_rules.h` | `install_client`, `client_frame`, `register_lua`, `register_console`, `mirror_copy`, `client_on_use`, `driving_car` |
-| F5-VEH-4 | `coop_vehicles_state.cpp`, `xrCoop/coop_vehicle_state_rules.h` | `state_frame`, `state_on_state` |
-| F5-VEH-5 | `coop_vehicles_ride.cpp`, `xrCoop/coop_vehicle_seats.h` | `ride_frame`, `riding`, `seat_transform` для мест ≥ 1 (в файле F5-VEH-2) |
+| F5-VEH-4 | `coop_vehicles_state.cpp` / `.h`, `xrCoop/coop_vehicle_state_rules.h` | `state_frame`, `state_on_state`; в `coop_vehicles_state.h` — `copy_sound_scale` (хук `CarSound.cpp`), `doll_frame` (хук `coop_players.cpp`), `state_print_status`; в файле F5-VEH-3 — `mirror_seat_of` (`coop_vehicles_client.h`) |
+| F5-VEH-5 | `coop_vehicles_ride.cpp` / `.h`, `xrCoop/coop_vehicle_seats.h`, `configs/coop_vehicles.ltx` | `ride_frame`, `riding`, `ride_begin` (`RideLink`), `ride_exit_point`, `ride_session_over`; в `coop_vehicles_ride.h` — `car_seat_count`, `passenger_seat`, `passenger_exit`, хуки актёра (`ride_camera`, `ride_actor_died`, `ride_key`, `ride_hold`), `ride_print_status`; `seat_transform` для мест ≥ 1 (в файле F5-VEH-2) |
 | F5-PROTO | хабы | id сообщений, области, регистрация `install_*`, четырёх кадров, `register_lua`, `register_console` |
 
-Каждый `install_*` начинает с пустого состояния (новая сессия, новый мир): отдельного `reset` нет.
+Каждый `install_*` начинает с пустого состояния (новая сессия, новый мир). Конец сессии — `sync::reset()`: `session_over()`
+(авторитет) и `ride_session_over()` (поездка пассажира). Строки `coop_status` — `print_status`, `client_print_status`,
+`state_print_status`, `ride_print_status` (`coop_sync.cpp`). Файлы `coop_vehicles_state.cpp` и `coop_vehicles_ride.cpp` — в
+`xrGame.vcxproj` (иначе LNK2019 на `state_frame` / `ride_frame` / `riding` / `ride_begin`).
 
 ## 17. Проверки по режимам
 
@@ -377,6 +431,12 @@ F — запрос выхода), колбэки модов те же. Стре�
 - Стрельба пассажиров.
 - Гудок (в стоке его нет; поле во VehicleInput есть).
 - Скорость отъезда при выходе (`ExitVelocity`, `Actor.cpp:1591`): копия кинематическая, у клиента она нулевая.
+- Пассажир, у которого пропала копия машины, пока авторитет его держит, и выход ему отказан: он ходит, его прокси стоит на месте
+  (редко, восстановления нет).
+- Машина только с пассажирами и заглушённым двигателем у авторитета «не живая» для VehicleState (`has_sitter` видит место 0):
+  дым под обстрелом до копий не доходит. Кукла пассажира на экране хоста играет позу `steering_idle_0_0` любой машины.
+- Ремонт скриптом (`StopDamageParticles`) на копии; рулёжка куклы водителя (только поза покоя); здоровье из VehicleState на
+  копии не показывается.
 
 ## 19. Не проверено
 
@@ -386,7 +446,10 @@ F — запрос выхода), колбэки модов те же. Стре�
   `requests::stalker_hit` пересылает взрыв как PlayerHit. Освобождение `CarDestroyed` случается в кадре, где выставлен
   `b_exploded`, раньше события взрыва (`GE_GRENADE_EXPLODE`, `Explosive.cpp:659-677`, минимум кадр спустя): прокси уже стоит в
   точке выхода, как стоковый владелец. Отдельного урона «владельцу» не добавлено.
-- Есть ли у куклы-сталкера анимация сидения водителя (`m_vehicle_anims` — актёрские) — F5-VEH-4.
+- Поза куклы: `steering_idle_0_0…2`, `steering_idle_1_0…1` (и `_ls` / `_rs`) есть в `stalker_animation.omf` стенда (F5-VEH-4,
+  прочитано из файла), вживую кукла в позе не видена.
+- Места пассажиров по моделям (`coop_vehicles.ltx`): `veh_niva`, `veh_uaz_01/02`, `veh_zaz_968`, `veh_zaz`, `veh_kamaz`, `veh_btr`
+  (крыша); `veh_zil_131` — догадка (его `camera_pos` x −1.3 мимо места).
 - Совпадение id прокси у авторитета и актёра клиента (раздел 3) — F5-VEH-3.
 - Остаётся ли онлайн у хоста машина, на которой клиент уехал далеко от хоста (как прокси — по правилам `coop_alife`) — F5-VEH-2.
 - Видят ли NPC спрятанный прокси (`setVisible(0)` — рендер; зрение ИИ — не проверено).
