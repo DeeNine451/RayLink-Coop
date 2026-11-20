@@ -38,17 +38,6 @@ function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
     }
     return $false
 }
-function Show-Lines([string]$file, [string]$pattern, [int]$most, [int]$after = 0) {
-    if (-not (Test-Path -LiteralPath $file)) { Write-Host "  no log $file"; return }
-    Select-String -LiteralPath $file -Pattern $pattern -Context 0, $after | Select-Object -Last $most | ForEach-Object {
-        foreach ($l in @($_.Line) + @($_.Context.PostContext)) {
-            $l = $l -replace '[0-9a-fA-F]{32,}', '<hidden>'
-            if ($l.Length -gt 240) { $l = $l.Substring(0, 240) }
-            Write-Host "  $l"
-        }
-    }
-}
-
 $stage = Join-Path $Stand 'appdata_server\coop_new_world.ltx'
 Write-StandText -Path $stage -Text "[world]`nfaction = stalker`ntitle = carry`n" -Encoding ([System.Text.Encoding]::ASCII)
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -100,8 +89,8 @@ finally {
     Remove-StandFile -Path $probe
 }
 Write-Host '--- client ---'
-Show-Lines $clientLog '\[cs\]|\[coop\] (my state|restored my|arrival|health |load:)|kept .* for the load|player data kept|\[pdata\] restored|did not take the host|session reset|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 80
+Show-StandLogLines $clientLog '\[cs\]|\[coop\] (my state|restored my|arrival|health |load:)|kept .* for the load|player data kept|\[pdata\] restored|did not take the host|session reset' 80
 Write-Host '--- world server ---'
-Show-Lines $serverLog '\[coop\] checkpoint|\[coop\]   checkpoint|checkpoint sources|body report|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 80
+Show-StandLogLines $serverLog '\[coop\] checkpoint|\[coop\]   checkpoint|checkpoint sources|body report' 80
 Write-Host '--- map server 1 ---'
-Show-Lines $msLog '\[base\]|checkpoint sources|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 50
+Show-StandLogLines $msLog '\[base\]|checkpoint sources' 50

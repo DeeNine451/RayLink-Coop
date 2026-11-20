@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 $s7Live = '\[coop\] phase loading-world -> live\b'
 $s7Load = 'host replaced the world|phase .* -> (?:receiving-world|loading-world)\b|\[coop\] load: the group moves to '
-$s7Bad = '\[s7\] FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)|ownership violation:|Unknown command:.*srv_|@rl error\b'
+$s7Bad = '\[s7\] FAIL\b|ownership violation:|Unknown command:.*srv_|@rl error\b'
 $s7Player = 'role=(?<role>s7move|s7stay) map=(?<map>\w+) peer=(?<peer>\d+) operator=(?<operator>[01]) alive=(?<alive>[01]) kits=(?<kits>\d+) character=(?<character>\d+) levelid=(?<level>\d+)\s*$'
 $s7Counter = '\[coop\] levels: (?<held>\d+) object\(s\) online at map servers, .*\| xfer in flight (?<pending>\d+), retries \d+, completed (?<completed>\d+), rolled back (?<rolled>\d+), resyncs (?<asked>\d+) asked (?<heard>\d+) heard, violations (?<violations>\d+)\s*$'
 $s7Start = '\[coop\] map server (?<slot>[1-7]) starts for level (?<level>\d+) \(.+, process (?<process>\d+)\)\s*$'
@@ -30,8 +30,16 @@ function Find-S7Line([string[]]$Paths, [string]$Pattern, [int]$After = 0) {
 }
 
 function Assert-S7Logs($Context) {
-    $bad = Find-S7Line $Context.Logs.Values $s7Bad
-    if ($bad) { throw (Hide-Hex "$($bad.Path):$($bad.LineNumber) $($bad.Line)") }
+    foreach ($file in $Context.Logs.Values) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $expected = $null
+        if ($file -eq $Context.Logs.world -and $Context.ExpectedMapLoss) {
+            $expected = Find-S7Line $file $Context.ExpectedMapLoss.Pattern $Context.ExpectedMapLoss.After
+        }
+        $bad = Select-StandLogLine $file $s7Bad | Where-Object { -not $expected -or $_.LineNumber -ne $expected.LineNumber } |
+            Select-Object -First 1
+        if ($bad) { throw (Hide-Hex "$($bad.Path):$($bad.LineNumber) $($bad.Line)") }
+    }
 }
 
 function Assert-S7Running($Context) {
@@ -572,7 +580,10 @@ Invoke-S7Scenario 'ms_crash_server' {
         Copy-StandFile -From $victimLog -To (Join-Path $script:StandDir "${Tag}_ms_crash_server_victim.log")
     }
     Stop-S7MapProcess $victim
-    $lost = Wait-S7Line $ctx $ctx.Logs.world "\[coop\] map server of level $($mover.Level) is gone: its objects are at their last confirmed state, 1 failure\(s\) in a row\s*$" 60 $worldLine
+    # Only this occurrence, in the world log after injecting the fault, is expected.
+    $loss = "$script:StandBang\[coop\] map server of level $($mover.Level) is gone: its objects are at their last confirmed state, 1 failure\(s\) in a row\s*$"
+    $ctx.ExpectedMapLoss = @{ Pattern = $loss; After = $worldLine }
+    $lost = Wait-S7Line $ctx $ctx.Logs.world $loss 60 $worldLine
     $cameHome = Find-S7Line $ctx.Logs.world "\[coop\] levels: map server $($victim.Slot) leads no level now, (?<count>[1-9]\d*) object\(s\) came home\s*$" $worldLine
     $victimCount = @($fixtures.Values | Where-Object Owner -eq $mover.Level).Count
     if (-not $cameHome -or $cameHome.LineNumber -ge $lost.LineNumber -or

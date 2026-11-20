@@ -116,7 +116,7 @@ function Wait-Line([string]$File, [string]$Pattern, [int]$Seconds) {
         }
         foreach ($path in $logs.Values) {
             if (Test-Path -LiteralPath $path -PathType Leaf) {
-                $bad = Select-String -LiteralPath $path -Pattern '\[weather-stand\] FAIL:|FATAL ERROR|LUA error|(?-i:stack traceback)' |
+                $bad = Select-StandLogLine $path '\[weather-stand\] FAIL:' |
                     Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }

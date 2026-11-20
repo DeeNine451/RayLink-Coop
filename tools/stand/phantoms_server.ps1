@@ -45,17 +45,6 @@ function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
     }
     return $false
 }
-function Show-Lines([string]$file, [string]$pattern, [int]$most, [int]$after = 0) {
-    if (-not (Test-Path -LiteralPath $file)) { Write-Host "  no log $file"; return }
-    Select-String -LiteralPath $file -Pattern $pattern -Context 0, $after | Select-Object -Last $most | ForEach-Object {
-        foreach ($l in @($_.Line) + @($_.Context.PostContext)) {
-            $l = $l -replace '[0-9a-fA-F]{32,}', '<hidden>'
-            if ($l.Length -gt 240) { $l = $l.Substring(0, 240) }
-            Write-Host "  $l"
-        }
-    }
-}
-
 $stage = Join-Path $Stand 'appdata_server\coop_new_world.ltx'
 Write-StandText -Path $stage -Text "[world]`nfaction = stalker`ntitle = phantoms`n" -Encoding ([System.Text.Encoding]::ASCII)
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -108,11 +97,11 @@ finally {
     Remove-StandFile -Path $shared
 }
 Write-Host '--- client ---'
-Show-Lines $clientLog '\[ph\]|mirror: .* (comes online now|left on the vote)|mirror without a game vertex|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 80
+Show-StandLogLines $clientLog '\[ph\]|mirror: .* (comes online now|left on the vote)|mirror without a game vertex' 80
 Write-Host '--- world server ---'
-Show-Lines $serverLog '\[coop\] trunk: a spawn|world out: |map server .* starts for level|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 40
+Show-StandLogLines $serverLog '\[coop\] trunk: a spawn|world out: |map server .* starts for level' 40
 Write-Host '--- map server 1 ---'
-Show-Lines $msLog '\[ph\]|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' 60
+Show-StandLogLines $msLog '\[ph\]' 60
 $verdict = $null
 if (Test-Path -LiteralPath $clientLog) {
     $verdict = Select-String -LiteralPath $clientLog -Pattern '\[ph\] ph (PASS|FAIL): (.*)$' | Select-Object -Last 1

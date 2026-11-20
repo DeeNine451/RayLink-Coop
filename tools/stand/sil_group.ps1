@@ -91,17 +91,6 @@ function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
     }
     return $false
 }
-function Show-Lines([string]$file, [string]$pattern, [int]$most, [int]$after = 0) {
-    if (-not (Test-Path -LiteralPath $file)) { Write-Host "  no log $file"; return }
-    Select-String -LiteralPath $file -Pattern $pattern -Context 0, $after | Select-Object -Last $most | ForEach-Object {
-        foreach ($l in @($_.Line) + @($_.Context.PostContext)) {
-            $l = $l -replace '[0-9a-fA-F]{32,}', '<hidden>'
-            if ($l.Length -gt 420) { $l = $l.Substring(0, 420) }
-            Write-Host "  $l"
-        }
-    }
-}
-
 $hostData = New-Profile 'h' 'hoster'
 $hostLog = Join-Path $hostData ('logs\xray_' + $env:USERNAME + '.log')
 $clientLog = Join-Path $Stand ('appdata_t\logs\xray_' + $env:USERNAME + '.log')
@@ -178,5 +167,5 @@ finally {
 }
 foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
     Write-Host "--- $($pair[1]): the probe ---"
-    Show-Lines $pair[0] '\[sil\]|\[silencer\]|spawn_item' 160
+    Show-StandLogLines $pair[0] '\[sil\]|\[silencer\]|spawn_item' 160
 }

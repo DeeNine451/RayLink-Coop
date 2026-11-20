@@ -82,10 +82,11 @@ $client = $null
 $installed = $false
 $restarting = $false
 
-function Find-Line([string[]]$Paths, [string]$Pattern) {
+function Find-Line([string[]]$Paths, [string]$Pattern, [switch]$Errors) {
     foreach ($path in $Paths) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $line = Select-String -LiteralPath $path -Pattern $Pattern | Select-Object -Last 1
+            $line = if ($Errors) { Select-StandLogLine $path $Pattern | Select-Object -Last 1 }
+            else { Select-String -LiteralPath $path -Pattern $Pattern | Select-Object -Last 1 }
             if ($line) { return $line }
         }
     }
@@ -96,7 +97,7 @@ function Wait-Evidence([string[]]$Paths, [string]$Pattern, [DateTime]$Deadline) 
         foreach ($process in @($server, $client)) {
             if ($process -and $process.HasExited) { throw "process $($process.Id) exited before '$Pattern' ($($process.ExitCode))" }
         }
-        $failed = Find-Line $logs '\[cmp-srv\] FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)'
+        $failed = Find-Line $logs '\[cmp-srv\] FAIL\b' -Errors
         if ($failed) { throw (Hide-Hex $failed.Line) }
         $hit = Find-Line $Paths $Pattern
         if ($hit) { return $hit }
@@ -129,8 +130,7 @@ function Stop-World([Diagnostics.Process]$World) {
 function Keep-Log([string]$Path, [string]$Role) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         Copy-StandFile -From $Path -To (Join-Path $script:StandDir "${Tag}_companions_server_$Role.log")
-        Select-String -LiteralPath $Path -Pattern '\[cmp-srv\]|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop' |
-            Select-Object -Last 12 | ForEach-Object { Write-Host (Hide-Hex $_.Line) }
+        Select-StandLogLine $Path '\[cmp-srv\]' -Last 12 | ForEach-Object { Write-Host (Hide-Hex $_.Line) }
     }
 }
 

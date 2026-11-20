@@ -31,7 +31,7 @@ $installedHostFs = $installedProbe = $installedStep = $backedUpOptions = $starte
 $scenario = 'vehicle_group'
 $step = 'setup'
 $mark = '\[vehicle-stand\] '
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)"
+$badLine = "$($mark)FAIL\b"
 $seatTable = '\[coop\]\s+vehicles: \d+ seated in \d+ car\(s\) \[car/seat=character:'
 
 function Set-VehicleStep([string]$Instruction) {
@@ -46,7 +46,7 @@ function Wait-VehicleLine([string[]]$Files, [string]$Pattern, [int]$Seconds, [in
         if (-not $AfterQuit -and $client -and $client.HasExited) { throw "test client exited ($($client.ExitCode))" }
         foreach ($log in $logs) {
             if (Test-Path -LiteralPath $log -PathType Leaf) {
-                $bad = Select-String -LiteralPath $log -Pattern $badLine | Select-Object -First 1
+                $bad = Select-StandLogLine $log $badLine | Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }
         }
@@ -75,7 +75,7 @@ function Wait-VehicleGrant([int]$Seat, [string]$Label) {
 function Keep-VehicleLog([string]$File, [string]$Label) {
     if (Test-Path -LiteralPath $File -PathType Leaf) {
         Copy-StandFile -From $File -To (Join-Path $script:StandDir "$($Tag)_$($scenario)_$Label.log")
-        Select-String -LiteralPath $File -Pattern "$mark|\[coop\]\s+vehicles?:|$badLine" |
+        Select-StandLogLine $File "$mark|\[coop\]\s+vehicles?:|$badLine" |
             ForEach-Object { Write-Host (Hide-Hex $_.Line) }
     }
 }

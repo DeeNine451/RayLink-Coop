@@ -28,7 +28,7 @@ $installed = [Collections.Generic.List[string]]::new()
 $started = $false
 $mark = '\[progress-stand\] '
 $trust = '\[coop-trust\] (?:! )?progress_\w+\b.*(?:would refuse|would be refused: let through|\brefused\b)'
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)"
+$badLine = "$($mark)FAIL\b"
 
 function Set-ProgressStep([string]$Step) {
     Write-StandText -Path $stepFile -Text ($Step + [Environment]::NewLine) -Encoding ([Text.Encoding]::ASCII)
@@ -40,7 +40,7 @@ function Assert-ProgressHealthy {
     }
     foreach ($log in $logs) {
         if (Test-Path -LiteralPath $log -PathType Leaf) {
-            $bad = Select-String -LiteralPath $log -Pattern $badLine | Select-Object -First 1
+            $bad = Select-StandLogLine $log $badLine | Select-Object -First 1
             if ($bad) { throw (Hide-Hex $bad.Line) }
         }
     }
@@ -64,7 +64,7 @@ function Wait-ProgressLine([string[]]$Files, [string]$Pattern, [int]$Seconds, [i
 function Keep-ProgressLog([string]$File, [string]$Label) {
     if (Test-Path -LiteralPath $File -PathType Leaf) {
         Copy-StandFile -From $File -To (Join-Path $script:StandDir "$($Tag)_progress_server_$Label.log")
-        Select-String -LiteralPath $File -Pattern "$mark|$trust|$badLine" | ForEach-Object { Write-Host (Hide-Hex $_.Line) }
+        Select-StandLogLine $File "$mark|$trust|$badLine" | ForEach-Object { Write-Host (Hide-Hex $_.Line) }
     }
 }
 

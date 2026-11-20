@@ -135,8 +135,10 @@ function Wait-CompanionLine([string]$Path, [string]$Pattern, [int]$Seconds) {
             if ($process -and $process.HasExited) { throw "game process $($process.Id) exited ($($process.ExitCode))" }
         }
         foreach ($log in @($hostLog, $clientLog)) {
-            $failure = Get-CompanionLog $log | Where-Object { $_ -match '\[companions\] (h|ag) FAIL\b' } | Select-Object -Last 1
-            if ($failure) { throw (Hide-Hex $failure) }
+            if ($log -and (Test-Path -LiteralPath $log -PathType Leaf)) {
+                $failure = Select-StandLogLine $log '\[companions\] (h|ag) FAIL\b' | Select-Object -First 1
+                if ($failure) { throw (Hide-Hex $failure.Line) }
+            }
         }
         if ($Path -and (Test-Path -LiteralPath $Path)) {
             $hit = Select-String -LiteralPath $Path -Pattern $Pattern | Select-Object -Last 1
@@ -216,9 +218,7 @@ finally {
         foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
             if ($pair[0] -and (Test-Path -LiteralPath $pair[0])) {
                 Copy-StandFile -From $pair[0] -To (Join-Path $outDir "$($Tag)_companions_$($pair[1]).log")
-                Get-CompanionLog $pair[0] | Where-Object {
-                    $_ -match '\[companions\]|FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop'
-                } | ForEach-Object { Write-Host (Hide-Hex $_) }
+                Select-StandLogLine $pair[0] '\[companions\]' | ForEach-Object { Write-Host (Hide-Hex $_.Line) }
             }
         }
     }

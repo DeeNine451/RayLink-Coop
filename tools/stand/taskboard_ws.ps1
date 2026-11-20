@@ -10,7 +10,7 @@
 #   map        map server 1 sent a nonempty reply in the probe window and the client prepared a row from it
 #   world      the world server handled zero offer requests locally (its offer counters)
 #   far_empty  no empty answer over the far view reached his game (coop_quests_offer status "(0 empty over the far view)")
-#   alive      the world server lives after the request; no FATAL ERROR or LUA error in any of the three logs
+#   alive      the world server lives after the request; no stand errors in any of the three logs
 # History: 2026-11-18 (build 54) the world server answered 29 NPCs of the Bar with 29 empty lists over the far view ("на раздельных
 # нет квестов"); build 55 let the client make an empty answer's list itself; S5 (A-S5S) wants the map server to make it.
 #   powershell -ExecutionPolicy Bypass -File tools\stand\taskboard_ws.ps1 [-Port 27982] [-Tag b57]
@@ -103,16 +103,6 @@ function Wait-Log([string]$file, [string]$pattern, [int]$seconds, $proc) {
     }
     return $false
 }
-function Show-Lines([string]$file, [string]$pattern, [int]$most, [int]$after = 0) {
-    if (-not (Test-Path -LiteralPath $file)) { Write-Host "  no log $file"; return }
-    Select-String -LiteralPath $file -Pattern $pattern -Context 0, $after | Select-Object -Last $most | ForEach-Object {
-        foreach ($l in @($_.Line) + @($_.Context.PostContext)) {
-            $l = $l -replace '[0-9a-fA-F]{32,}', '<hidden>'
-            if ($l.Length -gt 240) { $l = $l.Substring(0, 240) }
-            Write-Host "  $l"
-        }
-    }
-}
 function Get-LogLineCount([string]$file) {
     if (-not (Test-Path -LiteralPath $file)) { return 0 }
     return @(Get-Content -LiteralPath $file -Encoding Default).Count
@@ -175,11 +165,11 @@ finally {
     Remove-StandFile -Path $probe
 }
 Write-Host '--- client ---'
-Show-Lines $clientLog '\[tb\]|host refused the offer|\[coop-quests\]\[offer\]|context: role|FATAL ERROR' 60
+Show-StandLogLines $clientLog '\[tb\]|host refused the offer|\[coop-quests\]\[offer\]|context: role' 60
 Write-Host '--- world server ---'
-Show-Lines $serverLog '\[tb\]|\[coop-quests\]\[offer\]|far: |generate for|context: role|FATAL ERROR' 60
+Show-StandLogLines $serverLog '\[tb\]|\[coop-quests\]\[offer\]|far: |generate for|context: role' 60
 Write-Host '--- map server 1 ---'
-Show-Lines $msLog '\[tb\]|\[coop-quests\]\[offer\]|context: role|FATAL ERROR' 30
+Show-StandLogLines $msLog '\[tb\]|\[coop-quests\]\[offer\]|context: role' 30
 
 # ---------------------------------------------------------------- verdict
 $problems = [System.Collections.Generic.List[string]]::new()
@@ -215,7 +205,7 @@ if ($wsHandled -ne 0) { $problems.Add("world: expected zero locally handled offe
 if (-not $aliveAfter) { $problems.Add('alive: the world server did not live through the request') }
 foreach ($pair in @(@($clientLog, 'client'), @($serverLog, 'world server'), @($msLog, 'map server 1'))) {
     if (-not (Test-Path -LiteralPath $pair[0])) { $problems.Add("alive: no log of the $($pair[1])"); continue }
-    $bad = Select-String -LiteralPath $pair[0] -Pattern 'FATAL ERROR|LUA error|(?-i:stack traceback)' | Select-Object -First 1
+    $bad = Select-StandLogLine $pair[0] | Select-Object -First 1
     if ($bad) { $problems.Add(('alive: {0}: {1}' -f $pair[1], (Hide-Hex $bad.Line.Trim()))) }
 }
 if ($problems.Count -gt 0) {

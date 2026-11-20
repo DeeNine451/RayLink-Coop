@@ -20,8 +20,8 @@ $cp1251 = [System.Text.Encoding]::GetEncoding(1251)
 $exe = Join-Path $Stand 'bin\AnomalyCoopDX11AVX.exe'
 if (Get-Process -Name 'AnomalyCoop*', 'RayLinkServer*' -ErrorAction SilentlyContinue) { throw 'a game is running' }
 if (-not (Test-Path -LiteralPath (Join-Path $Stand 'appdata_t'))) { throw 'no appdata_t: run auto_world.ps1 once' }
-# errors the run must not show (single player has no "! [coop" line at all: any is a fault)
-$bad = 'FATAL ERROR|LUA error|SCRIPT ERROR|(?-i:stack traceback)|attempt to |! \[coop|! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game'
+# Additional errors the run must not show.
+$bad = 'SCRIPT ERROR|attempt to |! \[SCRIPT|xr_conditions fail|xr_effects fail|Cannot find saved game'
 
 function New-Profile([string]$letter) {
     $name = "appdata_$letter"
@@ -134,7 +134,7 @@ try {
     $saved = Test-Path -LiteralPath (Join-Path $saves 'zz_sp_smoke.scop')
     Write-Host "save file: $saved"
     if (-not $saved -and -not $why) { $why = 'no save file' }
-    if (-not $why -and (Select-String -LiteralPath $log -Pattern $bad -Quiet)) { $why = 'error lines in the log' }
+    if (-not $why -and (Select-StandLogLine $log $bad | Select-Object -First 1)) { $why = 'error lines in the log' }
 }
 catch {
     $why = "$_"
@@ -153,5 +153,5 @@ finally {
 Write-Host '--- the probe ---'
 Show-Lines $log '\[sp\]' 40
 Write-Host '--- errors ---'
-Show-Lines $log $bad 30
+Show-StandLogLines $log $bad 30
 if ($why) { Write-Host "sp_smoke: FAIL ($why)" } else { Write-Host 'sp_smoke: PASS' }

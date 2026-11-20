@@ -34,7 +34,9 @@ $mark = '\[cover-stand\] '
 $outside = "$($mark)env_cover: cover_tester open\s*$"
 $static = "$($mark)env_cover: cover_tester covered \(static\)\s*$"
 $trust = '\[coop-trust\] (?:! )?env_cover\b(?=.*\bcover_tester\b).*(?:would refuse|would be refused: let through)'
-$badLine = "$($mark)FAIL\b|FATAL ERROR|LUA error|(?-i:stack traceback)|\[coop\] emission: cover_tester .*kill sent"
+# The probe deliberately claims cover while the level sees none in log-only mode.
+$expectedTrust = '^\s*(?:\[[0-9:.]+\] +)?\[coop-trust\] ! env_cover: cover_tester claims cover, the level sees none \([^()]*, score -?\d+\.\d+\) \(would be refused: let through, \d+ of \d+ failed\)\s*$'
+$badLine = "$($mark)FAIL\b|\[coop\] emission: cover_tester .*kill sent"
 
 function Set-CoverStep([string]$Step) {
     Write-StandText -Path $stepFile -Text ($Step + [Environment]::NewLine) -Encoding $ascii
@@ -48,7 +50,7 @@ function Wait-CoverLine([string]$File, [string]$Pattern, [int]$Seconds, [int]$Af
         }
         foreach ($log in $logs) {
             if (Test-Path -LiteralPath $log -PathType Leaf) {
-                $bad = Select-String -LiteralPath $log -Pattern $badLine | Select-Object -First 1
+                $bad = Select-StandLogLine $log $badLine | Where-Object Line -NotMatch $expectedTrust | Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }
         }
@@ -185,8 +187,12 @@ finally {
             foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
                 if (Test-Path -LiteralPath $pair[0] -PathType Leaf) {
                     Copy-StandFile -From $pair[0] -To (Join-Path $script:StandDir "$($Tag)_cover_group_$($pair[1]).log")
-                    Select-String -LiteralPath $pair[0] -Pattern "$mark|$trust|$badLine" |
-                        ForEach-Object { Write-Host (Hide-Hex $_.Line) }
+                    Select-StandLogLine $pair[0] "$mark|$trust|$badLine" |
+                        ForEach-Object {
+                            $line = $_.Line
+                            if ($line -match $expectedTrust) { $line = $line -replace '\[coop-trust\] ! ', '[coop-trust] ' }
+                            Write-Host (Hide-Hex $line)
+                        }
                 }
             }
         }

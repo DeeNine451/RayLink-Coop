@@ -20,12 +20,81 @@ $script:ScenarioDir = Join-Path $script:Root 'tools\stand'
 $script:HeadTool = Join-Path $script:ScenarioDir 'stand_head.py'
 $script:MarkDir = Join-Path $script:Root 'temp\gates'
 
-# error lines a scenario may print that are known and harmless (anything else fails the scenario)
-$script:AllowedErrors = @(
-    'asks to leave through level exit .* ignored',
-    'map servers: this PC has .* free \(under .*\): an empty map server does not linger'
-)
-$script:ErrorPattern = 'FATAL ERROR|LUA error|(?-i:stack traceback)|! \[coop'
+$script:ErrorPattern = @(
+    'FATAL ERROR'
+    '(?-i:LUA error)'
+    '(?-i:stack traceback)'
+    'crash: (exception 0x|access violation)'
+    '! (\[[0-9:.]+\] +)?\[coop'
+    '\[coop[^\]]*\](\[[^\]]*\])* +! '
+    '\bcoop_(?!route\b|zz_)\w+\.script \(line: \d+\)'
+    'SCRIPT RUNTIME ERROR|SCRIPT SYNTAX ERROR|\[SCRIPT ERROR\]'
+) -join '|'
+
+# Engine diagnostics use one space on the world server and add a timestamp elsewhere.
+$script:StandBang = '^\s*! (?:\[[0-9:.]+\] +)?'
+$script:StandLuaHeader = $script:StandBang + '\[LUA\] SCRIPT (?:RUNTIME|SYNTAX) ERROR\s*$'
+$script:StandLuaFrame = $script:StandBang + '\[LUA\] +\d+ : '
+$script:StandGammaSource = '(?<source>(?:(?:[A-Z]:)?[^:\r\n]*[\\/])?(?:' + (@(
+    'a_faction_prices\.script:16: attempt to index global ''faction_stocks'' \(a nil value\)' # G.A.M.M.A. UI
+    'mags_patches\.script:4: attempt to index global ''magazine_binder'' \(a nil value\)' # 433- UDP-9 Carbine
+    'zz_ui_inventory_better_stats_bars\.script:41: attempt to index global ''better_stats_bars_mcm'' \(a nil value\)' # G.A.M.M.A. Keybinds fixes
+    'zzz_mspizza_godis_zoomcalc\.script:113: unexpected symbol near ''/''' # 410- 3DSS for GAMMA
+) -join '|') + '))\s*$'
+$script:StandGammaDetail = $script:StandBang + '\[LUA\] ' + $script:StandGammaSource
+$script:StandGammaReport = $script:StandBang + '\[SCRIPT ERROR\]: ' + $script:StandGammaSource
+
+$script:StandNoise = @(
+    $script:StandGammaDetail # debug Lua detail from the four GAMMA sources above
+    $script:StandGammaReport # engine summary from the same four sources
+    ($script:StandBang + '\[coop\] .* asks to leave through level exit .* ignored\s*$') # srv/coop_srv_join.cpp: rejects out-of-range requests
+    ($script:StandBang + '\[coop\] map servers: this PC has .* free \(under .*\): an empty map server does not linger(?:, it stops at once)?\s*$') # srv/coop_mapserver.cpp: low-memory policy
+    ($script:StandBang + '\[coop\] the host''s level is still precaching after \d+ s \(window without focus\?\): joins go on\s*$') # coop_join.cpp: lets joins proceed
+    ($script:StandBang + '\[coop\] the host does not answer \(\d+ ms\): the game waits for it, out after \d+ s\s*$') # coop_manager.cpp: warns at the start of a recoverable wait
+    '^\s*(?:\[[0-9:.]+\] +)?\[coop-game\] ! the record was not read at the world start: switched on late, scripts that cached an option keep the machine''s\s*$' # coop_game_settings.script: save callback loaded the record
+) -join '|'
+
+function Test-StandErrorLine([string]$Line) {
+    return ($Line -match $script:ErrorPattern -and $Line -notmatch $script:StandNoise)
+}
+
+function Test-StandLogNoise([Microsoft.PowerShell.Commands.MatchInfo]$Hit) {
+    if ($Hit.Line -match $script:StandNoise) { return $true }
+    if ($Hit.Line -notmatch $script:StandLuaHeader) { return $false }
+    # CScriptStorage prints the error detail, then repeats it in the [SCRIPT ERROR] report.
+    # Suppress the bare header only when both lines identify the same known load error.
+    $detail = $null
+    foreach ($line in $Hit.Context.PostContext) {
+        if ($line -match $script:StandLuaFrame) { continue }
+        if (-not $detail -and $line -match $script:StandGammaDetail) {
+            $detail = $Matches.source
+            continue
+        }
+        return ($detail -and $line -match $script:StandGammaReport -and $Matches.source -eq $detail)
+    }
+    return $false
+}
+
+function Select-StandLogLine([string]$Path, [string]$Pattern = '', [int]$Last = 0) {
+    $patterns = @($script:ErrorPattern)
+    if ($Pattern) { $patterns += $Pattern }
+    $select = {
+        # The debug header in b56/b57 has up to seven [LUA] lines before its [SCRIPT ERROR] report.
+        Select-String -LiteralPath $Path -Pattern $patterns -Context 0, 8 |
+            Where-Object { -not (Test-StandLogNoise $_) }
+    }
+    if ($Last -le 0) { & $select; return }
+    $hits = @(& $select)
+    if ($hits.Count -le $Last) { $hits; return }
+    # Keep the normal excerpt size without dropping an earlier error.
+    $first = $hits[$hits.Count - $Last].LineNumber
+    $hits | Where-Object { $_.LineNumber -ge $first -or (Test-StandErrorLine $_.Line) }
+}
+
+function Show-StandLogLines([string]$Path, [string]$Pattern, [int]$Last) {
+    if (-not (Test-Path -LiteralPath $Path)) { Write-Host "  no log $Path"; return }
+    Select-StandLogLine $Path $Pattern -Last $Last | ForEach-Object { Write-Host ('  ' + (Hide-Hex $_.Line)) }
+}
 
 function Hide-Hex([string]$text) { return ($text -replace '[0-9a-fA-F]{32,}', '<hidden>') }
 
@@ -272,11 +341,7 @@ function Invoke-Scenario {
         if ($hit) { $problems.Add('bad line: ' + (Hide-Hex $hit.Trim())) }
     }
     foreach ($l in $lines) {
-        if ($l -match $script:ErrorPattern) {
-            $allowed = $false
-            foreach ($a in $script:AllowedErrors) { if ($l -match $a) { $allowed = $true; break } }
-            if (-not $allowed) { $problems.Add('error line: ' + (Hide-Hex $l.Trim())) }
-        }
+        if (Test-StandErrorLine $l) { $problems.Add('error line: ' + (Hide-Hex $l.Trim())) }
     }
     $err = $errPath
     if ((Test-Path -LiteralPath $err) -and (Get-Item -LiteralPath $err).Length -gt 0) {
