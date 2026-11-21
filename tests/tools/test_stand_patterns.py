@@ -84,6 +84,9 @@ CASES = (
     ("event-malformed", "! [coop] malformed script event from #1 dropped", True),
     ("status-other-drop", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet, 3 more", True),
     ("status-lookalike", "! [coop] script event 'core.statusx' from #1 dropped: sender is not in the world yet", True),
+    # b57g companions_server client: the scenario's own Stop-World; a client's notice of an orderly server shutdown
+    ("server-shutdown", "! [07:41:32.013]  [coop] disconnected: the server is shutting down", False),
+    ("disconnected-other", "! [07:41:32.013]  [coop] disconnected: HostNotReady: the server cannot run your level now, try again later", True),
 )
 
 
