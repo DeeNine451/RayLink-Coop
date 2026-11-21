@@ -1,8 +1,7 @@
 local fixture = assert(loadfile("tests/lua/mods_wpo_window_fixture.lua"))
 local checks, failed = 0, 0
--- R35 (every container, both modes) and its round 2 (the authority gives a player's item its parts with the item, the
--- readers wait, the gun in hand, lost asks): the server mode and the co-op, each its own run.
-for _, scenario in ipairs({ "r35", "fix2" }) do
+-- Run each R35 scenario with the world and map servers and again with the co-op host.
+for _, scenario in ipairs({ "r35", "fix2", "residual" }) do
 	for _, server in ipairs({ true, false }) do
 		local c, f = fixture(server, scenario)
 		checks, failed = checks + (c or 0), failed + (f or 0)

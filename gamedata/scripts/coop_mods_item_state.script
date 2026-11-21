@@ -334,6 +334,7 @@ local parts_asked, parts_queries, parts_dirty, parts_waiting = {}, {}, {}, {}
 -- process that led that player's map when last seen (0: none)
 local parts_after, routes = {}, {}
 local parts_eval
+local parts_seq = 0
 
 local function has_parts(obj)
 	local im = C().mod("itms_manager")
@@ -359,18 +360,22 @@ local function valid_parts(value)
 	return true
 end
 
-local function request_parts(obj)
+local function request_parts(obj, again)
 	local id = obj:id()
 	local name = obj:name()
 	local holder = C().root_of(id)
 	local asked = parts_asked[id]
-	if asked and asked.name == name and asked.holder == holder and not released_since(id, asked.tick) then return true end
+	if not again and asked and not asked.refused and asked.name == name and asked.holder == holder
+		and not released_since(id, asked.tick) then return asked end
 	local hid = C().hid(id)
 	if not hid or #name > 256 then return false end
 	local _, now = ticks()
-	local query = { w = hid, name = name, holder = holder, tick = now }
+	parts_seq = parts_seq + 1
+	-- Older passive readers can still receive a refusal without a sequence when there was no overlapping ask.
+	local overlap = asked and (asked.overlap or (asked.sent and not asked.refused))
+	local query = { w = hid, name = name, holder = holder, tick = now, q = parts_seq, overlap = overlap }
 	parts_asked[id], parts_queries[id] = query, query
-	return true
+	return query
 end
 
 local function flush_parts_queries()
@@ -382,14 +387,17 @@ local function flush_parts_queries()
 		if released_since(id, query.tick) then
 			parts_asked[id], parts_queries[id] = nil, nil
 		else
-			bytes = bytes + 3 * #query.name + 32
+			bytes = bytes + 3 * #query.name + 48
 			if t.n == MAX_PART_QUERIES or bytes > 10000 then break end
 			t.n = t.n + 1
-			t["w" .. t.n], t["s" .. t.n], ids[t.n] = query.w, query.name, id
+			t["w" .. t.n], t["s" .. t.n], t["q" .. t.n], ids[t.n] = query.w, query.name, query.q, id
 		end
 	end
 	if t.n > 0 and C().to_host("wpo_eval", t) then
-		for _, id in ipairs(ids) do parts_queries[id] = nil end
+		for _, id in ipairs(ids) do
+			parts_queries[id].sent = true
+			parts_queries[id] = nil
+		end
 	end
 end
 
@@ -408,8 +416,23 @@ end
 -- A read the player started (an action, a gun taken in hand) asks again even while an ask is out: that one may be lost.
 -- Cells and other passive reads share the ask that is out.
 local function ask_now(obj)
-	parts_asked[obj:id()] = nil
-	return request_parts(obj)
+	return request_parts(obj, true)
+end
+
+local function parts_gui()
+	local inv = rawget(_G, "ui_inventory")
+	local gui = inv and inv.GUI
+	return gui and gui:IsShown() and type(gui.CC) == "table" and gui or nil
+end
+
+local function has_parts_cell(id, gui)
+	gui = gui or parts_gui()
+	if not gui then return false end
+	for _, cc in pairs(gui.CC) do
+		local ok, cell = pcall(function() return cc:GetCell_ID(id) end)
+		if ok and cell then return true end
+	end
+	return false
 end
 
 -- Runs f(obj) once the parts of `obj` are known on this machine: at once when they are (or the item has none, or this
@@ -451,9 +474,13 @@ end
 -- An ask whose answer may be lost on its way (item 3 of the R35 review): asked again now while the item is here without
 -- parts. Events only, never a timer: the world back, the player's map led by another process, the item coming online here.
 local function ask_again(id)
-	local obj = parts_asked[id] and level.object_by_id(id)
-	parts_asked[id] = nil
-	if obj and has_parts(obj) and not read_parts(id) then request_parts(obj) end
+	local asked = parts_asked[id]
+	local obj = asked and level.object_by_id(id)
+	if obj and obj:name() == asked.name and not released_since(id, asked.tick) and has_parts(obj) and not read_parts(id)
+		and (not asked.refused or parts_after[id] or has_parts_cell(id)) then
+		if ask_now(obj) then return end
+	end
+	parts_asked[id], parts_queries[id] = nil, nil
 end
 
 local function ask_all_again()
@@ -543,7 +570,9 @@ local function answer_parts(t, from)
 			end
 		end
 	end
-	C().to_peer(from, "wpo_eval_no", { w = hid, name = t.name })
+	-- The world authority can receive the ask itself while there is no map route for this player.
+	local unrouted = coop_mode.decides_world() and not coop_mode.leads_here()
+	C().to_peer(from, "wpo_eval_no", { w = hid, name = t.name, q = t.q, unrouted = unrouted or nil })
 end
 
 local function answer_online_parts()
@@ -570,9 +599,8 @@ local function answer_online_parts()
 end
 
 local function refresh_parts_cell(id)
-	local inv = rawget(_G, "ui_inventory")
-	local gui = inv and inv.GUI
-	if not (gui and gui:IsShown() and type(gui.CC) == "table") then return end
+	local gui = parts_gui()
+	if not gui then return end
 	local obj = level.object_by_id(id)
 	if not obj then return end
 	for _, cc in pairs(gui.CC) do
@@ -594,15 +622,24 @@ local function bind_parts_jamming(jam)
 	local function missing_state(gun)
 		return C().active() and coop_mode.is_player_mirror() and gun and jam.has_parts(gun) and not read_parts(gun:id())
 	end
-	-- Both stock reads iterate the parts table. Wait for the same state the
-	-- inventory cell needs before running either action.
-	C().wrap(jam, "unjam", "item_state.parts_unjam", function(orig)
+	local wrapped = C().wrap(jam, "unjam", "item_state.parts_unjam", function(orig)
 		return function(wpn, ...)
 			local gun = wpn or active_gun()
-			if missing_state(gun) then request_parts(gun) return end
-			return orig(wpn, ...)
+			if not missing_state(gun) then return orig(wpn, ...) end
+			local explicit, n, args = wpn ~= nil, select("#", ...), { ... }
+			return with_parts(gun, function(item)
+				local current = not explicit and active_gun()
+				if owns(item:id()) and (explicit or current and current:id() == item:id()) then
+					return orig(item, unpack(args, 1, n))
+				end
+			end)
 		end
 	end)
+	-- The inventory's custom action retained the old function at the mod's start.
+	local add_functor = C().fn(C().mod("custom_functor_autoinject"), "add_functor")
+	if wrapped and add_functor and C().fn(jam, "check_unjam") and C().fn(jam, "string_unjam") then
+		add_functor("arti_unjam", jam.check_unjam, jam.string_unjam, nil, jam.unjam, false)
+	end
 	local update_jam = C().fn(jam, "actor_on_update") or C().find_local(jam, "actor_on_update")
 	if not update_jam then return end
 	-- arti_jamming keeps the gun in hand as its update last read it (cgd): the shot and jam callbacks use it. While the
@@ -625,8 +662,36 @@ local function bind_parts_jamming(jam)
 	end)
 	RegisterScriptCallback("actor_on_weapon_before_fire", function()
 		local gun = active_gun()
-		if missing_state(gun) then request_parts(gun) end
+		if not missing_state(gun) then return end
+		local asked = parts_asked[gun:id()]
+		if asked and asked.shot and not asked.refused and asked.name == gun:name()
+			and not released_since(gun:id(), asked.tick) then return end
+		local query = ask_now(gun)
+		if query then query.shot = true end
 	end)
+end
+
+local function bind_favorite_parts()
+	local favorite = C().mod("indirect_parts_favoriter")
+	local wrapped = C().wrap(favorite, "init_favorite_parts_menu", "item_state.parts_favorite_menu", function(orig)
+		return function(obj, bag, mode)
+			if not parts_missing(obj) then return orig(obj, bag, mode) end
+			local gui = parts_gui()
+			return with_parts(obj, function(item)
+				if gui and parts_gui() == gui and has_parts_cell(item:id(), gui) then return orig(item, bag, mode) end
+			end)
+		end
+	end)
+	C().wrap(favorite, "act_favorite_part", "item_state.parts_favorite_action", function(orig)
+		return function(id, sec, mode)
+			if not (C().active() and coop_mode.is_player_mirror() and (mode == 2 or mode == 3)) then return orig(id, sec, mode) end
+			local obj = level.object_by_id(id)
+			if not obj then return say_unknown() end
+			return with_parts(obj, function(item) return orig(item:id(), sec, mode) end)
+		end
+	end)
+	-- Refresh the action registered by value with the inventory's custom functors.
+	if wrapped and C().fn(favorite, "on_game_start") then favorite.on_game_start() end
 end
 
 -- Readers of G.A.M.M.A. that index the parts table of an item at once, without a check. Bound at the first update: the
@@ -641,6 +706,18 @@ local readers_bound = false
 local function bind_parts_readers(parts)
 	if readers_bound then return end
 	readers_bound = true
+	bind_favorite_parts()
+	-- Not tasks_fetch's reward (tasks_fetch.script:185): a turn-in ends on the deciding side only (coop_tasks), and the router
+	-- keeps the mod's timer there by the chunk of its function (tasks_fetch = host). A coop_* wrapper of it runs everywhere.
+	C().wrap(C().mod("NimbleTrade"), "has_bad_part", "item_state.parts_nimble", function(orig)
+		return function(minimum, obj, ...)
+			if parts_missing(obj) then
+				request_parts(obj)
+				return true -- Nimble's good_gun negates this predicate.
+			end
+			return orig(minimum, obj, ...)
+		end
+	end)
 	-- A disassembly of an own item (by hand, or the Autolooter's after coop_mods_items has taken it) waits for its parts.
 	for _, key in ipairs({ "disassembly_weapon", "disassembly_outfit" }) do
 		C().wrap(parts, key, "item_state.parts_" .. key, function(orig)
@@ -762,7 +839,7 @@ function install_parts(parts, jam)
 	C().on("wpo_eval", function(t, from)
 		local n = batch_size(t)
 		if not n then return end
-		for i = 1, n do answer_parts({ w = t["w" .. i], name = t["s" .. i] }, from) end
+		for i = 1, n do answer_parts({ w = t["w" .. i], name = t["s" .. i], q = t["q" .. i] }, from) end
 	end, "host")
 	-- An ask the flood limit drops is refused like any other: the asker's ask is released and he asks again when he
 	-- reads the item next. Silent, it stayed asked, and the item never got its parts on his machine.
@@ -770,25 +847,32 @@ function install_parts(parts, jam)
 		local n = batch_size(t)
 		if not n then return end
 		local no = { n = n }
-		for i = 1, n do no["w" .. i], no["s" .. i] = t["w" .. i], t["s" .. i] end
+		for i = 1, n do no["w" .. i], no["s" .. i], no["q" .. i] = t["w" .. i], t["s" .. i], t["q" .. i] end
 		C().to_peer(from, "wpo_eval_no", no)
 	end)
-	-- A refused ask is released (the next read asks again); a reader that waited for it ends with a word.
-	local function release_ask(hid, name)
+	-- A refusal only ends the ask it answers. Keep the demand of open cells and readers waiting for a map route.
+	local function release_ask(hid, name, q, unrouted)
 		local id = C().lid(tonumber(hid))
 		local asked = id and parts_asked[id]
-		if not (asked and asked.name == name) then return end
-		parts_asked[id] = nil
-		if parts_after[id] then
+		if not (asked and asked.sent and not asked.refused and asked.name == name) then return end
+		if q == nil then
+			if asked.overlap or parts_after[id] then return end
+		elseif tonumber(q) ~= asked.q then return end
+		if not unrouted and parts_after[id] then
 			parts_after[id] = nil
 			say_unknown()
 		end
+		if parts_after[id] or has_parts_cell(id) then
+			asked.refused = true
+		else
+			parts_asked[id] = nil
+		end
 	end
 	C().on("wpo_eval_no", function(t)
-		if t.n == nil then return release_ask(t.w, t.name) end
+		if t.n == nil then return release_ask(t.w, t.name, t.q, t.unrouted == true) end
 		local n = batch_size(t)
 		if not n then return end
-		for i = 1, n do release_ask(t["w" .. i], t["s" .. i]) end
+		for i = 1, n do release_ask(t["w" .. i], t["s" .. i], t["q" .. i]) end
 	end, "client")
 	-- Lost asks (R35 review, item 3): asked again on events. The world says his map is led by another process now; the
 	-- world is back after its move; the item came online on his machine.

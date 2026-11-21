@@ -38,6 +38,11 @@ end
 -- Readers the R35 review named (round 2): the workshop's parts scheme (ui_workshop.script:594) and the Autolooter's
 -- disassembly filters (z_auto_looter cond_*_disassemble). Their checks run when the scripts are there.
 local OPT = { ui_workshop = read_ref("ui_workshop"), z_auto_looter = read_ref("z_auto_looter") }
+if scenario == "residual" then
+	for _, name in ipairs({ "indirect_parts_favoriter", "tasks_fetch", "NimbleTrade" }) do
+		SRC[name] = assert(read_ref(name), "missing G.A.M.M.A. script " .. name)
+	end
+end
 local function slice(src, from, to)
 	local a = assert(src:find(from, 1, true), "slice start " .. from)
 	local b = assert(src:find(to, a, true), "slice end " .. to)
@@ -77,7 +82,9 @@ local function configure(W)
 	W.sound_object = function() return { playing = function() return false end } end
 	W.AC_ID = 0
 	W.key_bindings = setmetatable({}, { __index = function(_, k) return k end })
-	W.ini_sys = { r_string_ex = function() return nil end }
+	W.ini_sys = { r_string_ex = function(_, sec, key)
+		if sec == GUN and key == "hud" then return "wpn_ak74_hud" end
+	end }
 	W.itms_manager = { ini_parts = {
 		r_string_ex = function(_, sec, key)
 			if sec == "con_parts_list" and key == GUN then return table.concat(PARTS, ",") end
@@ -130,6 +137,7 @@ local function configure(W)
 		get_color_con = function() return "" end }
 	W.ui_item = { get_sec_name = function(s) return s end }
 	W.utils_obj = { play_sound = function() end }
+	W.utils_item.addon_attached = function() return false end -- fixture weapons have no attached grenade launcher
 	W.mag_support = { using_mags = function() return false end }
 	W.utils_stpk = { get_item_data = function() return {} end, set_item_data = function() end }
 	W.CREATED = {}
@@ -309,6 +317,36 @@ local function load_autolooter(W)
 	W.z_auto_looter = env
 end
 
+local function load_residual_readers(W, jam)
+	-- A boundary of the UI: custom functors and the submenu retain functions by value.
+	W.FUNCTORS, W.FAVORITES, W.FETCH_REWARDS, W.FETCH_TAKEN = {}, {}, {}, {}
+	W.custom_functor_autoinject = { add_functor = function(name, _, _, _, action) W.FUNCTORS[name] = action end }
+	W.utils_ui_custom = { UICellPropertiesCustom = function(action)
+		return { Reset = function(_, _, _, lines, params) W.FAVORITE_MENU = { action = action, lines = lines, params = params } end }
+	end }
+	W.GetCursorPosition = function() end
+	W.ui_inventory.GUI.PlaySND = function() end
+	W.zzz_rax_sortingplus_mcm = {
+		is_favorite = function(sec) return W.FAVORITES[sec] end,
+		set_favorite = function(sec, value) W.FAVORITES[sec] = value end,
+	}
+	W.rax_icon_layers = { refresh = function() end }
+	load_module(W, "indirect_parts_favoriter", SRC.indirect_parts_favoriter).on_game_start()
+	W.custom_functor_autoinject.add_functor("arti_unjam", jam.check_unjam, jam.string_unjam, nil, jam.unjam, false)
+	W.GetActorMenu = function() return { Close = function() W.UNJAMMED = (W.UNJAMMED or 0) + 1 end } end
+	W.ini_sys.r_float_ex = function(_, _, key) if key == "cost" then return 10000 end end
+	W.IsArtefact = function() return false end
+	W.news_manager.relocate_item = function() end
+	W.alife_release_id = function(id) W.FETCH_TAKEN[#W.FETCH_TAKEN + 1] = id end
+	W.xr_effects = { reward_random_money = function(_, _, range) W.FETCH_REWARDS[#W.FETCH_REWARDS + 1] = range end }
+	W.db.actor.iterate_belt = function() end
+	W.db.actor.iterate_inventory = function(_, f, obj)
+		for _, id in ipairs(W.INV) do if f(obj, W.OBJ[id]) then return end end
+	end
+	load_module(W, "tasks_fetch", slice(SRC.tasks_fetch, "xr_effects.fetch_reward_and_remove =", "xr_effects.remove_fetch_item ="))
+	load_module(W, "NimbleTrade", slice(SRC.NimbleTrade, "function has_bad_part(", "function player_has_coonan_money()"))
+end
+
 -- the dots a cell shows now: part -> colour (only shown dots)
 local function dots(W, id)
 	local ci
@@ -456,6 +494,7 @@ local function setup(split)
 		load_script(W, "coop_mods_mags")
 		load_script(W, "coop_trust")
 		load_script(W, "coop_mods_item_state")
+		if scenario == "residual" and (peer == 1 or peer == 2) then load_residual_readers(W, jam) end
 		for _, n in ipairs({ "coop_hostplay_mode", "coop_mode", "coop_srv_mode" }) do W[n].on_game_start() end
 		W.coop_economy_mdata.on_game_start()
 		W.coop_mods_item_state.on_game_start()
@@ -903,6 +942,155 @@ if scenario == "fix2" then
 	end
 
 	no_errors(A, "client")
+	no_errors(authority, "map authority")
+	if M then no_errors(H, "world server") end
+	local checks, fails = CHECKS, FAILS
+	CHECKS, FAILS = 0, 0
+	return checks, fails
+end
+
+if scenario == "residual" then
+	section("R35 residual: " .. (server and "world server, map server, clients" or "co-op host and clients"))
+	local H, A, B, M = setup(server)
+	local authority = M or H
+	A.STRINGS.st_coop_guard_failed = "GUARD_FAILED"
+	local function his(id, cond)
+		gun_everywhere(id, cond, 1)
+		place(id, { peer = 1 })
+		if M then H.OBJ[id] = nil end
+	end
+	local function known(id, con)
+		authority.coop_economy_mdata.quietly(authority.item_parts.set_parts_con, id,
+			{ [GUN] = con, [PARTS[1]] = con, [PARTS[2]] = con, [PARTS[3]] = con })
+	end
+	local function pending(verb, peer)
+		for i, msg in ipairs(QUEUE) do
+			if msg.name == "mods." .. verb and msg.to == peer then return table.remove(QUEUE, i) end
+		end
+	end
+
+	his(1030, 0.43)
+	open(A, 0, { 1030 }, "actor_bag")
+	local ok, err = pcall(A.FUNCTORS.parts_favoriter, A.OBJ[1030], "actor_bag", "inventory")
+	check(ok and not A.FAVORITE_MENU and not parts(A, 1030), "favorite context-menu click waits for parts (" .. tostring(err) .. ")")
+	settle()
+	local menu = A.FAVORITE_MENU
+	check(menu and #menu.lines >= 3 and parts(A, 1030)[GUN] == 43, "favorite submenu opens with the authority's parts")
+	-- A submenu retains its registered action. Run the bulk action while its item's parts are absent.
+	his(1031, 0.35)
+	known(1031, 35) -- stable conditions for a favorite-all click
+	ok, err = pcall(menu and menu.action or A.indirect_parts_favoriter.act_favorite_part, 1031, nil, 3)
+	check(ok and not next(A.FAVORITES), "favorite-all waits for parts (" .. tostring(err) .. ")")
+	settle()
+	check(A.FAVORITES[PARTS[1]] and A.FAVORITES[PARTS[2]] and A.FAVORITES[PARTS[3]], "favorite-all uses the authority's conditions")
+
+	-- tasks_fetch.script:185 reads the parts of a weapon turned in, in the mod's reward timer. A turn-in is ended by the
+	-- deciding side only (coop_tasks: a client's set_task_completed goes to the host, on_complete runs there), and the router
+	-- keeps that timer there: it routes a time event by the chunk of its function (coop_router.cpp l_of), tasks_fetch = host
+	-- (coop_route_stock.ltx). A coop_* wrapper (view) of the timer would run the stock reward on a player's machine as well.
+	his(1032, 0.37)
+	known(1032, 50)
+	local gun = A.OBJ[1032]
+	gun.get_weapon_type = function() return 1 end
+	A.item_parts.evaluate_parts(gun)
+	settle()
+	check(parts(A, 1032) and parts(A, 1032)[GUN] == 50, "the turned-in weapon's parts are on the player's machine")
+	A.INV = { 1032 }
+	A.load_var = function(_, key) if key == "fetch_test" then return GUN end end
+	A.TE = {}
+	A.xr_effects.fetch_reward_and_remove(A.db.actor, nil, { "fetch_test", "1" })
+	local te = A.TE["0/delay_reward"]
+	local src = te and type(te.f) == "function" and debug.getinfo(te.f, "S").source or nil
+	check(src == "@tasks_fetch.script", "a turn-in's reward timer stays the mod's own function, routed host-only ("
+		.. tostring(src) .. ")")
+	for key, e in pairs(A.TE) do -- the router on a player's machine: tasks_fetch's event is skipped (removed), a coop_* one runs
+		if debug.getinfo(e.f, "S").source == "@tasks_fetch.script" or e.f(unpack(e.args)) then A.TE[key] = nil end
+	end
+	check(not next(A.FETCH_REWARDS) and not next(A.FETCH_TAKEN), "a player's machine neither pays nor takes a fetch turn-in")
+	A.TE = {}
+
+	his(1033, 0.82)
+	ok, err = pcall(A.NimbleTrade.has_bad_part, 60, A.OBJ[1033])
+	check(ok and err == true and not parts(A, 1033), "Nimble's eligibility rejects unknown parts for this attempt (" .. tostring(err) .. ")")
+	known(1033, 82)
+	settle()
+	check(parts(A, 1033) and A.NimbleTrade.has_bad_part(60, A.OBJ[1033]) == false, "Nimble reads the delivered good parts")
+
+	if M then
+		local route = H.coop.levels.bridge_of_player
+		H.coop.levels.bridge_of_player = function() end
+		tick(H, 400)
+		his(1034, 0.61)
+		his(1038, 0.47)
+		open(A, 0, { 1034 }, "actor_bag")
+		A.TIPS = {}
+		A.item_parts.disassembly_weapon(A.OBJ[1038], nil)
+		tick(A, 400)
+		local ask = pending("wpo_eval", 0)
+		if ask then H.coop_main.on_event(ask.name, ask.payload, ask.from) end
+		local refused = {}
+		local refusal = pending("wpo_eval_no", 1)
+		while refusal do
+			refused[tonumber(CM_DECODE(refusal.payload).w)] = true
+			A.coop_main.on_event(refusal.name, refusal.payload, refusal.from)
+			refusal = pending("wpo_eval_no", 1)
+		end
+		check(refused[1034] and refused[1038], "the world server actually refused the cell's and reader's asks at route 0")
+		deliver_all()
+		check(not parts(A, 1034) and select(2, dots(A, 1034)) == 0, "route 0 refused: open inventory still has no parts")
+		check(#A.DISASSEMBLED == 0 and #A.TIPS == 0, "no map route: keep the deferred reader waiting without a failure tip")
+		H.coop.levels.bridge_of_player = route
+		settle()
+		check(parts(A, 1034) and parts(A, 1034)[GUN] == 61 and select(2, dots(A, 1034)) == 3,
+			"route 0 to map server re-asks after a refusal and redraws the existing cell")
+		check(#A.DISASSEMBLED == 1 and A.DISASSEMBLED[1].id == 1038 and A.DISASSEMBLED[1].main == 47,
+			"route 0 to map server also re-asks for a deferred reader without a visible cell")
+	end
+
+	close(A)
+	A.DISASSEMBLED, A.TIPS = {}, {}
+	local arriving = item(A, 1035, GUN, 0)
+	A.item_parts.evaluate_parts(arriving)
+	tick(A, 400)
+	local ask = pending("wpo_eval", 0)
+	if ask then H.coop_main.on_event(ask.name, ask.payload, ask.from) end
+	if M then
+		local relay = pending("wpo_eval", MK)
+		if relay then M.coop_main.on_event(relay.name, relay.payload, relay.from) end
+	end
+	local refusal = pending("wpo_eval_no", 1)
+	check(refusal ~= nil, "authority refused the first ask before its copy arrived")
+	his(1035, 0.68)
+	A.item_parts.disassembly_weapon(A.OBJ[1035], nil)
+	tick(A, 400)
+	if refusal then A.coop_main.on_event(refusal.name, refusal.payload, refusal.from) end
+	check(#A.TIPS == 0, "a late refusal of the old ask must leave the new reader queued")
+	settle()
+	check(#A.DISASSEMBLED == 1 and A.DISASSEMBLED[1].main == 68, "the new reader runs once after the re-ask's parts arrive")
+
+	his(1036, 0.73)
+	A.ACTIVE_WEAPON = A.OBJ[1036]
+	tick(A, 400)
+	tick(A, 400)
+	check(pending("wpo_eval", 0) ~= nil, "equip sent the ask that will be lost")
+	settle()
+	fire(A, "actor_on_weapon_before_fire", {})
+	tick(A, 400)
+	fire(A, "actor_on_weapon_before_fire", {})
+	tick(A, 400)
+	check(#received(A, "mods.wpo_eval", 0) == 1, "shots share the first re-ask while it is outstanding")
+	settle()
+	check(parts(A, 1036) and parts(A, 1036)[GUN] == 73, "the first shot re-asks after the equip ask vanished without a refusal")
+
+	his(1037, 0.55)
+	known(1037, 55)
+	A.arti_jamming.jammed_guns[1037] = 1
+	ok, err = pcall(A.FUNCTORS.arti_unjam, A.OBJ[1037])
+	check(ok and A.arti_jamming.jammed_guns[1037] == 1 and not parts(A, 1037), "unjam context action waits (" .. tostring(err) .. ")")
+	settle()
+	check(A.arti_jamming.jammed_guns[1037] == nil and A.UNJAMMED == 1, "the same unjam runs once when the parts arrive")
+	no_errors(A, "client")
+	no_errors(B, "second client")
 	no_errors(authority, "map authority")
 	if M then no_errors(H, "world server") end
 	local checks, fails = CHECKS, FAILS
