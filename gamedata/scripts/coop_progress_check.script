@@ -665,11 +665,32 @@ local function install_listeners()
 	end
 end
 
-local function first_update()
-	if not leads_here() then return end
+-- The save a process loaded before it had a session (a co-op host: load_state comes before hosting): its records are read
+-- once the session is up, or they were lost and a returning guest was checked from an empty record.
+local pending_save = nil
+
+local function install_hooks()
+	if not leads_here() then return false end
+	if pending_save then
+		local m = pending_save
+		pending_save = nil
+		start_step("load records", function() load_records(m) end)
+	end
 	start_step("body listeners", install_listeners)
 	start_step("corpse search", wrap_corpse)
 	start_step("task rank", wrap_task_rank)
+	return true
+end
+
+-- A co-op host starts its session after its level is up (coop_manager.cpp autostart waits for level_ready; the in-game
+-- Host comes later still), so at its first update nobody led here (stand b57h: the keeper saw neither the guest's
+-- steps nor his corpse search). Until this process leads, ask again at each update.
+local function await_lead()
+	if install_hooks() then UnregisterScriptCallback("actor_on_update", await_lead) end
+end
+
+local function first_update()
+	if not install_hooks() then RegisterScriptCallback("actor_on_update", await_lead) end
 end
 
 local function start()
@@ -677,7 +698,12 @@ local function start()
 	-- answers, these lifecycle callbacks install no hooks into gameplay or mods.
 	start_step("first update", function() RegisterScriptCallback("actor_on_first_update", first_update) end)
 	start_step("load records", function() RegisterScriptCallback("load_state", function(m)
-		if C().active() then load_records(m) end
+		if C().active() then
+			pending_save = nil
+			load_records(m)
+		else
+			pending_save = m
+		end
 	end) end)
 end
 
