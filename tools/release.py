@@ -233,6 +233,7 @@ def must(run: Runner, args: list[str], cwd: pathlib.Path) -> str:
 # ---- verify ------------------------------------------------------------------------------------------------------------
 
 OWNER_WAIVER = re.compile(r"^[РR]\d{1,3}$")
+WAIVED_LINE = re.compile(r"missing|does not count|stale|FAIL|refused", re.I)
 
 
 def check_waiver(root: pathlib.Path, waiver: str) -> None:
@@ -270,7 +271,9 @@ def gate_checks(run: Runner, root: pathlib.Path, since: str, exe: pathlib.Path,
         if source.returncode != 0:
             raise Refused(f"--owner-waiver {waiver} waives the stand and tests marks only, and the exe is not engine-ci's "
                           "build of engine HEAD: " + scrub((source.stdout or "")[-800:]))
-        waived = "\n".join(scrub(l) for l in out.splitlines() if l.startswith("gates:") and "required" not in l)
+        # what refused, not the range's file list (b57: 150 KB of it went into one printed line)
+        waived = "\n".join(scrub(l) for l in out.splitlines()
+                           if l.startswith("gates:") and WAIVED_LINE.search(l) and "required" not in l)
         shown.append(f"gates: WAIVED by the owner (TZ.md {waiver}): " + "; ".join(waived.splitlines()))
         return shown, waived
     return shown, ""

@@ -448,9 +448,12 @@ def test_verify_owner_waiver_goes_past_the_marks_and_is_recorded(tmp_path, capsy
     exe = b"MZ RayLink Engine dev: the build"
     n, original, fake, _ = whole_verify(tmp_path, exe, exe, exe, "original")
     fake.gates = 1
+    fake.out = "gates:   mod b2bd2971: core     gamedata/scripts/coop_mods_items.script (core)\n"
     tz_with(tmp_path)
     result = release.verify(n, tmp_path, "dev-42.1", original, fake, waiver="Р24")
     assert result["owner_waiver"] == "Р24" and "hostplay.ok missing" in result["waived"]
+    # only what refused: not the range's file list (b57: 150 KB of it went into one printed line)
+    assert "coop_mods_items" not in result["waived"] and "required" not in result["waived"], result["waived"]
     saved = json.loads((tmp_path / n.work / "verified.json").read_text(encoding="utf-8"))
     assert saved["owner_waiver"] == "Р24" and "hostplay.ok missing" in saved["waived"]
     out = capsys.readouterr().out
