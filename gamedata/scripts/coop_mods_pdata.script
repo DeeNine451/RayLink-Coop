@@ -162,6 +162,9 @@ function apply_loaded(m)
 	m[STORE] = nil -- other players' records are the host's business
 	st.token = saved_token
 	st.kept = false -- a new world: the reports go on
+	-- and its first report goes even when it equals the last one sent: that one may have been dropped (b57i Server
+	-- allymark: sent the moment before the trip, the world had the peer joining again), and the world's record would miss it.
+	st.last = nil
 	st.applied = st.applied + 1
 	log("restored %d key(s) for character %d from %s", #order, my, src)
 end

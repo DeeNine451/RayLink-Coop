@@ -185,6 +185,31 @@ if which == "client" then
 	NOW = NOW + 20000
 	SendScriptCallback("actor_on_update")
 	check(sent("mods.pd") ~= nil, "and the reports go on in the new world")
+	-- 3b'. b57i allymark_server (Server): the world dropped a report sent the moment before the trip, the peer was joining
+	-- again ("script event 'mods.pd' from #2 dropped: sender is not in the world yet"). It was this machine's last report,
+	-- the state kept for the load equals it, and nothing changed after the load: the first report of the new world must go
+	-- all the same, or the world's record misses it until the next change.
+	EF_LIVE.XP = 79
+	SENT = {}
+	NOW = NOW + 20000
+	SendScriptCallback("actor_on_update")
+	check(sent("mods.pd") ~= nil, "a report goes the moment before the trip (the world drops it)")
+	world_epoch = 6
+	SENT = {}
+	coop_main.on_world_leaving(6)
+	alife_storage_manager.CALifeStorageManager_load({
+		skills_levels = { strength = 9 }, experience_framework_savedata = { XP = 999 },
+		coop_mods_pdata = { ["500"] = { t = "TOK2", d = { skills_levels = { strength = 6 }, experience_framework_savedata = { XP = 78 } } } },
+	})
+	m = alife_storage_manager.get_state()
+	check(m.experience_framework_savedata.XP == 79, "the state kept as he left is what he has after the load")
+	SENT = {}
+	NOW = NOW + 20000
+	SendScriptCallback("actor_on_update")
+	local again = sent("mods.pd")
+	local da = again and coop_mods_core.deser(again.d)
+	check(da and da.experience_framework_savedata.XP == 79,
+		"nothing changed since the dropped report: the first report of the new world still goes")
 	-- kept for another world (the host loaded a save while this one was coming): not this world's
 	STASH.coop_mods_pdata = "@load:9|" .. s5
 	alife_storage_manager.CALifeStorageManager_load({
