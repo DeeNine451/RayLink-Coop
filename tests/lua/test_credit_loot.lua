@@ -86,8 +86,39 @@ haru_skills = setmetatable({
 		return { scavenging_skill = "-20", scavenging_skill_increment = "10" }
 	end } end,
 }, { __index = _G })
-local haru_chunk = assert(loadfile(mod_path("haru_skills")))
+-- Regression (stand b57e): G.A.M.M.A.'s configs\unlocalizers\dotmarks_unlocalizers.ltx has the engine (script_storage.cpp)
+-- turn Haru's file local rank_table into a module field before the script compiles ("found variable rank_table to
+-- unlocal"). Load Haru in that shape, as the game does.
+local HARU_UNLOCAL = { rank_table = true }
+local function unlocalize(src, names)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if names[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+local haru_file = assert(io.open(mod_path("haru_skills"), "rb"))
+local haru_src = haru_file:read("*a")
+haru_file:close()
+local haru_chunk = assert(loadstring(unlocalize(haru_src, HARU_UNLOCAL), "@haru_skills.script"))
 setfenv(haru_chunk, haru_skills)()
+assert(type(rawget(haru_skills, "rank_table")) == "table", "the unlocalized Haru keeps rank_table as a module field")
 haru_skills.skills_levels.scavenging = { experience = 0 }
 haru_skills.skills_stats.scavenging = { scavenging_skill = 80 }
 haru_skills.options.exp_multiplier_scavenging = 2
@@ -111,6 +142,11 @@ AddScriptCallback("GUI_on_show")
 AddScriptCallback("server_entity_on_unregister")
 if have_file(ROOT .. "scripts/coop_credit_loot.script") then load_script("coop_credit_loot").on_game_start() end
 SendScriptCallback("actor_on_first_update")
+do
+	local installed = false
+	for _, label in ipairs(coop_mods_core.wrapped) do installed = installed or label == "g93.haru_skills.scavanger_effect" end
+	check(installed, "stand b57e: an unlocalized Haru rank_table still installs the corpse search credit")
+end
 
 local function generate(npc, who)
 	local ok, err = coop_mods_core.as_player(who, death_manager.create_release_item, npc)

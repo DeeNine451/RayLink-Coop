@@ -45,11 +45,20 @@ local function install_search()
 	local effect = C().fn(haru, "scavanger_effect")
 	local increase = C().fn(haru, "increase_skill")
 	if not (effect and increase and C().fn(death, "create_release_item")) then return end
-	local kept = C().upvalue(effect, "always_keep_item")
-	local rank_xp = C().upvalue(effect, "rank_table")
-	local random = C().upvalue(effect, "math_random")
+	-- A file local of haru_skills.script, or a module field where an unlocalizer has the engine (script_storage.cpp) turn
+	-- the local into one before the script compiles: G.A.M.M.A.'s configs\unlocalizers\dotmarks_unlocalizers.ltx lists
+	-- [haru_skills] rank_table (stand b57e: no searcher, no search XP on any machine).
+	local function haru_local(name)
+		local value = C().upvalue(effect, name)
+		if value == nil then value = rawget(haru, name) end
+		return value
+	end
+	local kept = haru_local("always_keep_item")
+	local rank_xp = haru_local("rank_table")
+	local random = haru_local("math_random")
 	if not (type(kept) == "table" and type(rank_xp) == "table" and type(random) == "function") then
-		C().log("credit_loot", "Haru scavenging effects could not be identified")
+		C().log("credit_loot", "Haru scavenging effects could not be identified (always_keep_item %s, rank_table %s, math_random %s)",
+			type(kept), type(rank_xp), type(random))
 		return
 	end
 
