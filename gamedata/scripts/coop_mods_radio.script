@@ -529,13 +529,20 @@ local function fm_list(path)
 	return out
 end
 
+-- The folders of channel ch, built as the tab builds them (stock ui_pda_radio_tab.script:31-34). Its path_radio_ch /
+-- path_radio_session are main-chunk locals that no function captures and no unlocalizer lists: unreachable from here.
+local function fm_folders(ch)
+	local dir = "radio\\_channel_" .. tostring(ch)
+	return dir .. "\\", dir .. "_session\\"
+end
+
 -- The tab lists the same folders; listing them again maps a track index back to its file name.
 local function fm_build()
 	local ch_t, ses_t = fm_local("radio_ch"), fm_local("radio_session")
-	local pc, ps = fm_local("path_radio_ch"), fm_local("path_radio_session")
-	if not (type(ch_t) == "table" and type(ses_t) == "table" and type(pc) == "table" and type(ps) == "table") then return false end
+	if not (type(ch_t) == "table" and type(ses_t) == "table") then return false end
 	for ch = 1, #ch_t do
-		local tracks, sessions = fm_list(pc[ch] or ""), fm_list(ps[ch] or "")
+		local track_dir, session_dir = fm_folders(ch)
+		local tracks, sessions = fm_list(track_dir), fm_list(session_dir)
 		if type(ch_t[ch]) == "table" and type(ses_t[ch]) == "table" and #tracks == #ch_t[ch] and #sessions == #ses_t[ch] then
 			fm.names[ch] = { [KIND_TRACK] = tracks, [KIND_SESSION] = sessions }
 			fm.slots[ch] = { [KIND_TRACK] = {}, [KIND_SESSION] = {} }

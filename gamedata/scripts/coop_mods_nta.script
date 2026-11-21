@@ -875,7 +875,11 @@ end
 local function hidden_threat_rank()
 	if not world_active() or has_alife_info("hidden_threat_start") or has_alife_info("hidden_threat_disabled") then return end
 	local ht, u = C().mod("hidden_threat"), C().mod("utils_slht")
-	local rank = ht and u and C().find_local(ht, "cond_rank")
+	if not (ht and u) then return end
+	-- cond_rank (hidden_threat.script:12) is an upvalue of the local hidden_threat_update only, two levels below the module
+	-- function on_game_start (-> actor_on_first_update -> hidden_threat_update): past find_local's one-wrapper walk
+	local rank = C().find_local(ht, "cond_rank")
+	if rank == nil then rank = C().upvalue(C().find_local(ht, "hidden_threat_update"), "cond_rank") end
 	if type(rank) ~= "number" then return end
 	for _, p in ipairs(C().all_players()) do
 		if faction_of(p.obj) == "army" and p.obj:character_rank() >= rank then

@@ -434,9 +434,12 @@ do
 	local H, E = host_world()
 	local NEWS = {}
 	do
+		-- hidden_threat.script's shape: cond_rank (:12) is an upvalue of the local hidden_threat_update only, which the
+		-- local actor_on_first_update holds, which the module function on_game_start holds (two levels down)
 		local cond_rank = 1000
 		local function hidden_threat_update() return cond_rank end
-		E.hidden_threat = { touch = function() return hidden_threat_update end }
+		local function actor_on_first_update() return hidden_threat_update end
+		E.hidden_threat = { on_game_start = function() return actor_on_first_update end }
 	end
 	E.utils_slht = { valid_faction_actor = function() return true end,
 		HTCreateNews = function(_, msg) NEWS[#NEWS + 1] = msg end }
@@ -459,6 +462,86 @@ do
 	NOW = NOW + 6000
 	H.fire("actor_on_update")
 	check(E.INFOS.hidden_threat_start == nil, "a storyline that is off stays off")
+end
+
+-- The real hidden_threat.script, loaded the game's way (unlocalize.lua: no unlocalizer lists it, its locals stay locals).
+-- Live shape: on_game_start -> actor_on_first_update -> hidden_threat_update -> cond_rank = 1000.
+if have_file(gamma("hidden_threat")) then
+	local unloc = dofile("tests/lua/support/unlocalize.lua")
+	for _, dedicated in ipairs({ false, true }) do
+		print("== Hidden Threat, the real script, " .. (dedicated and "Server (the world server, the player on a map server)"
+			or "Co-op (the host, the client on his map)") .. ": an army player's rank starts it")
+		local H, E = host_world(dedicated)
+		local NEWS = {}
+		E.utils_slht = { valid_faction_actor = function() return true end,
+			HTCreateNews = function(_, msg) NEWS[#NEWS + 1] = msg end }
+		local f = assert(unloc.loadfile(gamma("hidden_threat")))
+		local ht = setmetatable({}, { __index = E })
+		E.hidden_threat = ht
+		setfenv(f, ht)
+		f()
+		ht.on_game_start()
+		E.db.actor.character_rank = function() return 100 end
+		local rank = 999
+		if dedicated then
+			H.objects[500] = nil
+			E.SE[500] = { position = vec(0, 0, 0), m_game_vertex_id = 2, m_level_vertex_id = 3,
+				alive = function() return true end, community = function() return "actor_army" end, rank = function() return rank end }
+			E.coop.levels = {
+				split = function() return true end,
+				my_level = function() return 1 end,
+				level_of_player = function(p) if p == 1 then return 2 end end,
+				carried = function() return {} end,
+			}
+			E.alife = function() return { level_name = function(_, l) return l == 2 and "l05_bar" or "fake_start" end } end
+		else
+			H.objects[500]._comm = "actor_army"
+			H.objects[500].character_rank = function() return rank end
+		end
+		start_nta(H)
+		NOW = NOW + 6000
+		H.fire("actor_on_update")
+		check(E.INFOS.hidden_threat_start == nil and #NEWS == 0, "rank 999: under the script's cond_rank, not yet")
+		rank = 1000
+		NOW = NOW + 6000
+		H.fire("actor_on_update")
+		check(E.INFOS.hidden_threat_start == true and NEWS[1] == "st_sl_hidden_threat_msg_start",
+			"rank 1000 = the script's cond_rank: the army player starts it the stock way")
+		NOW = NOW + 6000
+		H.fire("actor_on_update")
+		check(#NEWS == 1, "once")
+	end
+
+	print("== Hidden Threat, the real script, single player: only the stock update starts it")
+	do
+		local H, E = host_world()
+		E.coop.is_active = function() return false end
+		local NEWS = {}
+		E.utils_slht = { valid_faction_actor = function() return true end,
+			HTCreateNews = function(_, msg) NEWS[#NEWS + 1] = msg end }
+		E.ResetTimeEvent, E.RemoveTimeEvent = function() end, function() end
+		local f = assert(unloc.loadfile(gamma("hidden_threat")))
+		local ht = setmetatable({}, { __index = E })
+		E.hidden_threat = ht
+		setfenv(f, ht)
+		f()
+		ht.on_game_start()
+		E.db.actor._comm = "actor_army"
+		E.db.actor.character_rank = function() return 1200 end
+		E.db.actor.give_info_portion = function(_, i) E.INFOS[i] = true end
+		start_nta(H)
+		NOW = NOW + 6000
+		H.fire("actor_on_update")
+		check(E.INFOS.hidden_threat_start == nil and #NEWS == 0, "no session: the co-op poll starts nothing")
+		H.timers = {}
+		H.fire("actor_on_first_update")
+		check(H.timers[1] and H.timers[1].name == "stht_update", "the stock first update schedules its own update")
+		run_timers(H)
+		check(E.INFOS.hidden_threat_start == true and #NEWS == 1 and NEWS[1] == "st_sl_hidden_threat_msg_start",
+			"the stock update starts it once, for db.actor")
+	end
+else
+	print("  (GAMMA hidden_threat.script not found: the real Hidden Threat check is skipped)")
 end
 
 print("== Mystery of the Swamps: the ghost's blow lands on the player nearest to it")

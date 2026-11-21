@@ -1,8 +1,9 @@
 -- The engine's unlocalizer for tests (engine src\xrServerEntities\script_storage.cpp, before a script compiles): for a
 -- script listed in a gamedata\configs\unlocalizers\*.ltx section, a column-0 "local a, b = ..." naming a listed variable
--- loses its "local" (a module field from then on) and "local a" becomes "a = nil"; one line for one line, so line numbers
--- stay. A test that loads a G.A.M.M.A. script must load it this way, or it passes where the game fails (stand, build 57:
--- XCV phantoms, corpse search XP, the guide, the Barrier defense - all looked for a local that the game made a field).
+-- loses its "local" (a module field from then on) and "local a" becomes "a = nil"; a column-0 "local function f(" of a
+-- listed name becomes "function f(" (a module function); one line for one line, so line numbers stay. A test that loads a
+-- G.A.M.M.A. script must load it this way, or it passes where the game fails (stand, build 57: XCV phantoms, corpse
+-- search XP, the guide, the Barrier defense - all looked for a local that the game made a field).
 local M = {}
 
 -- What the stand's unlocalizers list for the scripts these tests load (E:\RayLinkGames\GAMMA\game-dev\gamedata\configs\
@@ -10,6 +11,9 @@ local M = {}
 M.GAMMA = {
 	tasks_guide = { guid = true, curr_guid = true, tbl_way = true, tbl_ignore_Locations = true },
 	tasks_defense = { MDATA = true },
+	-- unlocalizer_idiots.ltx (danger_in_radius is a module function already: nothing to do for it)
+	xr_danger = { bd_types = true, is_danger = true, danger_in_radius = true, npc_on_hear_callback = true,
+		npc_on_hit_callback = true },
 }
 
 function M.source(src, names)
@@ -18,7 +22,11 @@ function M.source(src, names)
 	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
 		local l = line:gsub("\r$", "")
 		local rest = l:match("^local[ \t]+(.*)$")
-		if rest and not rest:match("^function[ \t]") then
+		-- the engine's pattern (^local)([\t ]+)(function)([\t ]+)([_a-zA-Z].*)([\t ]*)(\(.*$) and its name group 5
+		local fn = rest and rest:match("^function[ \t]+([_a-zA-Z].*)[ \t]*%(.*$")
+		if fn then
+			if names[fn] then l = rest end
+		elseif rest and not rest:match("^function[ \t]") then
 			local body = rest:gsub("%-%-.*$", "")
 			local has_value = body:find("=", 1, true) ~= nil
 			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do

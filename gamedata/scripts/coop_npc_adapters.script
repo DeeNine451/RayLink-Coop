@@ -38,9 +38,19 @@ end
 
 local corpse_said = 0 -- log lines of the rule below
 
-local function corpse(C, P, active)
-	local m = C.mod("xr_danger")
+-- xr_danger's corpse action is a file local that only the method action_danger:execute captures. action_danger is a
+-- luabind class, a userdata: find_local cannot list its methods (pairs() fails on it), so in the game it found nothing
+-- and the rule below was never installed, in any build since it was written (found by the build 57 sweep). The class
+-- gives a method by name (luabind class_rep::static_class_gettable; a name it lacks raises, so C.fn reads it under pcall).
+local function corpse_local(C, m)
 	local old, holder, index = C.find_local(m, "script_action_danger_corpse")
+	if holder then return old, holder, index end
+	local cls = type(m) == "table" and rawget(m, "action_danger")
+	return C.upvalue(C.fn(cls, "execute"), "script_action_danger_corpse")
+end
+
+local function corpse(C, P, active)
+	local old, holder, index = corpse_local(C, C.mod("xr_danger"))
 	if type(old) ~= "function" or not holder then return false end
 	debug.setupvalue(holder, index, function(npc, st, danger, object, dependent, kind, ...)
 		if active() and npc and st then
