@@ -58,9 +58,38 @@ function getFS()
 	return { update_path = function(_, _, file) return GAMMA_DIR .. BS .. file end }
 end
 
--- a module the way the engine loads it: its file run in a module table (line numbers kept)
-local function load_real(name)
+-- The engine's unlocalizer (engine xrServerEntities\script_storage.cpp, before a script compiles): a column-0
+-- "local a, b = ..." that names a listed variable loses its "local" (a module field from then on), "local a" becomes
+-- "a = nil"; one line for one line, so line numbers stay.
+local function unlocalize(src, names)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if names[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+
+-- a module the way the engine loads it: its file run in a module table (line numbers kept); unlocal: the names an
+-- unlocalizer section of the game lists for that script
+local function load_real(name, unlocal)
 	local src = assert(read_all(gamma(name)))
+	if unlocal then src = unlocalize(src, unlocal) end
 	local f = assert(loadstring(src, "@" .. gamma(name)))
 	local m = setmetatable({}, { __index = _G })
 	_G[name] = m
@@ -239,38 +268,66 @@ local function squad(id, members)
 			return function() i = i + 1 return members[i] and { id = members[i] } or nil end
 		end }
 end
-local tg = load_real("tasks_guide")
--- the guide job: squad 300 with members 301, 302 (curr_guid is a local of the module: activate fills it the stock way)
+-- the guide job: squad 300 with members 301, 302
 SE[300] = squad(300, { 301, 302 })
 SE[301] = { id = 301, group_id = 300 }
 SE[302] = { id = 302, group_id = 65535 } -- a member of a squad from the wire, here
 SE[401] = { id = 401, group_id = 400 }
 SE[400] = squad(400, { 401 })
 SE[501] = { id = 501, group_id = 65535 }
-local curr = nil
-for i = 1, 255 do
-	local n, v = debug.getupvalue(tg.is_not_guider_companion, i)
-	if n == nil then break end
-	if n == "curr_guid" then curr = v end
+-- Regression (unlocalizers review): G.A.M.M.A.'s configs\unlocalizers\unlocalizer_idiots.ltx lists [tasks_guide]
+-- curr_guid, so the engine turns tasks_guide.script:7 "local curr_guid = {}" into a module field before the script
+-- compiles. The guard looked for an upvalue only: the guide's squad was never found in a session. Each shape is run: the
+-- game's (the unlocalizer applied) and a plain file local (a profile without that unlocalizer entry).
+local function upvalue_index(tg, name)
+	for _, f in pairs(tg) do
+		if type(f) == "function" then
+			for i = 1, 255 do
+				local n = debug.getupvalue(f, i)
+				if n == nil then break end
+				if n == name then return f, i end
+			end
+		end
+	end
+	return nil
 end
-assert(type(curr) == "table", "curr_guid upvalue")
-curr.squad_id = 300
-local stock_not, stock_is = tg.is_not_guider_companion, tg.is_guider_companion
-check(stock_not(db.actor, npc(301)) == false and stock_is(db.actor, npc(301)) == true, "stock: the guide")
-check(stock_not(db.actor, npc(401)) == true, "stock: another companion")
-local ok4, err4 = pcall(stock_not, db.actor, npc(302))
-check(not ok4 and tostring(err4):find("tasks_guide.script:447: attempt to index a nil value", 1, true) ~= nil,
-	"RED (stock): " .. tostring(err4))
-check(F.guard_guide() == true and F.guard_guide() == false, "the guard installs once")
-check(tg.is_not_guider_companion(db.actor, npc(301)) == false and tg.is_guider_companion(db.actor, npc(301)) == true, "with a squad: the original")
-check(tg.is_not_guider_companion(db.actor, npc(401)) == true and tg.is_guider_companion(db.actor, npc(401)) == false, "another squad: the original")
-ok4, err4 = pcall(tg.is_not_guider_companion, db.actor, npc(302))
-check(ok4 and err4 == false, "GREEN: an unbound member of the guide's squad is the guide: " .. tostring(err4))
-check(tg.is_guider_companion(db.actor, npc(302)) == true, "is_guider_companion agrees")
-check(tg.is_not_guider_companion(db.actor, npc(501)) == true and tg.is_guider_companion(db.actor, npc(501)) == false, "no squad, not the guide's")
-curr.squad_id = nil
-check(tg.is_not_guider_companion(db.actor, npc(501)) == true, "no guide job: not the guide")
-check(logged("has no squad here") ~= nil, "said in the log")
+local function guide_shape(shape, unlocal, fixes)
+	local tg = load_real("tasks_guide", unlocal)
+	local holder, slot = upvalue_index(tg, "curr_guid")
+	if unlocal then
+		check(holder == nil and type(rawget(tg, "curr_guid")) == "table", shape .. ": curr_guid is a module field, no upvalue")
+	else
+		check(holder ~= nil and rawget(tg, "curr_guid") == nil, shape .. ": curr_guid is a file local")
+	end
+	-- what the stock "curr_guid = copy_tbl(guid)" (activate, :393) and "curr_guid = {}" (finish, :293) do in that shape
+	local function set_job(job)
+		if holder then debug.setupvalue(holder, slot, job) else rawset(tg, "curr_guid", job) end
+	end
+	set_job({ squad_id = 300 })
+	local stock_not, stock_is = tg.is_not_guider_companion, tg.is_guider_companion
+	check(stock_not(db.actor, npc(301)) == false and stock_is(db.actor, npc(301)) == true, shape .. ": stock: the guide")
+	check(stock_not(db.actor, npc(401)) == true, shape .. ": stock: another companion")
+	local ok4, err4 = pcall(stock_not, db.actor, npc(302))
+	check(not ok4 and tostring(err4):find("tasks_guide.script:447: attempt to index a nil value", 1, true) ~= nil,
+		shape .. ": RED (stock): " .. tostring(err4))
+	local said_before = #LOG
+	check(fixes.guard_guide() == true and fixes.guard_guide() == false, shape .. ": the guard installs once")
+	check(tg.is_not_guider_companion(db.actor, npc(301)) == false and tg.is_guider_companion(db.actor, npc(301)) == true, shape .. ": with a squad: the original")
+	check(tg.is_not_guider_companion(db.actor, npc(401)) == true and tg.is_guider_companion(db.actor, npc(401)) == false, shape .. ": another squad: the original")
+	ok4, err4 = pcall(tg.is_not_guider_companion, db.actor, npc(302))
+	check(ok4 and err4 == false, shape .. ": GREEN: an unbound member of the guide's squad is the guide: " .. tostring(err4))
+	check(tg.is_guider_companion(db.actor, npc(302)) == true, shape .. ": is_guider_companion agrees")
+	check(tg.is_not_guider_companion(db.actor, npc(501)) == true and tg.is_guider_companion(db.actor, npc(501)) == false, shape .. ": no squad, not the guide's")
+	set_job({})
+	check(tg.is_not_guider_companion(db.actor, npc(302)) == true and tg.is_guider_companion(db.actor, npc(302)) == false, shape .. ": the job finished: not the guide")
+	set_job({ squad_id = 300 })
+	check(tg.is_guider_companion(db.actor, npc(302)) == true, shape .. ": a new job is read, not the first table")
+	local line = nil
+	for i = said_before + 1, #LOG do line = line or (LOG[i]:find("has no squad here", 1, true) and LOG[i]) end
+	check(line ~= nil and line:find("squad 300 instead (true)", 1, true) ~= nil, shape .. ": said in the log with the guide's squad: " .. tostring(line))
+end
+guide_shape("the game's tasks_guide", { curr_guid = true }, F)
+guide_shape("a plain tasks_guide", nil, load_fixes())
 
 -------------------------------------------------------------------------------
 print("== V5 game_relations.reset_all_relations: the table is written by position in a list of another order")

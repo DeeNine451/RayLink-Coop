@@ -111,14 +111,70 @@ local function deliver(obj)
 	OBJ[obj:id()] = obj
 	SendScriptCallback("actor_on_item_take", obj)
 end
-local function corpus(name)
-	local file = assert(loadfile("temp/review/corpus/merged/" .. name .. ".script"))
+-- The engine's unlocalizer (engine\src\xrServerEntities\script_storage.cpp): a column-0 "local x = v" of a listed name
+-- becomes "x = v" ("local x": "x = nil") before the script compiles, so x is a module field, not an upvalue.
+local function unlocalize(src, names)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if names[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+-- The names an unlocalizer .ltx lists under [script].
+local function unlocal_names(ltx, script)
+	local names, inside = {}, false
+	local fh = assert(io.open(ltx, "r"))
+	for line in fh:lines() do
+		line = line:gsub("\r$", ""):gsub(";.*$", ""):match("^%s*(.-)%s*$")
+		local section = line:match("^%[(.-)%]")
+		if section then
+			inside = section:lower() == script
+		elseif inside and line ~= "" then
+			names[line] = true
+		end
+	end
+	fh:close()
+	return names
+end
+local function corpus(name, unlocal)
+	local path = "temp/review/corpus/merged/" .. name .. ".script"
+	local file
+	if unlocal then
+		local fh = assert(io.open(path, "rb"))
+		local src = fh:read("*a")
+		fh:close()
+		file = assert(loadstring(unlocalize(src, unlocal), "@" .. name .. ".script"))
+	else
+		file = assert(loadfile(path))
+	end
 	local env = setmetatable({}, { __index = _G })
 	_G[name] = env
 	setfenv(file, env)()
 	return env
 end
-local D = corpus("item_device")
+-- Regression: our gamedata\configs\unlocalizers\unlocalizer_coop_economy.ltx [item_device] has the engine turn
+-- item_device's file local dev_condition into a module field. Load item_device in that shape, as the game does.
+local D = corpus("item_device",
+	unlocal_names("gamedata/configs/unlocalizers/unlocalizer_coop_economy.ltx", "item_device"))
+assert(type(rawget(D, "dev_condition")) == "table", "the unlocalized item_device keeps dev_condition as a module field")
+-- item_device's [id] = condition table (its load_state replaces it, so read it anew).
+local function stored(id) return rawget(D, "dev_condition")[id] end
 local P = corpus("liz_fdda_redone_item_pickup")
 local S = corpus("liz_fdda_redone_mutant_skinning")
 
@@ -195,6 +251,7 @@ if mode == "hostplay" or mode == "srv_map" then
 	local reply, target = answer()
 	check(reply.ok == true and target == 1 and creates == 1 and #RELEASED == released + 1 and SE[batt_id] == nil
 		and dev:condition() == 0.9 and CREATED[#CREATED].cond == 0.3, mode .. ": swap commits once and returns the extracted charge")
+	check(stored(dev_id) == 0.9, mode .. ": the swap writes the new charge into item_device's unlocalized dev_condition")
 
 	local d2, b2 = item("detector_simple", 500, 0.4), item("batteries_dead", 500, 0.8)
 	fail_create = true
@@ -207,6 +264,7 @@ if mode == "hostplay" or mode == "srv_map" then
 	local output = CREATED[#CREATED] or {}
 	check(answer().why == "release" and d2:condition() == 0.4 and SE[b2:id()] and output.id and SE[output.id] == nil,
 		mode .. ": failed release restores the charge and removes the output")
+	check(stored(d2:id()) == 0.4, mode .. ": the rollback restores the charge in item_device's unlocalized dev_condition")
 	fail_release = false
 
 	local other = item("detector_simple", 0, 0.4)
@@ -273,6 +331,8 @@ if mode == "hostplay" or mode == "srv_map" then
 	end
 	check(d1:condition() == 0.9 and d2:condition() == 0.4 and fx == sound_before + 1,
 		mode .. ": client applies the confirmed charge and plays the effect once")
+	check(stored(d1:id()) == 0.9 and stored(d2:id()) == nil,
+		mode .. ": client writes the confirmed charge into item_device's unlocalized dev_condition")
 
 	local first, second = item("meat"), item("hide")
 	local a = pickup(first)

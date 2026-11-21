@@ -30,10 +30,18 @@ local function install_facer()
 	local core = coop_mods_core
 	local m = core.mod("xrs_facer")
 	if not m then return end
+	-- facer_sets: a file local of xrs_facer.script, or a module field where G.A.M.M.A.'s
+	-- configs\unlocalizers\unlocalizer_modded_exes_xrs_facer_script_fixes.ltx has the engine (script_storage.cpp) turn
+	-- the local into one before the script compiles. Read anew on every call: xrs_facer.on_game_start replaces it.
 	local _, holder, index = core.find_local(m, "facer_sets")
-	if not holder then return end
+	if not holder and type(rawget(m, "facer_sets")) ~= "table" then return end
 	local function settings(rank)
-		local _, sets = debug.getupvalue(holder, index)
+		local sets
+		if holder then
+			_, sets = debug.getupvalue(holder, index)
+		else
+			sets = rawget(m, "facer_sets")
+		end
 		local ranks_by_name = sets and sets.ranks
 		return ranks_by_name and (ranks_by_name[rank] or ranks_by_name.default)
 	end

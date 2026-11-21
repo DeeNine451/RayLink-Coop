@@ -81,10 +81,14 @@ local function open_task(id)
 	end
 end
 
--- A table local of tasks_guide (nil without the mod).
+-- A table local of tasks_guide (nil without the mod), or the module field an unlocalizer makes of it before the script
+-- compiles: G.A.M.M.A.'s tasks_guide_unlocalizer_tasks_guide_spot.ltx lists [tasks_guide] guid and unlocalizer_idiots.ltx
+-- curr_guid (stand, build 57: the host refused a client's guide, no guide news or dialogue in any session).
 local function guide_table(name)
 	local m = qc.mod("tasks_guide")
-	local v = m and coop_mods_core.find_local(m, name)
+	if not m then return nil end
+	local v = coop_mods_core.find_local(m, name)
+	if v == nil then v = rawget(m, name) end
 	return type(v) == "table" and v or nil
 end
 

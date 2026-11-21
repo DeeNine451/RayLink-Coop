@@ -380,12 +380,20 @@ local function install_defense()
 			return available(tid, who)
 		end
 	end)
+	-- MDATA: a file local of tasks_defense.script, or a module field where an unlocalizer has the engine
+	-- (script_storage.cpp) turn the local into one before the script compiles: G.A.M.M.A.'s
+	-- configs\unlocalizers\emission_fix_task_defense_mdata.ltx lists [tasks_defense] MDATA.
+	local function defense_data()
+		local data, holder = C.find_local(m, "MDATA")
+		if holder then return data end
+		return rawget(m, "MDATA")
+	end
 	local offer_pending = false
 	patch_callback(m, "actor_on_first_update", "actor_on_first_update", "npcrel.defense_offers", function(original)
 		return function(...)
 			if not live() then return original(...) end
 			if not coop_mode.decides_world() then return end
-			local data = C.find_local(m, "MDATA")
+			local data = defense_data()
 			if not data then return end
 			local tid
 			if not offer_pending then

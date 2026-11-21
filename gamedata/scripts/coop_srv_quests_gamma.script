@@ -123,7 +123,10 @@ end
 
 local function defense_tick(mod, expired)
 	if not world_live() or not db.actor then return end
+	-- A file local of tasks_defense.script, or the module field G.A.M.M.A.'s emission_fix_task_defense_mdata.ltx
+	-- ([tasks_defense] MDATA) has the engine make of it (stand, build 57: no Barrier defense offer from the world server).
 	local data = coop_mods_core.upvalue(mod.save_state, "MDATA")
+	if data == nil then data = rawget(mod, "MDATA") end
 	if not data then return end
 	local all, eligible = defense_audience()
 	if #all == 0 then return end

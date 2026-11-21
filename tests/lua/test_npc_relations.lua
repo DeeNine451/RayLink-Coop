@@ -23,6 +23,34 @@ local real_remove = function_source(corpus .. "sim_squad_scripted.script",
 local real_reset = function_source(stock, "function reset_goodwill (", "function is_relation_allowed (")
 local real_set = function_source(stock, "function set_npcs_relation(", "function get_npc_sympathy(")
 local real_sky = read(corpus .. "tasks_skyfall.script")
+-- Regression (build 57): G.A.M.M.A.'s configs\unlocalizers\emission_fix_task_defense_mdata.ltx ([tasks_defense] MDATA)
+-- has the engine (script_storage.cpp) turn the file local MDATA into a module field before the script compiles
+-- ("local MDATA" becomes "MDATA = nil"). Load tasks_defense in that shape, as the game does.
+local DEFENSE_UNLOCAL = { MDATA = true }
+local function unlocalize(src, unlocals)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if unlocals[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+local real_defense = unlocalize(read(corpus .. "tasks_defense.script"), DEFENSE_UNLOCAL)
 local original_random = math.random
 local names = modes.names()
 
@@ -144,8 +172,9 @@ for _, role in ipairs(names) do
 	local day = 0
 	game.get_game_time = function() return { days = day, diffSec = function(_, other) return (day - (other.days or 0)) * 86400 end } end
 	level.get_start_time = function() return { days = 0 } end
-	tasks_defense = module("tasks_defense", read(corpus .. "tasks_defense.script"))
+	tasks_defense = module("tasks_defense", real_defense)
 	tasks_defense.load_state({})
+	check(type(rawget(tasks_defense, "MDATA")) == "table", role .. " m09 unlocalized tasks_defense keeps MDATA as a module field")
 	local faction_fn = game_relations.is_factions_enemies
 	load_script("coop_main"); load_script("coop_mods_core"); load_script("coop_npc_players"); load_script("coop_mode")
 	local set = modes.install(coop_mode, role, { seat_plays = function(peer)

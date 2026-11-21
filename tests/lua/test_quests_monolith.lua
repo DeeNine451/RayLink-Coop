@@ -14,10 +14,12 @@ local STARTS = {
 }
 local MAP = { [1] = "l01_escape", [2] = "l02_garbage", [3] = "l03_agroprom", [4] = "l05_bar", [9] = "fake_start" }
 
+-- The game's way: G.A.M.M.A.'s unlocalizers make tasks_guide's guid / curr_guid module fields (support\unlocalize.lua).
+local unlocalize = dofile("tests/lua/support/unlocalize.lua")
 local function load_mod(m, name)
 	local file = name .. ".script"
-	local source = loadfile("temp/review/corpus/merged/" .. file)
-	if not source then source = assert(loadfile("E:/RayLinkGames/GAMMA/game-dev/gamedata/scripts/" .. file)) end
+	local source = unlocalize.loadfile("temp/review/corpus/merged/" .. file)
+	if not source then source = assert(unlocalize.loadfile("E:/RayLinkGames/GAMMA/game-dev/gamedata/scripts/" .. file)) end
 	local module = setmetatable({}, { __index = m.env })
 	m.env[name] = module
 	setfenv(source, module)()
@@ -172,7 +174,7 @@ local function start_cases(world, client, label)
 end
 
 local function guide(m)
-	return m.env.coop_mods_core.find_local(m.env.tasks_guide, "guid")
+	return m.env.coop_mods_core.find_local(m.env.tasks_guide, "guid") or rawget(m.env.tasks_guide, "guid")
 end
 
 local function guide_dialog(m)

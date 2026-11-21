@@ -22,6 +22,46 @@ local function stock(name, f)
 	return mod
 end
 
+-- The engine's unlocalizer (engine\src\xrServerEntities\script_storage.cpp): before a script compiles, a column-0
+-- "local x = v" of a listed name becomes "x = v" and "local x" becomes "x = nil", a module field.
+local function unlocalize(src, names)
+	local out = {}
+	for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+		local l = line:gsub("\r$", "")
+		local rest = l:match("^local[ \t]+(.*)$")
+		if rest and not rest:match("^function[ \t]") then
+			local body = rest:gsub("%-%-.*$", "")
+			local has_value = body:find("=", 1, true) ~= nil
+			for v in (body:match("^([^=]*)") or ""):gmatch("[^,]+") do
+				if names[v:match("^%s*(.-)%s*$")] then
+					l = rest
+					if not has_value then
+						local code, comment = l:match("^(.-)(%-%-.*)$")
+						l = code and (code .. "= nil " .. comment) or (l .. " = nil")
+					end
+					break
+				end
+			end
+		end
+		out[#out + 1] = l
+	end
+	return table.concat(out, "\n")
+end
+
+-- A stock script compiled as the game compiles it: the names of its unlocalizer section become module fields.
+local function unlocalized_chunk(name, names)
+	local file = name .. ".script"
+	for _, dir in ipairs({ "temp/review/corpus/merged/", "temp/stock_scripts/scripts/", "../anomaly-ref/unpacked/scripts/" }) do
+		local fh = io.open(dir .. file, "rb")
+		if fh then
+			local src = fh:read("*a")
+			fh:close()
+			return assert(loadstring(unlocalize(src, names), "@" .. file))
+		end
+	end
+	error(file)
+end
+
 function class(name)
 	local env = getfenv(2)
 	return function() env[name] = {} end
@@ -155,7 +195,11 @@ xr_wounded = { unlock_medkit = function() end }
 game_statistics = { increment_statistic = function() end }
 npc.iterate_inventory = function() end
 
-stock("xrs_facer")
+-- Regression (Dev 57 G13-3): G.A.M.M.A.'s configs\unlocalizers\unlocalizer_modded_exes_xrs_facer_script_fixes.ltx has
+-- the engine turn xrs_facer's file locals Enabled and facer_sets into module fields before the script compiles. Load
+-- the Facer in that shape, as the game does.
+stock("xrs_facer", unlocalized_chunk("xrs_facer", { Enabled = true, facer_sets = true }))
+assert(type(rawget(xrs_facer, "facer_sets")) == "table", "the unlocalized Facer keeps facer_sets as a module field")
 stock("axr_stalker_panic")
 stock("xr_bribe")
 stock("xr_remark")
@@ -174,6 +218,12 @@ load_script("coop_trust")
 xrs_facer.on_game_start()
 xr_bribe.on_game_start()
 if coop_npc_player_checks then coop_npc_player_checks.on_game_start() end
+do
+	local labels = {}
+	for _, label in ipairs(coop_mods_core.wrapped) do labels[label] = true end
+	check(labels["npc-player-checks:xrs_facer.check_enemy"] and labels["npc-player-checks:xrs_facer.action_facer.execute"],
+		"the unlocalized Facer (facer_sets a module field) still gets both player-check wrappers")
+end
 
 local function punch(target)
 	local random = math.random

@@ -30,12 +30,19 @@ local function same_charge(observed, current)
 	return charge(observed) and charge(current) and math.abs(observed - current) <= CHARGE_TOLERANCE
 end
 
+-- item_device's [id] = condition table, read anew on every call (its load_state replaces it): a file local of
+-- item_device.script, or a module field where our configs\unlocalizers\unlocalizer_coop_economy.ltx has the engine
+-- (script_storage.cpp) turn the local into one before the script compiles (as coop_economy_world reads it).
 local function set_charge(obj, value)
 	obj:set_condition(value)
+	local conditions
 	if condition_holder then
-		local _, conditions = debug.getupvalue(condition_holder, condition_slot)
-		if type(conditions) == "table" then conditions[obj:id()] = obj:condition() end
+		local _
+		_, conditions = debug.getupvalue(condition_holder, condition_slot)
+	elseif type(device_mod) == "table" then
+		conditions = rawget(device_mod, "dev_condition")
 	end
+	if type(conditions) == "table" then conditions[obj:id()] = obj:condition() end
 end
 
 -- Both the trust check and the reservation use only objects the requester currently owns.

@@ -25,6 +25,7 @@
 	    talk; client RL-WZND-SWZJ, tasks_guide.script:447): get_object_squad(npc).id with no squad. On a client a member of a
 	    squad that came over the wire has m_group_id free (engine coop_entities.cpp, group_bound), so get_object_squad is
 	    nil. With a squad the original answers; without one the guide's squad (curr_guid) is asked whether it lists the NPC.
+	    curr_guid is a module field in the game (G.A.M.M.A.'s unlocalizer_idiots.ltx [tasks_guide]), a file local without it.
 	V5  game_relations.reset_all_relations (live 2026-11-12, the first player on the hidden world server: the Clear Sky base
 	    killed itself and him). The stock reset gives the j-th value of a row of [communities_relations] to the j-th name of
 	    its own list factions_table_all, and that list is in another order than the columns of game_relations.ltx (stock
@@ -83,7 +84,9 @@ local function line_of(src, needle)
 	return n
 end
 
--- A local of a module: an upvalue of one of its functions.
+-- A file local of a module: an upvalue of one of its functions; else its module field, where an unlocalizer has the
+-- engine (script_storage.cpp) turn the local into one before the script compiles (G.A.M.M.A.'s
+-- configs\unlocalizers\unlocalizer_idiots.ltx lists [tasks_guide] curr_guid). Read at each call: the script replaces it.
 local function module_local(m, name)
 	for _, f in pairs(m) do
 		if type(f) == "function" then
@@ -94,7 +97,7 @@ local function module_local(m, name)
 			end
 		end
 	end
-	return nil
+	return rawget(m, name)
 end
 
 -------------------------------------------------------------------------------

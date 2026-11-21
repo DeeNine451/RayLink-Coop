@@ -17,7 +17,8 @@ local function vendor(M, name)
 	end
 	local mod = setmetatable({}, { __index = M.env })
 	M.env[name] = mod
-	setfenv(assert(loadfile(path)), mod)()
+	-- The game's way: G.A.M.M.A.'s emission_fix_task_defense_mdata.ltx makes tasks_defense's MDATA a module field.
+	setfenv(assert(dofile("tests/lua/support/unlocalize.lua").loadfile(path)), mod)()
 	return mod
 end
 
