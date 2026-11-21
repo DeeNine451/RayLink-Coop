@@ -8,8 +8,20 @@ local function log(fmt, ...)
 	printf("%s", "[s7] " .. string.format(fmt, ...))
 end
 
+-- b57i creator10_server: the stand stops the processes 17 s after a failure; what the game writes meanwhile (the client's
+-- health ledger names what wrote his health) reaches the file only by a flush, so the probe flushes for 20 s after a FAIL.
+local fail_flush_until, next_flush = nil, 0
+
 local function out(fmt, ...)
 	log(fmt, ...)
+	get_console():execute("flush")
+	if type(fmt) == "string" and fmt:sub(1, 4) == "FAIL" then fail_flush_until = time_global() + 20000 end
+end
+
+local function flush_after_fail()
+	local now = time_global()
+	if not fail_flush_until or now >= fail_flush_until or now < next_flush then return end
+	next_flush = now + 500
 	get_console():execute("flush")
 end
 
@@ -180,6 +192,29 @@ local function life_of(actor)
 	return actor:alive() and coop.life_of(0) or "dead"
 end
 
+-- b57h/b57i creator10_server: the stock JumpToLevel puts the player at the first smart terrain of the map in pairs() order,
+-- a camp or a lair that changes between trips. On l02_garbage that was a mutant's fight (b57i: down 4.8 s after the arrival,
+-- no hit reached him, a script wrote his health past the debug god; b57h: a radiation zone, then a fall). A trip goes to one
+-- friendly camp of each map (the creator is a loner) through the same stock ChangeLevel; without that camp, the stock trip.
+local SAFE_CAMP = { l01_escape = "esc_smart_terrain_2_12", l02_garbage = "gar_smart_terrain_3_5" }
+
+local function travel(goal)
+	local name = SAFE_CAMP[goal]
+	if name then
+		local gg = game_graph()
+		for _, smart in pairs(db.smart_terrain_by_id or {}) do
+			if smart:name() == name then
+				local v = gg:vertex(smart.m_game_vertex_id)
+				if v and alife():level_name(v:level_id()) == goal then
+					ChangeLevel(v:level_point(), v:level_vertex_id(), smart.m_game_vertex_id, VEC_ZERO, true)
+					return true
+				end
+			end
+		end
+	end
+	return JumpToLevel(goal)
+end
+
 local function report(label, actor, map, link, character, map_id)
 	local kits = 0
 	actor:iterate_inventory(function(_, item)
@@ -221,7 +256,7 @@ local function tick()
 		travelling = seq
 		out("trip seq=%d role=%s from=%s to=%s", seq, role, map, goal)
 		-- The stock debug trip goes through ChangeLevel and the real server's move decision.
-		if not JumpToLevel(goal) then out("FAIL trip seq=%d could not request %s", seq, goal) end
+		if not travel(goal) then out("FAIL trip seq=%d could not request %s", seq, goal) end
 	end
 end
 
@@ -244,6 +279,7 @@ function on_game_start()
 		RegisterScriptCallback("actor_on_update", function()
 			local ok, err = pcall(role == "bridge" and bridge_tick or tick)
 			if not ok then out("FAIL %s", tostring(err)) end
+			flush_after_fail()
 		end)
 	end)
 end

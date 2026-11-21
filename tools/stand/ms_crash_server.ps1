@@ -539,6 +539,12 @@ function Invoke-S7Run([string]$Name, [scriptblock]$Body) {
         Write-Host ("$Name`: FAIL ({0})" -f (Hide-Hex "$_"))
         throw
     } finally {
+        if (-not $finished -and @($ctx.Clients.Values | Where-Object { -not $_.HasExited }).Count) {
+            # b57i creator10_server: the clients were killed 30 ms after the probe's FAIL, before the client's health ledger
+            # (15 s windows, engine xrCoop/coop_health_ledger.h) named what wrote his health. The probe flushes 20 s after it.
+            Write-Host 'the processes stay up 17 s after the failure (the health ledger, flushed logs)'
+            Start-Sleep -Seconds 17
+        }
         try {
             try { Stop-S7Clients $ctx } finally { Stop-S7World $ctx }
         } finally {

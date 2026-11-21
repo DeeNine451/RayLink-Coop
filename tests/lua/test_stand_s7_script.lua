@@ -193,6 +193,52 @@ check(#restored.trips == 0 and restored.has("arrival seq=7"), "fresh Lua state o
 restored.instruction, restored.reject = "8 s7move travel l01_escape", true
 restored.tick()
 check(restored.has("FAIL") and not restored.has("arrival seq=8"), "a refused trip fails")
+local function flushes(f)
+	local n = 0
+	for _, cmd in ipairs(f.commands) do if cmd == "flush" then n = n + 1 end end
+	return n
+end
+local before_flush = flushes(restored)
+for _ = 1, 4 do restored.tick() end
+check(flushes(restored) >= before_flush + 4, "after a FAIL the probe flushes its log every 500 ms (the stand keeps it up 17 s)")
+restored.now = restored.now + 21000
+local late_flush = flushes(restored)
+restored.tick()
+restored.tick()
+check(flushes(restored) == late_flush, "and stops 20 s after it")
+
+-- b57h/b57i creator10_server: the stock JumpToLevel goes to the first smart terrain of the map in pairs() order (b57i: a
+-- mutant's fight on l02_garbage, down 4.8 s after the arrival). A trip goes to the map's friendly camp, stock ChangeLevel.
+local safe = fixture("s7move")
+local changes = {}
+local smarts = {
+	[11] = { name = function() return "gar_smart_terrain_5_2" end, m_game_vertex_id = 760 }, -- a lair, first in pairs()
+	[12] = { name = function() return "gar_smart_terrain_3_5" end, m_game_vertex_id = 726 },
+	[13] = { name = function() return "esc_smart_terrain_2_12" end, m_game_vertex_id = 453 },
+}
+safe.api.db.smart_terrain_by_id = smarts
+safe.api.VEC_ZERO = "zero"
+safe.api.game_graph = function() return { vertex = function(_, gv) return {
+	level_id = function() return gv >= 700 and 2 or 1 end,
+	level_point = function() return "point" .. gv end,
+	level_vertex_id = function() return gv * 10 end,
+} end } end
+safe.api.alife = function() return { level_name = function(_, id) return id == 2 and "l02_garbage" or "l01_escape" end } end
+safe.api.ChangeLevel = function(pos, lv, gv, dir, anim)
+	changes[#changes + 1] = { pos = pos, lv = lv, gv = gv, dir = dir, anim = anim }
+	safe.trips[#safe.trips + 1] = gv >= 700 and "l02_garbage" or "l01_escape"
+end
+safe.start()
+safe.tick()
+safe.instruction = "3 s7move travel l02_garbage"
+safe.tick()
+local c = changes[1]
+check(#changes == 1 and c.gv == 726 and c.lv == 7260 and c.pos == "point726" and c.dir == "zero" and c.anim == true,
+	"a trip to l02_garbage arrives at the Garbage hangar camp (gar_smart_terrain_3_5), not the first smart of pairs()")
+safe.map, safe.instruction = "l02_garbage", "4 s7move travel l01_escape"
+safe.tick()
+safe.tick()
+check(#changes == 2 and changes[2].gv == 453, "and back on l01_escape at the rookie village (esc_smart_terrain_2_12)")
 
 local observer = fixture("s7stay")
 observer.start()
