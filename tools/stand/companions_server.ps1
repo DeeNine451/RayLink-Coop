@@ -183,6 +183,9 @@ try {
     }
     if (-not $client.HasExited) { Stop-Process -Id $client.Id -Force }
     $client = $null
+    # The client went with the first world: its 'disconnected: the server is shutting down' (that Stop-World, b57 stand)
+    # is no error of the restart, whose waits read the world and map logs only.
+    $logs = @($serverLog) + $mapLogs
     Keep-Log $serverLog 'world_before'
     Remove-StandFile -Path $serverLog
     $restarting = $true
