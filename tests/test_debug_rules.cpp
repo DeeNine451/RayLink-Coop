@@ -267,6 +267,27 @@ TEST(debug_server_state_flags)
 
 // ============================================================================ the player's machine: its own actor
 
+// b57i creator10_server: every trip reset this machine's state (sync::reset) and took the server's god off its actor; it came
+// back only with the DebugState at the end of the join, 3.4-6.3 s after the client was live. A reset inside the session (a trip,
+// a rejoin, a save the host loaded) keeps what this machine set; the next DebugState decides. Only the session's end takes it.
+TEST(debug_reset_inside_the_session_keeps_the_own_flags)
+{
+	CHECK_EQ(flags_taken_at_reset(kFlagGod, true), uint8_t(0));
+	CHECK_EQ(flags_taken_at_reset(uint8_t(kFlagGod | kFlagAmmo), true), uint8_t(0));
+	CHECK_EQ(flags_taken_at_reset(kFlagGod, false), kFlagGod);
+	CHECK_EQ(flags_taken_at_reset(uint8_t(kFlagGod | kFlagAmmo), false), uint8_t(kFlagGod | kFlagAmmo));
+	CHECK_EQ(flags_taken_at_reset(0, false), uint8_t(0));
+	// kept through the reset, the state at the end of the join still wants god: nothing to set again, still ours
+	const LocalApply kept = apply_local(kFlagGod, kFlagGod, kFlagGod);
+	CHECK_EQ(kept.set, uint8_t(0));
+	CHECK_EQ(kept.clear, uint8_t(0));
+	CHECK_EQ(kept.applied, kFlagGod);
+	// and if the server switched it off meanwhile, that state takes it
+	const LocalApply off = apply_local(kFlagGod, 0, kFlagGod);
+	CHECK_EQ(off.clear, kFlagGod);
+	CHECK_EQ(off.applied, uint8_t(0));
+}
+
 TEST(debug_apply_local_takes_back_only_its_own)
 {
 	// nothing before, god wanted: set, and it is ours
