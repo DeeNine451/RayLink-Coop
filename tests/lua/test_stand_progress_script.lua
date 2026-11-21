@@ -33,6 +33,7 @@ local function fixture(role, map)
 	local inventory = {}
 	local corpse = {
 		id = function() return client and 82 or 81 end,
+		name = function() return "stand_corpse" end,
 		alive = function() return not client and f.killed == 0 end,
 		position = function() return f.corpse_position or f.position end,
 		kill = function(self, killer, bypass)
@@ -107,6 +108,11 @@ local function fixture(role, map)
 			end,
 		},
 		alife_storage_manager = { get_state = function() return { coop_mods_pdata = f.store } end },
+		-- The stock loot roll marks the body (death_manager.create_release_item): the map authority's half of a search.
+		se_load_var = function(id, name, var)
+			assert(not client and id == 81 and name == "stand_corpse" and var == "death_dropped")
+			return f.dropped
+		end,
 		coop_mods_core = {
 			players = function() return players end,
 			avatar = function(peer) assert(peer == 4 and not world); return actor end,
@@ -185,6 +191,27 @@ run("coop_host_and_map_spawn_once_for_the_present_guest", function()
 		step(f, "spawn")
 		check(f.killed == 1 and has(f, "corpse map=l01_escape id=901"), role .. "_announces_dead_corpse_in_host_numbering")
 		check(f.online_rank == 19999, role .. "_spawns_the_corpse_online_as_a_veteran")
+	end
+end)
+
+run("the_map_authority_says_once_what_reached_it_while_the_search_waits", function()
+	for _, role in ipairs({ "prg_host", "map" }) do
+		local f = fixture(role, "l01_escape")
+		step(f, "spawn")
+		step(f, "spawn")
+		check(has(f, "corpse map=l01_escape id=901"), role .. "_made_the_corpse")
+		local flushes = f.flushes
+		step(f, "search 901")
+		step(f, "search 901", 19000)
+		check(not has(f, "host search waits") and f.flushes >= flushes + 2, role .. "_flushes_while_the_search_is_young")
+		f.dropped = true
+		f.trust.pass("g93_corpse_window", true, "peer %s cannot search corpse %s", "4", "81")
+		step(f, "search 901", 1000)
+		check(has(f, "host search waits corpse id=901 online=true loot=true window_checks=1"),
+			role .. "_says_whether_the_loot_roll_and_the_corpse_window_reached_it")
+		local lines = #f.log
+		step(f, "search 901", 20000)
+		check(#f.log == lines, role .. "_says_it_once")
 	end
 end)
 
@@ -339,12 +366,21 @@ for _, map in ipairs({ "l01_escape", "l05_bar" }) do
 		f.corpse_online = false
 		step(f, "search 901")
 		check(f.opens == 0 and #f.reports == 0, map .. "_waits_for_valid_synced_corpse")
+		local flushes = f.flushes
+		step(f, "search 901", 20000)
+		check(has(f, "client search waits for corpse id=901: not online here") and f.flushes >= flushes + 2,
+			map .. "_flushes_and_says_why_the_corpse_is_not_searched")
 		f.corpse_online = true
 		step(f, "search 901")
 		step(f, "search 901")
-		check(f.opens == 1 and #f.reports == 0, map .. "_uses_real_binder_once_and_waits_for_xp")
+		check(f.opens == 1 and #f.reports == 0 and has(f, "client used corpse id=901 inventory=false"),
+			map .. "_uses_real_binder_once_and_waits_for_xp")
+		step(f, "search 901", 20000)
+		check(has(f, "client search waits id=901 inventory=false window=false animation=false xp=11.000000"),
+			map .. "_says_once_what_the_search_waits_for")
 		f.skill.experience = 56
 		local closed = false
+		-- ui_inventory's npc_on_use handler (after FDDA's animation) opens the loot window on the stock first search.
 		f.inventory.GUI = { mode = "loot", npc_id = 82, IsShown = function() return true end,
 			Close = function() closed = true end }
 		step(f, "search 901")

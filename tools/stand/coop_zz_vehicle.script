@@ -76,14 +76,14 @@ local function heading_forward(h)
 	return vector():set(-math.sin(h), 0, math.cos(h))
 end
 
-local function runway(p, forward, ignore)
-	-- Check the space around the car and 20 m in front of it, along its heading.
+local function runway(p, forward, ignore, reach, marks)
+	-- Check the space around the car and `reach` - 2 m in front of it, along `forward` (the spawn: 20 m along its heading).
 	local side = vector():set(forward.z, 0, -forward.x)
 	for _, x in ipairs({-1.25, 0, 1.25}) do
 		local start = vector():set(p.x + side.x * x - forward.x * 2, p.y + 1, p.z + side.z * x - forward.z * 2)
-		if level.ray_pick(start, forward, 22, rq_target.rqtStatic, rq_result(), ignore) then return false end
+		if level.ray_pick(start, forward, reach or 22, rq_target.rqtStatic, rq_result(), ignore) then return false end
 	end
-	for _, d in ipairs({-2, 4, 10, 16, 20}) do
+	for _, d in ipairs(marks or {-2, 4, 10, 16, 20}) do
 		local gap = ground_gap(vector():set(p.x + forward.x * d, p.y, p.z + forward.z * d), ignore)
 		if not gap or math.abs(gap) > 0.8 then return false end
 	end
@@ -245,28 +245,42 @@ end
 
 function authority_steps.passenger_status() return status("passenger") end
 
+-- b57d: the client's drive ran past its checked lane and stopped at a static face (22.9 m, then 0.28 m back).
+-- The host backs the car down the lane it has just driven (the stock back key: PressBack, UpdateBack -> DriveBack;
+-- fwp is clear after the client's exit, ResetKeys), checked from where the car stands; it lets go after 5 m.
+local HOST_REACH, HOST_MARKS, HOST_RELEASE = 12, {2, 5, 8}, 5
+
 local function host_drive(_, now)
 	local car = authority_car()
 	local physics = car:get_car()
 	if not state.host_drive_at then
-		local key = bind_to_dik(key_bindings.kFWD, -1)
-		assert(key and key > 0, "the host has no forward key bound")
+		local key = bind_to_dik(key_bindings.kBACK, -1)
+		assert(key and key > 0, "the host has no back key bound")
+		local p, dir = car:position(), car:direction()
+		local flat = math.sqrt(dir.x * dir.x + dir.z * dir.z)
+		assert(flat > 0.5, "the car is not on its wheels")
+		local back = vector():set(-dir.x / flat, 0, -dir.z / flat)
+		assert(runway(p, back, car, HOST_REACH, HOST_MARKS),
+			string.format("no clear lane %d m behind the car at %.3f %.3f %.3f", HOST_REACH - 2, p.x, p.y, p.z))
 		start_engine(physics)
 		physics:SetThrottle(1)
-		state.host_origin = copy(car:position())
+		state.host_origin, state.host_back = copy(p), {x = back.x, z = back.z}
 		state.host_drive_at, state.host_key = now, key
 		level.press_action(key)
 		out("host driving")
 		return
 	end
-	if now - state.host_drive_at < DRIVE_MS then return end
+	local p = car:position()
+	local moved = distance(p, state.host_origin)
+	if moved < HOST_RELEASE and now - state.host_drive_at < DRIVE_MS then return end
 	level.release_action(state.host_key)
 	state.host_key = nil
 	physics:SetThrottle(0)
 	physics:HandBreak()
-	local p = car:position()
-	local moved = distance(p, state.host_origin)
-	return measurement(moved >= 3, "host moved=%.3f pos=%.3f %.3f %.3f", moved, p.x, p.y, p.z)
+	-- The back key must move the car back down its lane, not push it aside.
+	local along = (p.x - state.host_origin.x) * state.host_back.x + (p.z - state.host_origin.z) * state.host_back.z
+	return measurement(moved >= 3 and along >= 0.8 * moved, "host moved=%.3f pos=%.3f %.3f %.3f along=%.3f",
+		moved, p.x, p.y, p.z, along)
 end
 
 function authority_steps.passenger_clear() return status("passenger exit") end

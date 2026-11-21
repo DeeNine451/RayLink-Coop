@@ -56,8 +56,8 @@ local function fixture(role, wrong_authority)
 		end} end,
 		io = {open = function() return {read = function() return f.step end, close = function() end} end},
 		db = {actor = actor}, vector = vec, rq_result = function() return {} end, rq_target = {rqtStatic = 1},
-		key_bindings = {kFWD = 1},
-		bind_to_dik = function(action, index) assert(action == 1 and index == -1); return 17 end,
+		key_bindings = {kFWD = 1, kBACK = 2},
+		bind_to_dik = function(action, index) assert(index == -1); return ({17, 31})[action] end,
 		level = {
 			name = function() return "l01_escape" end,
 			object_by_id = function(id)
@@ -69,10 +69,10 @@ local function fixture(role, wrong_authority)
 			vertex_game_vertex_id = function() return 2 end,
 			ray_pick = function(pos, dir, _, _, result)
 				if dir.y == -1 then result.range = pos.y; return true end
-				return f.wall and f.wall(pos) or false
+				return f.wall and f.wall(pos, dir) or false
 			end,
-			press_action = function(key) assert(key == 17); record("forward") end,
-			release_action = function(key) assert(key == 17); record("stop forward") end,
+			press_action = function(key) record(assert(({[17] = "forward", [31] = "back"})[key])) end,
+			release_action = function(key) record("stop " .. assert(({[17] = "forward", [31] = "back"})[key])) end,
 		},
 		alife_create = function(section, pos, lv, gv)
 			assert(section == "veh_niva" and math.abs(pos.x - (f.spawn_x or 6)) < 0.01 and lv == 1 and gv == 2)
@@ -134,10 +134,16 @@ case("Co-op authority spawns, measures and drives with its actor", function()
 	assert(f.holder and f:has("host seated car=40"))
 	f:tick("passenger_status")
 	f:tick("host_drive")
-	assert(table.concat(f.commands, "|"):find("throttle 1|forward", 1, true))
-	f.car_pos = {x = 18, y = 0, z = 0}
-	f:tick(nil, 3000)
-	assert(f:has("host moved=6.000"))
+	-- b57d: the client's drive ends against whatever stands past its lane; the host backs down the lane just driven.
+	assert(table.concat(f.commands, "|"):find("throttle 1|back", 1, true) and not f:has("FAIL"))
+	f.car_pos = {x = 9, y = 0, z = 0}
+	f:tick(nil, 1000)
+	assert(not f:has("host moved"))
+	-- Released once the car has gone 5 m, before the 3 s are up: it stays on the lane it drove.
+	f.car_pos = {x = 6, y = 0, z = 0}
+	f:tick(nil, 250)
+	assert(f:has("host moved=6.000 pos=6.000 0.000 0.000 along=6.000"))
+	assert(table.concat(f.commands, "|"):find("back|stop back|throttle 0|brake", 1, true))
 	f:tick("passenger_clear")
 	f:tick("reboard_status")
 	f.body_present = false
@@ -156,6 +162,30 @@ case("Server map authority prepares an empty passenger seat and observes disconn
 	f.body_present = false
 	f:tick("disconnect")
 	assert(f:has("disconnect status") and f.commands[#f.commands] == "coop_status")
+end)
+
+local function host_driving(f)
+	f:tick("passenger_status")
+	f:tick("host_drive")
+end
+
+case("A host drive that pushes the car aside instead of down its lane fails", function()
+	-- b57d: the car stood against a face ahead and slid 0.6 m sideways; a 4 m slide must not pass either.
+	local f = authority("h")
+	host_driving(f)
+	f.car_pos = {x = 12, y = 0, z = 4}
+	f:tick(nil, 3000)
+	assert(f:has("FAIL host_drive") and f:has("host moved=4.000"))
+	assert(table.concat(f.commands, "|"):find("stop back|throttle 0|brake", 1, true))
+end)
+
+case("A wall in the lane behind the car fails the host drive before any input", function()
+	local f = authority("h")
+	f.wall = function(_, dir) return dir.x < -0.5 end
+	host_driving(f)
+	assert(f:has("FAIL host_drive") and f:has("no clear lane"))
+	local commands = table.concat(f.commands, "|")
+	assert(not commands:find("back", 1, true) and not commands:find("throttle", 1, true))
 end)
 
 local function driver()

@@ -2,10 +2,12 @@
 -- Dev 57, stand only. The map authority makes the body. The keeper witnesses facts and the stored report.
 local NICK, STEP_FILE = "progress_tester", "zz_progress_step.txt"
 local STEP_M, STEPS, STEP_MS = 20, 15, 1500
+local WAIT_NOTE_MS, WAIT_FLUSH_MS = 20000, 2000 -- both inside the stand's 45 s wait for the search line
 local role, step_path, next_poll, failed = nil, nil, 0, false
 local corpse_id, kill_sent, corpse_ready
 local phase, client_map, origin, endpoint, walk_at, steps = nil, nil, nil, nil, 0, 0
 local search_id, before_search
+local wait_note_at, wait_noted, next_flush = nil, false, 0
 local guest_peer, guest_character, pending, honest_xp, skills_done
 local step_m, corpse_search, facts_ready = 0, 0, false
 local walking = false
@@ -272,24 +274,70 @@ local function send_report()
 	assert(report_sent, "the client did not send its pdata report")
 end
 
-local function search(actor, host_id)
+-- The engine log reaches its file only on a flush, and the stand stops the games by force. While the search is awaited
+-- the probe flushes every 2 s (Lua errors, refusals and trust lines reach the file) and says once, after 20 s, where it
+-- waits. It changes nothing in the search itself.
+local function search_wait(now, fmt, ...)
+	if now >= next_flush then
+		next_flush = now + WAIT_FLUSH_MS
+		flush()
+	end
+	wait_note_at = wait_note_at or now + WAIT_NOTE_MS
+	if not wait_noted and now >= wait_note_at then
+		wait_noted = true
+		out(fmt, ...)
+	end
+end
+
+local function corpse_state(actor, corpse)
+	if not corpse then return "not online here" end
+	if not IsStalker(corpse) then return "not a stalker" end
+	if corpse:alive() then return "alive here" end
+	local a, b = actor:position(), corpse:position()
+	local d = math.sqrt(distance_xz(a, b)^2 + (a.y - b.y)^2)
+	if d > 6 then return string.format("out of reach %.1f m", d) end
+end
+
+local function search(actor, host_id, now)
 	if not search_id then
 		local id = coop_mods_core.lid(host_id)
-		local corpse = object_id(id) and level.object_by_id(id)
-		if not (corpse and IsStalker(corpse) and not corpse:alive() and near(actor:position(), corpse:position(), 6)) then return end
+		local corpse = object_id(id) and level.object_by_id(id) or nil
+		local why = corpse_state(actor, corpse)
+		if why then return search_wait(now, "client search waits for corpse id=%d: %s", host_id, why) end
 		local binder = assert(corpse:binded_object(), "the stand corpse has no stalker binder")
+		local inventory = ui_inventory.GUI ~= nil
 		search_id, before_search = corpse:id(), skill().experience
+		-- The stock first search: use_callback asks for the loot and sends npc_on_use; ui_inventory's own npc_on_use
+		-- handler opens the loot window (after FDDA's search animation) when its window object exists.
 		binder:use_callback(corpse, actor)
+		wait_note_at, wait_noted = nil, false
+		out("client used corpse id=%d inventory=%s", host_id, tostring(inventory))
 		return
 	end
 	local gui, xp = ui_inventory.GUI, skill().experience
-	if gui and gui.mode == "loot" and gui.npc_id == search_id and gui:IsShown() and xp > before_search then
+	local shown = gui and gui.mode == "loot" and gui.npc_id == search_id and gui:IsShown() and true or false
+	if shown and xp > before_search then
 		gui:Close()
 		local delta = xp - before_search
 		assert(delta > coop_progress_check.constants.skill_allowance, "the search XP fits the unconditional allowance")
 		phase = "searched"
 		out("client searched id=%d xp=%.6f delta=%.6f", host_id, xp, delta)
+		return
 	end
+	local animation = (lam2 and lam2.get_action_with_tag and lam2.get_action_with_tag("body_search")) ~= nil
+	search_wait(now, "client search waits id=%d inventory=%s window=%s animation=%s xp=%.6f", host_id,
+		tostring(gui ~= nil), tostring(shown), tostring(animation), xp)
+end
+
+-- The map authority's half of the same search: did the loot roll (corpse_loot) and a corpse window (container_opened)
+-- reach it? Said once while the client's search line is awaited.
+local function corpse_wait(step, now)
+	if not (corpse_ready and step:match("^search %d+$")) then return end
+	local corpse = level.object_by_id(corpse_id)
+	local rolled = corpse and se_load_var(corpse_id, corpse:name(), "death_dropped") and true or false
+	local window = coop_trust.status().g93_corpse_window
+	search_wait(now, "host search waits corpse id=%d online=%s loot=%s window_checks=%d", coop_mods_core.hid(corpse_id),
+		tostring(corpse ~= nil), tostring(rolled), window and window.checked or 0)
 end
 
 local function client_step(step, actor, now)
@@ -306,7 +354,7 @@ local function client_step(step, actor, now)
 		walk(actor, now)
 	elseif phase == "walked" then
 		local host_id = tonumber(step:match("^search (%d+)$"))
-		if object_id(host_id) then search(actor, host_id) end
+		if object_id(host_id) then search(actor, host_id, now) end
 	elseif phase == "searched" then
 		local expected = step:match("^honest (%d+%.%d%d%d%d%d%d)$")
 		if expected then
@@ -341,6 +389,7 @@ local function update()
 			client_step(step, db.actor, now)
 		else
 			if step == "spawn" and (role == "host" or role == "body") then make_corpse() end
+			if role == "host" or role == "body" then corpse_wait(step, now) end
 			if role == "host" or role == "world" then keeper_step(step) end
 		end
 	end)
