@@ -34,7 +34,7 @@ local function fixture(role, map)
 	local corpse = {
 		id = function() return client and 82 or 81 end,
 		name = function() return "stand_corpse" end,
-		alive = function() return not client and f.killed == 0 end,
+		alive = function() return not client and (f.killed == 0 or f.undying == true) end,
 		position = function() return f.corpse_position or f.position end,
 		kill = function(self, killer, bypass)
 			assert(self == killer and bypass == false)
@@ -158,6 +158,7 @@ local function fixture(role, map)
 	setfenv(chunk, env)()
 	env.on_game_start()
 	f.inventory = inventory
+	f.env = env
 	return f
 end
 
@@ -191,6 +192,58 @@ run("coop_host_and_map_spawn_once_for_the_present_guest", function()
 		step(f, "spawn")
 		check(f.killed == 1 and has(f, "corpse map=l01_escape id=901"), role .. "_announces_dead_corpse_in_host_numbering")
 		check(f.online_rank == 19999, role .. "_spawns_the_corpse_online_as_a_veteran")
+	end
+end)
+
+-- b57i progress_server (l05_bar, 2026-11-21): the map server said nothing in the stand's 30 s wait for the corpse line
+-- and its log ended before that wait. The world's save then held the veteran dead, its death about 24 s into the wait,
+-- and the guest's character 14 m from it. The map authority flushes while the corpse is awaited, says why it waits after
+-- 20 s and again at once whenever that changes (here: offline, then online, then dead 14 m from the moved body).
+run("the_map_authority_says_why_the_corpse_line_waits_and_when_that_changes", function()
+	for _, role in ipairs({ "prg_host", "map" }) do
+		local f = fixture(role, "l05_bar")
+		f.away = true
+		step(f, "spawn")
+		step(f, "spawn", 19000)
+		check(f.spawned == 0 and not has(f, "host corpse waits") and f.flushes >= 2, role .. "_flushes_while_the_guest_is_away")
+		step(f, "spawn", 1000)
+		check(has(f, "host corpse waits 20.0 s: peer 4 is away, decided by this"), role .. "_says_where_the_guest_is")
+		local lines = #f.log
+		step(f, "spawn", 20000)
+		check(#f.log == lines, role .. "_says_the_same_wait_once")
+
+		f = fixture(role, "l05_bar")
+		f.undying = true
+		step(f, "spawn")
+		step(f, "spawn", 20000)
+		check(f.killed == 1 and has(f, "host corpse waits 20.0 s: corpse id=81 is alive after the kill, body 0.0 0.0 0.0"),
+			role .. "_says_the_kill_did_not_take")
+
+		f = fixture(role, "l05_bar")
+		f.corpse_online = false
+		step(f, "spawn")
+		step(f, "spawn", 20000)
+		check(f.spawned == 1 and has(f, "host corpse waits 20.0 s: corpse id=81 (host 901) is not online here, body 0.0 0.0 0.0"),
+			role .. "_says_the_corpse_is_not_online")
+		f.position, f.corpse_online = vector():set(0, 0, 14), true
+		step(f, "spawn", 4000)
+		check(f.killed == 1 and has(f, "host corpse waits 24.0 s: corpse id=81 is online and alive: the kill is sent, body 0.0 0.0 14.0"),
+			role .. "_says_at_once_when_the_corpse_comes_online")
+		step(f, "spawn")
+		check(has(f, "host corpse waits 24.5 s: corpse id=81 lies 14.1 m from the body: body 0.0 0.0 14.0, corpse 2.0 0.0 0.0")
+			and not has(f, "corpse map="), role .. "_says_at_once_that_the_dead_corpse_lies_far_from_the_body")
+		lines = #f.log
+		step(f, "spawn", 2000)
+		check(#f.log == lines, role .. "_says_each_change_once")
+		f.position = vector():set(0, 0, 0)
+		step(f, "spawn")
+		check(has(f, "corpse map=l05_bar id=901"), role .. "_announces_the_corpse_once_it_lies_by_the_body")
+		local flushes = f.flushes
+		step(f, "search 901")
+		step(f, "search 901", 19000)
+		check(not has(f, "host search waits") and f.flushes >= flushes + 2, role .. "_starts_the_search_wait_afresh")
+		step(f, "search 901", 1000)
+		check(has(f, "host search waits corpse id=901"), role .. "_still_says_what_the_search_waits_for")
 	end
 end)
 
@@ -407,6 +460,35 @@ run("client_reports_failure_when_no_walkable_endpoint_exists", function()
 	f.unsafe = true
 	step(f, "walk")
 	check(has(f, "FAIL") and #f.moves == 0 and #f.reports == 0, "no_walkable_endpoint_fails_before_reporting")
+end)
+
+-- b57i progress_server: the world drew the guest's start at random among the stalker starts and gave him lodging_house on
+-- l05_bar, where the scenario's walk, corpse and search never finished (a Server question kept apart, the probe now says
+-- why it waits); a start on k00_marsh times out at "client ready". This scenario's world starts him at the rookie village.
+run("the_world_starts_the_guest_at_the_rookie_village", function()
+	local f = fixture("prg_world", "fake_start")
+	local starts = { { id = "hidden_base" }, { id = "lodging_house" }, { id = "rookie_village" } }
+	local stock_random = math.random
+	f.env.coop_menu_char = { host_start = function(faction)
+		local n = #starts
+		local s = starts[math.max(1, math.min(n, tonumber(math.random(n)) or 1))]
+		return { id = s.id, where = "start:" .. s.id, faction = faction }
+	end }
+	step(f, "ready")
+	for _ = 1, 5 do
+		local s = f.env.coop_menu_char.host_start("stalker")
+		check(s and s.id == "rookie_village", "the world of this scenario starts the guest at the rookie village")
+	end
+	check(math.random == stock_random, "math.random is the stock one again after the pick")
+	starts = { { id = "makeshift_barracks" } }
+	local d = f.env.coop_menu_char.host_start("dolg")
+	check(d and d.id == "makeshift_barracks", "a faction without that start keeps its own")
+	check(math.random == stock_random, "and math.random is the stock one again")
+	local host = fixture("prg_host", "l01_escape")
+	local untouched = function() return { id = "x" } end
+	host.env.coop_menu_char = { host_start = untouched }
+	step(host, "ready")
+	check(host.env.coop_menu_char.host_start == untouched, "a Co-op host's own world is not touched")
 end)
 
 run("client_must_reach_the_last_step", function()

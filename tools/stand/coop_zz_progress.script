@@ -8,6 +8,9 @@ local corpse_id, kill_sent, corpse_ready
 local phase, client_map, origin, endpoint, walk_at, steps = nil, nil, nil, nil, 0, 0
 local search_id, before_search
 local wait_note_at, wait_noted, next_flush = nil, false, 0
+-- The corpse line's wait (inside the stand's 30 s): since when, the kind of wait last said, how many notes went out.
+local CORPSE_NOTES = 6
+local corpse_since, corpse_kind, corpse_notes = nil, nil, 0
 local guest_peer, guest_character, pending, honest_xp, skills_done
 local step_m, corpse_search, facts_ready = 0, 0, false
 local walking = false
@@ -79,12 +82,25 @@ local function tester_peer()
 	end
 end
 
+local function pos_text(name, p)
+	return string.format("%s %.1f %.1f %.1f", name, p.x, p.y, p.z)
+end
+
+-- nil once the corpse line is out (or before), else the kind of the wait and what it waits for. b57i progress_server
+-- (l05_bar): the map server said nothing in the stand's 30 s wait and its log ended before it; the world's save then
+-- held the veteran dead (its death about 24 s into the wait) and the guest's character 14 m from it, by a camp.
 local function make_corpse()
-	if corpse_ready or not coop_mode.leads_here() then return end
+	if corpse_ready then return end
+	if not coop_mode.leads_here() then return "lead", "this process leads no level" end
 	local peer = tester_peer()
-	local body = peer and coop_mode.where(peer) == "here" and coop_mode.decider(peer) == "this"
-		and coop_mods_core.avatar(peer)
-	if not (body and body:alive()) then return end
+	if not peer then return "peer", "no " .. NICK .. " among the players" end
+	local where, decider = coop_mode.where(peer), coop_mode.decider(peer)
+	if where ~= "here" or decider ~= "this" then
+		return "where", string.format("peer %d is %s, decided by %s", peer, tostring(where), tostring(decider))
+	end
+	local body = coop_mods_core.avatar(peer)
+	if not body then return "body", string.format("peer %d has no body here", peer) end
+	if not body:alive() then return "dead body", string.format("the body of peer %d is dead here", peer) end
 	if not corpse_id then
 		local pos = body:position()
 		for i = 0, 7 do
@@ -102,21 +118,31 @@ local function make_corpse()
 		assert(object_id(corpse_id), "no valid corpse spawn next to the player")
 	end
 	local corpse = level.object_by_id(corpse_id)
-	if not corpse then return end
+	if not corpse then
+		return "offline", string.format("corpse id=%d (host %s) is not online here, %s", corpse_id,
+			tostring(coop_mods_core.hid(corpse_id)), pos_text("body", body:position()))
+	end
 	if corpse:alive() then
 		if not kill_sent then
 			kill_sent = true
 			corpse:kill(corpse, false) -- The guest gets no kill credit.
+			return "kill", string.format("corpse id=%d is online and alive: the kill is sent, %s", corpse_id,
+				pos_text("body", body:position()))
 		end
-		return
+		return "alive", string.format("corpse id=%d is alive after the kill, %s", corpse_id, pos_text("body", body:position()))
 	end
 	assert(IsStalker(corpse), "the stand corpse is not a stalker")
 	local rank = ranks.get_obj_rank_name(corpse)
 	assert(rank == "veteran", "the stand corpse must award veteran XP, not " .. tostring(rank))
-	if not near(body:position(), corpse:position(), 5) then return end
+	local a, b = body:position(), corpse:position()
+	if not near(a, b, 5) then
+		return "far", string.format("corpse id=%d lies %.1f m from the body: %s, %s", corpse_id,
+			math.sqrt(distance_xz(a, b)^2 + (a.y - b.y)^2), pos_text("body", a), pos_text("corpse", b))
+	end
 	local host_id = coop_mods_core.hid(corpse_id)
 	assert(object_id(host_id), "cannot translate the corpse id")
 	corpse_ready = true
+	next_flush = 0 -- the search's wait (corpse_wait) flushes from its own start, as before the corpse's notes
 	out("corpse map=%s id=%d", level.name(), host_id)
 end
 
@@ -289,6 +315,21 @@ local function search_wait(now, fmt, ...)
 	end
 end
 
+-- The same for the corpse line, on the map authority. Its wait can change on the way (b57i: offline or alive, then dead
+-- far from the body), so after the first note at 20 s each new kind of wait is said at once, with the seconds since the
+-- wait began (at most CORPSE_NOTES lines). It changes nothing in the spawn, the kill or the checks.
+local function corpse_note(now, kind, text)
+	if now >= next_flush then
+		next_flush = now + WAIT_FLUSH_MS
+		flush()
+	end
+	corpse_since = corpse_since or now
+	if corpse_notes >= CORPSE_NOTES or kind == corpse_kind then return end
+	if not corpse_kind and now - corpse_since < WAIT_NOTE_MS then return end
+	corpse_kind, corpse_notes = kind, corpse_notes + 1
+	out("host corpse waits %.1f s: %s", (now - corpse_since) / 1000, text)
+end
+
 local function corpse_state(actor, corpse)
 	if not corpse then return "not online here" end
 	if not IsStalker(corpse) then return "not a stalker" end
@@ -377,7 +418,37 @@ local function client_step(step, actor, now)
 	end
 end
 
+-- b57i progress_server: the world draws the guest's start at random among the stalker starts (coop_menu_char.host_start:
+-- rookie_village on l01_escape, hidden_base on k00_marsh, lodging_house on l05_bar). This scenario's walk, corpse and search
+-- are built on l01_escape: on l05_bar they never finished (a Server question kept apart: the corpse note says why it waits),
+-- on k00_marsh "client ready" times out. This scenario's world starts him at the rookie village; another faction keeps its own.
+local PIN_START = "rookie_village"
+local pinned = false
+
+local function pin_start()
+	if pinned or role ~= "world" then return end
+	local menu = coop_menu_char
+	if not (type(menu) == "table" and type(menu.host_start) == "function") then return end
+	pinned = true
+	local stock = menu.host_start
+	menu.host_start = function(faction, ...)
+		local random = math.random
+		for k = 1, 8 do
+			math.random = function(n) return math.min(k, tonumber(n) or 1) end
+			local ok, s = pcall(stock, faction, ...)
+			if ok and type(s) == "table" and s.id == PIN_START then
+				math.random = random
+				return s
+			end
+		end
+		math.random = random
+		return stock(faction, ...)
+	end
+	out("the guest's start is pinned to %s", PIN_START)
+end
+
 local function update()
+	pin_start()
 	if failed or not (coop.is_live() and db.actor) then return end
 	local now = time_global()
 	if now < next_poll then return end
@@ -388,7 +459,10 @@ local function update()
 		if role == "client" then
 			client_step(step, db.actor, now)
 		else
-			if step == "spawn" and (role == "host" or role == "body") then make_corpse() end
+			if step == "spawn" and (role == "host" or role == "body") then
+				local kind, why = make_corpse()
+				if kind then corpse_note(now, kind, why) end
+			end
 			if role == "host" or role == "body" then corpse_wait(step, now) end
 			if role == "host" or role == "world" then keeper_step(step) end
 		end
