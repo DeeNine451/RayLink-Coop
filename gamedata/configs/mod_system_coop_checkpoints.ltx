@@ -96,6 +96,8 @@ pol_secret_sleep
 ; the lines sorted by name, the row whose zone name comes first alphabetically stays (agr_army_sleep before
 ; agr_sr_sleep_wagon), and the log names the dropped one.
 ; Mod packs change rows or add bases with DLTX (![coop_bases]).
+; gar_dolg_sleep (Garbage, the Duty post) lies on the ground of gar_angar_sleep: the engine dropped it with a warning on
+; every start of the Garbage (b57 stand, 2026-11-21), so it is not listed; gar_angar_sleep is that base.
 [coop_bases]
 esc_basement_sleep_area     = 50, stalker, csky, ecolog   ; Cordon, Rookie Village (esc_smart_terrain_2_12: spawns stalker squads)
 bar_actor_sleep_zone        = 50, dolg      ; Rostok, the Bar (every base smart of l05_bar has dolg; bar_dolg_*, bar_zastava* only dolg)
@@ -104,7 +106,6 @@ jup_a6_sr_sleep             = 50, stalker, freedom, ecolog   ; Jupiter, Yanov (j
 mar_a3_sr_sleep             = 50, csky      ; Great Swamps, Clear Sky base (mar_smart_terrain_base: csky 2, the others 1)
 yan_bunker_sleep_restrictor = 50, ecolog, stalker, csky   ; Yantar, the scientists' bunker (yan_smart_terrain_6_4: spawns ecolog squads only, its guards are the scientists')
 mil_freedom_sleep           = 50, freedom   ; Army Warehouses, Freedom base (its name; mil_smart_terrain_7_7: freedom 5 only)
-gar_dolg_sleep              = 50, dolg      ; Garbage, the Duty post (its name)
 gar_angar_sleep             = 50, dolg      ; Garbage, the hangar (gar_smart_terrain_5_2: spawns Duty squads only, stalker_sim_dolg_post, duty_sim_squad_*)
 agr_army_sleep              = 50, army      ; Agroprom, the institute (its name; agr_smart_terrain_1_6 and its near_* smarts: army only)
 agr_sr_sleep_wagon          = 50, stalker, csky, ecolog   ; Agroprom, the stalker camp (props: stalker 2; spawns: 4_4 duty + renegade, near_1 renegade, near_2/3 stalker + csky; to check live, TESTERS К-26)
