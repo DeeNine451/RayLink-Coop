@@ -77,6 +77,12 @@ CASES = (
     # the same line cut where the game was stopped while writing it (companions_group, b57 stand)
     ("torso-cut", "! [03:33:35.512]  [coop] stalker [sim_default_renegade_228430] visual ", False),
     ("torso-other", "! [03:10:20.871]  [coop] stalker [x] visual [y]: the torso motion broke the frame", True),
+    # b57i ms_crash_server: the map server the scenario kills stopped inside the line (its log's last line)
+    ("torso-cut-count", "! [coop] stalker [sim_default_military_028619] visual [actors\\stalker_soldier\\stalker_soldier_hired_lc_5]: the torso motion of its active item is not in the visual (20 so f", False),
+    ("torso-cut-digits", "! [coop] stalker [sim_default_military_028619] visual [actors\\stalker_soldier\\stalker_soldier_hired_lc_5]: the torso motion of its active item is not in the visual (2", False),
+    ("torso-cut-tail", "! [coop] stalker [sim_default_military_028619] visual [actors\\stalker_soldier\\stalker_soldier_hired_lc_5]: the torso motion of its active item is not in the visual (20 so far), the no-item motion pla", False),
+    ("torso-cut-open", "! [coop] stalker [sim_default_military_028619] visual [actors\\stalker_soldier\\stalker_soldier_hired_lc_5]: the torso motion of its active item is not in the visual ", False),
+    ("torso-cut-wrong", "! [coop] stalker [sim_default_military_028619] visual [actors\\stalker_soldier\\stalker_soldier_hired_lc_5]: the torso motion of its active item is not in the visual (20 so far), the frame broke", True),
     # b57b save_handover_server world log: a Live player's status crossed the SessionReset of his trip (P6 drop)
     ("status-crossed-reset", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet", False),
     ("status-crossed-reset-ts", "! [04:31:05.100]  [coop] script event 'core.status' from #2 dropped: sender is not in the world yet", False),
