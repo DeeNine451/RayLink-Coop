@@ -4,6 +4,13 @@
 local NICK = "cmp_srv"
 local NO_VERTEX = 4294967295
 local CAP_MS = 90000
+-- The map server judges the talk distance (coop_dialog.cpp host_try_lock, 6 m) on its copy of the body, drawn 100 ms
+-- behind the client's states and moved once a frame; b57l asked 250 ms after a teleport and got "too far". The client
+-- asks once the body has stood SETTLE_MS where it was put, asks again as a player presses F again (TALK_RETRY_MS), and
+-- fails when no talk opened within TALK_CAP_MS of its first step to the NPC.
+local SETTLE_MS = 1000
+local TALK_RETRY_MS = 3000
+local TALK_CAP_MS = 20000
 local source, spawn_at, last_step = nil, nil, 0
 local armed, client, finished = false, false, false
 local travel = {}
@@ -175,22 +182,28 @@ local function client_step(job, now)
 	end
 	if travel.hired_at then return walk_out(actor, now, map) end
 	if not (npc and npc:alive()) then return end
-	if not travel.talk_at then
-		local pos = npc:position()
-		if actor:position():distance_to(pos) > 2.5 then
-			local lv, near = stand_point(pos, { 1.8, 2, 1.5 }, function(_, d) return d >= 1 and d <= 2.3 end)
-			assert(lv, "no AI vertex within talk distance")
-			step_to(actor, near, 0.3)
-		elseif npc:is_talk_enabled() then
-			actor:run_talk_dialog(npc, false)
-			travel.talk_at = now
-		end
-	elseif not travel.ask_hire then
-		assert(now - travel.talk_at < 10000, "the actual talk did not open")
-		if actor:is_talking() and npc:is_talking() then
+	if not travel.ask_hire then
+		if travel.talk_at and actor:is_talking() and npc:is_talking() then
 			dialogs_axr_companion.become_actor_companion(actor, npc, "dm_is_not_actor_companion_dialog")
 			travel.ask_hire = true
 			out("client requested recruit npc=%d", job.npc)
+			return
+		end
+		travel.talk_from = travel.talk_from or now
+		assert(now - travel.talk_from < TALK_CAP_MS, "the actual talk did not open")
+		if travel.talk_at and now - travel.talk_at < TALK_RETRY_MS then return end
+		local pos = npc:position()
+		local distance = actor:position():distance_to(pos)
+		if distance > 2.5 then
+			local lv, near = stand_point(pos, { 1.8, 2, 1.5 }, function(_, d) return d >= 1 and d <= 2.3 end)
+			assert(lv, "no AI vertex within talk distance")
+			step_to(actor, near, 0.3)
+			travel.moved_at = now
+		elseif npc:is_talk_enabled() and not (travel.moved_at and now - travel.moved_at < SETTLE_MS) then
+			travel.tries = (travel.tries or 0) + 1
+			out("client talk request npc=%d try=%d distance=%.2f", job.npc, travel.tries, distance)
+			actor:run_talk_dialog(npc, false)
+			travel.talk_at = now
 		end
 	elseif coop_npc_companions.held_here(npc) then
 		actor:stop_talk()
