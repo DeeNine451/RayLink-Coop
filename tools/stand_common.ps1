@@ -61,6 +61,34 @@ function Test-StandErrorLine([string]$Line) {
     return ($Line -match $script:ErrorPattern -and $Line -notmatch $script:StandNoise)
 }
 
+# GAMMA NPE (npe_director Register_npe_callbacks): a one-shot tutorial callback that fired was unregistered and its guard
+# cleared; the next on_option_change adds the name again, and axr_main callback_add prints a warning with its callstack and
+# goes on (stock GAMMA does the same after an MCM apply). On a client the host's settings change runs on_option_change
+# through coop_settings, so our frames are in that stack (b57i weather_server, 2026-11-21). A frame is noise only when the
+# lines before it, read back, are frames of one stack up to its opening rule right under that header, with npe_director's
+# re-add among them.
+$script:StandAxrReAdd = '^\s*!\s*(?:\[[0-9:.]+\] +)?\[axr_main callback_add\] callback \w+ already exists!\s*$'
+$script:StandStackLine = '^\s*(?:(?:\.\.\. |[A-Za-z]:[\\/]|\[C\]: )[^\r\n]*\bin (?:function|main chunk)\b.*|(?:\[[0-9:.]+\] *)?|~ (?:\[[0-9:.]+\] +)?STACK TRACEBACK:\s*)$'
+$script:StandStackRule = '^~ (?:\[[0-9:.]+\] +)?-{20,}\s*$'
+$script:StandNpeReAdd = '\bnpe_director\.script \(line: \d+\) in function ''Register_npe_callbacks''\s*$'
+$script:StandStackContext = 40
+
+function Test-StandNpeReAddFrame([Microsoft.PowerShell.Commands.MatchInfo]$Hit) {
+    if ($Hit.Line -notmatch '^\t[^\r\n]*\(line: \d+\) in function') { return $false }
+    $pre = @($Hit.Context.PreContext)
+    $npe = $false
+    for ($i = $pre.Count - 1; $i -ge 0; $i--) {
+        $line = $pre[$i]
+        if ($line -match $script:StandStackRule) {
+            # the opening rule: right under the header; any other rule closed a block before this frame
+            return ($npe -and $i -gt 0 -and $pre[$i - 1] -match $script:StandAxrReAdd)
+        }
+        if ($line -match $script:StandNpeReAdd) { $npe = $true }
+        if ($line -notmatch $script:StandStackLine) { return $false }
+    }
+    return $false
+}
+
 $script:StandLuaContext = 8 # the debug header in b56/b57 has up to seven [LUA] lines before its [SCRIPT ERROR] report
 
 # -Live: the log is read while the game writes it (a scenario polling its logs). A header block the end of the file cuts
@@ -68,6 +96,7 @@ $script:StandLuaContext = 8 # the debug header in b56/b57 has up to seven [LUA] 
 # failed on the header of a known GAMMA load error read before its report (2026-11-21). The final read (no -Live) flags it.
 function Test-StandLogNoise([Microsoft.PowerShell.Commands.MatchInfo]$Hit, [switch]$Live) {
     if ($Hit.Line -match $script:StandNoise) { return $true }
+    if (Test-StandNpeReAddFrame $Hit) { return $true }
     if ($Hit.Line -notmatch $script:StandLuaHeader) { return $false }
     # CScriptStorage prints the error detail, then repeats it in the [SCRIPT ERROR] report.
     # Suppress the bare header only when both lines identify the same known load error.
@@ -91,7 +120,7 @@ function Select-StandLogLine([string]$Path, [string]$Pattern = '', [int]$Last = 
     $patterns = @($script:ErrorPattern)
     if ($Pattern) { $patterns += $Pattern }
     $select = {
-        Select-String -LiteralPath $Path -Pattern $patterns -Context 0, $script:StandLuaContext |
+        Select-String -LiteralPath $Path -Pattern $patterns -Context $script:StandStackContext, $script:StandLuaContext |
             Where-Object { -not (Test-StandLogNoise $_ -Live:$Live) }
     }
     if ($Last -le 0) { & $select; return }

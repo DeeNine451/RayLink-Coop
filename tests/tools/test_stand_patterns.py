@@ -80,7 +80,9 @@ CASES = (
     # b57b save_handover_server world log: a Live player's status crossed the SessionReset of his trip (P6 drop)
     ("status-crossed-reset", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet", False),
     ("status-crossed-reset-ts", "! [04:31:05.100]  [coop] script event 'core.status' from #2 dropped: sender is not in the world yet", False),
-    ("event-not-ready", "! [coop] script event 'mods.pd' from #2 dropped: sender is not in the world yet", True),
+    # b57i allymark_server world log: his last personal record report crossed the trip; resent in the new world
+    ("pdata-crossed-trip", "! [coop] script event 'mods.pd' from #2 dropped: sender is not in the world yet", False),
+    ("event-not-ready", "! [coop] script event 'mods.pd_fix' from #2 dropped: sender is not in the world yet", True),
     ("event-malformed", "! [coop] malformed script event from #1 dropped", True),
     ("status-other-drop", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet, 3 more", True),
     ("status-lookalike", "! [coop] script event 'core.statusx' from #1 dropped: sender is not in the world yet", True),
@@ -195,3 +197,61 @@ def test_live_read_waits_for_a_block_the_game_is_still_writing(tmp_path: Path, t
     final = run_powershell(rf"Select-StandLogLine '{path}' | ForEach-Object Line")
     assert (header in live) is live_flags, live
     assert header in final, final
+
+
+NPE_READD = (
+    "! [13:36:29.210] [axr_main callback_add] callback fft_tutorial_on_actor_unlock_fast_travel already exists!",
+    "~ [13:36:29.210]  ------------------------------------------------------------------------",
+    "~ [13:36:29.210]  STACK TRACEBACK:",
+    "[13:36:29.210] ",
+    "\t... axr_main.script (line: 252) in function 'callback_add'",
+    "\te:/raylinkgames/gamma/game-dev\\gamedata\\scripts\\_g.script (line: 127) in function 'AddScriptCallback'",
+    "\t... npe_director.script (line: 1091) in function 'Register_npe_callbacks'",
+    "\t... npe_director.script (line: 1227) in function <... npe_director.script:1197>",
+    "\t[C]: in function 'pcall'",
+    "\t... coop_route.script (line: 166) in function 'func_or_userdata'",
+    "\t... axr_main.script (line: 284) in function 'make_callback'",
+    "\te:/raylinkgames/gamma/game-dev\\gamedata\\scripts\\_g.script (line: 118) in function <e:/raylinkgames/gamma/game-dev\\gamedata\\scripts\\_g.script:111>",
+    "\t[C]: in function 'pcall'",
+    "\t... coop_settings.script (line: 904) in function 'fire_option_change'",
+    "\t... coop_settings.script (line: 1226) in function 'after_change'",
+    "\t... coop_settings.script (line: 1258) in function <... coop_settings.script:1229>",
+    "\t[C]: in function 'pcall'",
+    "\t... coop_main.script (line: 237) in function 'orig'",
+    "\t... coop_mods_radio.script (line: 440) in function <... coop_mods_radio.script:439>",
+    "~ [13:36:29.210]  ------------------------------------------------------------------------",
+)
+NPE_COOP_FRAMES = [line for line in NPE_READD if "coop_" in line and "coop_route" not in line]
+
+
+@pytest.mark.parametrize(("case", "flagged"), [
+    ("npe-readd", False),
+    ("npe-readd-world-server", False),
+    ("other-header", True),
+    ("readd-not-npe", True),
+    ("frames-after-the-block", True),
+])
+def test_npe_callback_readd_stack_is_noise(tmp_path: Path, case: str, flagged: bool):
+    """b57i weather_server (2026-11-21): GAMMA's NPE unregisters a one-shot tutorial callback when it fires and clears its
+    guard; the next on_option_change adds the callback name again, and axr_main callback_add prints a warning with its
+    callstack and goes on (stock GAMMA does the same after an MCM apply). On a client the host's settings change runs
+    on_option_change through coop_settings, so our frames are in that stack. Only that block is noise: the same frames
+    under another header, a re-add by someone else, or frames after the block's closing rule are still errors."""
+    lines = list(NPE_READD)
+    if case == "npe-readd-world-server":
+        stamp = re.compile(r"\[\d{2}:\d{2}:\d{2}\.\d{3}\] +")
+        lines = [stamp.sub("", line) for line in lines]
+        lines[0] = lines[0].replace("! [axr_main", "![axr_main")  # the world server prints axr_main's text as is
+    elif case == "other-header":
+        lines[0] = "! [13:36:29.210] [axr_main callback_set] trying to set callback fft_tutorial_on_actor_unlock_fast_travel to nil function!"
+    elif case == "readd-not-npe":
+        lines = [line.replace("npe_director.script", "coop_npe_bridge.script") for line in lines]
+    elif case == "frames-after-the-block":
+        lines += ["[13:36:29.211] stack traceback:", *NPE_COOP_FRAMES]
+    log = tmp_path / "game.log"
+    log.write_text("\n".join(["[13:36:29.105] [coop-settings] host changed 1 setting(s)", *lines]), encoding="ascii")
+    path = str(log).replace("'", "''")
+    output = run_powershell(rf"Select-StandLogLine '{path}' -Live | ForEach-Object Line")
+    coop = [line for line in output if "coop_" in line and "coop_route" not in line and "coop-settings" not in line]
+    assert bool(coop) is flagged, output
+
