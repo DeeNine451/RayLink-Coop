@@ -87,7 +87,9 @@ try {
     Set-CoverStep 'ready'
     $installed.Add($stage)
     $installed.Add("$stage.used")
-    $stageText = @('[world]', 'faction = stalker', 'title = emission-cover', '') -join [Environment]::NewLine
+    # A Server world starts a new character at a random start of its faction (b57 stand: stalker landed on k00_marsh,
+    # where the probe knows no shelter). Duty has one start, the Bar, whose surge covers the probe knows.
+    $stageText = @('[world]', 'faction = dolg', 'title = emission-cover', '') -join [Environment]::NewLine
     Write-StandText -Path $stage -Text $stageText -Encoding $ascii
 
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -101,7 +103,7 @@ try {
     $started = $true
     $null = Wait-CoverLine $worldLog '\[coop\] dedicated: the session is up on port' $UpTimeoutS
 
-    $clientArgs = "-fsltx fsgame_t.ltx -coop_nick cover_tester -coop_autochoose stalker -coop_connect 127.0.0.1:$Port -coop_probe coverclient -silent_error_mode"
+    $clientArgs = "-fsltx fsgame_t.ltx -coop_nick cover_tester -coop_autochoose dolg -coop_connect 127.0.0.1:$Port -coop_probe coverclient -silent_error_mode"
     $client = Start-Process -FilePath $exe -WorkingDirectory $Stand -PassThru -ArgumentList $clientArgs
     $null = $client.Handle
     $null = Wait-CoverLine $clientLog '\[coop\] phase loading-world -> live' $JoinTimeoutS
