@@ -1482,11 +1482,16 @@ local function abuse_use(t, from, add)
 	local meet = st and st.meet and st.meet.meet_manager
 	local ab = st and st.abuse
 	local manager = ab and ab.abuse_manager
-	local eligible = actor and npc and IsStalker(npc) and npc:alive() and P.peer_of(id) == nil and meet and manager
-		and P.with_identity(actor, abuse_rules, npc, actor, meet)
-	if not coop_trust.pass("npc_abuse_eligible", eligible, "peer %s: NPC %d cannot be irritated by this use",
-		tostring(from), t.i) then return end
-	if not eligible then return end
+	-- A client asks at every USE of a living NPC stalker in reach (ask_abuse): it cannot see the NPC's [meet], which lives
+	-- on the map that runs the NPC. Only a target that is no NPC stalker is a request no honest client sends. Whether this
+	-- use irritates (a dead NPC, no [meet], a talk, abuse off, no friend) is the NPC's own answer, and stock
+	-- xr_meet.notify_on_use answers it with no effect: so does this use (stand b57h: a talk to the Marsh barman).
+	local target = actor and npc and IsStalker(npc) and P.peer_of(id) == nil
+	if not coop_trust.pass("npc_abuse_target", target, "peer %s: object %d is no NPC stalker", tostring(from), t.i) then
+		return
+	end
+	if not target then return end
+	if not (npc:alive() and meet and manager and P.with_identity(actor, abuse_rules, npc, actor, meet)) then return end
 	-- The cached enable bit is set by [meet] for the player its update was evaluating. This use has its own player.
 	local enabled, before = manager.enable, manager.abuse_value
 	manager.enable = true

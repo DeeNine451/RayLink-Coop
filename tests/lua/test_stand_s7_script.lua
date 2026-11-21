@@ -19,7 +19,7 @@ end
 local function fixture(role)
 	local f = {
 		map = "l01_escape", now = 0, live = true, mirror = true, server = role == "s7world",
-		alive = true, kit = 1, log = {}, commands = {}, callbacks = {}, trips = {}, direct_reads = 0,
+		alive = true, life = "alive", kit = 1, log = {}, commands = {}, callbacks = {}, trips = {}, direct_reads = 0,
 		instruction = "", allowed = true, link = { operator = role == "s7move" },
 	}
 	local e = setmetatable({
@@ -40,6 +40,7 @@ local function fixture(role)
 			self_id = function() return f.peer or 2 end,
 			to_host_id = function(id) assert(id == 0); return 71 end,
 			server_link = function() return f.link end,
+			life_of = function(id) assert(id == 0); return f.life end,
 			levels = { my_level = function()
 				if not f.unmapped then return f.map == "l01_escape" and 1 or 2 end
 			end,
@@ -160,6 +161,30 @@ client.instruction = "4 s7move travel l01_escape"
 client.tick()
 check(#client.trips == 2 and client.trips[2] == "l01_escape", "a new sequence can travel back")
 
+-- b57h creator10_server: downed by the Zone on l02_garbage, the creator stayed alive() to the engine, reported alive=1 and set
+-- off on his next trip; he died before it went and arrived with the medkit in his death stash ("Kits 0").
+local downed = fixture("s7move")
+downed.start()
+downed.tick()
+check(downed.has("ready role=s7move map=l01_escape peer=2 operator=1 alive=1 kits=1") and not downed.has("FAIL"), "a standing creator")
+downed.life = "wounded"
+downed.instruction = "5 s7move travel l02_garbage"
+downed.tick()
+check(#downed.trips == 0, "a downed creator alive() to the engine does not set off on a trip")
+check(downed.has("FAIL role=s7move is wounded on l01_escape"), "the probe names the fall before an assertion reads his items")
+downed.instruction = "6 s7move sample"
+downed.tick()
+check(downed.has("sample seq=6 role=s7move map=l01_escape peer=2 operator=1 alive=0 kits=1"), "a downed creator samples alive=0")
+local told = 0
+for _, line in ipairs(downed.log) do
+	if line:find("FAIL role=s7move", 1, true) then told = told + 1 end
+end
+check(told == 1, "one line per fall")
+downed.life = "alive"
+downed.instruction = "7 s7move travel l02_garbage"
+downed.tick()
+check(#downed.trips == 1, "standing again, he travels")
+
 local restored = fixture("s7move")
 restored.map, restored.instruction = "l02_garbage", "7 s7move travel l02_garbage"
 restored.start()
@@ -244,6 +269,50 @@ check(world.api.world_status(4, false) and world.has("status end seq=4"), "tags 
 world.audit_counter = true
 check(world.api.world_status(5, true), "addresses a build whose audit also prints a counter row")
 check(not world.api.world_status("invalid", false) and not observer.api.world_status(5, true), "invalid and player audit requests are inert")
+
+-- b57h ms_crash_server: fixture 19501 (stalker_sim_squad_novice, held on l02_garbage) was on l01_escape, held by nobody,
+-- after the map server restart. A free sim squad goes where the world's board sends it, also to the next level. The crash
+-- fixtures are squads the stock simulation keeps at a smart of their level; the save fixtures stay every held squad.
+local fixed = fixture("s7world")
+fixed.start()
+local squads = {
+	[501] = { level = 2 }, -- a free sim squad: its section names no target_smart
+	[502] = { level = 2, condlist = true, smart = 601 }, -- target_smart, at a smart of its level
+	[503] = { level = 2, condlist = true, smart = 602 }, -- its smart is on another level
+	[504] = { level = 2, condlist = true, smart = 601, random = true }, -- random_targets
+	[505] = { level = 2, condlist = true, smart = 601, scripted = "actor" }, -- a task or a bounty ordered it
+	[506] = { level = 2, condlist = true, smart = 601 }, -- another bridge holds it
+	[507] = { level = 2, condlist = true }, -- no smart yet
+}
+local smarts = { [601] = 2, [602] = 1 }
+fixed.api.alife = function() return { object = function(_, id)
+	local s = squads[id]
+	if s then
+		return { m_game_vertex_id = s.level, section_name = function() return "squad_" .. id end,
+			action_condlist = s.condlist and {} or nil, random_targets = s.random and { "x" } or nil,
+			scripted_target = s.scripted, smart_id = s.smart }
+	end
+	if smarts[id] then return { m_game_vertex_id = smarts[id], section_name = function() return "smart_terrain" end } end
+end } end
+fixed.api.coop.levels.map_servers = function() return { { bridge = 258, level = 2 } } end
+fixed.api.coop.levels.squads_at = function(bridge) return bridge == 258 and { 501, 502, 503, 504, 505, 506, 507 } or {} end
+fixed.owners = { [501] = 258, [502] = 258, [503] = 258, [504] = 258, [505] = 258, [506] = 259, [507] = 258 }
+local function listed()
+	local ids = {}
+	for _, line in ipairs(fixed.log) do ids[#ids + 1] = line:match("^%[s7%] object id=(%d+) ") end
+	return table.concat(ids, ",")
+end
+check(fixed.api.world_status(1, false, "fixed") and fixed.has("status end seq=1") and listed() == "502",
+	"crash fixtures: only a held squad the stock simulation keeps at a smart of its level")
+fixed.log = {}
+check(fixed.api.world_status(2, false, "auto") and listed() == "501,502,503,504,505,507", "save fixtures: every squad the bridge holds")
+local crash_text = ""
+do
+	local handle = io.open("tools/stand/ms_crash_server.ps1", "r") or io.open("temp/stand/ms_crash_server.ps1", "r")
+	if handle then crash_text = handle:read("*a"); handle:close() end
+end
+check(crash_text:find("Assert%-S7Audit %$ctx %$levels %-SelectFixtures %-Stationary\r?\n") ~= nil
+	and crash_text:find("if ($Stationary) { \", 'fixed'\" }", 1, true) ~= nil, "ms_crash_server takes its fixtures from squads that stay")
 
 -- b57g save_handover_server: the world never ran world_status(6), sent right after an unanswered disarm_save. The engine
 -- runs a run_string line as one global function looked up when its thread first runs, and makes every queued thread

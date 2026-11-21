@@ -336,6 +336,50 @@ case("The authority spawns beside the placed spot only after the body arrives", 
 	assert(f.commands[1] == "spawn" and f:has("spawned car=40 body=71 distance=5.800"))
 end)
 
+-- b57h (l05_bar): one body-relative sample read 6.659 m. The car's own spot is the placement check; the body only has to be
+-- in the decider's enter range (kEnterMaxDistance 7, body to car).
+local function spawn_offline(f)
+	f:tick("ready")
+	f.online = false
+	f:tick("spawn 0.000 0.000 0.000")
+	assert(f.commands[1] == "spawn" and not f:has("FAIL") and not f:has("spawned car="))
+end
+
+case("A body off its spot when the car comes online, still in enter range: the spawn passes", function()
+	local f = fixture("map")
+	spawn_offline(f)
+	f:tick()
+	assert(not f:has("FAIL") and not f:has("spawned car="))
+	f.online, f.body_pos = true, {x = -0.659, y = 0, z = 0}
+	f:tick()
+	assert(not f:has("FAIL") and f:has("spawned car=40 body=71 distance=6.659"), table.concat(f.lines, " | "))
+	assert(f:has("car 6.000 0.000 0.000 (0.000 m off its spot), body -0.659 0.000 0.000 (0.659 m off the client's spot)"))
+end)
+
+case("The car is measured on the frame it comes online, not at the next 100 ms poll", function()
+	local f = fixture("h")
+	spawn_offline(f)
+	f.online = true
+	f:tick(nil, 16)
+	assert(not f:has("FAIL") and f:has("spawned car=40 body=71 distance=6.000"))
+end)
+
+case("A car that comes online away from its spot fails the spawn", function()
+	local f = fixture("map")
+	spawn_offline(f)
+	f.online, f.car_pos = true, {x = 7, y = 0, z = 0}
+	f:tick(nil, 16)
+	assert(f:has("FAIL spawn") and f:has("car came online at 7.000 0.000 0.000, 1.000 m from its spot 6.000 0.150 0.000"))
+end)
+
+case("A body out of enter range of the car fails the spawn", function()
+	local f = fixture("map")
+	spawn_offline(f)
+	f.online, f.body_pos = true, {x = -1.5, y = 0, z = 0}
+	f:tick(nil, 16)
+	assert(f:has("FAIL spawn") and f:has("spawn distance 7.500 m: car 6.000 0.000 0.000 (0.000 m off its spot)"))
+end)
+
 case("A body that never reaches the placed spot fails the spawn after ten seconds", function()
 	local f = fixture("h")
 	f:tick("ready")

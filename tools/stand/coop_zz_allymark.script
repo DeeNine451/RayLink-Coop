@@ -6,8 +6,12 @@ local OBSERVER, MOVER = "allyobserver", "allymover"
 local START_KEY = "stand.allymark_from" -- session stash survives the mover's level load
 local GATHER_KEY = "stand.allymark_gather" -- the map of the mover's setup trip, kept over his level load
 local GATHER_MS = 30000 -- after the setup trip the observer must be on the mover's map within this long
+-- A client of a map server goes live before that server's online set (its level changers) reaches it: the map server sends
+-- it after the client's WorldLoaded (join::server_player_in_world -> entities::host_send_online_to). Co-op has them in the save.
+-- A mover who starts on the observer's map (one start of the faction, e.g. Duty in the Bar) looks on his first live update.
+local EXIT_WAIT_MS = 45000
 local role, next_poll, finished = nil, 0, false
-local travel, initial_level, stable_id, stable_level, stable_at, gathering, gathered_at
+local travel, initial_level, stable_id, stable_level, stable_at, gathering, gathered_at, exit_wait
 
 local function out(fmt, ...)
 	printf("%s", "[allymark] " .. string.format(fmt, ...))
@@ -96,9 +100,14 @@ local function move(now, actor)
 		if not observer or gather(now, here, observer) then return end
 		local target = nearest_exit(actor)
 		local beside = target and beside_exit(target, actor:position())
+		if not beside then
+			exit_wait = exit_wait or now + EXIT_WAIT_MS
+			if now < exit_wait then return end
+		end
 		if not beside or not coop.stash_set(START_KEY, here) then
 			finished = true
-			out("FAIL: mover could not prepare a level exit from %s", here)
+			out("FAIL: mover could not prepare a level exit from %s (%s)", here, not target and "no level changer online"
+				or not beside and "no AI ground beside the nearest level changer" or "the session stash refused the map")
 			return
 		end
 		actor:set_actor_position(vector():set(beside.x, beside.y + 0.3, beside.z))

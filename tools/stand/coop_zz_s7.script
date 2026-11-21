@@ -1,7 +1,7 @@
 -- A-S7, Dev 57. Installed only for the guarded Server stand. No product events or saved state.
 local WORLD, MOVER, OBSERVER = "s7world", "s7move", "s7stay"
 local MAPS = { l01_escape = true, l02_garbage = true }
-local role, ready, travelling, save_armed, world_server
+local role, ready, travelling, save_armed, world_server, down_told
 local seen, next_poll, map_ids = 0, 0, nil
 
 local function log(fmt, ...)
@@ -50,10 +50,25 @@ local function report_objects(ids, bridges)
 	end
 end
 
+-- A squad the stock simulation keeps at a smart of its level: its section names its smart (target_smart, the
+-- action_condlist of sim_squad_scripted), no random_targets, no order of a task or a bounty (scripted_target), and it is
+-- assigned to a smart on its own level. A free sim squad goes where the world's board sends it, also to the next level:
+-- b57h ms_crash_server, 19501 stalker_sim_squad_novice held on l02_garbage was on l01_escape, held by nobody, after the
+-- map server restart.
+local function stays(id, level)
+	local squad = alife():object(id)
+	if not (squad and squad.action_condlist ~= nil and squad.random_targets == nil and squad.scripted_target == nil
+		and squad.smart_id and object_level(squad) == level) then return false end
+	local smart = alife():object(squad.smart_id)
+	return smart ~= nil and object_level(smart) == level
+end
+
+-- selection: nil (no objects), "auto" (the squads each bridge holds), "fixed" (of those, the squads that stay), or ids.
 function world_status(seq, audit, selection)
 	if not is_world() or not whole(seq, 1, 2147483647) or type(audit) ~= "boolean" then return false end
+	local pick = selection == "auto" or selection == "fixed"
 	local ids = selection == nil and {} or ids_of(selection)
-	if selection ~= "auto" and not ids then return false end
+	if not pick and not ids then return false end
 	out("status begin seq=%d", seq)
 	local console = get_console()
 	if audit then console:execute("srv_levels_audit") end
@@ -70,14 +85,16 @@ function world_status(seq, audit, selection)
 	end
 	for name, id in pairs(map_ids) do log("world map=%s levelid=%d", name, id) end
 	local bridges = levels.map_servers()
-	if selection == "auto" then ids = {} end
+	if pick then ids = {} end
 	for _, map in ipairs(bridges) do
 		log("world bridge peer=%d levelid=%d", map.bridge, map.level)
-		if selection == "auto" then
+		if pick then
 			local limit = math.min(#ids + 32, 64)
 			for _, id in ipairs(levels.squads_at(map.bridge)) do
 				if #ids >= limit then break end
-				if levels.holder_of(id) == map.bridge then ids[#ids + 1] = id end
+				if levels.holder_of(id) == map.bridge and (selection == "auto" or stays(id, map.level)) then
+					ids[#ids + 1] = id
+				end
 			end
 		end
 	end
@@ -157,13 +174,19 @@ local function bridge_tick()
 	end
 end
 
+-- b57h creator10_server: the world downed the creator on l02_garbage, and to the engine a downed co-op player is alive (the
+-- survival layer holds him at 0.01 health): he reported alive=1 and set off on the next trip. His co-op life decides.
+local function life_of(actor)
+	return actor:alive() and coop.life_of(0) or "dead"
+end
+
 local function report(label, actor, map, link, character, map_id)
 	local kits = 0
 	actor:iterate_inventory(function(_, item)
 		if item:section() == "medkit" then kits = kits + 1 end
 	end)
 	out("%s role=%s map=%s peer=%d operator=%d alive=%d kits=%d character=%d levelid=%d", label, role, map,
-		coop.self_id(), link.operator and 1 or 0, actor:alive() and 1 or 0, kits, character, map_id)
+		coop.self_id(), link.operator and 1 or 0, life_of(actor) == "alive" and 1 or 0, kits, character, map_id)
 end
 
 local function tick()
@@ -180,6 +203,12 @@ local function tick()
 		ready = true
 		report("ready", actor, map, link, character, map_id)
 	end
+	local life = life_of(actor)
+	if life ~= "alive" and not down_told then
+		-- The stand reads every "[s7] FAIL" at once: it names the fall, not the medkit the death drop took later.
+		out("FAIL role=%s is %s on %s: what he carries and his trips no longer judge a transition", role, tostring(life), map)
+	end
+	down_told = life ~= "alive"
 	local seq, verb, goal = instruction()
 	if not seq then return end
 	if verb == "sample" then
@@ -188,7 +217,7 @@ local function tick()
 	elseif map == goal then
 		seen, travelling = seq, nil
 		report("arrival seq=" .. seq, actor, map, link, character, map_id)
-	elseif travelling ~= seq and actor:alive() then
+	elseif travelling ~= seq and life == "alive" then
 		travelling = seq
 		out("trip seq=%d role=%s from=%s to=%s", seq, role, map, goal)
 		-- The stock debug trip goes through ChangeLevel and the real server's move decision.

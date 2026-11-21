@@ -17,6 +17,7 @@ $s7Bad = '\[s7\] FAIL\b|ownership violation:|Unknown command:.*srv_|@rl error\b'
 $s7Player = 'role=(?<role>s7move|s7stay) map=(?<map>\w+) peer=(?<peer>\d+) operator=(?<operator>[01]) alive=(?<alive>[01]) kits=(?<kits>\d+) character=(?<character>\d+) levelid=(?<level>\d+)\s*$'
 $s7Counter = '\[coop\] levels: (?<held>\d+) object\(s\) online at map servers, .*\| xfer in flight (?<pending>\d+), retries \d+, completed (?<completed>\d+), rolled back (?<rolled>\d+), resyncs (?<asked>\d+) asked (?<heard>\d+) heard, violations (?<violations>\d+)\s*$'
 $s7Start = '\[coop\] map server (?<slot>[1-7]) starts for level (?<level>\d+) \(.+, process (?<process>\d+)\)\s*$'
+$s7God = '\[coop\] debug: my flags from the server: god on\b'
 $s7From = 'l01_escape'
 $s7To = 'l02_garbage'
 
@@ -181,7 +182,22 @@ function Start-S7Client($Context, [ValidateSet('s7move','s7stay')][string]$Role)
     $Context.Clients[$Role] = $proc
     $null = $proc.Handle
     $null = Wait-S7Line $Context $Context.Logs[$Role] $s7Live $JoinTimeoutS
-    return Read-S7Player (Wait-S7Line $Context $Context.Logs[$Role] "\[s7\] ready $s7Player" 90)
+    $ready = Read-S7Player (Wait-S7Line $Context $Context.Logs[$Role] "\[s7\] ready $s7Player" 90)
+    Set-S7Immortal $Context $Role
+    return $ready
+}
+
+# b57h creator10_server: on trip 6 of 10 the creator was downed 1.5 s after his arrival on l02_garbage (damage of his own game,
+# the actor its own initiator; no hit came from the map server), died, and the death drop put the staged medkit into a stash:
+# "unexpected player evidence ... Kits 0". In ms_crash_server dogs downed him at the same arrival point. S7 judges transitions,
+# not the Zone: both players are immortal through the server's debug (docs/DEBUG_DESIGN.md §B.9). Every trip replaces the
+# client's world, which takes the flags back; Complete-S7Trip waits for the world to give them again.
+function Set-S7Immortal($Context, [string]$Role) {
+    $worldAfter = Get-S7LineCount $Context.Logs.world
+    $after = Get-S7LineCount $Context.Logs[$Role]
+    Send-S7World $Context "coop_dbg god @$Role on=1"
+    $null = Wait-S7Line $Context $Context.Logs.world "\[coop\] debug: #\d+ '$Role' flags: god\b" 30 $worldAfter
+    $null = Wait-S7Line $Context $Context.Logs[$Role] $s7God 30 $after
 }
 
 function Set-S7Step($Context, [string]$Role, [string]$Command) {
@@ -213,7 +229,8 @@ function Start-S7Trip($Context, $Player, [string]$Goal, [int[]]$SaveFixtures) {
 
 function Complete-S7Trip($Context, $Player, $Trip) {
     $loaded = Wait-S7Line $Context $Context.Logs[$Player.Role] $s7Live $StepTimeoutS $Trip.ClientLine
-    $arrival = Wait-S7Line $Context $Context.Logs[$Player.Role] "\[s7\] arrival seq=$($Trip.Sequence) $s7Player" 90 $loaded.LineNumber
+    $null = Wait-S7Line $Context $Context.Logs[$Player.Role] $s7God 90 $Trip.ClientLine
+    $arrival =Wait-S7Line $Context $Context.Logs[$Player.Role] "\[s7\] arrival seq=$($Trip.Sequence) $s7Player" 90 $loaded.LineNumber
     $new = Read-S7Player $arrival
     $worldLevel = Get-S7PlayerLevel (Get-S7Status $Context) $new $Trip.Goal
     if ($worldLevel -ne $Trip.GoalLevel) { throw 'the world changed the trip destination level ID' }
@@ -287,11 +304,13 @@ function Add-S7Object([hashtable]$Objects, [string]$Line) {
     $Objects[$id] = @{ Name = $Matches[2]; Level = [int]$Matches[3]; Owner = [int]$Matches[4] }
 }
 
-function Get-S7Status($Context, [switch]$Audit, [switch]$SelectFixtures, [int[]]$FixtureIds) {
+function Get-S7Status($Context, [switch]$Audit, [switch]$SelectFixtures, [switch]$Stationary, [int[]]$FixtureIds) {
     $Context.Query++
     $seq = $Context.Query
     $flag = if ($Audit) { 'true' } else { 'false' }
-    $selection = if ($SelectFixtures) { ", 'auto'" } elseif ($FixtureIds.Count) { ", '$($FixtureIds -join ',')'" } else { '' }
+    # -Stationary: only squads the stock simulation keeps at a smart of their level (coop_zz_s7.script stays).
+    $pick = if ($Stationary) { ", 'fixed'" } else { ", 'auto'" }
+    $selection = if ($SelectFixtures) { $pick } elseif ($FixtureIds.Count) { ", '$($FixtureIds -join ',')'" } else { '' }
     Send-S7World $Context "run_string coop_zz_s7.world_status($seq, $flag$selection)"
     $end = Wait-S7Line $Context $Context.Logs.world "\[s7\] status end seq=$seq\s*$" 45
     $begin = Find-S7Line $Context.Logs.world "\[s7\] status begin seq=$seq\s*$"
@@ -376,12 +395,13 @@ function Assert-S7Fixtures([hashtable]$Expected, [hashtable]$Actual) {
         $before = $Expected[$id]
         $after = $Actual[$id]
         if (-not $after -or $after.Name -ne $before.Name -or $after.Level -ne $before.Level -or $after.Owner -ne $before.Owner) {
-            throw "fixture object $id changed section, level, or owner"
+            $now = if ($after) { "$($after.Name) level $($after.Level) owner $($after.Owner)" } else { 'not listed' }
+            throw "fixture object $id changed section, level, or owner ($($before.Name) level $($before.Level) owner $($before.Owner) -> $now)"
         }
     }
 }
 
-function Assert-S7Audit($Context, [int[]]$Levels, [switch]$SelectFixtures, [int[]]$FixtureIds) {
+function Assert-S7Audit($Context, [int[]]$Levels, [switch]$SelectFixtures, [switch]$Stationary, [int[]]$FixtureIds) {
     $until = [DateTime]::UtcNow.AddSeconds(90)
     do {
         $before = Get-S7Status $Context
@@ -408,7 +428,7 @@ function Assert-S7Audit($Context, [int[]]$Levels, [switch]$SelectFixtures, [int[
                 }
                 Assert-S7BridgeReplies $replies $sent.Bridges $seq
                 do {
-                    $status = Get-S7Status $Context -SelectFixtures:$SelectFixtures -FixtureIds $FixtureIds
+                    $status = Get-S7Status $Context -SelectFixtures:$SelectFixtures -Stationary:$Stationary -FixtureIds $FixtureIds
                     if ($status.Bridges.Count -ne $Levels.Count -or
                         @($Levels | Where-Object { $status.Bridges[$_] -ne $sent.Bridges[$_] }).Count -ne 0) { break }
                     if ($status.Pending -eq 0 -and $status.Held -gt 0 -and (Test-S7AuditAcks $Context.Logs.world $sent $status)) {
@@ -565,7 +585,8 @@ Invoke-S7Scenario 'ms_crash_server' {
     $victim = Get-S7MapProcess $ctx $mover
     $other = Get-S7MapProcess $ctx $observer
     $levels = @($mover.Level, $observer.Level)
-    $snapshot = Assert-S7Audit $ctx $levels -SelectFixtures
+    # Squads that stay at a smart of their level: a free sim squad may walk to the next level while the map restarts (b57h).
+    $snapshot = Assert-S7Audit $ctx $levels -SelectFixtures -Stationary
     $fixtures = @{}
     foreach ($map in $levels) {
         $ids = @($snapshot.Objects.Keys | Where-Object {

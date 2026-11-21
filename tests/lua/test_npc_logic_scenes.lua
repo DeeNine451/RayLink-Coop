@@ -284,11 +284,28 @@ local function run_scene(set, second_map)
 	body._enemy, nr.meet.meet_manager.a.abuse, nr.meet.meet_manager.abuse_mode = nil, "false", "false"
 	client.fire("on_key_press", client.env.key_bindings.kUSE)
 	dispatch()
-	check(abuse.abuse_value == 6, label .. " s42:4 out-of-reach, hostile and disabled attempts do not add irritation")
+	-- Stand b57h phantoms_server: a client's USE on a trader is a talk (stock [meet] use = true). The client asks at every
+	-- USE of a living NPC stalker in reach: the NPC's [meet] lives on the map that runs it.
+	NOW = NOW + 2000 -- the burst of mods.npc_abuse_use (6) went to the presses above
+	local mm = nr.meet.meet_manager
+	mm.use, mm.a.use, mm.a.abuse, mm.abuse_mode = "true", "true", "true", "true"
+	client.fire("on_key_press", client.env.key_bindings.kUSE)
+	dispatch()
+	mm.use, mm.a.use = "false", "false"
+	check(abuse.abuse_value == 6, label .. " s42:4 out-of-reach, hostile, disabled and talk uses do not add irritation")
 	local checks = host.env.coop_trust.status()
-	check(checks.npc_abuse_reach and checks.npc_abuse_reach.refused == 1
-		and checks.npc_abuse_eligible and checks.npc_abuse_eligible.refused == 2,
-		label .. " s42:4 the decider records failed use checks through coop_trust")
+	local failed = 0
+	for name, c in pairs(checks) do
+		if name:match("^npc_abuse_") and name ~= "npc_abuse_reach" then failed = failed + c.failed end
+	end
+	check(checks.npc_abuse_reach and checks.npc_abuse_reach.refused == 1 and failed == 0,
+		label .. " s42:4 an honest use its NPC answers no to (hostile, abuse off, a talk) is no failed check")
+	-- No honest client names a player's character: ask_abuse sends a living NPC stalker only.
+	client.env.coop_mods_core.to_host("npc_abuse_use", { i = client_body })
+	dispatch()
+	checks = host.env.coop_trust.status()
+	check(abuse.abuse_value == 6 and checks.npc_abuse_target and checks.npc_abuse_target.refused == 1,
+		label .. " s42:4 the decider records a use of no NPC stalker through coop_trust")
 	if not server then
 		abuse.abuse_value = 0
 		nr.meet.meet_manager.a.abuse, nr.meet.meet_manager.abuse_mode = "true", "true"

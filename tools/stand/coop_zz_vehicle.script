@@ -6,6 +6,8 @@
 local NICK, SECTION = "vehicle_tester", "veh_niva"
 local STEP_FILE = "zz_vehicle_step.txt"
 local POLL_MS, GRANT_MS, DRIVE_MS = 100, 5000, 3000
+-- xrCoop/coop_vehicle_rules.h kEnterMaxDistance: the decider measures the body to the car (coop_vehicles_seat.cpp).
+local ENTER_RANGE = 7
 local state = { index = 1, next_poll = 0 }
 local role, step_path
 
@@ -45,6 +47,10 @@ end
 local function distance(a, b)
 	local d = delta(a, b)
 	return math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z)
+end
+
+local function flat(a, b)
+	return math.sqrt((a.x - b.x) ^ 2 + (a.z - b.z) ^ 2)
 end
 
 local function car_here(id)
@@ -118,7 +124,7 @@ local function spawn_car(origin, body)
 	local se = assert(alife_create(SECTION, pos, lv, gv), "veh_niva spawn was refused")
 	-- Turn the car onto its lane before it comes online (the stock way: itms_manager.script).
 	se.angle = vector():set(0, h, 0)
-	state.heading = h
+	state.heading, state.asked = h, copy(pos)
 	return se.id
 end
 
@@ -186,14 +192,31 @@ function authority_steps.spawn(arg, now)
 			return
 		end
 		state.car, state.body = spawn_car(place, body), body:id()
+		state.client_spot, state.watch_spawn = copy(place), true
 	end
-	local car, body = car_here(state.car), player_body()
-	if not (car and body) then return end
-	local d = distance(car:position(), body:position())
-	assert(d >= 5.5 and d <= 6.5, string.format("spawn distance %.3f m", d))
-	local dir, want = car:direction(), heading_forward(state.heading)
-	assert(dir.x * want.x + dir.z * want.z >= 0.9,
-		string.format("car faces %.2f %.2f, its lane %.2f %.2f", dir.x, dir.z, want.x, want.z))
+	local car = car_here(state.car)
+	if not car then return end
+	local p, asked = car:position(), state.asked
+	if state.watch_spawn then
+		-- b57h: one body-relative sample (6.659 m) could not tell a car put off its spot from a body off the client's spot.
+		-- Polled every frame until here: where the authority put the car, and the heading it was given.
+		state.watch_spawn = nil
+		local off = flat(p, asked)
+		assert(off <= 0.3 and math.abs(p.y - asked.y) <= 0.6, string.format(
+			"car came online at %.3f %.3f %.3f, %.3f m from its spot %.3f %.3f %.3f", p.x, p.y, p.z, off, asked.x, asked.y, asked.z))
+		local dir, want = car:direction(), heading_forward(state.heading)
+		assert(dir.x * want.x + dir.z * want.z >= 0.9,
+			string.format("car faces %.2f %.2f, its lane %.2f %.2f", dir.x, dir.z, want.x, want.z))
+	end
+	local body = player_body()
+	if not body then return end
+	local b = body:position()
+	local d = distance(p, b)
+	local where = string.format("car %.3f %.3f %.3f (%.3f m off its spot), body %.3f %.3f %.3f (%.3f m off the client's spot)",
+		p.x, p.y, p.z, flat(p, asked), b.x, b.y, b.z, flat(b, state.client_spot))
+	out("spawn at %s", where)
+	-- What the scenario needs of the body: the decider's enter check passes (the same two points) and the car is clear of him.
+	assert(d >= 3 and d <= ENTER_RANGE, string.format("spawn distance %.3f m: %s", d, where))
 	out("spawned car=%d body=%d distance=%.3f", coop.to_host_id(state.car), coop.to_host_id(state.body), d)
 	return true
 end
@@ -331,7 +354,7 @@ function client_steps.online(arg)
 	local local_id = coop.to_local_id(id)
 	local car = car_here(local_id)
 	if not car then return end
-	assert(distance(car:position(), db.actor:position()) <= 7, "fixture copy is outside enter range")
+	assert(distance(car:position(), db.actor:position()) <= ENTER_RANGE, "fixture copy is outside enter range")
 	state.wire_car, state.car = id, local_id
 	out("client online car=%d local=%d", id, local_id)
 	return true
@@ -473,6 +496,8 @@ local function update()
 			state.index, state.deadline = state.index + 1, nil
 		end
 	end)
+	-- The spawned car is looked for every frame until it comes online (its placement is measured on that frame).
+	if state.watch_spawn then state.next_poll = now end
 	if not ok then
 		state.failed = true
 		if state.host_key then pcall(level.release_action, state.host_key) end

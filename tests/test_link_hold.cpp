@@ -82,6 +82,54 @@ TEST(first_frames_after_a_load_keep_the_link_until_live)
 	CHECK(host.left[0].second.find("lost") != std::string::npos);
 }
 
+// b57h Server stand 2026-11-21 (feed_server): a GAMMA client went live on l05_bar (the precache was over: no hold), and
+// 11 s later one frame (the level's NPCs coming online on it) ran about 19 s. The world server dropped him after its 10 s.
+// The first stretch of play after live holds the link; after it a stall is silence again, and a crash is silence at once.
+TEST(link_hold_covers_the_first_stretch_after_live)
+{
+	link_hold::FrameState fs;
+	CHECK_EQ(fs.live_ms, link_hold::kNotLive); // a FrameState of a machine that plays normally holds nothing
+	fs.live_ms = 0;
+	CHECK(link_hold::keep_held(fs)); // the frame that went live
+	fs.live_ms = 11000;
+	CHECK(link_hold::keep_held(fs)); // b57h: the long frame began here
+	fs.live_ms = link_hold::kSettleMs - 1;
+	CHECK(link_hold::keep_held(fs));
+	fs.live_ms = link_hold::kSettleMs;
+	CHECK(!link_hold::keep_held(fs)); // plays normally: a stall is silence
+	fs.live_ms = link_hold::kNotLive;
+	CHECK(!link_hold::keep_held(fs)); // not live, or no player plays on this machine
+	CHECK(link_hold::kSettleMs >= 31000u); // b57h: the frame ended 30.7 s after live
+	fs.live_ms = 11000;
+	fs.crashed = true;
+	CHECK(!link_hold::keep_held(fs)); // a crash is silence at once
+}
+
+TEST(a_long_frame_soon_after_live_keeps_the_link)
+{
+	Node host("Boss", 37290), cl("Alice", 37290);
+	host.cfg.peer_timeout_ms = 1500;
+	cl.cfg.peer_timeout_ms = 1500;
+	join_one(host, cl, 37290);
+
+	// Live 11 s: the frame pump arms the hold, then the frame (the level's NPCs coming online) outlasts the host's timeout.
+	link_hold::FrameState settling;
+	settling.live_ms = 11000;
+	client_frame(cl, settling);
+	t::pump_for({&host.s}, 3500);
+	CHECK(host.left.empty());
+	CHECK_EQ(host.s.peers().size(), size_t(1));
+
+	// After the first stretch: the frame releases the hold, and a stall is silence: the host drops the client.
+	link_hold::FrameState normal;
+	normal.live_ms = link_hold::kSettleMs;
+	client_frame(cl, normal);
+	t::pump_for({&host.s, &cl.s}, 500);
+	CHECK(host.left.empty());
+	REQUIRE(t::pump_until({&host.s}, 15000, [&] { return !host.left.empty(); }));
+	CHECK(host.left[0].second.find("lost") != std::string::npos);
+}
+
 // Review of the live fixes: on_crash released the hold, but the next frame of the main thread (a crash on a worker
 // thread does not stop it at once) armed it again for kLoadHoldMs while precache frames ran: the crashed player stayed
 // "connected" for two minutes. A crash is for good: no frame and no load stage holds the link after it.

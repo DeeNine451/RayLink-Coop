@@ -3,7 +3,12 @@
 // Server: the world server installs its join handlers after the Core's, runs its bridges' wait every frame and asks its own facts at
 // the autostart; a map server installs its SessionReset after the Core's client tables; a server player's session starts and runs the
 // feed. Co-op: nothing of it in hostplay/coop_hostplay_mode.cpp.
+// Stand b57h creator10_server: a level is left standing. Server: the world refuses a move of a player who is down, dead, out of the
+// run or being respawned (srv::departure::may_leave), and his own game does not ask one. Co-op: none (no trip; the group transition
+// counts the standing, join::host_player_alive).
 #include "test_util.h"
+#include "coop_death_rules.h"
+#include "srv/coop_srv_departure_rules.h"
 
 #include <fstream>
 #include <regex>
@@ -86,4 +91,25 @@ TEST(srv_join_not_wired_in_the_coop_modes)
 	for (const char* word : {"coop_srv_join", "join_install_world", "join_world_frame", "join_install_map", "feed_start", "feed_frame",
 	         "world_facts"})
 		CHECK(coop.find(word) == std::string::npos);
+}
+
+// b57h: the creator went down in the 3 s fade of a stock ChangeLevel and died; the trip went out after it, the world moved him and he
+// arrived downed again (health 0.01, a new bleed-out) instead of being evacuated and respawned.
+TEST(srv_join_a_level_is_left_standing)
+{
+	using namespace coop::death;
+	CHECK(coop::srv::departure::may_leave(kLifeAlive));
+	for (uint8_t life : {kLifeWounded, kLifeDead, kLifeSpectating, kLifeRespawning, uint8_t(5), uint8_t(255)})
+		CHECK(!coop::srv::departure::may_leave(life));
+	const std::string world = sjw_read("xrGame/coop/srv/coop_srv_join.cpp");
+	REQUIRE(!world.empty());
+	const std::string move = sjw_member(world, R"(void\s+on_level_move)");
+	REQUIRE(!move.empty());
+	CHECK(sjw_order(move, "srv::departure::may_leave(u8(life))", "levels::host_judge_move(from, target)"));
+	CHECK(sjw_order(move, "srv::departure::may_leave(u8(life))", "alife_rw().teleport_object(proxy->ID"));
+	const std::string core = sjw_read("xrGame/coop/coop_join.cpp");
+	REQUIRE(!core.empty());
+	const std::string trip = sjw_member(core, R"(void\s+client_level_trip)");
+	REQUIRE(!trip.empty());
+	CHECK(sjw_order(trip, "survival::life_of(0) != survival::Life::Alive", "client_send_move(m, now)"));
 }
