@@ -1330,6 +1330,37 @@ TEST(xfer_abort_while_spawning_keeps_the_spawn)
 	CHECK_EQ(w.owner(30), kM1);
 }
 
+// b57i progress_server (Server, l05_bar; a read-only investigation of coop_levels_xfer.cpp's frame order): the switch vote
+// ran on a stalker this map server had just made before its spawn was flushed (client_requests before client_flush_up), so
+// the holder asked the world for the id (TakeReq); the spawn then found the id known and was dropped. The object never
+// became this map server's, the world refused the request (Abort {0}: no such object yet), and it came online only after
+// refusals, kRefusedMs (10 s) each. A request of an id this map server spawns is that spawn.
+TEST(xfer_spawn_of_an_id_asked_for_becomes_the_spawn)
+{
+	Ledger w;
+	connect(w);
+	Holder m1(kM1);
+	Wire net(w, {&m1});
+	net.send(m1.want_online(40, net.now)); // the vote, before the flush
+	CHECK(m1.requesting(40));
+	std::vector<Packet> sp = m1.spawned(40, {4}, net.now); // the flush: the spawn of the same leased id
+	REQUIRE(sp.size() == 1);
+	CHECK(sp[0].op == Op::SpawnPrepare);
+	CHECK(m1.authors(40)); // this map server's from now on
+	CHECK(!m1.requesting(40));
+	net.send(sp);
+	net.pump(); // the world refuses the TakeReq (Abort {0}), then registers the spawn (Ack)
+	const std::vector<Holder::Event> ev = m1.take_events();
+	CHECK_EQ(count_events(ev, Holder::Event::Kind::Refused, 40), size_t(0));
+	CHECK_EQ(count_events(ev, Holder::Event::Kind::Remove, 40), size_t(0));
+	CHECK(m1.authors(40));
+	CHECK_EQ(w.owner(40), kM1);
+	CHECK(confirmed_is(w, 40, {4}));
+	CHECK(m1.idle());
+	CHECK_EQ(m1.gen(40), w.gen(40));
+	CHECK(m1.spawned(40, {5}, net.now).empty()); // a known id in any other state still makes no second spawn
+}
+
 // Review I2: a record the world makes anew takes a fresh gen, so a late ReleaseCommit of the id's earlier life is still
 // answered and the map server stops repeating it.
 TEST(xfer_late_release_commit_after_id_reuse)
