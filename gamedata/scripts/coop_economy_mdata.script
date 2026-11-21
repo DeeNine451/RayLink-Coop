@@ -191,7 +191,7 @@ local SE_HOST_ONLY = {
 for k in pairs(SE_HOST_ONLY) do se_not_to_bridges[k] = true end
 -- Accepted from a client on any entity (flags a player sets on world objects he deals with).
 local SE_WORLD_VARS = {
-	looted = true, parts = true, info = true, unpatched = true, strapped_item = true,
+	looted = true, info = true, unpatched = true, strapped_item = true,
 	last_seen_level = true, last_seen_time = true,
 }
 
@@ -199,14 +199,14 @@ local se_out = {} -- "id\0var" -> { id (host numbering), var, packed }
 local se_sig = {} -- "id\0var" -> packed value last sent / received
 local se_recent = {} -- client, "id\0var" -> { id (host numbering), var, packed, instance, at = sent }: a load may come before it reached
 local se_wait = {} -- changes for entities not here yet: { id (local), var, value, packed, until_ms }
+local se_parts_wait = {} -- latest parts for an instance whose item has not arrived
 local se_next_flush = 0
--- A client's writes made while the host's world is being read (in a session, not live yet): "id\0var" -> { id (local), var, value }.
--- They go out with the first live frame. GAMMA's WPO rolls the parts of the player's weapon then; dropped, the host never had them,
--- its save had none, and every next load of a level rolled them again with another seed (owner, live build 46: "the gun is broken,
--- maybe it is not kept at transitions"). The table lives as long as this Lua state: a new load starts with none.
+-- Local writes made while the host's world is being read: "id\0var" -> { id (local), var, value }.
+-- They go out with the first live frame. A new Lua state starts with none.
 local se_early = {}
 local se_early_n = 0
 local SE_EARLY_MAX = 512
+local se_heard
 
 -- Build 57: a player's machine keeps what it sent recently for a load that may come before it reached the world (a map server never
 -- loads another world of this session: its process ends with its world).
@@ -222,6 +222,18 @@ end
 -- log: "first visit: defaults" at every load of a level).
 local function nobody_to_tell()
 	return core.others_count() == 0 and not core.follows_world()
+end
+
+local function parts_held_by(id, holder)
+	if holder == nil then return false end
+	local item = alife_object(id)
+	if item and item.parent_id == holder then return true end
+	local root = core.root_of(id)
+	if root == holder then return true end
+	-- The chain can end just before registration of the carrier. The item's
+	-- server-side parent still identifies that carrier during the handoff.
+	local top = root and alife_object(root)
+	return top ~= nil and top.parent_id == holder
 end
 
 -- queues entity `id`'s var for the next flush unless the others have this value already
@@ -256,8 +268,18 @@ local function se_wrapper(id, name, varname, val, ...)
 		local m = m_data()
 		if m and m.se_object and m.se_object[id] and m.se_object[id].parts ~= nil then return end
 	end
+	if varname == "parts" and not applying and core.follows_world() and coop_mode.is_player_mirror() then
+		local actor = db and db.actor
+		if not actor or not parts_held_by(id, actor:id()) then
+			-- Registration and clone cleanup can clear storage of an entity
+			-- that is already gone. That clear is local bookkeeping.
+			if val == nil and not alife_object(id) then return orig_save_var(id, name, varname, val, ...) end
+			return
+		end
+	end
 	orig_save_var(id, name, varname, val, ...)
 	se_queue(id, varname, val)
+	if varname == "parts" and not applying and core.live() then se_heard(id, varname) end
 end
 
 -- The session is live: what was written while its world was being read is queued like any write made now.
@@ -303,8 +325,8 @@ local function se_store(local_id, var, value)
 	return true
 end
 
--- Scripts that act on a value the network brought (coop_mods_mags draws the dots of a weapon again): f(local id, var). Runs after
--- the value is stored, on every machine; not for this machine's own writes.
+-- Notify subscribers after an SE value is installed. Parts also notify for
+-- local edits and initial metadata so all paths refresh the same item cell.
 local se_listeners = {}
 function on_se_value(f)
 	if type(f) ~= "function" then return end
@@ -312,7 +334,7 @@ function on_se_value(f)
 	se_listeners[#se_listeners + 1] = f
 end
 
-local function se_heard(id, var)
+se_heard = function(id, var)
 	for _, f in ipairs(se_listeners) do
 		local ok, err = pcall(f, id, var)
 		if not ok then
@@ -322,8 +344,16 @@ local function se_heard(id, var)
 	end
 end
 
--- f(...) with the se vars it writes kept on this machine: a stand-in until the real value comes (coop_mods_mags: the parts of a
--- weapon a client carries while its authority rolls them). Returns what f returns; an error of f is raised again.
+-- A requested item field uses the normal SE receiver and its instance check. fill: an answer to that player's ask, stored
+-- only where his machine has no value (it may hold a newer one of its own already: the same table reached it on the
+-- lane and he edited his own item since).
+function send_se(peer, id, var, value, fill)
+	local packed = core.pack(value)
+	if #packed > MAX_VALUE then return false end
+	return core.send("se", { n = 1, i1 = core.host_id(id), k1 = var, d1 = packed, x1 = item_instance(id), f = fill and 1 or nil }, peer)
+end
+
+-- f(...) with its SE writes kept on this machine. Propagate the result or error.
 function quietly(f, ...)
 	local was = applying
 	applying = true
@@ -333,8 +363,7 @@ function quietly(f, ...)
 	return unpack(r, 2, table.maxn(r))
 end
 
--- A value of entity `id` (local numbering) sent to this machine alone (coop_mods_mags: the authority answers an ask with the
--- parts it has): stored as one that came through "se", without sending it on. False when the entity is not here.
+-- Install a value through the same SE receiver without sending it on.
 function apply_se(id, var, value)
 	if type(id) ~= "number" or not_sent(var) then return false end
 	se_sig[tostring(core.host_id(id)) .. "\0" .. var] = core.pack(value)
@@ -347,17 +376,9 @@ end
 local function client_may_write(from, hid, var)
 	if clone_busy[hid] or clone_is_retired(hid) then return false end
 	if SE_HOST_ONLY[var] then return false end
-	if var == "parts" then
-		local root = core.root_of(hid)
-		for _, owner in ipairs(core.players()) do
-			if owner.avatar_id == root then
-				local sender = core.player(from)
-				return sender and sender.avatar_id == root
-			end
-		end
-	end
 	if SE_WORLD_VARS[var] then return alife_object(hid) ~= nil end
 	local p = core.player(from)
+	if var == "parts" then return p ~= nil and parts_held_by(hid, p.avatar_id) end
 	return p ~= nil and p.avatar_id ~= nil and core.root_of(hid) == p.avatar_id
 end
 
@@ -380,16 +401,28 @@ local function on_se(t, from)
 	local host = core.owns_world()
 	if host and from <= 0 then return end
 	if not host and from ~= 0 then return end
+	if clone_storage ~= m_data() then clone_reset() end
 	local relay = {}
 	for _, e in ipairs(read_batch(t)) do
 		local lid = host and e.id or core.local_id(e.id)
 		local mismatch = alife_object(lid) and e.instance and e.instance ~= item_instance(lid)
 		local m = m_data()
 		local stamped = m and m.se_object and m.se_object[lid] and m.se_object[lid]._coop_instance
-		if clone_is_retired(lid) or clone_busy[lid] or mismatch or (stamped and not e.instance) then
+		if clone_is_retired(lid) or clone_busy[lid] then
+			stats.se_refused = stats.se_refused + 1
+		elseif e.key == "parts" and mismatch and not stamped and (not host or from >= 0x100) then
+			-- An existing mirror can receive parts before it learns the
+			-- matching initial stamp. Never apply them under the old stamp.
+			se_parts_wait[lid] = e
+			stats.se_pending = stats.se_pending + 1
+			if host then relay[#relay + 1] = { e.id, e.key, e.packed, e.instance } end
+		elseif mismatch or (stamped and not e.instance) then
 			stats.se_refused = stats.se_refused + 1
 		elseif not_sent(e.key) then
 			-- ignore
+		elseif t.f == 1 and not host and m and m.se_object and m.se_object[lid]
+			and m.se_object[lid][e.key] ~= nil and not (type(m.se_object[lid][e.key]) == "table" and next(m.se_object[lid][e.key]) == nil) then
+			-- an answer to an ask of this machine (send_se fill) that the lane beat: this machine's value stays
 		elseif host_holds(host, from, e.id) then
 			stats.se_held = stats.se_held + 1
 			hold(se_hold, from, e)
@@ -402,11 +435,16 @@ local function on_se(t, from)
 			stats.se_in = stats.se_in + 1
 			if not se_store(lid, e.key, e.value) then
 				stats.se_pending = stats.se_pending + 1
-				se_wait[#se_wait + 1] = { lid, e.key, e.value, instance = e.instance, until_ms = core.now() + PENDING_MS }
+				if e.key == "parts" then
+					se_parts_wait[lid] = e
+				else
+					se_wait[#se_wait + 1] = { lid, e.key, e.value, instance = e.instance, until_ms = core.now() + PENDING_MS }
+				end
 			else
+				if e.key == "parts" then se_parts_wait[lid] = nil end
 				se_heard(lid, e.key)
 			end
-			if host then relay[#relay + 1] = { e.id, e.key, e.packed } end
+			if host then relay[#relay + 1] = { e.id, e.key, e.packed, e.instance } end
 		end
 	end
 	if host and #relay > 0 then
@@ -428,7 +466,7 @@ local function se_release_held()
 				if se_store(e.id, e.key, e.value) then se_heard(e.id, e.key) end
 				relay[h.from] = relay[h.from] or {}
 				local r = relay[h.from]
-				r[#r + 1] = { e.id, e.key, e.packed }
+				r[#r + 1] = { e.id, e.key, e.packed, e.instance }
 			else
 				stats.se_refused = stats.se_refused + 1
 			end
@@ -447,6 +485,20 @@ end
 
 local function se_retry()
 	if core.owns_world() then se_release_held() end
+	local m = next(se_parts_wait) and m_data()
+	for id, e in pairs(se_parts_wait) do
+		if not clone_busy[id] and alife_object(id) then
+			local stamp = item_instance(id)
+			local se = m and m.se_object and m.se_object[id]
+			if clone_is_retired(id) or (se and se._coop_instance and stamp ~= e.instance) then
+				se_parts_wait[id] = nil
+			elseif stamp == e.instance and se_store(id, "parts", e.value) then
+				se_parts_wait[id] = nil
+				se_sig[tostring(e.id) .. "\0parts"] = e.packed
+				se_heard(id, "parts")
+			end
+		end
+	end
 	if #se_wait == 0 then return end
 	local keep, t = {}, core.now()
 	for _, w in ipairs(se_wait) do
@@ -1342,6 +1394,10 @@ function clone_stage(source, target, name, packed, trust, token)
 		snapshot.se_present = snapshot.se_present or m.se_object[source] ~= nil
 		original = core.pack(snapshot) -- the owner's permitted source state survives a rejected replacement
 	end
+	local early = se_parts_wait[target]
+	if trust == 2 and early and early.instance == snapshot.se._coop_instance and snapshot.se.parts == nil then
+		snapshot.se.parts = early.value
+	end
 	local rollback = original and clone_decode(original)
 	if original and not rollback then return false end
 	snapshot.se_present = true
@@ -1362,6 +1418,7 @@ function clone_stage(source, target, name, packed, trust, token)
 	clone_purge(source)
 	clone_purge(target)
 	clone_restore(target, snapshot, name)
+	if trust == 2 then se_parts_wait[target] = nil end
 	return true
 end
 
@@ -1376,6 +1433,7 @@ function clone_activate(target)
 		end
 	end
 	if tx then tx.activated = true end
+	if m.se_object[target] and m.se_object[target].parts ~= nil then se_heard(target, "parts") end
 	return true
 end
 
@@ -1420,10 +1478,27 @@ function clone_adopt(id, packed)
 	if current and current ~= snapshot.se._coop_instance then return false end
 	m.se_object[id] = m.se_object[id] or {}
 	for key in pairs(SE_HOST_ONLY) do m.se_object[id][key] = snapshot.se[key] end
+	-- A player's copy can predate the authority's initialization. Seed that
+	-- existing instance too. Keep a newer value already received on the SE lane.
+	local parts_key = tostring(core.host_id(id)) .. "\0parts"
+	local parts_sig = se_sig[parts_key]
+	local local_parts = se_out[parts_key] or se_recent[parts_key]
+	local early = se_parts_wait[id]
+	se_parts_wait[id] = nil
+	if not parts_sig or (early and early.instance == snapshot.se._coop_instance) then
+		local parts = snapshot.se.parts
+		if parts == nil and early and early.instance == snapshot.se._coop_instance then parts = early.value end
+		if parts ~= nil and core.pack(m.se_object[id].parts) ~= core.pack(parts) then
+			m.se_object[id].parts = parts
+			parts_sig = core.pack(parts)
+			se_heard(id, "parts")
+		end
+	end
 	clone_retired[id] = nil
 	clone_purge(id)
+	if not local_parts then se_sig[parts_key] = parts_sig end
 	for key, value in pairs(m.se_object[id]) do
-		if key ~= "name" and not SE_HOST_ONLY[key] then se_queue(id, key, value) end
+		if key ~= "name" and not SE_HOST_ONLY[key] and (key ~= "parts" or local_parts) then se_queue(id, key, value) end
 	end
 	return true
 end
@@ -1431,6 +1506,7 @@ end
 function clone_reset()
 	clone_busy, clone_transactions, clone_retired = {}, {}, {}
 	item_retry = {}
+	se_parts_wait = {}
 	clone_storage = m_data()
 end
 -- GAMMA's alife_clone_weapon (_g.script) copies m_data.se_object[old] to the clone directly; only item_parts.copy_parts_con
@@ -1485,7 +1561,11 @@ end
 
 local function server_entity_on_unregister(se_obj)
 	local id = se_obj and se_obj.id
-	if type(id) == "number" then item_base[id] = nil end
+	if type(id) ~= "number" then return end
+	item_base[id] = nil
+	se_parts_wait[id] = nil
+	local key = tostring(core.host_id(id)) .. "\0parts"
+	if not clone_busy[id] then se_sig[key], se_out[key] = nil, nil end
 end
 
 local function bolt_max()

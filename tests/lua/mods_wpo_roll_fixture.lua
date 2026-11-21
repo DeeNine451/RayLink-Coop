@@ -1,8 +1,5 @@
--- Weapon Parts Overhaul with split levels (testers 2026-11-13: "parts of armour and weapons stay 100 % if you take them before their
--- condition reaches the server"). The parts of a weapon are rolled once from its condition (zzzz_arti_jamming_repairs
--- weapon_eval_parts: > 0.9 gives 90-99 to every part). A client's copy of loot of a map server's level may still show the spawn's
--- 1.0: the roll belongs to the authority of the level, whose copy has the wear (coop_mods_mags, wpo_eval). And a refused strip of a
--- weapon in a body or a box says so to the player (wpo_no), it was silent.
+-- WPO requests and strip refusals. The map authority rolls once from its own
+-- object. The real GAMMA evaluation and rendering run in mods_wpo_window_fixture.
 local which = ...
 MODE = which == "host" and "host" or "client"
 dofile("tests/lua/support/stubs_mods.lua")
@@ -17,6 +14,7 @@ coop.levels = { split = function() return which == "server client" end }
 
 PARTS, ROLLED = {}, {}
 function se_load_var(id, name, var) if var == "parts" then return PARTS[id] end end
+coop_economy_mdata = { on_se_value = function() end, send_se = function() return true end }
 item_parts = {
 	get_parts_con = function(obj, id) local i = obj and obj:id() or id; return PARTS[i] end,
 	set_parts_con = function(id, p) PARTS[id] = p end,
@@ -39,9 +37,20 @@ SendScriptCallback("actor_on_first_update")
 SendScriptCallback("actor_on_update")
 
 local function weapon(parent, cond, pos)
-	local _, w = spawn("wpn_ak", pos or vec3(21, 0, 0), parent, { cond = cond })
+	local se, w = spawn("wpn_ak", pos or vec3(21, 0, 0), parent, { cond = cond })
 	w._kind = "weapon"
+	function w:name() return self:section() .. self:id() end
+	se.name = function() return w:name() end
 	return w
+end
+
+local function eval(w)
+	from("wpo_eval", { n = 1, w1 = w:id(), s1 = w:name() }, 1)
+end
+
+local function read(w)
+	item_parts.evaluate_parts(w)
+	SendScriptCallback("actor_on_update")
 end
 
 if which == "co-op client" then
@@ -49,32 +58,40 @@ if which == "co-op client" then
 	box._kind = "box"
 	local plain = weapon(box:id(), 1)
 	SENT = {}
-	item_parts.evaluate_parts(plain)
-	check(ROLLED[plain:id()] == 1 and sent("mods.wpo_eval") == nil, "co-op client rolls parts on its own map")
+	read(plain)
+	check(ROLLED[plain:id()] == nil and sent("mods.wpo_eval") ~= nil, "co-op client asks the host for parts")
 elseif which == "host" then
 	local _, box = spawn("box", vec3(21, 0, 0))
 	box._kind = "box"
 	-- the authority of the level rolls with its own condition: the wear death_manager gave the gun here
 	local worn = weapon(box:id(), 0.31)
 	SENT = {}
-	from("wpo_eval", { w = worn:id() }, 1)
+	eval(worn)
 	check(ROLLED[worn:id()] == 1 and PARTS[worn:id()].wpn_ak == 31, "wpo_eval: the authority rolls the parts of loot near the player from its own condition")
-	from("wpo_eval", { w = worn:id() }, 1)
+	eval(worn)
 	check(ROLLED[worn:id()] == 1, "wpo_eval: parts that exist are never rolled again")
-	-- a gun another player (or a living NPC) carries is not loot
+	-- A living NPC's trade/inventory view uses the same state as a corpse.
 	local _, npc = spawn("npc", vec3(21, 0, 0), nil, { id = 600 })
 	npc._kind = "stalker"
 	local carried = weapon(600, 0.5)
-	from("wpo_eval", { w = carried:id() }, 1)
-	check(ROLLED[carried:id()] == nil and log_has("wpo_eval from #1 refused") ~= nil, "wpo_eval: a carried weapon is refused")
+	eval(carried)
+	check(ROLLED[carried:id()] == 1, "wpo_eval: a nearby living NPC's weapon is evaluated by the host")
 	-- loot far away is not his to look at
 	local far = weapon(nil, 0.4, vec3(200, 0, 0))
-	from("wpo_eval", { w = far:id() }, 1)
+	eval(far)
 	check(ROLLED[far:id()] == nil, "wpo_eval: loot far from the player is refused")
 	-- the weapon the requester carries himself (taken before its condition reached his copy) is rolled here too
 	local his = weapon(500, 0.27)
-	from("wpo_eval", { w = his:id() }, 1)
+	eval(his)
 	check(ROLLED[his:id()] == 1, "wpo_eval: the requester's own fresh weapon is rolled by the authority")
+	-- Review of R35: an ask the flood limit drops is answered, so the asker's ask is released (he asks again when he
+	-- reads the item next) instead of waiting for an answer that never comes.
+	SENT = {}
+	for _ = 1, 25 do eval(worn) end
+	local dropped = sent("mods.wpo_eval_no")
+	check(dropped ~= nil and dropped.n == 1 and dropped.w1 == worn:id() and dropped.s1 == worn:name(),
+		"wpo_eval: an ask the limit drops is refused to the asker")
+	NOW = NOW + 60000
 
 	-- a refused strip answers the player (it was a log line on the host alone)
 	SENT = {}
@@ -107,30 +124,37 @@ else
 	-- loot in a box: this copy may not have its wear yet, the authority rolls
 	local loot = weapon(box:id(), 1)
 	SENT = {}
-	item_parts.evaluate_parts(loot)
+	read(loot)
 	local ask = sent("mods.wpo_eval")
 	check(ROLLED[loot:id()] == nil, "client, split levels: loot is not rolled from this copy's condition")
-	check(ask ~= nil and ask.w == loot:id(), "client, split levels: the authority of the level is asked to roll")
-	item_parts.evaluate_parts(loot)
+	check(ask ~= nil and ask.w1 == loot:id(), "client, split levels: the authority of the level is asked to roll")
+	read(loot)
 	check(sent_count("mods.wpo_eval") == 1, "client: one request while the answer is on its way")
 	NOW = NOW + 5000
-	item_parts.evaluate_parts(loot)
-	check(sent_count("mods.wpo_eval") == 2, "client: asked again after a while (a lost answer)")
-	-- the weapon just taken: its condition may still be the spawn's too. What he carries never goes without a table (arti_jamming
-	-- reads the gun in hand every second): a stand-in rolled here, the authority asked for the real one (test_srv_mods_wpo.lua
-	-- shows the stand-in stays on this machine and gives way to the authority's roll)
+	read(loot)
+	check(sent_count("mods.wpo_eval") == 1 and not PARTS[loot:id()], "elapsed time cannot authorize a mirror roll")
+	-- Taking a weapon whose parts are unknown does not turn the mirror
+	-- into its evaluator.
 	local taken = weapon(0, 1)
 	SENT = {}
-	item_parts.evaluate_parts(taken)
+	read(taken)
 	check(sent("mods.wpo_eval") ~= nil, "client, split levels: a weapon without parts in the bag is rolled by the authority too")
-	check(ROLLED[taken:id()] == 1 and PARTS[taken:id()] ~= nil, "client, split levels: meanwhile it has a stand-in table")
-	item_parts.evaluate_parts(taken)
-	check(ROLLED[taken:id()] == 1 and sent_count("mods.wpo_eval") == 1, "client: the stand-in is not evaluated again, nor asked twice")
+	check(ROLLED[taken:id()] == nil and PARTS[taken:id()] == nil, "client, split levels: no stand-in table")
+	read(taken)
+	check(ROLLED[taken:id()] == nil and sent_count("mods.wpo_eval") == 1, "client: repeated reads share one request")
+	from("wpo_eval_no", { w = taken:id(), name = taken:name() }, 0)
+	check(ROLLED[taken:id()] == nil and PARTS[taken:id()] == nil, "refusal never initializes parts on a mirror")
+	read(taken)
+	check(sent_count("mods.wpo_eval") == 2, "client: a refused ask is asked again at the next read")
+	from("wpo_eval_no", { n = 1, w1 = taken:id(), s1 = taken:name() }, 0)
+	read(taken)
+	check(sent_count("mods.wpo_eval") == 3 and PARTS[taken:id()] == nil,
+		"client: an ask the limit dropped (a batch refusal) is released too, and nothing is rolled here")
 	-- parts that exist: the mod's own code (it returns at once)
 	local known = weapon(box:id(), 1)
 	PARTS[known:id()] = { scope = 70 }
 	SENT = {}
-	item_parts.evaluate_parts(known)
+	read(known)
 	check(sent("mods.wpo_eval") == nil, "client: a weapon with parts asks nobody")
 	-- the authority's refusal of a strip is said to the player
 	TIPS = {}

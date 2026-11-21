@@ -324,6 +324,488 @@ local function owns(id)
 	return coop_mode.actor_is_player() and db.actor and C().root_of(id) == db.actor:id()
 end
 
+-- WPO uses the stock SE field so saves, clone/initial snapshots and live changes
+-- all refer to the same parts. A mirror can edit its carried weapon's existing
+-- state, but only the process running the map can initialize that state.
+local PARTS = "parts"
+local MAX_PART_QUERIES = 64
+local parts_asked, parts_queries, parts_dirty, parts_waiting = {}, {}, {}, {}
+-- parts_after[id]: readers of this machine waiting for the item's parts ({ f, name }); routes[peer] (the world): the
+-- process that led that player's map when last seen (0: none)
+local parts_after, routes = {}, {}
+local parts_eval
+
+local function has_parts(obj)
+	local im = C().mod("itms_manager")
+	local ini = im and im.ini_parts
+	if not ini then return true end
+	local sec = obj:section()
+	sec = ini_sys:r_string_ex(sec, "parent_section") or sec
+	local list = ini:r_string_ex("con_parts_list", sec)
+	return type(list) == "string" and list ~= ""
+end
+
+local function read_parts(id)
+	local value = se_load_var(id, nil, PARTS)
+	return type(value) == "table" and next(value) and value or nil
+end
+
+local function valid_parts(value)
+	if type(value) ~= "table" or not next(value) then return false end
+	for key, condition in pairs(value) do
+		if type(key) ~= "string" or type(condition) ~= "number"
+			or not (condition == -1 or condition >= 0 and condition <= 100) then return false end
+	end
+	return true
+end
+
+local function request_parts(obj)
+	local id = obj:id()
+	local name = obj:name()
+	local holder = C().root_of(id)
+	local asked = parts_asked[id]
+	if asked and asked.name == name and asked.holder == holder and not released_since(id, asked.tick) then return true end
+	local hid = C().hid(id)
+	if not hid or #name > 256 then return false end
+	local _, now = ticks()
+	local query = { w = hid, name = name, holder = holder, tick = now }
+	parts_asked[id], parts_queries[id] = query, query
+	return true
+end
+
+local function flush_parts_queries()
+	if not C().active() or not next(parts_queries) then return end
+	-- One inventory draw can ask for a whole trader page. A request per
+	-- cell exhausts the verb's burst allowance and leaves later cells blank.
+	local t, ids, bytes = { n = 0 }, {}, 0
+	for id, query in pairs(parts_queries) do
+		if released_since(id, query.tick) then
+			parts_asked[id], parts_queries[id] = nil, nil
+		else
+			bytes = bytes + 3 * #query.name + 32
+			if t.n == MAX_PART_QUERIES or bytes > 10000 then break end
+			t.n = t.n + 1
+			t["w" .. t.n], t["s" .. t.n], ids[t.n] = query.w, query.name, id
+		end
+	end
+	if t.n > 0 and C().to_host("wpo_eval", t) then
+		for _, id in ipairs(ids) do parts_queries[id] = nil end
+	end
+end
+
+-- The item's parts are not known on this player's machine yet: a reader that indexes them would fail here.
+local function parts_missing(obj)
+	return parts_eval ~= nil and obj ~= nil and C().active() and coop_mode.is_player_mirror() and has_parts(obj)
+		and not read_parts(obj:id())
+end
+
+-- A reader that waited for the parts of an item the authority refused: told, as a refused action is.
+local function say_unknown()
+	local msg = C().text("st_coop_guard_failed", "Co-op: this action could not be done on a client.")
+	if db.actor and news_manager and news_manager.send_tip then pcall(news_manager.send_tip, db.actor, msg, nil, "swiss_knife", 6000) end
+end
+
+-- A read the player started (an action, a gun taken in hand) asks again even while an ask is out: that one may be lost.
+-- Cells and other passive reads share the ask that is out.
+local function ask_now(obj)
+	parts_asked[obj:id()] = nil
+	return request_parts(obj)
+end
+
+-- Runs f(obj) once the parts of `obj` are known on this machine: at once when they are (or the item has none, or this
+-- process is no player's mirror). A reader of G.A.M.M.A. that indexes the table goes through here (a disassembly, the
+-- workshop's scheme, a field strip): it never gets a stand-in table, it waits for the authority's (asked for now), and a
+-- refusal ends it with a word. One round trip at most: the authority gives a player's item its table as he gets it
+-- (player_takes). Returns what f returns when it ran now.
+function with_parts(obj, f)
+	if not parts_missing(obj) then return f(obj) end
+	if not ask_now(obj) then return say_unknown() end
+	local id = obj:id()
+	local list = parts_after[id]
+	if not list then
+		list = {}
+		parts_after[id] = list
+	end
+	list[#list + 1] = { f = f, name = obj:name() }
+end
+
+-- The readers whose item's parts came: each runs once, on the same item.
+local function run_after()
+	local ready = {}
+	for id in pairs(parts_after) do
+		if read_parts(id) then ready[#ready + 1] = id end
+	end
+	for _, id in ipairs(ready) do
+		local list = parts_after[id]
+		parts_after[id] = nil
+		local obj = level.object_by_id(id)
+		for _, e in ipairs(list) do
+			if obj and obj:name() == e.name then
+				local ok, err = pcall(e.f, obj)
+				if not ok then C().report("item_state", "parts reader", err) end
+			end
+		end
+	end
+end
+
+-- An ask whose answer may be lost on its way (item 3 of the R35 review): asked again now while the item is here without
+-- parts. Events only, never a timer: the world back, the player's map led by another process, the item coming online here.
+local function ask_again(id)
+	local obj = parts_asked[id] and level.object_by_id(id)
+	parts_asked[id] = nil
+	if obj and has_parts(obj) and not read_parts(id) then request_parts(obj) end
+end
+
+local function ask_all_again()
+	if not coop_mode.is_player_mirror() then return end
+	local ids = {}
+	for id in pairs(parts_asked) do ids[#ids + 1] = id end
+	for _, id in ipairs(ids) do ask_again(id) end
+end
+
+-- The world: who leads each player's map (the srv layer's hook levels.bridge_of_player; the co-op has none, its host
+-- leads the one map). When that changes (a map server came, went or was replaced), what he asked of the old one may be
+-- lost with it: he hears so and asks again.
+local function watch_routes()
+	if not coop_mode.decides_world() then return end
+	local bridge_of = coop_mode.hook("levels.bridge_of_player")
+	if not bridge_of then return end
+	local now = {}
+	for _, p in ipairs(C().players()) do
+		if type(p.id) == "number" and not p.is_self then
+			local ok, b = pcall(bridge_of, p.id)
+			b = ok and tonumber(b) or 0
+			now[p.id] = b
+			if routes[p.id] ~= nil and routes[p.id] ~= b then C().to_peer(p.id, "wpo_eval_again", { r = b }) end
+		end
+	end
+	routes = now
+end
+
+local function evaluate_parts(obj, ...)
+	if not C().active() then return parts_eval(obj, ...) end
+	if not obj then return end
+	if coop_mode.leads_here() then return parts_eval(obj, ...) end
+	if not coop_mode.is_player_mirror() then return end
+	local id = obj:id()
+	if read_parts(id) then
+		-- GAMMA keeps an existing table in step with the item's condition (armour re-evaluates, a weapon returns at
+		-- once). The condition of what this player carries is his word, so his machine does that edit, as with a strip.
+		if owns(id) then return parts_eval(obj, ...) end
+		return
+	end
+	if has_parts(obj) then request_parts(obj) end
+end
+
+-- The parts this authority has of item `id`, to one player. fill: only where his machine has none (an answer to his ask).
+function send_parts(peer, id, fill)
+	local value = read_parts(id)
+	if value then return coop_economy_mdata.send_se(peer, id, PARTS, value, fill) end
+	return false
+end
+
+local function answer_parts(t, from)
+	local hid = tonumber(t.w)
+	if not (hid and hid > 0 and hid < 65535 and hid % 1 == 0 and type(t.name) == "string") then return end
+	local id = C().lid(hid)
+	if not id then return end
+	local se = alife_object(id)
+	local obj = level.object_by_id(id)
+	local who = C().avatar(from)
+	if coop_mode.leads_here() and se and who and se:name() == t.name then
+		local root = C().root_of(id)
+		local at = level.object_by_id(root) or obj
+		if root == who:id() or (at and at:position():distance_to_sqr(who:position()) <= 12 * 12) then
+			local known = read_parts(id)
+			local em = C().mod("coop_economy_mdata")
+			if not known and obj and has_parts(obj) and not (em and em.clone_pending and em.clone_pending(id)) then
+				-- The first roll goes to everybody on the SE lane in this frame, the asker too, once: a second copy (a
+				-- direct answer as well) could come after his own edit of his own item and undo it.
+				parts_eval(obj)
+				if read_parts(id) then
+					if flush_se and coop_economy_core.live() then flush_se() end
+					return
+				end
+			end
+			-- Known here already: he missed it, or it is on its way to him; his machine keeps a table it has.
+			if known and send_parts(from, id, true) then return end
+			if not known and not obj then
+				local waiting = parts_waiting[id]
+				local stamp = instance(id)
+				if stamp == t.name then stamp = nil end -- initial replication can stamp the same entity later
+				if not waiting or waiting.name ~= t.name or released_since(id, waiting.tick) then
+					local _, now = ticks()
+					waiting = { name = t.name, stamp = stamp, tick = now, peers = {} }
+					parts_waiting[id] = waiting
+				end
+				waiting.peers[from] = t
+				return
+			end
+		end
+	end
+	C().to_peer(from, "wpo_eval_no", { w = hid, name = t.name })
+end
+
+local function answer_online_parts()
+	for id, waiting in pairs(parts_waiting) do
+		-- an asker who is no longer on this map hears a refusal: he asks again where he is when he reads the item
+		for peer, t in pairs(waiting.peers) do
+			if not C().avatar(peer) then
+				waiting.peers[peer] = nil
+				C().to_peer(peer, "wpo_eval_no", t)
+			end
+		end
+		local se = alife_object(id)
+		local replaced = not se or se:name() ~= waiting.name or released_since(id, waiting.tick)
+			or (waiting.stamp and instance(id) ~= waiting.stamp)
+		if not next(waiting.peers) then
+			parts_waiting[id] = nil
+		elseif replaced or level.object_by_id(id) then
+			parts_waiting[id] = nil
+			for peer, t in pairs(waiting.peers) do
+				if replaced then C().to_peer(peer, "wpo_eval_no", t) else answer_parts(t, peer) end
+			end
+		end
+	end
+end
+
+local function refresh_parts_cell(id)
+	local inv = rawget(_G, "ui_inventory")
+	local gui = inv and inv.GUI
+	if not (gui and gui:IsShown() and type(gui.CC) == "table") then return end
+	local obj = level.object_by_id(id)
+	if not obj then return end
+	for _, cc in pairs(gui.CC) do
+		local ok, err = pcall(function() if cc:GetCell_ID(id) then cc:UpdateItem(obj) end end)
+		if not ok then C().report("item_state", "parts cell", err) end
+	end
+end
+
+local function parts_changed(id, key)
+	if key ~= PARTS then return end
+	parts_asked[id], parts_queries[id] = nil, nil
+	parts_dirty[id] = true
+end
+
+local function bind_parts_jamming(jam)
+	local function active_gun()
+		return db.actor and db.actor.active_item and db.actor:active_item()
+	end
+	local function missing_state(gun)
+		return C().active() and coop_mode.is_player_mirror() and gun and jam.has_parts(gun) and not read_parts(gun:id())
+	end
+	-- Both stock reads iterate the parts table. Wait for the same state the
+	-- inventory cell needs before running either action.
+	C().wrap(jam, "unjam", "item_state.parts_unjam", function(orig)
+		return function(wpn, ...)
+			local gun = wpn or active_gun()
+			if missing_state(gun) then request_parts(gun) return end
+			return orig(wpn, ...)
+		end
+	end)
+	local update_jam = C().fn(jam, "actor_on_update") or C().find_local(jam, "actor_on_update")
+	if not update_jam then return end
+	-- arti_jamming keeps the gun in hand as its update last read it (cgd): the shot and jam callbacks use it. While the
+	-- gun in hand has no parts here that update does not run, so GAMMA's own reset (as after a repair) takes the previous
+	-- gun's data off it. The gun is asked for when it is taken in hand; after a refusal, again on the next equip or shot.
+	local waiting_gun
+	local function wait_for(gun)
+		local id = gun:id()
+		if waiting_gun == id then return end
+		waiting_gun = id
+		ask_now(gun)
+		local current = C().fn(jam, "current_id") and jam.current_id()
+		if current ~= nil and current ~= 0 and C().fn(jam, "reset_cgd") then jam.reset_cgd() end
+	end
+	C().swap_callback("actor_on_update", update_jam, function(...)
+		local gun = active_gun()
+		if missing_state(gun) then return wait_for(gun) end
+		waiting_gun = nil
+		return update_jam(...)
+	end)
+	RegisterScriptCallback("actor_on_weapon_before_fire", function()
+		local gun = active_gun()
+		if missing_state(gun) then request_parts(gun) end
+	end)
+end
+
+-- Readers of G.A.M.M.A. that index the parts table of an item at once, without a check. Bound at the first update: the
+-- mods that replace them (item_parts_repair_notifications and its zzzz_ twin, the workshop's nearby-stashes patch) have
+-- done so at their load by then; coop_mods_items puts its take-first wrappers around these again, outermost.
+local AUTOLOOTER_READS = { -- the option that makes the filter read the parts: { config key, options table, value }
+	cond_weapon_disassemble = { "disassemble_weapon", "disassemble_weapon_options", "with_usable_barrel" },
+	cond_armor_disassemble = { "disassemble_armor", "disassemble_armor_options", "with_usable_parts" },
+}
+
+local readers_bound = false
+local function bind_parts_readers(parts)
+	if readers_bound then return end
+	readers_bound = true
+	-- A disassembly of an own item (by hand, or the Autolooter's after coop_mods_items has taken it) waits for its parts.
+	for _, key in ipairs({ "disassembly_weapon", "disassembly_outfit" }) do
+		C().wrap(parts, key, "item_state.parts_" .. key, function(orig)
+			return function(obj, obj_d, ...)
+				if not (C().active() and type(obj) ~= "number" and obj and obj.id and owns(obj:id())) then
+					return orig(obj, obj_d, ...)
+				end
+				local n, args, tool = select("#", ...), { ... }, obj_d and obj_d:id()
+				return with_parts(obj, function(item)
+					local d = tool and level.object_by_id(tool)
+					if tool and not (d and owns(tool)) then return end -- the tool went meanwhile
+					if owns(item:id()) then return orig(item, d, unpack(args, 1, n)) end
+				end)
+			end
+		end)
+	end
+	-- The workshop's parts scheme (ui_workshop.script:594 parts_con[...]) is drawn when the selected item's parts are here,
+	-- and only while it is still the selected one.
+	local ws = C().mod("ui_workshop")
+	local ok, repair = pcall(function() return ws and ws.UIWorkshopRepair end)
+	if ok and repair then
+		-- drawn[page]: the item whose scheme the page shows (false: none drawn, the selected item's parts are awaited). While
+		-- they are, the page still shows the scheme of the item selected before, and WPO's Repair writes the page's scheme into
+		-- the selected item (zzzz_arti_jamming_repairs Repair: item_parts.set_parts_con(id, ...)): a table this machine made up.
+		local drawn = setmetatable({}, { __mode = "k" })
+		local function selected(page)
+			local got, obj = pcall(function() return page.CC["inventory"]:GetCell_Selected(true) end)
+			return got and obj or nil
+		end
+		C().wrap(repair, "ListPartScheme", "item_state.parts_workshop", function(orig)
+			return function(page, ...)
+				local obj = selected(page)
+				if not obj then return orig(page, ...) end
+				local id, n, args = obj:id(), select("#", ...), { ... }
+				if parts_missing(obj) then drawn[page] = false end
+				return with_parts(obj, function()
+					local now = selected(page)
+					if now and now:id() == id then
+						drawn[page] = id
+						return orig(page, unpack(args, 1, n))
+					end
+				end)
+			end
+		end)
+		-- A repair goes to the item whose scheme is on the page, never to another one (a player's machine only).
+		C().wrap(repair, "Repair", "item_state.parts_workshop_repair", function(orig)
+			return function(page, ...)
+				local shown = drawn[page]
+				local obj = shown ~= nil and C().active() and coop_mode.is_player_mirror() and selected(page)
+				if obj and obj:id() ~= shown then return say_unknown() end
+				return orig(page, ...)
+			end
+		end)
+	end
+	-- The Autolooter's disassembly filters (z_auto_looter cond_*_disassemble) read the parts of loot with the options that
+	-- ask for usable parts: loot whose parts are not here is not taken apart this time (asked for; the next run decides).
+	local al = C().mod("z_auto_looter")
+	for key, how in pairs(AUTOLOOTER_READS) do
+		C().wrap(al, key, "item_state.parts_" .. key, function(orig)
+			return function(obj, ...)
+				if parts_missing(obj) then
+					local cfg = type(al.config) == "table" and al.config or nil
+					local mcm = C().mod("auto_looter_mcm")
+					local options = mcm and type(mcm[how[2]]) == "table" and mcm[how[2]] or nil
+					if not (cfg and options) or cfg[how[1]] == options[how[3]] then
+						request_parts(obj)
+						return false
+					end
+				end
+				return orig(obj, ...)
+			end
+		end)
+	end
+end
+
+-- The authority of the map (the co-op host; the map server of the level): an item comes into a player's character here,
+-- whatever brought it (a take of loot, a pickup, a purchase, a reward or a craft product created for him). Single player
+-- rolls its parts right then (item_parts actor_on_item_take); a player's machine never rolls, so the authority does it
+-- here, with GAMMA's own roll from this machine's condition, and sends the table in this frame, with the item's move. A
+-- table that exists is never rolled again (his machine keeps an own item's table in step with its wear). In the server
+-- mode the world server has no player's map and no game object of his items: an item it creates for him gets its table
+-- on the map server of his map, when the item comes into his character there.
+local function player_takes(npc, obj)
+	if not (parts_eval and npc and obj and C().active() and coop_mode.leads_here()) then return end
+	if not C().is_remote_player(npc:id()) then return end
+	local id = obj:id()
+	local em = C().mod("coop_economy_mdata")
+	if read_parts(id) or (em and em.clone_pending and em.clone_pending(id)) or not has_parts(obj) then return end
+	local ok, err = pcall(parts_eval, obj)
+	if not ok then return C().report("item_state", "parts on take", err) end
+	if flush_se and coop_economy_core.live() then flush_se() end
+end
+
+function install_parts(parts, jam)
+	if parts_eval then return end
+	C().wrap(parts, "evaluate_parts", "item_state.parts", function(orig)
+		parts_eval = orig
+		return evaluate_parts
+	end)
+	C().wrap(parts, "get_parts_con", "item_state.parts_read", function(orig)
+		return function(obj, id, ...)
+			local value = orig(obj, id, ...)
+			if type(value) ~= "table" or not C().active() or not coop_mode.is_player_mirror()
+				or owns(obj and obj:id() or id) then return value end
+			-- Focus and tooltip mods also obtain this table. Their in-place
+			-- edits must not change the mirror of a world-owned item.
+			local copy = {}
+			for key, condition in pairs(value) do copy[key] = condition end
+			return copy
+		end
+	end)
+	local em = C().mod("coop_economy_mdata")
+	if em then em.on_se_value(parts_changed) end
+	local function batch_size(t)
+		local n = tonumber(t.n)
+		if not n or n % 1 ~= 0 or n < 1 or n > MAX_PART_QUERIES then return nil end
+		return n
+	end
+	C().on("wpo_eval", function(t, from)
+		local n = batch_size(t)
+		if not n then return end
+		for i = 1, n do answer_parts({ w = t["w" .. i], name = t["s" .. i] }, from) end
+	end, "host")
+	-- An ask the flood limit drops is refused like any other: the asker's ask is released and he asks again when he
+	-- reads the item next. Silent, it stayed asked, and the item never got its parts on his machine.
+	C().set_limit("wpo_eval", 20, 10, function(t, from)
+		local n = batch_size(t)
+		if not n then return end
+		local no = { n = n }
+		for i = 1, n do no["w" .. i], no["s" .. i] = t["w" .. i], t["s" .. i] end
+		C().to_peer(from, "wpo_eval_no", no)
+	end)
+	-- A refused ask is released (the next read asks again); a reader that waited for it ends with a word.
+	local function release_ask(hid, name)
+		local id = C().lid(tonumber(hid))
+		local asked = id and parts_asked[id]
+		if not (asked and asked.name == name) then return end
+		parts_asked[id] = nil
+		if parts_after[id] then
+			parts_after[id] = nil
+			say_unknown()
+		end
+	end
+	C().on("wpo_eval_no", function(t)
+		if t.n == nil then return release_ask(t.w, t.name) end
+		local n = batch_size(t)
+		if not n then return end
+		for i = 1, n do release_ask(t["w" .. i], t["s" .. i]) end
+	end, "client")
+	-- Lost asks (R35 review, item 3): asked again on events. The world says his map is led by another process now; the
+	-- world is back after its move; the item came online on his machine.
+	C().on("wpo_eval_again", ask_all_again, "client")
+	RegisterScriptCallback("coop_world_back", ask_all_again)
+	RegisterScriptCallback("game_object_on_net_spawn", function(obj)
+		local id = obj and obj:id()
+		if id and parts_asked[id] and coop_mode.is_player_mirror() then ask_again(id) end
+	end)
+	RegisterScriptCallback("npc_on_item_take", player_takes)
+	RegisterScriptCallback("actor_on_update", flush_parts_queries)
+	RegisterScriptCallback("actor_on_first_update", function()
+		bind_parts_jamming(jam)
+		bind_parts_readers(parts)
+	end)
+end
+
 local function capture(s, id, npc)
 	if applying or not C().active() or not id or not (owns(id) or (npc and coop_mode.leads_here())) then return end
 	local em = C().mod("coop_economy_mdata")
@@ -352,11 +834,13 @@ local function sync_item(obj)
 	observe(id)
 	restore(id)
 	refresh(id)
+	if parts_eval and coop_mode.is_player_mirror() and owns(id) then evaluate_parts(obj) end
 end
 
 local function unregister_item(se)
 	if not C().active() or not se or not se.id then return end
 	local id = se.id
+	parts_asked[id], parts_queries[id], parts_dirty[id], parts_after[id] = nil, nil, nil, nil
 	-- Seen here: what this script keeps of the id from now on (a clone's source) is kept on purpose.
 	local _, now = ticks()
 	since[id] = now
@@ -392,7 +876,11 @@ end
 
 local function restore_all()
 	if not C().active() then return end
-	seen, pending, retired, since, storage = {}, {}, {}, {}, data()
+	local current = data()
+	if storage ~= nil and storage ~= current then
+		parts_asked, parts_queries, parts_dirty, parts_waiting, parts_after, routes = {}, {}, {}, {}, {}, {}
+	end
+	seen, pending, retired, since, storage = {}, {}, {}, {}, current
 	local ids = {}
 	for _, s in ipairs(specs) do
 		for id in pairs(storage and storage[s.key] or {}) do ids[id] = true end
@@ -403,6 +891,12 @@ end
 local function update()
 	if not C().active() then return end
 	if storage ~= data() then restore_all() end
+	if next(parts_waiting) then answer_online_parts() end
+	watch_routes()
+	local dirty = parts_dirty
+	parts_dirty = {}
+	for id in pairs(dirty) do refresh_parts_cell(id) end
+	if next(parts_after) then run_after() end
 	if next(retired) then retired = {} end
 	if next(pending) then
 		-- apply can forget a released instance's pending entries (fresh): never re-add a key while pairs walks them.
@@ -580,7 +1074,12 @@ function carry(id)
 			end
 		end
 	end
-	if n == 0 then return nil end
+	local parts = parts_eval and owns(id) and read_parts(id)
+	if parts and valid_parts(parts) then
+		local packed = ec.pack(parts)
+		if #packed <= MAX_PACKED then t.parts, t.parts_instance = packed, stamp end
+	end
+	if n == 0 and not t.parts then return nil end
 	t.n = n
 	local text = cm.encode(t)
 	return type(text) == "string" and #text <= MAX_CARRY and text or nil
@@ -609,7 +1108,7 @@ function carried(hid, from, text, holder)
 	end
 	local decoded, t = pcall(cm.decode, text)
 	t = decoded and type(t) == "table" and t or {}
-	local n = ec.int(t.n, 1, #specs)
+	local n = ec.int(t.n, t.parts ~= nil and 0 or 1, #specs)
 	if not coop_trust.pass("item_state_batch", n ~= nil, "weapon rider carry: invalid batch size") or not n then return false end
 	local id, written = C().lid(hid), false
 	if em.clone_pending(id) then return false end
@@ -624,6 +1123,19 @@ function carried(hid, from, text, holder)
 				store(s, id, record)
 				apply(s, id, record)
 				se_save_var(id, nil, s.key, record)
+				written = true
+			end
+		end
+	end
+	if t.parts ~= nil and parts_eval then
+		local packed = t.parts
+		local wire_ok = type(packed) == "string" and #packed <= MAX_PACKED
+			and type(t.parts_instance) == "string" and t.parts_instance == instance(id)
+		if coop_trust.pass("item_state_wire", wire_ok, "weapon parts carry: invalid value or instance") and wire_ok then
+			local value, err = ec.unpack(packed)
+			local ok = err == nil and valid_parts(value)
+			if coop_trust.pass("item_state_value", ok, "weapon parts carry: invalid parts table") and ok then
+				se_save_var(id, nil, PARTS, value)
 				written = true
 			end
 		end

@@ -1,4 +1,4 @@
-local server = ...
+local server, scenario = ...
 -- Weapon Parts Overhaul on split levels: the dots of a weapon in a body or a box, its strip, and who knows its parts.
 -- Owner, live 2026-11-15 (build 50, a world server and split levels, he was a client), a dead NPC with three weapons:
 --   1. "When I opened it, the condition of the parts was not shown as dots at all."
@@ -35,6 +35,9 @@ for _, n in ipairs({ "item_parts", "zzzz_arti_jamming_repairs", "arti_jamming", 
 		return
 	end
 end
+-- Readers the R35 review named (round 2): the workshop's parts scheme (ui_workshop.script:594) and the Autolooter's
+-- disassembly filters (z_auto_looter cond_*_disassemble). Their checks run when the scripts are there.
+local OPT = { ui_workshop = read_ref("ui_workshop"), z_auto_looter = read_ref("z_auto_looter") }
 local function slice(src, from, to)
 	local a = assert(src:find(from, 1, true), "slice start " .. from)
 	local b = assert(src:find(to, a, true), "slice end " .. to)
@@ -52,6 +55,8 @@ end
 
 local GUN, BODY = "wpn_ak74", "stalker_dead"
 local PARTS = { "prt_w_trigger_1", "prt_w_spring_1", "prt_w_barrel_1" }
+-- a helmet with parts: no weapon, so GAMMA's evaluate re-evaluates an existing table when its condition moved (stock)
+local HELM, HELM_PARTS = "helm_m50", { "prt_o_fabrics_3", "prt_o_retardant_16" }
 local MK = 0x100
 local SPLIT = true
 local CLR_MISSING = "argb(255,70,60,60)"
@@ -60,6 +65,12 @@ local CLR_MISSING = "argb(255,70,60,60)"
 -- engine and G.A.M.M.A. stand-ins of one machine
 -------------------------------------------------------------------------------
 local function configure(W)
+	W.UnregisterScriptCallback = function(name, callback)
+		local callbacks = W.CB[name] or {}
+		for i = #callbacks, 1, -1 do
+			if callbacks[i] == callback then table.remove(callbacks, i) end
+		end
+	end
 	W.STRINGS = W.STRINGS or {}
 	W.game = { translate_string = function(s) return W.STRINGS[s] or s end, actor_lower_weapon = function() end,
 		get_game_time = function() return { ms = 0 } end }
@@ -70,6 +81,7 @@ local function configure(W)
 	W.itms_manager = { ini_parts = {
 		r_string_ex = function(_, sec, key)
 			if sec == "con_parts_list" and key == GUN then return table.concat(PARTS, ",") end
+			if sec == "con_parts_list" and key == HELM then return table.concat(HELM_PARTS, ",") end
 		end,
 		r_float_ex = function() return nil end,
 	} }
@@ -201,9 +213,11 @@ local function load_ui(W)
 end
 
 -- a window on a body: one cell per item, built the way UICellItem:Set ends (self:Update(obj))
-local function open(W, cont_id, ids)
+local function open(W, cont_id, ids, bag)
 	local U = W.utils_ui
-	local cc = setmetatable({ cell = {}, indx_id = {}, indx_sec = {}, showcase = false, path = "npc:cont_bag" },
+	bag = bag or "npc_bag"
+	local path = { npc_bag = "npc:cont_bag", npc_trade = "npc:cont_trade", actor_bag = "inventory:cont_bag", picker = "picker:cont_bag" }
+	local cc = setmetatable({ cell = {}, indx_id = {}, indx_sec = {}, showcase = false, path = path[bag] },
 		{ __index = U.UICellContainer })
 	for i, id in ipairs(ids) do
 		local obj = W.level.object_by_id(id)
@@ -218,17 +232,90 @@ local function open(W, cont_id, ids)
 		cc.indx_id[id] = i
 		ci:Update(obj)
 	end
-	W.ui_inventory.GUI.CC = { npc_bag = cc }
+	W.ui_inventory.GUI.CC = { [bag] = cc }
 	W.ui_inventory.GUI.shown = true
 	W.ui_inventory.GUI.npc_id = cont_id
 	return cc
 end
 local function close(W) W.ui_inventory.GUI.shown = false end
 
+-- A window part whose every method draws nothing; its numbered children are window parts too.
+local function widget()
+	return setmetatable({}, { __index = function(t, k)
+		if type(k) == "number" then
+			local child = widget()
+			rawset(t, k, child)
+			return child
+		end
+		return function() end
+	end })
+end
+
+-- The workshop's repair page with G.A.M.M.A.'s own UIWorkshopRepair:ListPartScheme (ui_workshop.script, whole function).
+local function load_workshop(W)
+	if not OPT.ui_workshop then return end
+	local env = setmetatable({ UIWorkshopRepair = {} }, { __index = W })
+	run_in(env, slice(OPT.ui_workshop, "function UIWorkshopRepair:ListPartScheme()", "function UIWorkshopRepair:ListSpareParts()"),
+		"ui_workshop.script")
+	env.SetTip = function() end
+	env.get_object_by_id = function(id) return W.level.object_by_id(id) end
+	W.itms_manager.play_item_sound = function() end
+	W.utils_xml.set_upgr_icon, W.utils_xml.set_icon = function() end, function() end
+	W.utils_item.get_cond_static = function(c) return c end
+	W.db.actor.object = function() return nil end
+	W.ui_workshop = env
+	-- WPO's Repair (zzzz_arti_jamming_repairs.script, whole function): it writes the scheme the page shows (self.parts with the
+	-- spare parts picked in self.new_con) into the item selected in the list.
+	local z = W.zzzz_arti_jamming_repairs
+	z.ui_workshop = env
+	run_in(z, slice(SRC.zzzz_arti_jamming_repairs, "WorkshopRepair = ui_workshop.UIWorkshopRepair.Repair",
+		"function section_has_parts("), "zzzz_arti_jamming_repairs.script")
+	W.is_not_empty = function(t) return t ~= nil and next(t) ~= nil end
+	W.print_ws, W.printe = function() end, function() end
+	W.get_object_by_id = function(id) return W.level.object_by_id(id) end
+	W.alife_release_id = function() end
+	W.actor_effects = { play_item_fx = function() end }
+	W.utils_item.discharge = function() end
+end
+
+-- The page with `obj` selected in its inventory list.
+local function bench(obj)
+	return setmetatable({
+		CC = { inventory = { GetCell_Selected = function() return obj end }, parts = { Reset = function() end } },
+		new_con = {}, parts = {}, stashId = false, owner = false,
+		UpdateToolkits = function() return 0 end, Reset = function() end,
+	}, { __index = function(t, k)
+		local w = widget()
+		rawset(t, k, w)
+		return w
+	end })
+end
+
+-- G.A.M.M.A.'s Autolooter disassembly filters (z_auto_looter.script, whole functions) with the options that read the parts.
+local function load_autolooter(W)
+	if not OPT.z_auto_looter then return end
+	W.auto_looter_mcm = {
+		disassemble_weapon_options = { all = "all", with_usable_barrel = "with_usable_barrel", none = "none" },
+		disassemble_armor_options = { all = "all", with_usable_parts = "with_usable_parts", none = "none" },
+	}
+	local env = setmetatable({}, { __index = W })
+	env.disassemble_weapon_options = W.auto_looter_mcm.disassemble_weapon_options
+	env.disassemble_armor_options = W.auto_looter_mcm.disassemble_armor_options
+	env.config = { disassemble_weapon = "with_usable_barrel", usable_weapon_part_condition_treshold = 50,
+		disassemble_armor = "with_usable_parts", usable_armor_part_condition_treshold = 50 }
+	run_in(env, slice(OPT.z_auto_looter, "function cond_armor_disassemble(obj)", "function cond_misc_disassemble(obj)"),
+		"z_auto_looter.script")
+	run_in(env, slice(OPT.z_auto_looter, "function has_parts(wpn)", "function has_value("), "z_auto_looter.script")
+	W.z_auto_looter = env
+end
+
 -- the dots a cell shows now: part -> colour (only shown dots)
 local function dots(W, id)
-	local cc = W.ui_inventory.GUI.CC.npc_bag
-	local ci = cc and cc:GetCell_ID(id)
+	local ci
+	for _, cc in pairs(W.ui_inventory.GUI.CC) do
+		ci = cc:GetCell_ID(id)
+		if ci then break end
+	end
 	local out, n = {}, 0
 	for part, d in pairs(ci and ci.parts_indicators or {}) do
 		if d.shown then
@@ -338,6 +425,16 @@ local function setup(split)
 		-- the scripts, loaded first, started after (axr_main)
 		local jam = load_module(W, "arti_jamming", SRC.arti_jamming)
 		load_module(W, "item_parts", SRC.item_parts)
+		-- G.A.M.M.A.'s disassembly reads the table with no check (item_parts_repair_notifications.script:161 and its
+		-- zzzz_ twin replace these two at load): this reader does the same and notes what it saw.
+		W.DISASSEMBLED = {}
+		local function disassembly_reader(obj, obj_d)
+			local parts = W.item_parts.get_parts_con(obj, nil, true)
+			local n = 0
+			for _ in pairs(parts) do n = n + 1 end
+			W.DISASSEMBLED[#W.DISASSEMBLED + 1] = { id = obj:id(), n = n, main = parts[GUN], tool = obj_d and obj_d:id() }
+		end
+		W.item_parts.disassembly_weapon, W.item_parts.disassembly_outfit = disassembly_reader, disassembly_reader
 		local z = W.zzzz_arti_jamming_repairs or setmetatable({}, { __index = W })
 		W.zzzz_arti_jamming_repairs = z
 		z.has_parts, z.is_part, z.print_dbg, z.get_config = jam.has_parts, jam.is_part, jam.print_dbg, W.a_arti_jamming_mcm.get_config
@@ -347,16 +444,24 @@ local function setup(split)
 			slice(SRC.zzzz_arti_jamming_repairs, "local good_breakpoint", "local temp_con = {}"), "zzzz_arti_jamming_repairs.script")
 		run_in(z, slice(SRC.zzzz_arti_jamming_repairs, "function act_fieldstrip(", "function on_game_start()"),
 			"zzzz_arti_jamming_repairs.script")
-		if peer ~= 0 and peer ~= MK then load_ui(W) end
+		if peer ~= MK and (peer ~= 0 or not split) then load_ui(W) end
+		if peer == 1 or peer == 2 then
+			load_workshop(W)
+			load_autolooter(W)
+		end
 		load_script(W, "coop_economy_core")
 		load_script(W, "coop_economy_mdata")
 		for _, n in ipairs({ "coop_hostplay_mode", "coop_mode", "coop_srv_mode" }) do load_script(W, n) end
 		load_script(W, "coop_mods_core")
 		load_script(W, "coop_mods_mags")
+		load_script(W, "coop_trust")
+		load_script(W, "coop_mods_item_state")
 		for _, n in ipairs({ "coop_hostplay_mode", "coop_mode", "coop_srv_mode" }) do W[n].on_game_start() end
 		W.coop_economy_mdata.on_game_start()
+		W.coop_mods_item_state.on_game_start()
 		W.coop_mods_mags.on_game_start()
-		W.JAM_REFRESH = W.coop_mods_core.upvalue(jam.on_game_start, "actor_on_update")
+		W.RegisterScriptCallback("actor_on_update", W.coop_mods_core.upvalue(jam.on_game_start, "actor_on_update"))
+		fire(W, "actor_on_first_update")
 	end
 	return WORLDS[0], WORLDS[1], WORLDS[2], WORLDS[MK]
 end
@@ -381,6 +486,430 @@ local function no_errors(W, label)
 end
 
 -------------------------------------------------------------------------------
+if scenario == "r35" then
+	section("R35: " .. (server and "world server, map server, client" or "co-op host and client"))
+	local H, A, B, M = setup(server)
+	local authority = M or H
+	local window_cases = {
+		{ "NPC corpse", "stalker", false },
+		{ "living NPC", "stalker", true, "npc_trade" },
+		{ "companion inventory", "stalker", true },
+		{ "inventory box", "box", false },
+		{ "xr_box ground loot", nil, false, "picker" },
+		{ "stash", "box", false },
+		{ "trader stock", "stalker", true, "npc_trade" },
+		{ "player corpse", "stalker", false, "npc_bag", PLAYERS[2].proxy },
+		{ "player backpack", "box", false },
+	}
+	for i, case in ipairs(window_cases) do
+		local holder = case[2] and (case[5] or 710 + i)
+		if holder then
+			for _, W in pairs(WORLDS) do
+				local obj = item(W, holder, case[1], nil, 1, case[2])
+				obj.alive = function() return case[3] end
+			end
+		end
+		local id = 930 + i
+		gun_everywhere(id, 0.31, 1)
+		if M then H.OBJ[id] = nil end -- only the map process has the game's object and its wear
+		place(id, holder)
+		open(A, holder, { id }, case[4])
+		local _, first = dots(A, id)
+		check(first == 0 and parts(A, id) == nil, case[1] .. ": copy at 1.0 must draw no fabricated green dots")
+		settle()
+		local _, count = dots(A, id)
+		local got, real = parts(A, id), parts(authority, id)
+		check(count == 3 and got and got[GUN] == 31 and A.coop_mods_core.ser(got) == authority.coop_mods_core.ser(real),
+			case[1] .. ": still in the container, expected authoritative 31, got "
+				.. tostring(got and got[GUN]) .. " and " .. count .. " dots")
+		if got and real then
+			place(id, { peer = 1 })
+			fire(A, "actor_on_item_take", A.OBJ[id])
+			item(A, id, GUN, 0, 0.83)
+			open(A, 0, { id }, "actor_bag")
+			check(parts(A, id)[GUN] == real[GUN] and select(2, dots(A, id)) == 3,
+				case[1] .. ": taking it keeps the same authoritative parts")
+			place(id, 700)
+			open(A, 700, { id })
+			check(parts(A, id)[GUN] == real[GUN] and select(2, dots(A, id)) == 3,
+				case[1] .. ": returning it to an NPC keeps the same parts")
+		end
+	end
+
+	local id = 950
+	gun_everywhere(id, 1, 1)
+	local authoritative_gun = authority.OBJ[id]
+	authority.OBJ[id] = nil
+	if M then H.OBJ[id] = nil end
+	open(A, 700, { id })
+	settle()
+	open(A, 700, { id })
+	settle()
+	check(parts(A, id) == nil and select(2, dots(A, id)) == 0,
+		"NPC corpse with its weapon still offline on the authority never shows spawn-condition parts")
+	authoritative_gun.cond = 0.34 -- this is death_manager's settled wear on the authority
+	authority.OBJ[id] = authoritative_gun
+	fire(authority, "game_object_on_net_spawn", authoritative_gun)
+	settle()
+	check(parts(A, id) and parts(A, id)[GUN] == 34 and select(2, dots(A, id)) == 3,
+		"the open corpse cell receives parts after the authority's weapon comes online")
+
+	-- A trader can show more than one verb burst of weapons in a window.
+	local stock = {}
+	for gun_id = 960, 985 do
+		gun_everywhere(gun_id, 0.31, 1)
+		stock[#stock + 1] = gun_id
+	end
+	open(A, 700, stock, "npc_trade")
+	settle()
+	local rendered = 0
+	for _, gun_id in ipairs(stock) do
+		if parts(A, gun_id) and parts(A, gun_id)[GUN] == 31 and select(2, dots(A, gun_id)) == 3 then rendered = rendered + 1 end
+	end
+	check(rendered == #stock, "the whole trader page gets parts (" .. rendered .. "/" .. #stock .. ")")
+
+	local id = 951
+	local real = item(authority, id, GUN, 700, 0.2)
+	local empty = assert(authority.coop_economy_mdata.clone_export(id, "spawn951"))
+	if M then
+		add_entity(H, id, GUN, 700)
+		check(H.coop_economy_mdata.clone_adopt(id, empty), "the world registers the map's item stamp")
+	end
+	authority.item_parts.evaluate_parts(real)
+	deliver_all()
+	tick(authority, 400)
+	deliver_all()
+	if M then
+		check(parts(H, id) and parts(H, id)[GUN] == 20, "the world stores the map's settled parts without a game object")
+	end
+	local snap = assert(authority.coop_economy_mdata.clone_export(id, "spawn951"))
+	tick(A, 35000)
+	check(A.coop_economy_mdata.clone_stage(65535, id, real:name(), empty, 2, "spawn951"), "stage weapon metadata before registration")
+	item(A, id, GUN, 700, 1)
+	check(A.coop_economy_mdata.clone_activate(id), "activate the weapon's staged metadata")
+	A.coop_economy_mdata.clone_finish(id, true)
+	open(A, 700, { id })
+	check(parts(A, id)[GUN] == 20 and select(2, dots(A, id)) == 3,
+		"the first cell draw uses the authoritative parts delivered alongside the weapon")
+	local mirrored = A.item_parts.get_parts_con(A.OBJ[id])
+	mirrored.prt_w_trigger_1 = 100
+	A.item_parts.set_parts_con(id, mirrored)
+	settle()
+	check(parts(A, id).prt_w_trigger_1 == parts(authority, id).prt_w_trigger_1,
+		"a focused loot cell and local setter cannot mutate the authority's table")
+
+	local known = parts(authority, id)
+	item(B, id, GUN, 700, 1)
+	close(B)
+	check(B.coop_economy_mdata.clone_adopt(id, snap), "existing mirror adopts initial metadata")
+	open(B, 700, { id })
+	check(parts(B, id) and parts(B, id)[GUN] == known[GUN] and select(2, dots(B, id)) == 3,
+		"an entity already mirrored still receives its initial parts snapshot")
+
+	place(id, { peer = 1 })
+	local edited = A.item_parts.get_parts_con(A.OBJ[id])
+	edited.prt_w_trigger_1 = 17
+	A.item_parts.set_parts_con(id, edited)
+	local carried = A.coop_mods_item_state.carry(id)
+	check(carried and authority.coop_mods_item_state.carried(id, 1, carried, 501)
+		and parts(authority, id).prt_w_trigger_1 == 17,
+		"a same-frame transfer carries the player's latest established parts before the parent changes")
+	place(id, 700)
+	settle()
+	open(B, 700, { id })
+	local marks = dots(B, id)
+	check(parts(B, id) and parts(B, id).prt_w_trigger_1 == 17 and marks.prt_w_trigger_1 == B.z_item_icon_info.clr_r,
+		"the next viewer sees the moved weapon's last owner edit")
+
+	-- Review of R35: GAMMA re-evaluates an existing table of armour when its condition moved (stock evaluate_parts,
+	-- diff_con 2). A player's own item's condition is his word, so his machine keeps doing it; loot stays the authority's.
+	local helm = 990
+	for _, W in pairs(WORLDS) do item(W, helm, HELM, 700, 0.9) end
+	if M then H.OBJ[helm] = nil end
+	open(A, 700, { helm })
+	settle()
+	local rolled = parts(A, helm)
+	check(rolled and rolled[HELM] == 90 and A.coop_mods_core.ser(rolled) == authority.coop_mods_core.ser(parts(authority, helm)),
+		"helmet in a body: the authority's first roll reaches the client")
+	local before = A.coop_mods_core.ser(rolled)
+	local sum_before, sum_after = 0, 0
+	for _, p in ipairs(HELM_PARTS) do sum_before = sum_before + (rolled and rolled[p] or 0) end
+	A.OBJ[helm].cond = 0.5
+	A.item_parts.get_parts_con(A.OBJ[helm], nil, true)
+	check(A.coop_mods_core.ser(parts(A, helm)) == before, "helmet in a body: a mirror never re-evaluates loot from its copy")
+	place(helm, { peer = 1 })
+	A.OBJ[helm].cond = 0.4
+	A.item_parts.get_parts_con(A.OBJ[helm], nil, true)
+	local worn = parts(A, helm) or {}
+	for _, p in ipairs(HELM_PARTS) do sum_after = sum_after + (worn[p] or 0) end
+	check(worn[HELM] == 40 and sum_after < sum_before,
+		"helmet the player wears: its parts follow his condition as in single player (" .. tostring(worn[HELM]) .. ")")
+	settle()
+	check(authority.coop_mods_core.ser(parts(authority, helm)) == A.coop_mods_core.ser(worn)
+		and H.coop_mods_core.ser(parts(H, helm)) == A.coop_mods_core.ser(worn),
+		"and the world and the map authority keep his re-evaluated table")
+
+	no_errors(A, "client")
+	no_errors(authority, "map authority")
+	local checks, fails = CHECKS, FAILS
+	CHECKS, FAILS = 0, 0
+	return checks, fails
+end
+
+-------------------------------------------------------------------------------
+-- R35 round 2 (review of 2026-11-22). The authority of the map gives an item that becomes a player's its parts with it; the
+-- readers of G.A.M.M.A. that index the table wait for it or refuse cleanly; the gun in hand asks again on equip and on a
+-- shot, never on a timer, and never keeps the previous gun's data; an ask lost on its way is asked again on events.
+if scenario == "fix2" then
+	section("R35 round 2: " .. (server and "world server, map server, client" or "co-op host and client"))
+	local H, A, B, M = setup(server)
+	local authority = M or H
+	A.STRINGS.st_coop_guard_failed = "GUARD_FAILED"
+	local function asks(W)
+		local n = 0
+		for _, s in ipairs(W.SENT) do if s.name == "mods.wpo_eval" then n = n + 1 end end
+		return n
+	end
+	local function ser(W, id) return W.coop_mods_core.ser(parts(W, id)) end
+	-- an item in player 1's character: his own on his machine, in his character elsewhere; the world server of the server
+	-- mode has no game object of it (no map of his)
+	local function his(id, cond, sec)
+		for peer, W in pairs(WORLDS) do
+			local parent = peer == 1 and 0 or PLAYERS[1].proxy
+			if peer == 0 and M then
+				add_entity(W, id, sec or GUN, parent)
+			else
+				item(W, id, sec or GUN, parent, W == authority and cond or 1)
+			end
+		end
+	end
+	-- the authority comes to know an item that was only his machine's (its move reached it)
+	local function known_there(id, cond)
+		for peer, W in pairs(WORLDS) do
+			if peer ~= 1 then
+				if peer == 0 and M then add_entity(W, id, GUN, PLAYERS[1].proxy) else item(W, id, GUN, PLAYERS[1].proxy, W == authority and cond or 1) end
+			end
+		end
+	end
+	local function loot(id, cond, sec)
+		for peer, W in pairs(WORLDS) do item(W, id, sec or GUN, 700, (peer == MK or peer == 0) and cond or 1) end
+		if M then H.OBJ[id] = nil end
+	end
+	local char = authority.level.object_by_id(PLAYERS[1].proxy)
+
+	-- 1. A reward or a craft product the authority creates in his character, loot he takes: the table comes with the item.
+	his(1001, 0.42)
+	local before = asks(A)
+	fire(authority, "npc_on_item_take", char, authority.OBJ[1001])
+	deliver_all()
+	check(parts(authority, 1001) and parts(authority, 1001)[GUN] == 42,
+		"the authority rolls an item that came into his character from its own condition (42)")
+	check(parts(A, 1001) and ser(A, 1001) == ser(authority, 1001), "the reward reaches his machine with its parts, in that frame")
+	if M then check(parts(H, 1001) and ser(H, 1001) == ser(authority, 1001), "the world server keeps them") end
+	fire(A, "actor_on_item_take", A.OBJ[1001])
+	tick(A, 400)
+	check(asks(A) == before, "his machine has nothing to ask")
+	local ok, err = pcall(A.item_parts.disassembly_weapon, A.OBJ[1001], nil)
+	check(ok and #A.DISASSEMBLED == 1 and A.DISASSEMBLED[1].main == 42,
+		"a disassembly at once reads the authority's table (" .. tostring(err) .. ")")
+	loot(1002, 0.36)
+	place(1002, { peer = 1 })
+	fire(authority, "npc_on_item_take", char, authority.OBJ[1002])
+	deliver_all()
+	check(parts(A, 1002) and parts(A, 1002)[GUN] == 36 and ser(A, 1002) == ser(authority, 1002),
+		"loot nobody looked at gets its parts as he takes it")
+	local kept = ser(authority, 1002)
+	authority.OBJ[1002].cond = 0.2
+	fire(authority, "npc_on_item_take", char, authority.OBJ[1002])
+	deliver_all()
+	check(ser(authority, 1002) == kept, "a take of an item with parts never rolls them again")
+	loot(1003, 0.5)
+	fire(authority, "npc_on_item_take", authority.OBJ[700], authority.OBJ[1003])
+	check(parts(authority, 1003) == nil, "an NPC's take rolls nothing (his loot is rolled when a player looks)")
+
+	-- 2. A reader on his machine before the table is here waits for it and runs once with it; a refusal ends it with a word.
+	his(1004, 0.37)
+	add_item(A, 1020, "leatherman_tool", 0)
+	A.DISASSEMBLED = {}
+	ok, err = pcall(A.item_parts.disassembly_weapon, A.OBJ[1004], A.OBJ[1020])
+	check(ok and #A.DISASSEMBLED == 0 and parts(A, 1004) == nil,
+		"a disassembly of his fresh gun waits for its parts (" .. tostring(err) .. ")")
+	settle()
+	local d = A.DISASSEMBLED[1]
+	check(#A.DISASSEMBLED == 1 and d.main == 37 and d.n == 4 and d.tool == 1020,
+		"and runs once with the authority's table and the same tool")
+	if A.ui_workshop then
+		his(1005, 0.58)
+		local page = bench(A.OBJ[1005])
+		ok, err = pcall(A.ui_workshop.UIWorkshopRepair.ListPartScheme, page)
+		check(ok and page.parts[1] == nil, "the workshop's scheme of his fresh item waits for its parts (" .. tostring(err) .. ")")
+		settle()
+		check(page.parts[1] and parts(A, 1005) and page.parts[1].con == parts(A, 1005)[PARTS[1]] and parts(A, 1005)[GUN] == 58,
+			"and is drawn when they are here")
+		his(1016, 0.4)
+		his(1017, 0.45)
+		page = bench(A.OBJ[1016])
+		pcall(A.ui_workshop.UIWorkshopRepair.ListPartScheme, page)
+		page.CC.inventory.GetCell_Selected = function() return A.OBJ[1017] end
+		settle()
+		check(page.parts[1] == nil, "another item selected meanwhile: the late scheme is not drawn over it")
+		-- Gate review r35-check2: a fresh gun selected while the page shows the scheme of the item selected before, and its
+		-- parts refused: WPO's Repair writes the page's scheme into the selected item. His fresh gun must not get the other
+		-- item's table from his machine; with its own scheme drawn, the repair runs as in single player.
+		his(1019, 0.62)
+		fire(authority, "npc_on_item_take", char, authority.OBJ[1019])
+		deliver_all()
+		page = bench(A.OBJ[1019])
+		pcall(A.ui_workshop.UIWorkshopRepair.ListPartScheme, page)
+		check(page.parts[1] and parts(A, 1019) and page.parts[1].con == parts(A, 1019)[PARTS[1]],
+			"the scheme of an item with parts is drawn at once")
+		item(A, 1021, GUN, 0, 0.5) -- the authority does not know it yet: refused
+		local spare = item(A, 1022, PARTS[1], 0, 0.9)
+		page.CC.inventory.GetCell_Selected = function() return A.OBJ[1021] end
+		A.TIPS = {}
+		pcall(A.ui_workshop.UIWorkshopRepair.ListPartScheme, page)
+		settle()
+		page.new_con[1] = { id = 1022, con = 90 } -- a spare part picked on the scheme still shown
+		ok, err = pcall(A.ui_workshop.UIWorkshopRepair.Repair, page)
+		settle()
+		check(ok and parts(A, 1021) == nil and spare.cond == 0.9 and tips_of(A):find("GUARD_FAILED", 1, true) ~= nil,
+			"a Repair of a fresh item with another item's scheme on the page: no table made up, nothing spent, he is told ("
+			.. tostring(err) .. ")")
+		known_there(1021, 0.5)
+		pcall(A.ui_workshop.UIWorkshopRepair.ListPartScheme, page)
+		settle()
+		check(page.parts[1] and parts(A, 1021) and page.parts[1].con == parts(A, 1021)[PARTS[1]],
+			"selected again: its own scheme is drawn with the authority's parts")
+		page.new_con[1] = { id = 1022, con = 90 }
+		ok, err = pcall(A.ui_workshop.UIWorkshopRepair.Repair, page)
+		settle()
+		check(ok and parts(A, 1021) and parts(A, 1021)[PARTS[1]] == 90 and parts(authority, 1021)
+			and parts(authority, 1021)[PARTS[1]] == 90, "its own scheme drawn: the repair runs and reaches the authority ("
+			.. tostring(err) .. ")")
+	end
+	his(1006, 0.66)
+	A.CREATED = {}
+	A.zzzz_arti_jamming_repairs.act_fieldstrip(1006, "prt_w_trigger_1")
+	check(parts(A, 1006) == nil and #A.CREATED == 0, "a field strip of his fresh gun waits for its parts")
+	settle()
+	check(parts(A, 1006) and parts(A, 1006).prt_w_trigger_1 == -1 and #A.CREATED == 1 and A.CREATED[1].sec == "prt_w_trigger_1",
+		"and takes the trigger off once they are here")
+	check(parts(authority, 1006) and parts(authority, 1006).prt_w_trigger_1 == -1, "the authority keeps the strip")
+	item(A, 1007, GUN, 0, 0.5)
+	A.DISASSEMBLED, A.TIPS = {}, {}
+	ok, err = pcall(A.item_parts.disassembly_weapon, A.OBJ[1007], nil)
+	settle()
+	check(ok and #A.DISASSEMBLED == 0 and parts(A, 1007) == nil and tips_of(A):find("GUARD_FAILED", 1, true) ~= nil,
+		"an item the authority refuses: no disassembly, no table, he is told (" .. tips_of(A) .. ")")
+	known_there(1007, 0.5)
+	pcall(A.item_parts.disassembly_weapon, A.OBJ[1007], nil)
+	settle()
+	check(#A.DISASSEMBLED == 1 and A.DISASSEMBLED[1].main == 50, "the next try asks again and runs with the table")
+	-- One copy of a first roll: an answer to his ask never undoes an edit he made after the lane brought the table.
+	local mine = parts(A, 1007)
+	mine.prt_w_trigger_1 = 11
+	A.item_parts.set_parts_con(1007, mine)
+	authority.coop_mods_item_state.send_parts(1, 1007, true)
+	deliver_all()
+	check(parts(A, 1007).prt_w_trigger_1 == 11, "an answer to his ask keeps the table his machine has")
+	authority.MDATA.se_object[1007].parts.prt_w_trigger_1 = 12
+	authority.coop_mods_item_state.send_parts(1, 1007)
+	deliver_all()
+	check(parts(A, 1007).prt_w_trigger_1 == 12, "the authority's word on a strip still replaces it")
+
+	-- 3. The gun in hand (arti_jamming).
+	his(1008, 0.7)
+	fire(authority, "npc_on_item_take", char, authority.OBJ[1008])
+	deliver_all()
+	A.ACTIVE_WEAPON = A.OBJ[1008]
+	A.NOW = A.NOW + 2000
+	fire(A, "actor_on_update")
+	check(A.arti_jamming.current_id() == 1008, "arti_jamming reads the parts of the gun in hand")
+	item(A, 1009, GUN, 0, 0.5) -- the authority does not know it yet: refused
+	A.ACTIVE_WEAPON = A.OBJ[1009]
+	A.NOW = A.NOW + 2000
+	fire(A, "actor_on_update")
+	check(A.arti_jamming.current_id() ~= 1008, "a gun without parts in hand: arti_jamming no longer describes the previous gun")
+	settle()
+	check(parts(A, 1009) == nil, "refused: its parts stay unknown")
+	known_there(1009, 0.48)
+	local n = asks(A)
+	settle(4)
+	check(asks(A) == n and parts(A, 1009) == nil, "no timer asks again")
+	fire(A, "actor_on_weapon_before_fire", {})
+	settle()
+	check(parts(A, 1009) and parts(A, 1009)[GUN] == 48, "the first shot asks again and the table comes")
+	A.NOW = A.NOW + 2000
+	fire(A, "actor_on_update")
+	check(A.arti_jamming.current_id() == 1009, "and arti_jamming reads it")
+	item(A, 1010, GUN, 0, 0.5)
+	A.ACTIVE_WEAPON = A.OBJ[1010]
+	settle()
+	known_there(1010, 0.44)
+	A.ACTIVE_WEAPON = A.OBJ[1009]
+	fire(A, "actor_on_update")
+	A.ACTIVE_WEAPON = A.OBJ[1010]
+	settle()
+	check(parts(A, 1010) and parts(A, 1010)[GUN] == 44, "a refused gun taken in hand again asks again")
+
+	-- 4. An ask lost on its way: asked again on events.
+	loot(1011, 0.29)
+	open(A, 700, { 1011 })
+	tick(A, 400)
+	QUEUE = {} -- the answer's way went away
+	settle()
+	check(parts(A, 1011) == nil, "a lost ask: nothing asks again by itself")
+	fire(A, "coop_world_back")
+	settle()
+	check(parts(A, 1011) and parts(A, 1011)[GUN] == 29 and select(2, dots(A, 1011)) == 3,
+		"the world back: his open asks go again, the open window draws the dots")
+	loot(1012, 0.23)
+	open(A, 700, { 1012 })
+	tick(A, 400)
+	QUEUE = {}
+	fire(A, "game_object_on_net_spawn", A.OBJ[1012])
+	settle()
+	check(parts(A, 1012) and parts(A, 1012)[GUN] == 23, "the item coming online on his machine asks again")
+	if M then
+		loot(1013, 0.21)
+		open(A, 700, { 1013 })
+		tick(A, 400)
+		QUEUE = {}
+		local route = H.coop.levels.bridge_of_player
+		H.coop.levels.bridge_of_player = function() return nil end -- the map server of his level went away
+		tick(H, 400)
+		deliver_all()
+		H.coop.levels.bridge_of_player = route -- a map server leads it again
+		settle()
+		check(parts(A, 1013) and parts(A, 1013)[GUN] == 21, "his map's server changed: the world server tells him, he asks again")
+	end
+
+	-- 5. The Autolooter's disassembly filters on loot (non-default options that read the parts).
+	if A.z_auto_looter then
+		local al = A.z_auto_looter
+		loot(1014, 0.31)
+		ok, err = pcall(al.cond_weapon_disassemble, A.OBJ[1014])
+		check(ok and err == false, "the barrel filter on loot without parts: not this time, no error (" .. tostring(err) .. ")")
+		settle()
+		ok, err = pcall(al.cond_weapon_disassemble, A.OBJ[1014])
+		check(ok and type(err) == "boolean" and parts(A, 1014) ~= nil, "the next run decides with the authority's parts")
+		loot(1015, 0.3, HELM)
+		ok, err = pcall(al.cond_armor_disassemble, A.OBJ[1015])
+		check(ok and err == false, "the armour filter on loot without parts: not this time, no error (" .. tostring(err) .. ")")
+		al.config.disassemble_weapon = "all"
+		loot(1018, 0.3)
+		ok, err = pcall(al.cond_weapon_disassemble, A.OBJ[1018])
+		check(ok and err == true, "the option that reads no parts answers as in single player")
+	end
+
+	no_errors(A, "client")
+	no_errors(authority, "map authority")
+	if M then no_errors(H, "world server") end
+	local checks, fails = CHECKS, FAILS
+	CHECKS, FAILS = 0, 0
+	return checks, fails
+end
+
 if server then
 section("1. the dots of a fresh weapon in a body come as soon as the authority's parts are here (symptoms 1, 2)")
 do
@@ -478,16 +1007,19 @@ do
 end
 
 -------------------------------------------------------------------------------
-section("4. a client's current gun never leaves arti_jamming without a table")
+section("4. arti_jamming waits for the current gun's authoritative parts")
 do
 	local H, A, B, M = setup(true)
 	gun_everywhere(883, 0.27, 1.0)
 	place(883, { peer = 1 }) -- just taken: on his machine its condition is still the spawn's
 	A.ACTIVE_WEAPON = A.OBJ[883]
 	A.NOW = A.NOW + 2000
-	local ok, err = pcall(A.JAM_REFRESH)
+	local ok, err = pcall(fire, A, "actor_on_update")
 	check(ok, "arti_jamming's update reads the parts of the gun in hand (" .. tostring(err) .. ")")
-	check(parts(A, 883) ~= nil, "the gun has a table on his machine at once")
+	check(parts(A, 883) == nil, "the gun has no stand-in table")
+	ok, err = pcall(A.arti_jamming.unjam, A.ACTIVE_WEAPON)
+	check(ok and parts(A, 883) == nil, "inspection waits for parts instead of iterating nil (" .. tostring(err) .. ")")
+	tick(A, 400)
 	local asked = false
 	for _, m in ipairs(QUEUE) do if m.name == "mods.wpo_eval" then asked = true end end
 	check(asked, "and the authority is asked for the real one")
@@ -496,32 +1028,33 @@ do
 	for _, m in ipairs(QUEUE) do
 		if m.name == "economy.se" and m.from == 1 and m.payload:find("883", 1, true) then published = true end
 	end
-	check(not published, "the stand-in table is his machine's alone, not published")
+	check(not published, "the mirror publishes no parts while the authority prepares them")
 	settle()
-	check(parts(A, 883)[GUN] == 27 and parts(H, 883)[GUN] == 27, "the authority's roll (27) replaced it everywhere")
+	check(parts(A, 883)[GUN] == 27 and parts(H, 883)[GUN] == 27, "the authority's roll (27) reached every machine")
 	A.NOW = A.NOW + 2000
-	ok, err = pcall(A.JAM_REFRESH)
-	check(ok, "and arti_jamming reads it (" .. tostring(err) .. ")")
+	ok, err = pcall(fire, A, "actor_on_update")
+	check(ok and A.arti_jamming.current_id() == 883, "arti_jamming initializes once the parts are available (" .. tostring(err) .. ")")
 
-	-- the authority cannot roll it (it does not know the item): his machine rolls and publishes, as single player does
+	-- The authority does not have this weapon. No machine fabricates its state.
 	item(A, 884, GUN, 0, 0.5)
 	A.SE[884].parent_id = 0
 	add_entity(H, 884, GUN, 501)
 	add_entity(B, 884, GUN, 501)
 	A.item_parts.evaluate_parts(A.OBJ[884])
 	settle()
-	check(parts(H, 884) ~= nil and parts(H, 884)[GUN] == 50, "a refused ask: his own roll reaches the world server")
+	check(parts(A, 884) == nil and parts(H, 884) == nil, "a refused ask leaves parts unknown on the carrier")
 
-	-- the ask is lost: after a while his machine rolls for good
+	-- Losing the answer never authorizes the mirror to roll.
 	item(A, 886, GUN, 0, 0.45)
 	A.SE[886].parent_id = 0
 	add_entity(H, 886, GUN, 501)
 	A.item_parts.evaluate_parts(A.OBJ[886])
+	tick(A, 400)
 	QUEUE = {}
 	settle(2)
 	check(parts(H, 886) == nil, "nothing published while the answer may come")
 	settle(14)
-	check(parts(H, 886) ~= nil and parts(H, 886)[GUN] == 45, "no answer: his own roll reaches the world server")
+	check(parts(A, 886) == nil and parts(H, 886) == nil, "no answer: parts remain unknown on both machines")
 	no_errors(A, "client") no_errors(M, "map server")
 end
 
@@ -571,10 +1104,12 @@ do
 	check(parts(H, 880).prt_w_trigger_1 == -1 and parts(A, 880).prt_w_trigger_1 == -1, "the host stripped, the client has it")
 	local d = dots(A, 880)
 	check(d.prt_w_trigger_1 == CLR_MISSING, "the client's open window shows it missing (" .. tostring(d.prt_w_trigger_1) .. ")")
-	-- a fresh gun in a box is rolled by the client itself, as always
+	-- A fresh gun in a box is initialized by the host.
 	item(H, 885, GUN, 700, 0.5) item(A, 885, GUN, 700, 0.5)
 	A.item_parts.evaluate_parts(A.OBJ[885])
-	check(parts(A, 885) ~= nil, "one level: the client rolls at once, nobody is asked")
+	check(parts(A, 885) == nil, "one level: the client does not roll")
+	settle()
+	check(parts(A, 885) and parts(A, 885)[GUN] == 50, "one level: the host's parts reach the client")
 	no_errors(A, "client") no_errors(H, "host")
 end
 
