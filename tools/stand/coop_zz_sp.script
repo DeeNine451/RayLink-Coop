@@ -53,8 +53,18 @@ local function state(tag)
 	flush()
 end
 
+-- b57i: the log stopped 1 s after the steps start and the 15 s step never came, the game autosaved 7 s later. A pulse every
+-- 300 updates (flushed) tells updates that stop from a clock that stands still.
+local frames = 0
+
 local function actor_on_update()
 	if not db.actor then return end
+	frames = frames + 1
+	if frames % 300 == 0 then
+		out("pulse: %d updates, real clock %d ms since the steps start, game clock %d ms", frames, t0 and now() - t0 or 0,
+			time_global())
+		flush()
+	end
 	if not t0 then
 		t0 = now()
 		out("the steps start (stage '%s')", stage())
