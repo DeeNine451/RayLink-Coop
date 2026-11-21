@@ -25,7 +25,35 @@ end
 local function normalize(f)
 	return type(f) == "string" and (f:gsub("^actor_", "")) or nil
 end
-local function live() return C.active() end
+local function remember(sid, cid, rel)
+	local policy = policies[sid] or { chars = {} }; policies[sid] = policy
+	if cid == nil then policy.all, policy.chars = rel, {} else policy.chars[cid] = rel end
+end
+local function read_saved(saved)
+	if type(saved) ~= "table" then return end
+	for sid, p in pairs(saved) do
+		if number(sid, 1, 65534) and type(p) == "table" then
+			if REL[p.all] then remember(sid, nil, p.all) end
+			for cid, rel in pairs(type(p.chars) == "table" and p.chars or {}) do
+				if number(cid, 0, 65534) and REL[rel] then remember(sid, cid, rel) end
+			end
+		end
+	end
+end
+-- A co-op host loads its save before its session starts (coop_manager.cpp autostart waits for level_ready; the in-game
+-- Host comes later still): load_state found no session, and the first save in the session wrote the empty table back.
+-- The loaded record waits here until the first live() that finds the session running reads it, before that caller
+-- reads, changes or saves a policy.
+local pending_save = nil
+local function live()
+	if not C.active() then return false end
+	if pending_save ~= nil then
+		local saved = pending_save
+		pending_save = nil
+		read_saved(saved)
+	end
+	return true
+end
 local function owner() return coop_mode.leads_here() or coop_mode.decides_world() end
 local function log(what, err) printf("! [coop-npc-relations] %s: %s", what, tostring(err)) end
 local function step(what, fn)
@@ -124,10 +152,6 @@ local function apply(sid, squad, force_cid, cids, real_ids)
 end
 local function publish_policy(sid, cid, rel)
 	C.publish("npcrel_policy", { s = sid, c = cid == nil and -1 or cid, r = rel })
-end
-local function remember(sid, cid, rel)
-	local policy = policies[sid] or { chars = {} }; policies[sid] = policy
-	if cid == nil then policy.all, policy.chars = rel, {} else policy.chars[cid] = rel end
 end
 
 -- Apply a squad relation to one known character and persist the override.
@@ -463,17 +487,12 @@ end
 function save_state(data)
 	if live() then data.coop_npc_relations_v1 = policies end
 end
+-- Where the session already runs (a co-op client, the server mode) live() reads the record at once; a co-op host reads
+-- it once hosting starts (pending_save). Single player never reads it, and its saves leave m_data's record as loaded.
 function load_state(data)
 	policies, applied, last_audience = {}, {}, nil
-	if not live() then return end
-	for sid, p in pairs(data.coop_npc_relations_v1 or {}) do
-		if number(sid, 1, 65534) and type(p) == "table" then
-			if REL[p.all] then remember(sid, nil, p.all) end
-			for cid, rel in pairs(p.chars or {}) do
-				if number(cid, 0, 65534) and REL[rel] then remember(sid, cid, rel) end
-			end
-		end
-	end
+	pending_save = data.coop_npc_relations_v1
+	live()
 end
 function update()
 	if not (live() and owner()) then return end

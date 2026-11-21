@@ -7,6 +7,10 @@
 
 local installed = {}
 local choices = {} -- host-numbered device id -> host-numbered trader id
+-- The choices of a save loaded with no session yet, nil when none waits. A co-op
+-- host loads its save, then starts hosting (coop_manager.cpp autostart waits for
+-- level_ready; the in-game Host comes later still).
+local pending_choices = nil
 local CHOICES = "coop_gamma_trading_choices"
 
 local function C() return coop_mods_core end
@@ -135,19 +139,31 @@ local function object_id(value)
         and value == math.floor(value)
 end
 
+-- player_active(), first taking up the choices of a save loaded before the
+-- session. Every use of choices asks it, so none reads or replaces them before.
+local function own_choices()
+    if not player_active() then return false end
+    if pending_choices then choices, pending_choices = pending_choices, nil end
+    return true
+end
+
 local function computers(module)
-    P().register(CHOICES, { get = function() return choices end })
+    P().register(CHOICES, { get = function() own_choices() return choices end })
     local function restore(m)
-        if player_active() then choices = type(m[CHOICES]) == "table" and m[CHOICES] or {} end
+        local saved = type(m) == "table" and type(m[CHOICES]) == "table" and m[CHOICES] or {}
+        if player_active() then choices = saved end
+        -- No session yet: kept for it. Stand b57h: dropped here, the session fell
+        -- back to the furniture's stale stock value, the next save wrote {}.
+        pending_choices = not C().active() and saved or nil
     end
     after_restore("bind_trading_computer", restore)
     RegisterScriptCallback("load_state", restore) -- also the co-op owner's ordinary save
     RegisterScriptCallback("save_state", function(m)
-        if player_active() then m[CHOICES] = choices end
+        if own_choices() then m[CHOICES] = choices end
     end)
     C().wrap(module, "get_last_selected_trader", "bind_trading_computer.get_last_selected_trader", function(orig)
         return function(id, ...)
-            if not player_active() then return orig(id, ...) end
+            if not own_choices() then return orig(id, ...) end
             if not object_id(id) then return nil end
             local device = C().hid(id)
             if not object_id(device) then return nil end
@@ -161,7 +177,7 @@ local function computers(module)
     end)
     C().wrap(module, "set_last_selected_trader", "bind_trading_computer.set_last_selected_trader", function(orig)
         return function(id, trader, ...)
-            if not player_active() then return orig(id, trader, ...) end
+            if not own_choices() then return orig(id, trader, ...) end
             -- Local UI preferences, not a client request or authority to trade.
             -- Both ids cross the save boundary in host numbering.
             trader = tonumber(trader)

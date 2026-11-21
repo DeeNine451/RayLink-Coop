@@ -458,9 +458,27 @@ local function default_key()
 	log("ping key: chat_team bound to %s (Options > Controls > Common, Co-op: ping)", KEY_DEFAULT)
 end
 
+-- The key check of a world is due from its first update and runs once, at the first live update. A co-op host starts its
+-- session after its level is up (coop_manager.cpp autostart waits for level_ready; the in-game Host comes later still,
+-- stand b57h: 15 s after the first update), a client goes live after his precache frames (coop_join.cpp client_go_live):
+-- checked only at the first update, the first world of a host's session had no ping key.
+local key_due = false
+
+local function key_check()
+	if not (key_due and live()) then return end
+	key_due = false
+	default_key()
+end
+
+local function actor_on_first_update()
+	key_due = true
+	key_check()
+end
+
 local function actor_on_update()
 	local tg = time_global()
 	if live() then
+		key_check()
 		prune(tg)
 		world_on()
 	elseif WORLD or #pings > 0 then
@@ -470,6 +488,7 @@ local function actor_on_update()
 end
 
 local function actor_on_net_destroy()
+	key_due = false
 	world_off()
 	clear()
 end
@@ -488,6 +507,6 @@ function on_game_start()
 	end
 	RegisterScriptCallback("on_key_press", on_key_press)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
-	RegisterScriptCallback("actor_on_first_update", default_key)
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
 	RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
 end

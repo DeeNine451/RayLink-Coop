@@ -96,12 +96,52 @@ local function personal_active()
 	return C().active() and (not rawget(_G, "coop_mode") or coop_mode.actor_is_player())
 end
 
+-- A Co-op host starts its session after its level is up (coop_manager.cpp autostart waits for level_ready; the in-game
+-- Host comes later still) and its load_state comes before that: the records were restored only at a load_state with a
+-- session, so on a Co-op host none came back and its next save in the session wrote the mods' defaults over them. A save
+-- loaded without a session is kept, and its records are restored once this process has one: at the first update then,
+-- or at a save in the session that comes before it. A Co-op client joins before its level loads and a server's session
+-- starts before its Lua: their load_state has the session, as before. Single player never has one: nothing is restored.
+-- The records are copied at the load: the table load_state gets is the game's m_data, the one every later save_state
+-- writes into (CALifeStorageManager_before_save), its other callbacks in pairs order. Kept by reference, a save in the
+-- session before the restore had the wrapped helmet save write this session's helmet (none yet) over the save's one.
+-- from: the m_data of that load, so that its keys go into one copy
+local late = { from = nil, save = nil, states = {} }
+
+-- true: no save waits any more. Once the session runs, as at a load_state with one: restored only for a player's actor.
+local function restore_late()
+	local m = late.save
+	if m == nil then return true end
+	if not C().active() then return false end
+	late.from, late.save = nil, nil
+	if not personal_active() then return true end
+	for _, s in ipairs(late.states) do
+		local ok, e = pcall(s.restore, m[s.key], m)
+		if not ok then C().report("misc", "late restore " .. s.key, e) end
+	end
+	return true
+end
+
+local function await_session()
+	if restore_late() then UnregisterScriptCallback("actor_on_update", await_session) end
+end
+
 local function personal_state(key, get, restore)
 	P().register(key, { get = get })
+	late.states[#late.states + 1] = { key = key, restore = restore }
 	RegisterScriptCallback("save_state", function(m)
-		if personal_active() then m[key] = get() end
+		if not personal_active() then return end
+		restore_late() -- the kept save's records first, never the defaults over them
+		m[key] = get()
 	end)
 	RegisterScriptCallback("load_state", function(m)
+		if not C().active() then
+			if late.from ~= m then late.from, late.save = m, {} end
+			late.save[key] = m[key]
+			RegisterScriptCallback("actor_on_update", await_session)
+			return
+		end
+		late.from, late.save = nil, nil
 		if personal_active() then restore(m[key], m) end
 	end)
 end
