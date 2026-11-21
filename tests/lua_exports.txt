@@ -1161,6 +1161,7 @@ debug_render:get_flags
 debug_render:get_object
 debug_render:remove_object
 debug_render:set_flags
+game:active_tutorial_id
 game:active_tutorial_name
 game:actor_lower_weapon
 game:actor_weapon_lowered
@@ -1178,6 +1179,7 @@ game:only_movekeys_allowed
 game:open_originals_link
 game:play_hud_anm
 game:play_hud_motion
+game:player_hud_ready
 game:prefetch_model
 game:prefetch_texture
 game:reload_language

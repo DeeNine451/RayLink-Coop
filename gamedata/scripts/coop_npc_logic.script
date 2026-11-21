@@ -18,8 +18,8 @@
 	    by a replicated restrictor's condlist go to its audience: the players that walked in (or stood within
 	    the trigger distance), plus, for scenes (an arrival that disables the UI or teleports), everybody
 	    within [coop_npc] scene_radius of them. The host runs the effect only if its own player is in the
-	    audience; the others get it as npc.fx and run it on their own actor. enable_ui/enable_imput/
-	    stop_tutorial always run on the host too (an unlock never hurts, sr_cutscene locks outside condlists).
+	    audience; the others get it as npc.fx and run it on their own actor. enable_ui/enable_imput also
+	    clean up a host player's local scheme locks. A routed stop_tutorial may stop only its own local sequence.
 	  - A companion with a leader (coop_npc_companions.follows) switches for him: try_switch runs under his identity, the infos of its
 	    condlists stay the world's (pick_for_leader), dist_to_actor_* under an identity reads that player.
 	  - A physics object (ph_idle, ph_button: lifts, valves, switches) remembers who used it (generic_physics_binder
@@ -112,8 +112,16 @@ local ACTOR_FX = {
 	disable_ui = true, disable_ui_only = true, run_tutorial = true, kill_actor = true, hit_actor = true,
 	save_actor_position = true, restore_actor_position = true, teleport_actor = true, sr_teleport = true,
 	jup_teleport_actor = true,
-	enable_ui = "always", enable_imput = "always", stop_tutorial = "always",
+	enable_ui = "always", enable_imput = "always", stop_tutorial = true,
 }
+local TUTORIAL_FX = { run_tutorial = true, stop_tutorial = true }
+-- Effects on this player's own UI: never on a server (its actor is a ghost). The ones that start something also wait for
+-- a ready HUD; an unlock never waits: the lock it ends may have come while the HUD was ready (R38 review).
+local UI_FX = {
+	run_tutorial = true, stop_tutorial = true, disable_ui = true, disable_ui_only = true, enable_ui = true,
+	enable_imput = true,
+}
+local UNLOCK_FX = { enable_ui = true, enable_imput = true }
 -- The host sees a moved player late and repeats the effect: on a client it counts only while he still stands in this zone.
 local FX_ZONES = { jup_teleport_actor = "jup_b16_teleport" }
 -- A kill that spares whoever holds the item (judged on each player's machine).
@@ -125,6 +133,7 @@ local host_on = false -- host with at least one client (refreshed every 250 ms)
 local applying = false -- client: applying a host section
 local leading = false -- host: a companion's logic is switching under its leader's identity
 local replaying = false -- client: running a relayed effect
+local routed_tutorial -- the local sequence started by a specific restrictor or switch
 local ctx = {} -- host: stack of replicated restrictors whose condlist is being evaluated
 
 local orig = {}
@@ -374,6 +383,64 @@ end
 -------------------------------------------------------------------------------
 -- Actor effects
 -------------------------------------------------------------------------------
+-- This process plays the actor's own character: a server's actor is a ghost without a player's UI.
+local function own_player(actor)
+	if not (actor and db.actor and coop_mode.actor_is_player()) then return false end
+	local own = P.own_actor()
+	return own ~= nil and own:id() == actor:id() and own:id() == db.actor:id()
+end
+
+local function local_player_ui(actor)
+	if not own_player(actor) then return false end
+	if game.player_hud_ready then return game.player_hud_ready() end
+	if type(device) == "function" and device().precache_frame ~= 0 then return false end
+	return not ActorMenu or ActorMenu.get_maingame() ~= nil
+end
+
+-- GAMMA's modxml_tutorial_hooks prints its prompts into UIStaticTutorials, a child of the main game window that it builds
+-- once (actor_on_first_update) and keeps in a Lua global. CHUDManager::OnScreenResolutionChanged (a size or aspect
+-- change, a language reload, level.reload_hud_xml) deletes that window with the old HUD, builds a new HUD and then
+-- sends on_screen_resolution_changed. From then on the global is a dangling pointer, and the next prompt start or stop
+-- (SetText) reads freed memory: R38, the client crash of 2026-11-21 20:46. Lua cannot test such a handle (its methods
+-- read the freed object), so the window is built again on every rebuild, in any mode.
+local function rebuild_tutorial_monitor()
+	local hooks = rawget(_G, "modxml_tutorial_hooks")
+	if not (hooks and hooks.UIStaticTutorials and type(hooks.actor_on_first_update) == "function") then return end
+	if not (coop_mode.actor_is_player() and db.actor and ActorMenu and ActorMenu.get_maingame()) then return end
+	hooks.actor_on_first_update()
+end
+
+-- Its stop and start functions index that window: before the mod's first update it is nil.
+local function tutorial_monitor_built()
+	local hooks = rawget(_G, "modxml_tutorial_hooks")
+	return not hooks or hooks.UIStaticTutorials ~= nil
+end
+
+local function run_routed_tutorial(name, source, f, actor, npc, p, ready)
+	if not (source and game.active_tutorial_id) then return end
+	local active = game.active_tutorial_id()
+	local owned = routed_tutorial and routed_tutorial.id == active and routed_tutorial or nil
+	routed_tutorial = owned
+	if name == "stop_tutorial" then
+		if not (owned and owned.source == source) then return end
+		ready = ready and tutorial_monitor_built()
+		owned.stop_pending = not ready
+		if not ready then return end
+		f(actor, npc, p)
+		if routed_tutorial == owned and game.active_tutorial_id() ~= active then routed_tutorial = nil end
+		return
+	end
+	if owned and owned.source == source then
+		owned.stop_pending = nil -- its start came after the stop it deferred: the prompt it still shows stays
+		return
+	end
+	if not (ready and npc and p and type(p[1]) == "string" and p[1] ~= "") then return end
+	if not tutorial_monitor_built() then return end
+	f(actor, npc, p)
+	local started = game.active_tutorial_id()
+	if started ~= 0 and started ~= active then routed_tutorial = { source = source, id = started } end
+end
+
 local function args_of(p)
 	if type(p) ~= "table" then return "" end
 	local t = {}
@@ -397,6 +464,7 @@ end
 -- screen and the UI lock there (the next level's button does). Here the exit's board waits for the others: nobody waits blind
 -- and frozen. Stepping out of the zone later runs the stock end of the chain.
 local function end_ride(npc)
+	if not own_player(db.actor) then return end
 	xr_effects.stop_postprocess(db.actor, npc, { LIFT_BLACK })
 	xr_effects.enable_ui(db.actor, npc, {})
 end
@@ -411,7 +479,7 @@ function deliver(name, npc, p)
 		if not aud then return nil end
 		relay(aud, id_of(npc), name, args_of(p))
 		if name == "teleport_actor" then end_ride(npc) end
-		return aud[db.actor:id()] == true or ACTOR_FX[name] == "always"
+		return aud[db.actor:id()] == true or ACTOR_FX[name] == "always", true
 	end
 	if P.is_client() then return true end -- a scheme's own call (sr_cutscene): this player's
 	local _, frame = current(npc)
@@ -429,7 +497,7 @@ function deliver(name, npc, p)
 		return mine and not (gate and db.actor:object(gate))
 	end
 	relay(aud, npc:id(), name, args_of(p))
-	return mine or (not frame.cut_audience and ACTOR_FX[name] == "always")
+	return mine or (not frame.cut_audience and ACTOR_FX[name] == "always"), true
 end
 
 local function wrap_effect(name)
@@ -437,7 +505,24 @@ local function wrap_effect(name)
 	if type(f) ~= "function" or orig["fx_" .. name] then return end
 	orig["fx_" .. name] = f
 	xr_effects[name] = function(actor, npc, p)
-		if deliver(name, npc, p) == false then return end
+		local here, routed = deliver(name, npc, p)
+		if here == false then return end
+		if UI_FX[name] then
+			local in_session = P.active()
+			local ready
+			if not in_session then
+				ready = coop_mode.actor_is_player()
+			elseif UNLOCK_FX[name] then
+				ready = own_player(actor or db.actor)
+			else
+				ready = local_player_ui(actor or db.actor)
+			end
+			if TUTORIAL_FX[name] and routed then
+				return run_routed_tutorial(name, id_of(npc), f, actor, npc, p, ready)
+			end
+			if not ready then return end
+			if TUTORIAL_FX[name] and in_session and not replaying and not tutorial_monitor_built() then return end
+		end
 		return f(actor, npc, p)
 	end
 end
@@ -1005,9 +1090,13 @@ end
 local function client_on_fx(t)
 	local name = t.f
 	if type(name) ~= "string" or not ACTOR_FX[name] or not db.actor then return end
+	local ready = not UI_FX[name]
+		or (P.client_live() and (UNLOCK_FX[name] and own_player(db.actor) or local_player_ui(db.actor)))
+	if not ready and not TUTORIAL_FX[name] then return end -- run_routed_tutorial defers a stop, a start only cancels it
 	local f = xr_effects and xr_effects[name]
 	if type(f) ~= "function" then return end
-	local npc = type(t.i) == "number" and t.i >= 0 and level.object_by_id(P.to_local(t.i)) or nil
+	local npc_id = bounded_int(t.i, 0, MAX_OBJECT_ID) and t.i or nil
+	local npc = ready and npc_id and level.object_by_id(P.to_local(npc_id)) or nil
 	if name == "sr_teleport" and not npc then return end -- he left the level before it came: the stock's box needs the restrictor
 	if name == "kill_actor" and npc then
 		local gate = KILL_GATES[npc:name()]
@@ -1019,7 +1108,13 @@ local function client_on_fx(t)
 	local p = args ~= "" and xr_logic.parse_func_params(args) or {}
 	stats.fx_in = stats.fx_in + 1
 	replaying = true
-	local ok, err = pcall(f, db.actor, npc, p)
+	local ok, err
+	if TUTORIAL_FX[name] then
+		-- Keep host numbering here. The source object can be gone when its stop arrives.
+		ok, err = pcall(run_routed_tutorial, name, npc_id, f, db.actor, npc, p, ready)
+	else
+		ok, err = pcall(f, db.actor, npc, p)
+	end
 	replaying = false
 	if not ok then report("relayed effect " .. name, err) end
 end
@@ -1647,6 +1742,10 @@ local function actor_on_update()
 	next_tick = now + 250
 	host_on = installed and P.host_with_clients()
 	if not installed then return end
+	if routed_tutorial and routed_tutorial.stop_pending and local_player_ui(db.actor)
+		and (not coop_mode.is_player_mirror() or P.client_live()) then
+		run_routed_tutorial("stop_tutorial", routed_tutorial.source, xr_effects.stop_tutorial, db.actor, nil, {}, true)
+	end
 	if P.client_live() then
 		if asked_at < 0 or (now - asked_at > 60000 and next(pending) ~= nil) then
 			asked_at = now
@@ -1720,6 +1819,7 @@ function on_game_start()
 	if not ok then report("install", err) end
 	register_events()
 	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("on_screen_resolution_changed", rebuild_tutorial_monitor)
 end
 
 -- Tests and diagnostics.
