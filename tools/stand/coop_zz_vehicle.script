@@ -82,12 +82,19 @@ local function heading_forward(h)
 	return vector():set(-math.sin(h), 0, math.cos(h))
 end
 
+-- Side offsets of the lane rays: one every 0.25 m across the car and a margin. b57i Server (l05_bar): with rays at -1.25, 0
+-- and 1.25 a row of 0.3 m posts 8 m apart, 0.1-0.45 m left of the centre line, passed as a clear lane; the car came online
+-- over the first post, was shoved 1.27 m off it (b57h's 6.659 m spawn distance is that same shove) and 3 s of forward
+-- moved it 0.645 m. Nothing 0.25 m wide or wider stands between these rays.
+local LANE_RAYS = {}
+for i = 0, 10 do LANE_RAYS[i + 1] = -1.25 + 0.25 * i end
+
 local function runway(p, forward, ignore, reach, marks)
 	-- Check the space around the car and `reach` - 2 m in front of it, along `forward` (the spawn: 30 m along its heading).
 	-- b57i: 3 s of the client's forward drove 23.8 m and the car coasted on; at the end of a 20 m lane it struck a static
 	-- face, slewed 3.4 m aside, and the host's back lane was blocked. 30 m holds the drive and its coast on open ground.
 	local side = vector():set(forward.z, 0, -forward.x)
-	for _, x in ipairs({-1.25, 0, 1.25}) do
+	for _, x in ipairs(LANE_RAYS) do
 		local start = vector():set(p.x + side.x * x - forward.x * 2, p.y + 1, p.z + side.z * x - forward.z * 2)
 		if level.ray_pick(start, forward, reach or 32, rq_target.rqtStatic, rq_result(), ignore) then return false end
 	end

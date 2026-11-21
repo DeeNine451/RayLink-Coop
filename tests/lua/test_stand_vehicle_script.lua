@@ -396,6 +396,32 @@ case("A car that does not face its checked lane fails the spawn", function()
 	assert(f:has("FAIL spawn") and f:has("car faces"))
 end)
 
+-- A static post standing upright at (cx, cz), radius r: a level ray hits it when it passes within r of the post's axis ahead of
+-- its start.
+local function post(cx, cz, r)
+	return function(pos, dir)
+		local t = (cx - pos.x) * dir.x + (cz - pos.z) * dir.z
+		if t < 0 then return false end
+		local dx, dz = pos.x + dir.x * t - cx, pos.z + dir.z * t - cz
+		return dx * dx + dz * dz <= r * r
+	end
+end
+
+case("A post between the old side rays keeps the car off that spot", function()
+	-- b57i (l05_bar): a row of 0.3 m posts stood 0.1-0.45 m left of the lane's centre line, between its side rays 1.25 m
+	-- apart; the car came online over the first one, was shoved 1.27 m off it, and 3 s of forward moved it 0.645 m.
+	local f = fixture("map")
+	f:tick("ready")
+	-- The first spot (6, 0) has this post 0.25 m ahead and 0.3 m left of it; the next (22.5 degrees round) is clear.
+	f.wall = post(6.25, 0.3, 0.15)
+	f.online, f.spawn_x = false, 5.543
+	f:tick("spawn 0.000 0.000 0.000")
+	assert(f.commands[1] == "spawn" and not f:has("FAIL"), table.concat(f.lines, " | "))
+	f.online, f.car_pos, f.car_dir = true, {x = 5.543, y = 0, z = 2.296}, {x = 0.924, y = 0, z = 0.383}
+	f:tick(nil, 16)
+	assert(not f:has("FAIL") and f:has("spawned car=40 body=71 distance=6.000"), table.concat(f.lines, " | "))
+end)
+
 case("A drive that leaves its lane sideways fails", function()
 	local f = fixture("h")
 	f:tick("ready")
