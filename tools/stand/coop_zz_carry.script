@@ -87,6 +87,8 @@ local function ask(sec)
 	out("debug spawn %s asked: %s %s %s", sec, tostring(ok), tostring(sent), tostring(code))
 end
 
+local jumped_here = false -- this Lua state asked for the jump: its world is the old one until the load makes a new state
+
 local function host_steps()
 	if stage() == "" then
 		at("take", 8, function()
@@ -102,13 +104,16 @@ local function host_steps()
 		at("before", 12, function() state("before") end)
 		at("before2", 44, function() state("before the jump") end)
 		at("jump", 46, function()
+			jumped_here = true
 			set_stage("moved")
 			out("jump to %s", GOAL)
 			flush()
 			local ok, went = pcall(function() return JumpToLevel(GOAL) end)
 			out("JumpToLevel: %s %s", tostring(ok), tostring(went))
 		end)
-	else
+	elseif not jumped_here then
+		-- the new world only: b57l, the old world went on until the group's transition (it waits for the client), and the same
+		-- Lua state ran these by the old start, "h done" 44 s before the transition (the scenario's client wait began there)
 		at("after5", 5, function() state("after 5 s") end)
 		at("after25", 25, function() state("after 25 s") end)
 		at("done", 60, function()
