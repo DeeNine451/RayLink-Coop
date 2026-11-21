@@ -182,6 +182,13 @@ local function actor_on_update()
 		end
 	end
 	if not t0 then
+		-- b57j: the client started when it saw two players and asked the debug for the gun 25 ms before its own switch to
+		-- live and 5 s before the server's debug state reached it ("debug_off": no gun). It starts live, with the debug on.
+		if ROLE == "ag" then
+			local st = try(function() return coop.debug.state() end)
+			local on = st == true or (type(st) == "table" and st.on == true)
+			if not (try(coop.is_live) and on) then return end
+		end
 		t0 = time_global()
 		out("two players: the steps start (stage '%s')", stage())
 	end
