@@ -84,6 +84,14 @@ CASES = (
     ("event-malformed", "! [coop] malformed script event from #1 dropped", True),
     ("status-other-drop", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet, 3 more", True),
     ("status-lookalike", "! [coop] script event 'core.statusx' from #1 dropped: sender is not in the world yet", True),
+    # b57g ms_crash_server world log: the rest of what crossed the SessionReset of his trip; each is resent or carried
+    ("item-data-crossed-reset", "! [coop] script event 'economy.se' from #2 dropped: sender is not in the world yet", False),
+    ("item-rider-crossed-reset", "! [coop] script event 'economy.imd' from #2 dropped: sender is not in the world yet", False),
+    ("motion-crossed-reset", "! [coop] script event 'mods.sf_motion' from #2 dropped: sender is not in the world yet", False),
+    ("tilt-crossed-reset", "! [coop] script event 'mods.sf_wct' from #2 dropped: sender is not in the world yet", False),
+    ("marks-crossed-reset", "! [coop] script event 'mods.pda_marks_q' from #2 dropped: sender is not in the world yet", False),
+    ("item-data-lookalike", "! [coop] script event 'economy.sell' from #2 dropped: sender is not in the world yet", True),
+    ("world-key-not-carried", "! [coop] script event 'economy.wmd' from #2 dropped: sender is not in the world yet", True),
     # b57g companions_server client: the scenario's own Stop-World; a client's notice of an orderly server shutdown
     ("server-shutdown", "! [07:41:32.013]  [coop] disconnected: the server is shutting down", False),
     ("disconnected-other", "! [07:41:32.013]  [coop] disconnected: HostNotReady: the server cannot run your level now, try again later", True),

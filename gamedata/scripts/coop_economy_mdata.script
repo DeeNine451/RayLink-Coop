@@ -35,6 +35,11 @@
 	   world reads it instead of the host's record (up to 15 s older), and the next look tells the host.
 	4. World m_data keys that only the host writes but clients read (player-made stashes of addons ...):
 	   polled on the host, sent to clients on change. coop_economy_mdata.register_world_key(key).
+	   Build 57 (stand b57g_ms_crash_server, "script event 'economy.se' from #2 dropped: sender is not in the world yet"): what a
+	   client sent of 1 and 2 in the last CARRY_MS before a load that continues this world, and what he had not sent yet, goes
+	   into the session stash with his keys of 3; the world drops what he sends between his trip request and the SessionReset of
+	   his rejoin (P6), the co-op host what a mover sends after its go, and the save he loads next is the world's. Once he is
+	   live in the next world, a kept value his save lacks is written back on his machine and sent again (carry_release).
 
 	Events (values are coop_economy_core.pack strings):
 		economy.se   any -> host -> others   { n, i1, v1, d1, ... }   id (host numbering), var, value; the world server passes
@@ -58,6 +63,9 @@ local PENDING_MS = 30000 -- a change for an entity that does not exist here yet 
 local HOLD_MS = 60000 -- host: a client's change of an item the host has not made yet (a leased create) waits this long
 local HOLD_MAX = 512 -- host: at most this many held changes (the oldest go first)
 local PEER_STORE = "coop_peer_mdata"
+local CARRY_MS = 5000 -- client: an item value sent this recently may not have reached the world before his load (Build 57)
+local CARRY_MAX = 512 -- client: at most this many item values carried through one load
+local CARRY_BYTES = 128 * 1024 -- and this many bytes of them (a stash value holds 256 KiB)
 
 local installed = false
 local applying = false -- writing data that came from the network: do not send it again
@@ -189,6 +197,7 @@ local SE_WORLD_VARS = {
 
 local se_out = {} -- "id\0var" -> { id (host numbering), var, packed }
 local se_sig = {} -- "id\0var" -> packed value last sent / received
+local se_recent = {} -- client, "id\0var" -> { id (host numbering), var, packed, instance, at = sent }: a load may come before it reached
 local se_wait = {} -- changes for entities not here yet: { id (local), var, value, packed, until_ms }
 local se_next_flush = 0
 -- A client's writes made while the host's world is being read (in a session, not live yet): "id\0var" -> { id (local), var, value }.
@@ -198,6 +207,10 @@ local se_next_flush = 0
 local se_early = {}
 local se_early_n = 0
 local SE_EARLY_MAX = 512
+
+-- Build 57: a player's machine keeps what it sent recently for a load that may come before it reached the world (a map server never
+-- loads another world of this session: its process ends with its world).
+local function carries() return core.follows_world() and coop_mode.is_player_mirror() end
 
 local function not_sent(var)
 	return type(var) ~= "string" or var == "_coop_instance" or var:sub(1, 9) == "pathpoint"
@@ -264,6 +277,15 @@ local function se_flush()
 	table.sort(entries, function(a, b) return a[1] < b[1] or (a[1] == b[1] and a[2] < b[2]) end)
 	stats.se_out = stats.se_out + #entries
 	send_batches("se", entries, 0)
+	if carries() then
+		local t = core.now()
+		for key, e in pairs(se_recent) do
+			if t - e.at > CARRY_MS then se_recent[key] = nil end
+		end
+		for _, e in ipairs(entries) do
+			se_recent[tostring(e[1]) .. "\0" .. e[2]] = { e[1], e[2], e[3], e[4], at = t }
+		end
+	end
 end
 
 -- Writes a value that came from the network. False when the entity does not exist here (yet).
@@ -316,6 +338,7 @@ end
 function apply_se(id, var, value)
 	if type(id) ~= "number" or not_sent(var) then return false end
 	se_sig[tostring(core.host_id(id)) .. "\0" .. var] = core.pack(value)
+	se_recent[tostring(core.host_id(id)) .. "\0" .. var] = nil -- the authority's word is newer than what this machine sent
 	if not se_store(id, var, value) then return false end
 	se_heard(id, var)
 	return true
@@ -375,6 +398,7 @@ local function on_se(t, from)
 		else
 			local lid = host and e.id or core.local_id(e.id)
 			se_sig[tostring(e.id) .. "\0" .. e.key] = e.packed
+			se_recent[tostring(e.id) .. "\0" .. e.key] = nil -- a newer word than what this machine sent
 			stats.se_in = stats.se_in + 1
 			if not se_store(lid, e.key, e.value) then
 				stats.se_pending = stats.se_pending + 1
@@ -444,6 +468,7 @@ end
 local item_keys = {} -- { {key, apply}, ... }
 local item_base = {} -- item id (local) -> { key -> packed }
 local item_retry = {} -- restored source riders must be sent even before the first inventory poll
+local imd_recent = {} -- client, "id\0key" -> { id (host numbering), key, packed, instance, at = sent } (se_recent)
 local item_seeded = false
 local item_next_poll = 0
 
@@ -506,6 +531,15 @@ local function item_poll()
 		stats.imd_out = stats.imd_out + #out
 		send_batches("imd", out, 0)
 	end
+	if carries() then
+		local t = core.now()
+		for key, e in pairs(imd_recent) do
+			if t - e.at > CARRY_MS then imd_recent[key] = nil end
+		end
+		for _, e in ipairs(out) do
+			imd_recent[tostring(e[1]) .. "\0" .. e[2]] = { e[1], e[2], e[3], e[4], at = t }
+		end
+	end
 end
 
 local function on_imd(t, from)
@@ -533,6 +567,7 @@ local function on_imd(t, from)
 			item_store(m, d, lid, e.value)
 			item_base[lid] = item_base[lid] or {}
 			item_base[lid][e.key] = e.packed
+			imd_recent[tostring(e.id) .. "\0" .. e.key] = nil -- a newer word than what this machine sent
 			stats.imd_in = stats.imd_in + 1
 			if host then relay[#relay + 1] = { e.id, e.key, e.packed } end
 		end
@@ -837,18 +872,156 @@ local function keep_for_load(epoch)
 	core.log("player data kept for the load into the world of epoch %d (%d bytes)", epoch, #s)
 end
 
--- The keys kept for this load, or nil. Read once: a state kept for another world (the host loaded a save meanwhile) is dropped.
-local function kept_for_load()
+-- The keys kept for this load (under `key`, STASH_KEY by default), or nil. Read once: a state kept for another world (the host
+-- loaded a save meanwhile) is dropped.
+local function kept_for_load(key)
+	key = key or STASH_KEY
 	local api = core.engine()
 	if not (api and api.stash_get) then return nil end
-	local ok, s = pcall(api.stash_get, STASH_KEY)
+	local ok, s = pcall(api.stash_get, key)
 	if not (ok and type(s) == "string") then return nil end
-	if api.stash_set then pcall(api.stash_set, STASH_KEY, nil) end
+	if api.stash_set then pcall(api.stash_set, key, nil) end
 	local epoch, body = s:match("^@load:(%d+)|(.*)$")
 	if not epoch or tonumber(epoch) ~= world_epoch() then return nil end
 	local t, err = core.unpack(body)
 	if err ~= nil or type(t) ~= "table" then return nil end
 	return t
+end
+
+-------------------------------------------------------------------------------
+-- Build 57: the item values of 1 and 2 that may not have reached the world before such a load (see the header). Kept beside
+-- the keys above at the engine's word, read with them, put back once he is live in the next world.
+-------------------------------------------------------------------------------
+local ITEMS_STASH_KEY = "coop_economy_mdata_items"
+local carry = nil -- client, the values kept for this load: { se = { {id, var, packed, instance}, ... }, imd = { ... } }
+
+local function carry_add(out, seen, e, budget)
+	local key = tostring(e[1]) .. "\0" .. tostring(e[2])
+	if seen[key] then return end -- a newer one of this var is in already
+	local len = #e[3] + #tostring(e[2]) + #(e[4] or "") + 24
+	if budget.n >= CARRY_MAX or budget.bytes + len > CARRY_BYTES then
+		budget.over = budget.over + 1
+		return
+	end
+	seen[key] = true
+	budget.n, budget.bytes = budget.n + 1, budget.bytes + len
+	out[#out + 1] = { e[1], e[2], e[3], e[4] or "" }
+end
+
+local function recent_newest(list, t)
+	local r = {}
+	for _, e in pairs(list) do
+		if t - e.at <= CARRY_MS then r[#r + 1] = e end
+	end
+	table.sort(r, function(a, b) return a.at > b.at end)
+	return r
+end
+
+local function keep_items_for_load(epoch)
+	epoch = tonumber(epoch)
+	if not (epoch and epoch >= 0 and epoch == math.floor(epoch)) or not carries() or not core.live() then return end
+	local api = core.engine()
+	local m = m_data()
+	if not (api and api.stash_set and m) then return end
+	local budget = { n = 0, bytes = 0, over = 0 }
+	local se, imd, seen_se, seen_imd = {}, {}, {}, {}
+	-- not sent yet, so newer than anything sent: the queue of the next flush, the writes of the world's reading, the riders the
+	-- next look would send
+	for _, e in pairs(se_out) do carry_add(se, seen_se, e, budget) end
+	for _, e in pairs(se_early) do
+		if not clone_busy[e[1]] then carry_add(se, seen_se, { core.host_id(e[1]), e[2], core.pack(e[3]), item_instance(e[1]) }, budget) end
+	end
+	if item_seeded and db.actor then
+		db.actor:iterate_inventory(function(_, item)
+			local id = item:id()
+			if clone_busy[id] then return end
+			local b = item_base[id] or {}
+			for _, d in ipairs(item_keys) do
+				local tbl = m[d.key]
+				local value
+				if type(tbl) == "table" then value = tbl[id] end
+				local packed = core.pack(value)
+				if b[d.key] ~= packed then carry_add(imd, seen_imd, { core.host_id(id), d.key, packed, item_instance(id) }, budget) end
+			end
+		end, db.actor)
+	end
+	local t = core.now()
+	for _, e in ipairs(recent_newest(se_recent, t)) do carry_add(se, seen_se, e, budget) end
+	for _, e in ipairs(recent_newest(imd_recent, t)) do carry_add(imd, seen_imd, e, budget) end
+	if #se == 0 and #imd == 0 then
+		pcall(api.stash_set, ITEMS_STASH_KEY, nil)
+		return
+	end
+	local s = core.pack({ se = se, imd = imd })
+	local ok, done = pcall(api.stash_set, ITEMS_STASH_KEY, string.format("@load:%d|", epoch) .. s)
+	if not (ok and done) then
+		core.log("! item data for the load not kept (the stash refused %d bytes): the world's save is used", #s)
+		return
+	end
+	core.log("item data kept for the load into the world of epoch %d: %d se var(s), %d item rider(s)%s", epoch, #se, #imd,
+		budget.over > 0 and string.format(" (%d over the limit left out)", budget.over) or "")
+end
+
+-- May this machine write a kept value of entity `lid` and send it? The world's rule for a client (client_may_write, on_imd)
+-- seen from his side: his own item, or a world flag on an entity no other player holds.
+local function mine_to_write(lid, world_var)
+	if not alife_object(lid) or clone_busy[lid] or clone_is_retired(lid) then return false end
+	local root = core.root_of(lid)
+	local own = db.actor and db.actor:id()
+	if root ~= nil and root == own then return true end
+	if not world_var then return false end
+	for _, p in ipairs(core.players()) do
+		if p.avatar_id ~= nil and p.avatar_id == root then return false end -- another player's: his to write
+	end
+	return true
+end
+
+local function same_instance(lid, instance)
+	return instance == nil or instance == "" or instance == item_instance(lid)
+end
+
+-- Client, his first live frame in the next world: a kept value his save lacks is written here and sent as a write of his own.
+-- A value the save has reached the world before it was saved: nothing to do. A newer word of the world came after his own
+-- send: on_se / on_imd took his send out of the recent ones then.
+local function carry_release()
+	if not carry or not db.actor then return end
+	local c = carry
+	carry = nil
+	local m = m_data()
+	if not m then return end
+	local n_se, n_imd = 0, 0
+	for _, e in ipairs(type(c.se) == "table" and c.se or {}) do
+		local hid, var, packed = core.int(e[1], 0, 65534), e[2], e[3]
+		if hid and type(var) == "string" and type(packed) == "string" and not not_sent(var) and not SE_HOST_ONLY[var] then
+			local lid = core.local_id(hid)
+			local value, err = core.unpack(packed)
+			local se = type(m.se_object) == "table" and m.se_object[lid] or nil
+			if (err == nil or packed == "_") and same_instance(lid, e[4]) and mine_to_write(lid, SE_WORLD_VARS[var])
+				and core.pack(se and se[var]) ~= packed then
+				se_store(lid, var, value)
+				se_queue(lid, var, value)
+				n_se = n_se + 1
+			end
+		end
+	end
+	for _, e in ipairs(type(c.imd) == "table" and c.imd or {}) do
+		local hid, key, packed = core.int(e[1], 0, 65534), e[2], e[3]
+		local d = type(key) == "string" and item_decl(key) or nil
+		if hid and d and type(packed) == "string" then
+			local lid = core.local_id(hid)
+			local value, err = core.unpack(packed)
+			local tbl, cur = m[key], nil
+			if type(tbl) == "table" then cur = tbl[lid] end
+			if (err == nil or packed == "_") and same_instance(lid, e[4]) and mine_to_write(lid, false) and core.pack(cur) ~= packed then
+				item_store(m, d, lid, value)
+				item_retry[lid] = true -- the next look sends it, the first (silent) one of a world too
+				n_imd = n_imd + 1
+			end
+		end
+	end
+	if n_se + n_imd > 0 then
+		core.log("item data of the last world put back: %d se var(s), %d item rider(s) its save lacked", n_se, n_imd)
+	end
 end
 
 -- Client loading the host's world: its own per-player values replace the host's before load_state runs.
@@ -857,6 +1030,9 @@ local function apply_surrogate(m)
 	pmd_loaded_for = m
 	pmd_kept = false -- a new world: the looks go on
 	bolts_hold, bolts_quiet_until, bolts_carry = nil, 0, nil -- a new world: what the last one had to make is void
+	se_recent, imd_recent = {}, {} -- what the last world was sent is in its save or in the kept item data
+	local items = kept_for_load(ITEMS_STASH_KEY)
+	carry = type(items) == "table" and items or nil
 	local my = core.host_id(0)
 	local root = m[PEER_STORE]
 	local e = type(root) == "table" and root[my] or nil
@@ -1371,6 +1547,14 @@ local function actor_on_update()
 	end
 	if t >= se_next_flush then
 		se_next_flush = t + FLUSH_MS
+		if carry then
+			-- the writes of this load go into the queue first: a kept value of the same var is what he left with and goes out
+			-- after them (GAMMA's WPO rolls the parts again when the save has none: his machine and the world would differ)
+			local ok, err = pcall(se_early_release)
+			if not ok then core.log("! early se: %s", tostring(err)) end
+			ok, err = pcall(carry_release)
+			if not ok then core.log("! kept item data: %s", tostring(err)) end
+		end
 		local ok, err = pcall(se_flush)
 		if not ok then core.log("! se flush: %s", tostring(err)) end
 		se_retry()
@@ -1455,5 +1639,7 @@ function on_game_start()
 	RegisterScriptCallback("coop_on_world_leaving", function(epoch)
 		local ok, err = pcall(keep_for_load, epoch)
 		if not ok then core.log("! player data for the load: %s", tostring(err)) end
+		ok, err = pcall(keep_items_for_load, epoch) -- Build 57: and what may not have reached the world of his items
+		if not ok then core.log("! item data for the load: %s", tostring(err)) end
 	end)
 end
