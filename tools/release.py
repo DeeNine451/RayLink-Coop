@@ -232,11 +232,27 @@ def must(run: Runner, args: list[str], cwd: pathlib.Path) -> str:
 
 # ---- verify ------------------------------------------------------------------------------------------------------------
 
-def gate_checks(run: Runner, root: pathlib.Path, since: str, exe: pathlib.Path) -> list[str]:
+OWNER_WAIVER = re.compile(r"^[РR]\d{1,3}$")
+
+
+def check_waiver(root: pathlib.Path, waiver: str) -> None:
+    """An owner's waiver names a decision row of TZ.md (`| Р24 | ...`): the owner's words, in the project's own record."""
+    if not OWNER_WAIVER.match(waiver):
+        raise Refused(f"--owner-waiver {waiver!r}: the waiver is a decision row of TZ.md, like Р24")
+    tz = root / "TZ.md"
+    rows = tz.read_text(encoding="utf-8").splitlines() if tz.is_file() else []
+    if not any(line.startswith(f"| {waiver} |") for line in rows):
+        raise Refused(f"--owner-waiver {waiver}: no row {waiver} in TZ.md (the owner's decision is recorded there first)")
+
+
+def gate_checks(run: Runner, root: pathlib.Path, since: str, exe: pathlib.Path,
+                waiver: Optional[str] = None) -> tuple[list[str], str]:
     """check_layers and check_gates, first, in one process (check_gates --layers builds the layer model once and runs
-    check_layers on it before the gate; exit 3: the layer check failed): the lines to show. Raises Refused when either
-    fails. --release: the release rule (both stand marks and tests.ok whatever the files' layers) and the exe built
-    from engine HEAD."""
+    check_layers on it before the gate; exit 3: the layer check failed): the lines to show, and what an owner's waiver
+    waived. Raises Refused when either fails. --release: the release rule (both stand marks and tests.ok whatever the
+    files' layers) and the exe built from engine HEAD.
+    An owner's waiver (TZ.md Р24, 2026-11-21: Dev 57 after a stand round whose marks did not match HEAD) waives the
+    marks only: the layers still decide, and the exe must still be engine-ci's build of engine HEAD (--exe-source)."""
     gates = run([sys.executable, "-I", str(root / "tools" / "check_gates.py"), f"{since}..HEAD", "--release", "--layers",
                  "--root", str(root), "--exe", str(exe)], root)
     out = gates.stdout or ""
@@ -247,9 +263,17 @@ def gate_checks(run: Runner, root: pathlib.Path, since: str, exe: pathlib.Path) 
     shown += [scrub(l) for l in out.splitlines()
               if l.startswith("gates: required") or (l.startswith("gates:") and "ok" in l.lower())]
     if gates.returncode != 0:
-        raise Refused("check_gates refused (stand marks temp/gates/*.ok or tests.ok missing or stale, the exe not "
-                      "engine-ci's build of engine HEAD, or a commit to split): " + scrub(out[-1500:]))
-    return shown
+        if not waiver:
+            raise Refused("check_gates refused (stand marks temp/gates/*.ok or tests.ok missing or stale, the exe not "
+                          "engine-ci's build of engine HEAD, or a commit to split): " + scrub(out[-1500:]))
+        source = run([sys.executable, "-I", str(root / "tools" / "check_gates.py"), "--exe-source", "--exe", str(exe)], root)
+        if source.returncode != 0:
+            raise Refused(f"--owner-waiver {waiver} waives the stand and tests marks only, and the exe is not engine-ci's "
+                          "build of engine HEAD: " + scrub((source.stdout or "")[-800:]))
+        waived = "\n".join(scrub(l) for l in out.splitlines() if l.startswith("gates:") and "required" not in l)
+        shown.append(f"gates: WAIVED by the owner (TZ.md {waiver}): " + "; ".join(waived.splitlines()))
+        return shown, waived
+    return shown, ""
 
 
 def sha256(data: bytes) -> str:
@@ -363,8 +387,10 @@ def choose_since(n: Names, run: Runner, root: pathlib.Path, since: Optional[str]
 
 
 def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path, run: Runner = default_runner,
-           archive: Optional[pathlib.Path] = None, since_override: bool = False) -> dict:
+           archive: Optional[pathlib.Path] = None, since_override: bool = False, waiver: Optional[str] = None) -> dict:
     work = root / n.work
+    if waiver:
+        check_waiver(root, waiver)
     since, last = choose_since(n, run, root, since, since_override)
     # review 6, residual (a): one copy of the exe in temp/<tag>/ is what the gate judges, what the label, the hash and
     # the package are checked against, and what draft uploads; it may not change while verify runs
@@ -376,7 +402,8 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
             shutil.copy2(exe, asset)
         judged = asset
     before = sha256(judged.read_bytes()) if judged.is_file() else None
-    for line in gate_checks(run, root, since, judged):
+    shown, waived = gate_checks(run, root, since, judged, waiver)
+    for line in shown:
         print("verify:", line)
     engine = root / "engine"
     for repo in (root, engine):
@@ -422,7 +449,7 @@ def verify(n: Names, root: pathlib.Path, since: Optional[str], exe: pathlib.Path
         raise Refused(f"the exe {asset} changed while verify ran: run verify again")
     result = dict(asdict(n), project=project, engine=engine_sha, archive=str(archive), zip_sha256=sha256(archive.read_bytes()),
                   exe=str(asset), exe_source=str(exe), exe_built_from=engine_sha, exe_sha256=exe_hash, since=since,
-                  since_override=since != last,
+                  since_override=since != last, owner_waiver=waiver or None, waived=waived,
                   last_release=last, notes_sha256=notes_digests(work), **package)
     (work / "verified.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"verify: OK, {package['entries']} entries, {package['compared']} compared, exe {exe_hash[:8]}")
@@ -622,6 +649,9 @@ def main(argv: Optional[Sequence[str]] = None, run: Runner = default_runner, roo
                     help="gate from an older --since than the last release tag of the channel: widens the gated range "
                          "(an ancestor of that tag only; printed, recorded)")
     ap.add_argument("--exe", default=str(DEFAULT_EXE), help="the exe being released")
+    ap.add_argument("--owner-waiver", metavar="ROW",
+                    help="verify: the owner's decision row of TZ.md (Р24) that waives the stand and tests marks; the "
+                         "layers and the exe built from engine HEAD still decide (printed, recorded in verified.json)")
     ap.add_argument("--archive", help="the package (default releases/anomaly-coop-<version>.zip)")
     ap.add_argument("--dry-run", action="store_true", help="draft/publish: print the commands, run only local git reads")
     ap.add_argument("command", choices=["prepare", "verify", "draft", "publish"])
@@ -634,7 +664,7 @@ def main(argv: Optional[Sequence[str]] = None, run: Runner = default_runner, roo
             prepare(n, root)
         elif args.command == "verify":
             verify(n, root, args.since, pathlib.Path(args.exe), run, pathlib.Path(args.archive) if args.archive else None,
-                   args.since_override)
+                   args.since_override, args.owner_waiver)
         elif args.command == "draft":
             draft(n, root, run, args.dry_run)
         else:

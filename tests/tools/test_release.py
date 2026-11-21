@@ -32,12 +32,13 @@ class Fake:
 
     def __init__(self, root=None, layers=0, gates=0, out="", tags=("b42", "b41.9", "dev-42.1"), points_at=(),
                  heads=(PROJECT, ENGINE), remote=None, releases=None, latest=None, network=True, ancestors=(),
-                 untracked=""):
+                 untracked="", exe_source=0):
         self.root = Path(root) if root else None
         self.ancestors = set(ancestors)            # (a, b): a is an ancestor of b (git merge-base --is-ancestor)
         self.untracked = untracked                 # git status --untracked-files=all -- <product folders>
         self.calls = []
         self.layers, self.gates, self.out = layers, gates, out
+        self.exe_source = exe_source                # check_gates --exe-source: 0 engine HEAD's build, 1 not
         self.tags, self.points_at, self.heads = list(tags), list(points_at), heads
         self.remote = dict(remote or {})            # tag -> commit on GitHub (the co-op repository)
         self.releases = dict(releases or {})        # repo -> release json of the tag
@@ -53,6 +54,10 @@ class Fake:
             self.out
         if "check_layers.py" in joined:
             return done(args, layers, self.layers)
+        if "check_gates.py" in joined and "--exe-source" in args:
+            return done(args, "exe_source=" + (ENGINE if self.exe_source == 0 else "none") + "\n" + (
+                "" if self.exe_source == 0 else "gates: the exe is not engine-ci's build of engine HEAD\n"),
+                self.exe_source)
         if "check_gates.py" in joined:
             # --layers: the layer check runs first on the same model; exit 3 when it fails (the gate does not run)
             first = layers if "--layers" in args else ""
@@ -405,6 +410,66 @@ def whole_verify(tmp_path, exe: bytes, packaged: bytes, swap: bytes, target: str
     fake = SwapFake(original, swap, target, root=tmp_path)
     return n, original, fake, lambda: release.verify(n, tmp_path, "dev-42.1", original, fake)
 
+
+
+# --- the owner's waiver (TZ.md Р24, 2026-11-21) -------------------------------------------------------------------------
+# "если все четко просто выпустишь по окончанию этих тестов": Dev 57 goes out after a stand round whose marks did not match
+# HEAD (probe fixes made during the round). --owner-waiver <row> waives the stand and tests marks only, and only for a
+# decision row of TZ.md; the exe must still be engine-ci's build of engine HEAD, and the waiver goes into verified.json.
+
+def tz_with(root, row="Р24"):
+    (root / "TZ.md").write_text(f"| № | Решение | Слова владельца |\n|---|---|---|\n| {row} | выпуск | «...» |\n",
+                                encoding="utf-8")
+
+
+def test_verify_owner_waiver_needs_its_decision_row(tmp_path):
+    n = release.names_for("dev", "57")
+    with pytest.raises(release.Refused, match="Р24.*TZ.md"):
+        release.verify(n, tmp_path, "dev-42.1", tmp_path / "x.exe", Fake(gates=1), waiver="Р24")
+    tz_with(tmp_path, "Р23")
+    with pytest.raises(release.Refused, match="Р24.*TZ.md"):
+        release.verify(n, tmp_path, "dev-42.1", tmp_path / "x.exe", Fake(gates=1), waiver="Р24")
+    with pytest.raises(release.Refused, match="waiver"):
+        release.verify(n, tmp_path, "dev-42.1", tmp_path / "x.exe", Fake(gates=1), waiver="anything")
+
+
+def test_verify_owner_waiver_covers_the_marks_only(tmp_path):
+    tz_with(tmp_path)
+    fake = Fake(gates=1, exe_source=1)
+    with pytest.raises(release.Refused, match="engine-ci's build"):
+        release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", fake, waiver="Р24")
+    assert any("--exe-source" in c for c in fake.calls), fake.calls
+    with pytest.raises(release.Refused, match="check_layers failed"):  # nor the layers
+        release.verify(release.names_for("dev", "57"), tmp_path, "dev-42.1", tmp_path / "x.exe", Fake(layers=1),
+                       waiver="Р24")
+
+
+def test_verify_owner_waiver_goes_past_the_marks_and_is_recorded(tmp_path, capsys):
+    exe = b"MZ RayLink Engine dev: the build"
+    n, original, fake, _ = whole_verify(tmp_path, exe, exe, exe, "original")
+    fake.gates = 1
+    tz_with(tmp_path)
+    result = release.verify(n, tmp_path, "dev-42.1", original, fake, waiver="Р24")
+    assert result["owner_waiver"] == "Р24" and "hostplay.ok missing" in result["waived"]
+    saved = json.loads((tmp_path / n.work / "verified.json").read_text(encoding="utf-8"))
+    assert saved["owner_waiver"] == "Р24" and "hostplay.ok missing" in saved["waived"]
+    out = capsys.readouterr().out
+    assert "verify: gates: WAIVED by the owner (TZ.md Р24)" in out, out
+
+
+def test_verify_without_a_waiver_records_none(tmp_path, capsys):
+    exe = b"MZ RayLink Engine dev: the build"
+    n, original, fake, run = whole_verify(tmp_path, exe, exe, exe, "original")
+    result = run()
+    assert result["owner_waiver"] is None and result["waived"] == ""
+    assert not any("--exe-source" in c for c in fake.calls)  # the release rule judged the exe already
+    capsys.readouterr()
+
+
+def test_main_passes_the_owner_waiver(tmp_path, capsys):
+    code = release.main(["--channel", "dev", "--build", "57", "--since", "dev-42.1", "--owner-waiver", "Р24", "verify"],
+                        run=Fake(gates=1), root=tmp_path)
+    assert code == 1 and "Р24" in capsys.readouterr().out
 
 def test_verify_judges_one_copy_of_the_exe(tmp_path, capsys):
     exe = b"MZ RayLink Engine dev: the build"
