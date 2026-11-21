@@ -223,6 +223,9 @@ function Complete-S7Trip($Context, $Player, $Trip) {
 
 function Get-S7PlayerLevel($Status, $Player, [string]$Map) {
     $seat = $Status.Players[[int]$Player.Peer]
+    if ($seat -and $seat.Map -eq $Map -and -not $Status.Maps.ContainsKey($Map)) {
+        throw "the world placed $($Player.Role) on $Map, the probe named no level ID for it"
+    }
     if (-not $seat -or $seat.Map -ne $Map -or -not $Status.Maps.ContainsKey($Map) -or
         $seat.Level -ne $Status.Maps[$Map]) {
         throw "the world did not place $($Player.Role) on $Map"

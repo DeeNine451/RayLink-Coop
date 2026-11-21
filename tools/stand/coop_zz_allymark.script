@@ -1,9 +1,13 @@
 -- Dev 57 SS only. The mover takes a real level exit. The observer stays behind
 -- and checks the production HUD's spot against the offline record on the new map.
+-- A Server world starts each new character at any start of its faction (coop_menu_char.host_start; stalker: three maps):
+-- a mover who joined on another map first goes once to the observer's map (gather).
 local OBSERVER, MOVER = "allyobserver", "allymover"
 local START_KEY = "stand.allymark_from" -- session stash survives the mover's level load
+local GATHER_KEY = "stand.allymark_gather" -- the map of the mover's setup trip, kept over his level load
+local GATHER_MS = 30000 -- after the setup trip the observer must be on the mover's map within this long
 local role, next_poll, finished = nil, 0, false
-local travel, initial_level, stable_id, stable_level, stable_at
+local travel, initial_level, stable_id, stable_level, stable_at, gathering, gathered_at
 
 local function out(fmt, ...)
 	printf("%s", "[allymark] " .. string.format(fmt, ...))
@@ -46,6 +50,39 @@ local function beside_exit(exit, from)
 	end
 end
 
+-- The mover, before the test: true while he is not on the observer's map yet. Apart, he goes once to the observer's map by
+-- the stock debug trip (JumpToLevel: the server's real move decision); the real exit is taken from there.
+local function gather(now, here, observer)
+	local where = coop_mode.where(observer.id)
+	if where == "here" then return false end
+	if gathering then return true end -- the trip is under way
+	local went = coop.stash_get(GATHER_KEY)
+	if type(went) == "string" and went ~= "" then
+		gathered_at = gathered_at or now
+		if went ~= here or now - gathered_at >= GATHER_MS then
+			finished = true
+			out("FAIL: mover did not join the observer (went to %s, is on %s, the observer is %s)", went, here, where)
+		end
+		return true
+	end
+	if where ~= "away" then return true end -- the observer is not placed on a map yet
+	local lid = coop.levels.level_of_player(observer.id)
+	local map = lid and coop.levels.level_name(lid)
+	if not map or map == here then return true end
+	gathering = true
+	if not coop.stash_set(GATHER_KEY, map) then
+		finished = true
+		out("FAIL: mover could not keep the map of his setup trip")
+		return true
+	end
+	out("mover joins the observer on %s (start %s)", map, here)
+	if not JumpToLevel(map) then
+		finished = true
+		out("FAIL: mover could not request %s", map)
+	end
+	return true
+end
+
 local function move(now, actor)
 	local here = level.name()
 	local from = coop.stash_get(START_KEY)
@@ -56,7 +93,7 @@ local function move(now, actor)
 	end
 	if not travel then
 		local observer = player(OBSERVER)
-		if not observer or coop_mode.where(observer.id) ~= "here" then return end
+		if not observer or gather(now, here, observer) then return end
 		local target = nearest_exit(actor)
 		local beside = target and beside_exit(target, actor:position())
 		if not beside or not coop.stash_set(START_KEY, here) then

@@ -1,11 +1,17 @@
--- Dev 57 SS only (A-S6J, S5 feed lines). Two players of a server world start on one map. The first takes a real level exit,
+-- Dev 57 SS only (A-S6J, S5 feed lines). Two players of a server world on one map. The first takes a real level exit,
 -- the second follows through the same exit a little later. Each machine's engine writes its feed lines to the log
 -- ("[srv] feed: '<nick>' went to <level>" / "came from <level>"); feed_server.ps1 reads them. This probe only moves.
+-- A Server world starts each new character at any start of its faction (coop_menu_char.host_start; stalker: three maps). A
+-- first who joined on another map goes once to the second's map (the setup trip) and chooses his exit from the second's
+-- start there, so both take the same exit. The first moves: the second stays live where he started until the test.
 local FIRST, SECOND = "feedfirst", "feedsecond"
 local START_KEY = "stand.feed_from" -- the session stash survives this player's level load
 local FOLLOW_MS = 20000 -- the second goes this long after the first left the map
+local GATHER_KEY = "stand.feed_gather" -- the map of the first's setup trip, kept over his level load
+local GATHER_MS = 60000 -- after the setup trip the second must be on the first's map within this long
+local FACTION = "stalker" -- feed_server.ps1's stage and -coop_autochoose
 local role, next_poll, finished = nil, 0, false
-local travel, other_left_at
+local travel, other_left_at, gathering, gathered_at, origin
 
 local function out(fmt, ...)
 	printf("%s", "[feed] " .. string.format(fmt, ...))
@@ -18,9 +24,8 @@ local function player(nick)
 	end
 end
 
-local function nearest_exit(actor)
+local function nearest_exit(from)
 	local best, distance
-	local from = actor:position()
 	for id = 1, 65534 do
 		local obj = level.object_by_id(id)
 		if obj and (obj:clsid() == clsid.level_changer or obj:clsid() == clsid.level_changer_s) then
@@ -48,6 +53,62 @@ local function beside_exit(exit, from)
 	end
 end
 
+-- The start of the world's faction on this map (where a new character of it is put, coop_menu_char.host_start).
+local function start_of(map)
+	local ok, starts = pcall(coop_menu_char.faction_starts, FACTION, true)
+	if not ok or type(starts) ~= "table" then return nil end
+	for _, s in ipairs(starts) do
+		if s.image == map then return vector():set(s.x, s.y, s.z) end
+	end
+end
+
+-- The first, before the test: true while the second is not on his map. Apart, he goes once to the second's map by the stock
+-- debug trip (JumpToLevel: the server's real move decision). There he takes his exit from the second's start (`origin`): the
+-- second still stands there, and his nearest exit is the same one.
+local function gather(now, here)
+	local other = player(SECOND)
+	if not other then return true end
+	local where = coop_mode.where(other.id)
+	local went = coop.stash_get(GATHER_KEY)
+	local gathered = type(went) == "string" and went ~= ""
+	if where == "here" then
+		if gathered and not origin then
+			origin = start_of(here)
+			if not origin then
+				finished = true
+				out("FAIL: the first found no %s start on %s", FACTION, here)
+				return true
+			end
+		end
+		return false
+	end
+	if gathering then return true end -- the trip is under way
+	if gathered then
+		gathered_at = gathered_at or now
+		if went ~= here or now - gathered_at >= GATHER_MS then
+			finished = true
+			out("FAIL: the first did not join the second (went to %s, is on %s, the second is %s)", went, here, where)
+		end
+		return true
+	end
+	if where ~= "away" then return true end -- the second is not placed on a map yet
+	local lid = coop.levels.level_of_player(other.id)
+	local map = lid and coop.levels.level_name(lid)
+	if not map or map == here then return true end
+	gathering = true
+	if not coop.stash_set(GATHER_KEY, map) then
+		finished = true
+		out("FAIL: the first could not keep the map of his setup trip")
+		return true
+	end
+	out("first joins the second on %s (start %s)", map, here)
+	if not JumpToLevel(map) then
+		finished = true
+		out("FAIL: the first could not request %s", map)
+	end
+	return true
+end
+
 -- May this player leave now? The first: when the second stands on his map. The second: FOLLOW_MS after the first left it.
 local function may_go(now)
 	local other = player(role == FIRST and SECOND or FIRST)
@@ -71,9 +132,11 @@ local function move(now, actor)
 		return
 	end
 	if not travel then
+		if role == FIRST and gather(now, here) then return end
 		if not may_go(now) then return end
-		local target = nearest_exit(actor)
-		local beside = target and beside_exit(target, actor:position())
+		local from_pos = origin or actor:position()
+		local target = nearest_exit(from_pos)
+		local beside = target and beside_exit(target, from_pos)
 		if not beside or not coop.stash_set(START_KEY, here) then
 			finished = true
 			out("FAIL: %s could not prepare a level exit from %s", role, here)

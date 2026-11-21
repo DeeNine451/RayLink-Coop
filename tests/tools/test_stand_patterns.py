@@ -77,6 +77,13 @@ CASES = (
     # the same line cut where the game was stopped while writing it (companions_group, b57 stand)
     ("torso-cut", "! [03:33:35.512]  [coop] stalker [sim_default_renegade_228430] visual ", False),
     ("torso-other", "! [03:10:20.871]  [coop] stalker [x] visual [y]: the torso motion broke the frame", True),
+    # b57b save_handover_server world log: a Live player's status crossed the SessionReset of his trip (P6 drop)
+    ("status-crossed-reset", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet", False),
+    ("status-crossed-reset-ts", "! [04:31:05.100]  [coop] script event 'core.status' from #2 dropped: sender is not in the world yet", False),
+    ("event-not-ready", "! [coop] script event 'mods.pd' from #2 dropped: sender is not in the world yet", True),
+    ("event-malformed", "! [coop] malformed script event from #1 dropped", True),
+    ("status-other-drop", "! [coop] script event 'core.status' from #1 dropped: sender is not in the world yet, 3 more", True),
+    ("status-lookalike", "! [coop] script event 'core.statusx' from #1 dropped: sender is not in the world yet", True),
 )
 
 

@@ -28,11 +28,14 @@ local function vec(x, y, z)
 end
 
 local EXIT_ID = 4242
+local OTHER_EXIT_ID = 4243 -- a second exit, used only where a test places one
 
 local function fixture(role)
 	local f = {
 		map = "l01_escape", now = 0, live = true, mirror = true, log = {}, commands = {}, callbacks = {}, stash = {},
-		others = {}, where = {}, pos = vec(0, 0, 0), exit = vec(50, 0, 0), moved_to = {},
+		others = {}, where = {}, pos = vec(0, 0, 0), exit = vec(50, 0, 0), moved_to = {}, levels = {}, trips = {},
+		starts = { { id = "rookie_village", image = "l01_escape", x = 0, y = 0, z = 0 },
+			{ id = "hidden_base", image = "k00_marsh", x = 0, y = 0, z = 0 } },
 	}
 	local actor = {
 		position = function() return f.pos end,
@@ -47,12 +50,13 @@ local function fixture(role)
 		level = {
 			name = function() return f.map end,
 			object_by_id = function(id)
-				if id == EXIT_ID and not f.no_exit then
-					return { clsid = function() return 1 end, position = function() return f.exit end }
+				local at = (id == EXIT_ID and not f.no_exit and f.exit) or (id == OTHER_EXIT_ID and f.other_exit)
+				if at then
+					return { clsid = function() return 1 end, position = function() return at end }
 				end
 			end,
-			vertex_id = function() return 7 end,
-			vertex_position = function() return vec(f.exit.x + 12, f.exit.y, f.exit.z) end,
+			vertex_id = function(p) f.probe_at = p; return 7 end,
+			vertex_position = function() return vec(f.probe_at.x, f.probe_at.y, f.probe_at.z) end,
 		},
 		db = { actor = actor },
 		coop = {
@@ -60,7 +64,19 @@ local function fixture(role)
 			players = function() return f.others end,
 			stash_get = function(k) return f.stash[k] end,
 			stash_set = function(k, v) f.stash[k] = v; return true end,
+			levels = {
+				level_of_player = function(id) return f.levels[id] end,
+				level_name = function(id) return ({ [1] = "k00_marsh", [2] = "l01_escape", [3] = "l02_garbage" })[id] end,
+			},
 		},
+		coop_menu_char = { faction_starts = function(faction, story)
+			f.starts_asked = { faction, story }
+			return f.starts
+		end },
+		JumpToLevel = function(map)
+			f.trips[#f.trips + 1] = map
+			return not f.reject
+		end,
 		coop_mode = {
 			where = function(id) return f.where[id] or "away" end,
 			is_player_mirror = function() return f.mirror end,
@@ -168,6 +184,92 @@ lost.tick()
 check(lost.has("[feed] FAIL: feedfirst could not prepare a level exit from l01_escape"), "no exit is a failure")
 lost.tick(20000)
 check(lost.count("FAIL") == 1, "it says it once")
+
+-- b57b feed_server: a Server world starts each new character at any start of its faction (stalker: three maps). The first
+-- joined on k00_marsh, the second on l01_escape; the second took the first's absence for a departure and left first.
+-- Now a first apart goes once to the second's map (the stock debug trip) and waits there; the second stays.
+local apart = fixture("feedfirst")
+apart.map = "k00_marsh"
+apart.start()
+apart.others = { { id = 3, nick = "feedsecond", is_self = false } }
+apart.where[3] = "joining"
+apart.tick()
+check(#apart.trips == 0 and #apart.log == 0, "the first waits while the second is not placed")
+apart.where[3], apart.levels[3] = "away", 2
+apart.tick()
+check(#apart.trips == 1 and apart.trips[1] == "l01_escape" and apart.stash["stand.feed_gather"] == "l01_escape"
+	and apart.has("[feed] first joins the second on l01_escape (start k00_marsh)"), "a first apart goes to the second's map")
+apart.tick(30000)
+check(#apart.trips == 1 and not apart.has("preparing exit") and apart.stash["stand.feed_from"] == nil,
+	"one setup trip, no exit of his own while it is under way")
+-- After the trip (a fresh Lua state on the second's map, put where the stock debug trip puts him): he takes the exit
+-- nearest to the second's start, not to where he stands.
+local joined = fixture("feedfirst")
+joined.stash["stand.feed_gather"] = "l01_escape"
+joined.pos, joined.exit, joined.other_exit = vec(200, 0, 0), vec(50, 0, 0), vec(190, 0, 0)
+joined.starts[1].x = 10 -- rookie_village: 40 m from the first exit, 180 m from the second
+joined.start()
+joined.others = { { id = 3, nick = "feedsecond", is_self = false } }
+joined.where[3] = "here"
+joined.tick()
+check(#joined.trips == 0 and joined.has("[feed] feedfirst preparing exit from l01_escape")
+	and joined.stash["stand.feed_from"] == "l01_escape", "after the setup trip the first leaves the second's map")
+check(joined.starts_asked and joined.starts_asked[1] == "stalker" and joined.pos:distance_to(joined.exit) <= 24
+	and joined.pos:distance_to(joined.other_exit) > 100, "he takes the exit nearest to the second's start")
+-- Same map from the start: no trip and the exit nearest to where he stands, as before.
+local common = fixture("feedfirst")
+common.other_exit = vec(-40, 0, 0)
+common.start()
+common.others = { { id = 3, nick = "feedsecond", is_self = false } }
+common.where[3] = "here"
+common.tick()
+check(#common.trips == 0 and common.starts_asked == nil and common.pos:distance_to(common.other_exit) <= 24,
+	"a first on the second's map takes his own nearest exit")
+-- A setup trip after which the second is not on his map fails once.
+local stuck = fixture("feedfirst")
+stuck.stash["stand.feed_gather"] = "l01_escape"
+stuck.start()
+stuck.others = { { id = 3, nick = "feedsecond", is_self = false } }
+stuck.levels[3] = 3
+stuck.tick()
+check(#stuck.log == 0, "the second may still come into view after the setup trip")
+stuck.tick(61000)
+stuck.tick(5000)
+check(stuck.count("[feed] FAIL: the first did not join the second") == 1 and #stuck.trips == 0,
+	"no second on his map after the setup trip fails once")
+-- No start of the faction on the map of the setup trip: said once.
+local nostart = fixture("feedfirst")
+nostart.stash["stand.feed_gather"] = "l05_bar"
+nostart.map = "l05_bar"
+nostart.start()
+nostart.others = { { id = 3, nick = "feedsecond", is_self = false } }
+nostart.where[3] = "here"
+nostart.tick()
+nostart.tick(20000)
+check(nostart.count("[feed] FAIL: the first found no stalker start on l05_bar") == 1 and not nostart.has("preparing exit"),
+	"a map without the faction's start fails once")
+-- A refused trip request fails once.
+local refused = fixture("feedfirst")
+refused.map, refused.reject = "k00_marsh", true
+refused.start()
+refused.others = { { id = 3, nick = "feedsecond", is_self = false } }
+refused.where[3], refused.levels[3] = "away", 2
+refused.tick()
+refused.tick(5000)
+check(refused.count("[feed] FAIL: the first could not request l01_escape") == 1 and #refused.trips == 1, "a refused setup trip fails once")
+-- The second never travels to the first: he stays live on his start until the first left his map.
+local stays = fixture("feedsecond")
+stays.start()
+stays.others = { { id = 2, nick = "feedfirst", is_self = false } }
+stays.where[2], stays.levels[2] = "away", 1
+stays.tick()
+stays.where[2] = "here" -- the first's setup trip: the world puts him on this map
+stays.tick(30000)
+check(#stays.trips == 0 and #stays.log == 0, "the second waits while the first comes")
+stays.where[2], stays.levels[2] = "away", 3
+stays.tick()
+stays.tick(21000)
+check(#stays.trips == 0 and stays.has("[feed] feedsecond preparing exit from l01_escape"), "the second follows after the first left")
 
 print(string.format("%d passed, %d failed", passed, failed))
 if failed > 0 then os.exit(1) end

@@ -113,9 +113,21 @@ try {
     $firstMove = Wait-Line $firstLog '\[feed\] first arrived ([\w_]+) -> ([\w_]+)' $StepsTimeoutS
     $start = $firstMove.Groups[1].Value
     $there = $firstMove.Groups[2].Value
+    # A Server world starts each new character at any start of its faction: a first who joined on another map went once to
+    # the second's map before (the probe's setup trip) and left it from there. The second may have read where he came from.
+    $setupFrom = $null
+    $gather = Select-String -LiteralPath $firstLog -Pattern '\[feed\] first joins the second on ([\w_]+) \(start ([\w_]+)\)' | Select-Object -Last 1
+    if ($gather) {
+        $joined = $gather.Matches[0].Groups
+        if ($joined[1].Value -ne $start) { throw "the first joined the second on $($joined[1].Value), then left $start" }
+        $setupFrom = $joined[2].Value
+    }
     $went = Wait-Line $secondLog "\[srv\] feed: 'feedfirst' went to ([\w_]+) \(level \d+\)" $StepsTimeoutS
     if ($went.Groups[1].Value -ne $there) { throw "the second read 'went to $($went.Groups[1].Value)', the first is on $there" }
-    if (Select-String -LiteralPath $secondLog -Pattern "\[srv\] feed: 'feedfirst' came from" -Quiet) { throw 'the second read a came-from line of a map he is not on' }
+    foreach ($hit in @(Select-String -LiteralPath $secondLog -Pattern "\[srv\] feed: 'feedfirst' came from ([\w_]+)")) {
+        # Only the setup trip brought the first onto the second's map.
+        if (-not $setupFrom -or $hit.Matches[0].Groups[1].Value -ne $setupFrom) { throw 'the second read a came-from line of a map he is not on' }
+    }
 
     # 2. The second follows: the first, on that map, reads where he came from.
     $secondMove = Wait-Line $secondLog '\[feed\] second arrived ([\w_]+) -> ([\w_]+)' $StepsTimeoutS

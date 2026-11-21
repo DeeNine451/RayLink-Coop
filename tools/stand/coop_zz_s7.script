@@ -60,10 +60,12 @@ function world_status(seq, audit, selection)
 	console:execute("srv_levels_status")
 	local levels = coop.levels
 	if not map_ids then
+		-- Every level of the world, not only the trip maps: a Server joiner starts at any start of the world's faction
+		-- (coop_menu_char.host_start; stalker: l01_escape, k00_marsh, l05_bar) and his first trip needs that level's ID.
 		map_ids = {}
 		for id = 0, 255 do
 			local name = levels.level_name(id)
-			if MAPS[name] then map_ids[name] = id end
+			if type(name) == "string" and name:find("^[%w_]+$") then map_ids[name] = id end
 		end
 	end
 	for name, id in pairs(map_ids) do log("world map=%s levelid=%d", name, id) end

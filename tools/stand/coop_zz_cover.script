@@ -5,6 +5,9 @@
 
 local NICK = "cover_tester"
 local STEP_FILE = "zz_cover_step.txt"
+-- A client of a map server goes live before that server's online set (its restrictors) reaches it: the map server sends it
+-- after the client's WorldLoaded (join::server_player_in_world -> entities::host_send_online_to). Co-op has them in the save.
+local SHELTER_WAIT_MS = 45000
 local ZONES = {
 	l01_escape = { "esc_smart_terrain_2_12_surge_hide_a", 8 },
 	l05_bar = { "bar_visitors_surge_hide_a", 6 },
@@ -13,7 +16,7 @@ local ZONES = {
 local role, step_path, next_poll, finished = nil, nil, 0, false
 local observed, current_decision, surveyed, clock_started, kill_checked
 local client_stage, client_map, open_pos, shelter, shelter_pos, shelter_name
-local claiming, claimed, check_at
+local claiming, claimed, check_at, shelter_wait
 
 local function out(fmt, ...)
 	printf("%s", "[cover-stand] " .. string.format(fmt, ...))
@@ -204,6 +207,10 @@ local function mirror(step, actor, now)
 	if not client_stage then
 		if step ~= "ready" then return end
 		shelter, shelter_pos, shelter_name = find_shelter(sm, map)
+		if not shelter then
+			shelter_wait = shelter_wait or now + SHELTER_WAIT_MS
+			if now < shelter_wait then return end
+		end
 		assert(shelter, "no walkable static restrictor in [list] on " .. map)
 		open_pos = assert(find_open(sm, actor), "no usable open ground on " .. map)
 		actor:set_actor_position(open_pos)

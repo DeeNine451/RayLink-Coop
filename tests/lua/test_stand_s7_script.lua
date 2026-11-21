@@ -43,7 +43,7 @@ local function fixture(role)
 			levels = { my_level = function()
 				if not f.unmapped then return f.map == "l01_escape" and 1 or 2 end
 			end,
-				level_name = function(id) return ({ [1] = "l01_escape", [2] = "l02_garbage" })[id] end,
+				level_name = function(id) return ({ [1] = "l01_escape", [2] = "l02_garbage", [3] = "k00_marsh" })[id] end,
 				map_servers = function() return {} end,
 				holder_of = function(id) return f.owners and f.owners[id] end,
 			},
@@ -234,6 +234,10 @@ local log_before = #world.log
 check(world.api.world_status(3, true) and world.has("status end seq=3")
 	and world.commands[before + 2] == "srv_levels_audit"
 	and world.commands[before + 3] == "srv_levels_status", "audit dispatch precedes explicit native status")
+-- b57b creator10_server: a Server joiner starts at any start of the world's faction (stalker: l01_escape, k00_marsh,
+-- l05_bar); the observer's first trip to l01_escape needs the level ID of the map he joined on.
+check(world.has("world map=k00_marsh levelid=3") and world.has("world map=l01_escape levelid=1")
+	and world.has("world map=l02_garbage levelid=2"), "the world names every level, not only the trip maps")
 check(world.api.world_status(4, false) and world.has("status end seq=4"), "tags a later audit-counter sample")
 world.audit_counter = true
 check(world.api.world_status(5, true), "addresses a build whose audit also prints a counter row")

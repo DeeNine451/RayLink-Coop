@@ -1,8 +1,11 @@
 -- Dev 57 SS probe. One player changes map; both then observe the real sky and the emission mirror.
 local STAY, MOVE = "weatherstay", "weathermove"
 local FROM = "stand.weather_from"
+-- A client of a map server goes live before that server's online set (its level changers) reaches it: the map server sends
+-- it after the client's WorldLoaded (join::server_player_in_world -> entities::host_send_online_to). Co-op has them in the save.
+local EXIT_WAIT_MS = 45000
 local role, travel, ready, forecast_seen, active
-local next_poll = 0
+local next_poll, exit_wait, failed = 0, nil, false
 
 local function out(fmt, ...)
 	printf("%s", "[weather-stand] " .. string.format(fmt, ...))
@@ -54,7 +57,12 @@ local function move(actor, from, now)
 	if not travel then
 		local exit = nearest_exit(actor)
 		local beside = exit and beside_exit(exit)
+		if not beside then
+			exit_wait = exit_wait or now + EXIT_WAIT_MS
+			if now < exit_wait then return end
+		end
 		if not beside or not coop.stash_set(FROM, from) then
+			failed = true
 			out("FAIL: cannot prepare a real exit from %s", from)
 			return
 		end
@@ -75,7 +83,7 @@ end
 
 local function update()
 	local actor = db.actor
-	if not (actor and coop.is_live() and coop_mode.is_player_mirror()) then return end
+	if failed or not (actor and coop.is_live() and coop_mode.is_player_mirror()) then return end
 	local now = time_global()
 	if now < next_poll then return end
 	next_poll = now + 250
