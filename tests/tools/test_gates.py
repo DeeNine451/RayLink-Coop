@@ -523,6 +523,74 @@ foreach ($case in 'honest', 'allowance', 'no_steps', 'no_search', 'late_honest_w
     assert all(" rejected: " in line for line in verdicts[1:]), verdicts
 
 
+PROGRESS_HEALTH_REPLAY = r"""
+param($Path, $Root)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Root 'tools\stand_common.ps1')
+$tokens = $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw ($errors -join "`n") }
+$keeper = Join-Path $PSScriptRoot 'keeper.log'
+$clientLog = Join-Path $PSScriptRoot 'client.log'
+$worldLog = $hostLog = $keeper
+$logs = @($keeper, $clientLog)
+$world = $client = $hostGame = $null
+$assignments = '^\$(mark|trust|badLine|keeperLog|expectedTrust|expectFrom) = '
+. ([scriptblock]::Create(($ast.Extent.Text -split '\r?\n' | Where-Object { $_ -match $assignments }) -join "`n"))
+foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    if ($f.Name -in 'Test-ProgressExpected', 'Assert-ProgressHealthy', 'Write-ProgressExcerpt') { . ([scriptblock]::Create($f.Extent.Text)) }
+}
+$ready = '[progress-stand] keeper ready peer=4 character=42'
+$honest = '[progress-stand] honest accepted peer=4 character=42 xp=72.000000 checked=262 failed=0 refused=0'
+$deliberate = '[coop-trust] ! progress_skills: progress check failed: scavenging: budget (would be refused: let through, 1 of 116 failed)'
+$cases = [ordered]@{
+    deliberate = @{ Keeper = @($ready, $honest, $deliberate); From = 2 }
+    timestamped = @{ Keeper = @($ready, $honest, "[08:13:16.700] $deliberate"); From = 2 }
+    before_skills = @{ Keeper = @($ready, $honest, $deliberate); From = 0 }
+    during_honest = @{ Keeper = @($ready, $deliberate, $honest); From = 3 }
+    second_failure = @{ Keeper = @($ready, $honest, $deliberate.Replace('1 of 116', '2 of 117')); From = 2 }
+    other_skill = @{ Keeper = @($ready, $honest, $deliberate.Replace('scavenging', 'survival')); From = 2 }
+    refused = @{ Keeper = @($ready, $honest, $deliberate.Replace('would be refused: let through', 'refused')); From = 2 }
+    client_log = @{ Keeper = @($ready, $honest); Client = @('a', 'b', 'c', $deliberate); From = 2 }
+}
+foreach ($case in $cases.Keys) {
+    Set-Content -LiteralPath $keeper -Value $cases[$case].Keeper -Encoding Ascii
+    $clientLines = if ($cases[$case].Client) { $cases[$case].Client } else { @('[progress-stand] client ready map=l01_escape') }
+    Set-Content -LiteralPath $clientLog -Value $clientLines -Encoding Ascii
+    $expectFrom = $cases[$case].From
+    try { Assert-ProgressHealthy; Write-Output "$case ok" } catch { Write-Output "$case flagged" }
+    if ($case -in 'deliberate', 'second_failure') {
+        $excerpt = @(Write-ProgressExcerpt $keeper 6>&1 | ForEach-Object { "$_" })
+        $flagged = @($excerpt | Where-Object { Test-StandErrorLine $_ }).Count
+        $kept = @($excerpt | Where-Object { $_ -match '^\[coop-trust\] progress_skills: ' }).Count
+        Write-Output "excerpt $case flagged=$flagged kept=$kept"
+    }
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell is not here")
+@pytest.mark.parametrize("name", ["progress_group", "progress_server"])
+def test_progress_stand_expects_only_its_own_budget_failure(name, work):
+    # b57g Server stand (2026-11-21): the probe's deliberate +5000 scavenging report (step 'skills') makes the keeper's
+    # log-only check write "[coop-trust] ! progress_skills: ... scavenging: budget", which the stand's error pattern flags.
+    # That one line is expected: the keeper's first progress_skills failure, after the honest report was accepted. Any
+    # other trust failure, a second one, a refusal or the line in another log still fails the scenario.
+    script = ROOT / "tools" / "stand" / f"{name}.ps1"
+    replay = work / "health.ps1"
+    replay.write_text(PROGRESS_HEALTH_REPLAY, encoding="utf-8")
+    result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(replay),
+                             str(script), str(ROOT)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0 and not result.stderr, result.stdout + result.stderr
+    verdicts = dict(line.split(" ", 1) for line in result.stdout.splitlines() if re.match(r"^\w+ (ok|flagged)$", line))
+    assert verdicts == {"deliberate": "ok", "timestamped": "ok", "before_skills": "flagged", "during_honest": "flagged",
+                        "second_failure": "flagged", "other_skill": "flagged", "refused": "flagged",
+                        "client_log": "flagged"}, result.stdout
+    # the runner judges the excerpt: the expected line is kept without its "!", a second failure stays an error line
+    assert "excerpt deliberate flagged=0 kept=1" in result.stdout, result.stdout
+    assert "excerpt second_failure flagged=1 kept=0" in result.stdout, result.stdout
+
+
 # A scenario of tools/stand that no runner runs is one the gate never demands (the review of round 7, R7:
 # phantoms_server.ps1 of S3 and companions_group.ps1 of F5-CMP-1). Only these are run by no runner, with the reason.
 NOT_A_GATED_SCENARIO = {

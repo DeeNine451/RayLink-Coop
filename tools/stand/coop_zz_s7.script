@@ -98,9 +98,14 @@ function arm_save(seq, source, target, peer, character, selection)
 	return true
 end
 
-function disarm_save()
-	if not is_world() then return false end
+-- The stand waits for this line before its next run_string. The engine runs a run_string line as the global
+-- console_command_run_string_main_thread_function, looked up when its thread first runs (CScriptThread), and
+-- CScriptProcess makes every queued thread before it runs one: of two lines read in one frame, both run the first.
+-- b57g save_handover_server: an unacknowledged disarm swallowed the next world_status.
+function disarm_save(seq)
+	if not is_world() or not whole(seq, 1, 2147483647) then return false end
 	save_armed = false
+	out("save disarmed seq=%d", seq)
 	return true
 end
 

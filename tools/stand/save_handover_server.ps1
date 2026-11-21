@@ -284,7 +284,11 @@ Invoke-S7Scenario 'save_handover_server' {
             }
             Start-Sleep -Milliseconds 500
         } while ([DateTime]::UtcNow -lt $until -and [DateTime]::UtcNow -lt $settleBy)
-        Send-S7World $ctx 'run_string coop_zz_s7.disarm_save()'
+        # Two run_string lines read in one world frame both run the first (coop_zz_s7.disarm_save): the next one,
+        # Complete-S7Trip's status, goes only after the world answered this one.
+        $disarmAfter = Get-S7LineCount $ctx.Logs.world
+        Send-S7World $ctx "run_string coop_zz_s7.disarm_save($($trip.Sequence))"
+        $null = Wait-S7Line $ctx $ctx.Logs.world "\[s7\] save disarmed seq=$($trip.Sequence)\s*$" 45 $disarmAfter
         $mover = Complete-S7Trip $ctx $mover $trip
     }
     if (-not $save) { throw 'no release-only committed save contained a source fixture release on four map handovers' }

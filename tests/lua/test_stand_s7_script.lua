@@ -226,7 +226,9 @@ check(world.has("save begin seq=2 from=1 to=2 peer=2") and world.has("save end s
 	and world.has("object id=912 section=fixture_a levelid=1 owner=-1") and world.commands[armed_at + 2] == "srv_levels_status",
 	"reads fixture ownership within the pre-save callback")
 check(next(data) == "existing" and data.existing == 12 and next(data, "existing") == nil, "does not add persistent data")
-check(world.api.disarm_save(), "disarms save observation")
+check(not world.api.disarm_save() and not world.api.disarm_save("2"), "a disarm without its sequence is inert")
+check(world.api.disarm_save(2) and world.has("save disarmed seq=2"),
+	"disarms save observation and answers before the stand's next run_string")
 local before = #world.commands
 world.callbacks.save_state(data)
 check(#world.commands == before, "shutdown saves cannot reuse handover evidence")
@@ -242,6 +244,29 @@ check(world.api.world_status(4, false) and world.has("status end seq=4"), "tags 
 world.audit_counter = true
 check(world.api.world_status(5, true), "addresses a build whose audit also prints a counter row")
 check(not world.api.world_status("invalid", false) and not observer.api.world_status(5, true), "invalid and player audit requests are inert")
+
+-- b57g save_handover_server: the world never ran world_status(6), sent right after an unanswered disarm_save. The engine
+-- runs a run_string line as one global function looked up when its thread first runs, and makes every queued thread
+-- before it runs one, so two lines read in one frame both run the first. Each run_string of an S7 scenario is followed
+-- by a wait for the world's answer to it.
+for _, file in ipairs({ "ms_crash_server.ps1", "save_handover_server.ps1" }) do
+	local handle = io.open("tools/stand/" .. file, "r") or io.open("temp/stand/" .. file, "r")
+	local lines = {}
+	if handle then
+		for line in handle:lines() do lines[#lines + 1] = line end
+		handle:close()
+	end
+	local sends, answered = 0, 0
+	for i, line in ipairs(lines) do
+		if line:find("Send%-S7World") and line:find("run_string", 1, true) then
+			sends = sends + 1
+			local j = i + 1
+			while lines[j] and (lines[j]:find("^%s*$") or lines[j]:find("^%s*#")) do j = j + 1 end
+			if lines[j] and lines[j]:find("Wait%-S7Line %$%w+ %$%w+%.Logs%.world ") then answered = answered + 1 end
+		end
+	end
+	check(sends > 0 and answered == sends, file .. ": every run_string waits for the world's answer before the next line")
+end
 
 -- Run parser and guard regressions offline against the real PowerShell function bodies.
 -- Generate the native-shaped status log from the Lua entry points above.

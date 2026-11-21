@@ -32,10 +32,19 @@ $installed = [Collections.Generic.List[string]]::new()
 $backedUpOptions = $started = $false
 $mark = '\[progress-stand\] '
 $trust = '\[coop-trust\] (?:! )?progress_\w+\b.*(?:would refuse|would be refused: let through|\brefused\b)'
+# Step 'skills': the probe adds 5000 scavenging XP, the keeper's log-only check (coop_progress_check.script audit) logs it
+# with "!". Expected only in the keeper's log, after the honest report was accepted, as its first progress_skills failure.
+$keeperLog = $hostLog
+$expectedTrust = '^\s*(?:\[[0-9:.]+\] +)?\[coop-trust\] ! progress_skills: progress check failed: scavenging: budget \(would be refused: let through, 1 of \d+ failed\)\s*$'
+$expectFrom = 0
 $badLine = "$($mark)FAIL\b"
 
 function Set-ProgressStep([string]$Step) {
     Write-StandText -Path $stepFile -Text ($Step + [Environment]::NewLine) -Encoding ([Text.Encoding]::ASCII)
+}
+
+function Test-ProgressExpected([string]$File, [Microsoft.PowerShell.Commands.MatchInfo]$Hit) {
+    return ($expectFrom -gt 0 -and $File -eq $keeperLog -and $Hit.LineNumber -gt $expectFrom -and $Hit.Line -match $expectedTrust)
 }
 
 function Assert-ProgressHealthy {
@@ -44,9 +53,18 @@ function Assert-ProgressHealthy {
     }
     foreach ($log in $logs) {
         if (Test-Path -LiteralPath $log -PathType Leaf) {
-            $bad = Select-StandLogLine $log $badLine -Live | Select-Object -First 1
+            $bad = Select-StandLogLine $log $badLine -Live | Where-Object { -not (Test-ProgressExpected $log $_) } | Select-Object -First 1
             if ($bad) { throw (Hide-Hex $bad.Line) }
         }
+    }
+}
+
+# The excerpt the runner judges: the expected budget failure without its "!", every other line as logged.
+function Write-ProgressExcerpt([string]$File) {
+    Select-StandLogLine $File "$mark|$trust|$badLine" | ForEach-Object {
+        $line = $_.Line
+        if (Test-ProgressExpected $File $_) { $line = $line -replace '\[coop-trust\] ! ', '[coop-trust] ' }
+        Write-Host (Hide-Hex $line)
     }
 }
 
@@ -177,6 +195,7 @@ try {
     $honest = Wait-ProgressLine $hostLog "$($mark)honest accepted $guest xp=$xpPattern checked=[1-9]\d* failed=0 refused=0\s*$" 30 $facts.LineNumber
     $sent = Wait-ProgressLine $clientLog "$($mark)client honest report xp=$xpPattern\s*$" 5 $search.LineNumber
 
+    $expectFrom = $honest.LineNumber
     Set-ProgressStep 'skills'
     $skills = Wait-ProgressLine $hostLog "$($mark)skills budget failed $guest delta=5000\s*$" 30 $honest.LineNumber
     $inflated = Wait-ProgressLine $clientLog "$($mark)client added 5000 scavenging XP and reported\s*$" 5 $sent.LineNumber
@@ -202,7 +221,7 @@ finally {
             foreach ($pair in @(@($hostLog, 'host'), @($clientLog, 'client'))) {
                 if (Test-Path -LiteralPath $pair[0] -PathType Leaf) {
                     Copy-StandFile -From $pair[0] -To (Join-Path $script:StandDir "$($Tag)_progress_group_$($pair[1]).log")
-                    Select-StandLogLine $pair[0] "$mark|$trust|$badLine" | ForEach-Object { Write-Host (Hide-Hex $_.Line) }
+                    Write-ProgressExcerpt $pair[0]
                 }
             }
         }
