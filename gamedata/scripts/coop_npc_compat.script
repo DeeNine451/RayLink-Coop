@@ -332,6 +332,18 @@ function _rewrites() return REWRITES end
 -- that would declare its luabind class anew and drop every other mod's patch of it. Like the rewrites above it applies
 -- in and outside a session (on_game_start of a RayLink exe); outside one the fixed line answers what the author meant.
 local METHOD_REWRITES = {
+	-- R37: an interrupted scene enters idle through the same transition as a completed scene.
+	{ module = "sr_camp", class = "CCampManager", method = "unregister_npc", archive = true,
+		header = "function CCampManager:unregister_npc(npc_id)",
+		{ '\t\tself.active_state_time = 0\n\t\tself.director = nil\n\t\t\n\t\tself.active_state = "idle"',
+[[		self.director = nil
+		if coop_npc_players.active() then
+			self:set_next_state("idle")
+		else
+			self.active_state_time = 0
+			self.active_state = "idle"
+		end]] },
+	},
 	-- G8-3 s39:7: keep the chosen path, random draw and successful-point cooldown.
 	{ module = "sr_crow_spawner", class = "crowkiller", method = "check_for_spawn_new_crow", archive = true,
 		header = "function crowkiller:check_for_spawn_new_crow()",
