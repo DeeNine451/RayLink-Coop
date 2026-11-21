@@ -469,7 +469,11 @@ local function install_riders()
 	for _, s in ipairs(specs) do
 		em.declare_item_key(s.key, { apply = function(id, value)
 			if not C().active() then return end
-			if apply(s, id, value) then
+			-- nil: the economy has no rider of this weapon. clone_activate gives it for a weapon spawned or cloned with none
+			-- (every mirrored weapon spawn carries a clone initial), carry_release for a kept clear. A peer's malformed
+			-- rider never gets here as nil: dispatch_riders checks the wire before the economy. So no trust check (stand
+			-- b57i: "invalid weapon rider" once per weapon of a trader's restock); the SE copy decides, as before.
+			if value ~= nil and apply(s, id, value) then
 				-- A newer admitted item rider also supersedes an already queued SE value.
 				if coop_mode.decides_world() and not em.clone_pending(id) then em.apply_se(id, s.key, value) end
 				return

@@ -432,6 +432,35 @@ for _, name in ipairs(modes.names()) do
 		fire(a, "game_object_on_net_spawn", a.OBJ[800])
 		check(a.arti_jamming.jammed_guns[800] == nil and selection(a, 800) == nil, "unregister clears riders before same-name ID reuse")
 
+		-- Stand b57i base_group (2026-11-21): a weapon its authority makes with no rider (a trader's restock) reaches a player's
+		-- machine as an EntitySpawn whose clone initial (coop_requests.cpp write_clone_initial: clone_export with a stamp) has
+		-- no riders. client_on_spawn (coop_entities.cpp) stages it with trust 2, then clone_activate gives each rider table's
+		-- adapter the weapon's value: nil, "no rider" - not an invalid weapon rider ("item 32041: invalid weapon rider").
+		h, a, b, decider = worlds(name ~= "hostplay")
+		a.z_3dss_gamma_camo_system.select_camo(a.OBJ[800], "test.ltx", "wpn_test_green")
+		a.arti_jamming.set_jam_status(800, 3)
+		settle()
+		weapon(decider, 920, 600)
+		if h ~= decider then add_entity(h, 920, "wpn_test", 600) end
+		local initial = decider.coop_economy_mdata.clone_export(920, "spawn/920")
+		check(type(initial) == "string", "a weapon with no rider has a clone initial")
+		for _, w in ipairs({ a, b }) do
+			check(type(w.MDATA[CAMO]) == "table" and type(w.MDATA[JAM]) == "table", "rider tables exist before the spawn")
+			local em = w.coop_economy_mdata
+			local failed = (w.coop_trust.status().item_state_value or {}).failed or 0
+			check(em.clone_stage(65535, 920, "wpn_test920", initial, 2, "spawn/920"), "a spawned weapon's initial stages")
+			weapon(w, 920, 600)
+			check(em.clone_activate(920), "a spawned weapon with no rider activates")
+			em.clone_finish(920, true)
+			fire(w, "game_object_on_net_spawn", w.OBJ[920]) settle()
+			local now = (w.coop_trust.status().item_state_value or {}).failed or 0
+			check(now == failed, "a spawned weapon with no rider is no invalid weapon rider (peer " .. tostring(w.PEER) .. ", "
+				.. (now - failed) .. " failed)")
+			check(selection(w, 920) == nil and w.arti_jamming.jammed_guns[920] == nil and w.OBJ[920].texture == "base",
+				"a spawned weapon with no rider gets no camo and no jam")
+		end
+		check(selection(a, 800) and a.arti_jamming.jammed_guns[800] == 3, "the riders of the player's own weapon stay")
+
 		-- m01:5: only the map authority rolls; data/object order does not change the result.
 		h, a, b, decider = worlds(name ~= "hostplay")
 		local gun = weapon(decider, 810, 600)
