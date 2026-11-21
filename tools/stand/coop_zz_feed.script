@@ -10,8 +10,17 @@ local FOLLOW_MS = 20000 -- the second goes this long after the first left the ma
 local GATHER_KEY = "stand.feed_gather" -- the map of the first's setup trip, kept over his level load
 local GATHER_MS = 60000 -- after the setup trip the second must be on the first's map within this long
 local FACTION = "stalker" -- feed_server.ps1's stage and -coop_autochoose
+-- feed_server.ps1 writes "go" here once the second's log says his join is complete (he is live and his world is up: his feed
+-- watch compares only then, srv/coop_srv_join.cpp feed_frame). b57f-b57i: "here" is the second's character on the
+-- first's map, which the world places while the second's machine still loads; the first left then, the second's feed first saw
+-- him on the other map (a first sight makes no line, xrCoop/srv/coop_srv_feed_rules.h Watch::step) and "went to" never came.
+local STEP_FILE = "zz_feed_step.txt"
+-- After his arrival a player only waits while feed_server.ps1 reads the lines: a flushed pulse this often keeps his log current.
+-- b57i: one of the two players there (the scenario named only the pid) ended in a heap corruption (0xC0000374) minutes
+-- later; both logs lost their unflushed last 4 KB (the CRT buffer): the first's last minute of play is in no log.
+local PULSE_MS = 5000
 local role, next_poll, finished = nil, 0, false
-local travel, other_left_at, gathering, gathered_at, origin
+local travel, other_left_at, gathering, gathered_at, origin, step_path, next_pulse
 
 local function out(fmt, ...)
 	printf("%s", "[feed] " .. string.format(fmt, ...))
@@ -109,12 +118,23 @@ local function gather(now, here)
 	return true
 end
 
--- May this player leave now? The first: when the second stands on his map. The second: FOLLOW_MS after the first left it.
+-- The scenario's word (STEP_FILE) that the second is live.
+local function released()
+	step_path = step_path or getFS():update_path("$fs_root$", STEP_FILE)
+	local file = io.open(step_path, "r")
+	if not file then return false end
+	local step = file:read("*l")
+	file:close()
+	return step == "go"
+end
+
+-- May this player leave now? The first: when the second stands on his map and is live there (the scenario's word). The second:
+-- FOLLOW_MS after the first left it.
 local function may_go(now)
 	local other = player(role == FIRST and SECOND or FIRST)
 	if not other then return false end
 	local where = coop_mode.where(other.id)
-	if role == FIRST then return where == "here" end
+	if role == FIRST then return where == "here" and released() end
 	if where ~= "away" then
 		other_left_at = nil
 		return false
@@ -158,10 +178,21 @@ local function move(now, actor)
 	end
 end
 
+local function pulse(now, actor)
+	if next_pulse and now < next_pulse then return end
+	next_pulse = now + PULSE_MS
+	local health = type(actor.health) == "number" and string.format("%.3f", actor.health) or "?"
+	out("pulse: %s on %s, health %s", role, level.name(), health)
+end
+
 local function update()
 	local actor = db.actor
-	if finished or not (actor and coop.is_live() and coop_mode.is_player_mirror()) then return end
+	if not (actor and coop.is_live() and coop_mode.is_player_mirror()) then return end
 	local now = time_global()
+	if finished then
+		pulse(now, actor)
+		return
+	end
 	if now < next_poll then return end
 	next_poll = now + 250
 	move(now, actor)

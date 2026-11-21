@@ -27,9 +27,10 @@ if (Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue) { throw "
 $firstFs = Join-Path $Stand 'fsgame_t.ltx'
 $secondFs = Join-Path $Stand 'fsgame_feed.ltx'
 $probe = Join-Path $Stand 'gamedata\scripts\coop_zz_feed.script'
+$stepFile = Join-Path $Stand 'zz_feed_step.txt' # the probe's first leaves only once it says "go"
 $stageName = 'coop_feed_stage.ltx'
 $stage = Join-Path $Stand "appdata_server\$stageName"
-foreach ($owned in @($probe, $stage, "$stage.used", $secondFs)) {
+foreach ($owned in @($probe, $stage, "$stage.used", $secondFs, $stepFile)) {
     if (Test-Path -LiteralPath $owned) { throw "scenario file already exists: $owned" }
 }
 $exe = Join-Path $Stand 'bin\AnomalyCoopDX11AVX.exe'
@@ -40,12 +41,19 @@ $serverLog = Join-Path $Stand "appdata_server\$logLeaf"
 $firstLog = Join-Path $Stand "appdata_t\$logLeaf"
 $secondLog = Join-Path $Stand "appdata_feed\$logLeaf"
 $logs = @{ world = $serverLog; first = $firstLog; second = $secondLog }
+# The world server starts the map servers (appdata_ms<slot>): their logs are kept too (b57i: a later scenario overwrote them).
+$mapLogs = @(1..7 | ForEach-Object { Join-Path $Stand "appdata_ms$_\$logLeaf" })
 
 function Wait-Line([string]$File, [string]$Pattern, [int]$Seconds) {
     $until = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $until) {
-        foreach ($proc in @($server, $first, $second)) {
-            if ($proc -and $proc.HasExited) { throw "stand process $($proc.Id) exited ($($proc.ExitCode))" }
+        foreach ($entry in @(@{ p = $server; name = 'the world server' }, @{ p = $first; name = 'the first (feedfirst)' },
+                @{ p = $second; name = 'the second (feedsecond)' })) {
+            $proc = $entry.p
+            # b57i: "stand process 17240 exited (-1073740940)" named neither the process nor 0xC0000374
+            if ($proc -and $proc.HasExited) {
+                throw ("{0}: stand process {1} exited ({2}, 0x{2:X8})" -f $entry.name, $proc.Id, $proc.ExitCode)
+            }
         }
         foreach ($path in $logs.Values) {
             if (Test-Path -LiteralPath $path) {
@@ -87,7 +95,7 @@ try {
         Copy-StandFile -From $_.FullName -To (Join-Path $secondBin $_.Name)
     }
 
-    foreach ($path in $logs.Values) { Remove-StandFile -Path $path }
+    foreach ($path in @($logs.Values) + $mapLogs) { Remove-StandFile -Path $path }
     $runStarted = $true
     $created.Add($probe)
     Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_feed.script') -To $probe
@@ -110,6 +118,13 @@ try {
     $null = Wait-Line $firstLog '\[coop\] phase loading-world -> live' $JoinTimeoutS
     $second = Start-Player $secondExe 'fsgame_feed.ltx' 'feedsecond'
     $null = Wait-Line $secondLog '\[coop\] phase loading-world -> live' $JoinTimeoutS
+    # b57f-b57i: the world places the second's character on the start map while his machine still loads, and a first who saw
+    # him "here" left then: the second's feed first saw him on the other map (a first sight makes no line) and no "went to"
+    # came. The probe's first goes only on this word, written once the second is live and his world is up: his feed watch
+    # compares only then (srv/coop_srv_join.cpp feed_frame), and "join complete" comes right after "world is up again".
+    $null = Wait-Line $secondLog '\[coop\] join complete, live sync on' $JoinTimeoutS
+    $created.Add($stepFile)
+    Write-StandText -Path $stepFile -Text "go`n" -Encoding ([System.Text.Encoding]::ASCII)
 
     # 1. The first leaves: the second, still on the start map, reads where he went.
     $firstMove = Wait-Line $firstLog '\[feed\] first arrived ([\w_]+) -> ([\w_]+)' $StepsTimeoutS
@@ -170,6 +185,11 @@ finally {
             foreach ($name in $logs.Keys) {
                 if (Test-Path -LiteralPath $logs[$name]) {
                     Copy-StandFile -From $logs[$name] -To (Join-Path $script:StandDir "${Tag}_feed_$name.log")
+                }
+            }
+            for ($i = 0; $i -lt $mapLogs.Count; $i++) {
+                if (Test-Path -LiteralPath $mapLogs[$i]) {
+                    Copy-StandFile -From $mapLogs[$i] -To (Join-Path $script:StandDir "${Tag}_feed_ms$($i + 1).log")
                 }
             }
         }

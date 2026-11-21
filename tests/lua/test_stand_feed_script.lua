@@ -33,11 +33,13 @@ local OTHER_EXIT_ID = 4243 -- a second exit, used only where a test places one
 local function fixture(role)
 	local f = {
 		map = "l01_escape", now = 0, live = true, mirror = true, log = {}, commands = {}, callbacks = {}, stash = {},
+		step = "go", -- feed_server.ps1's zz_feed_step.txt (nil: not written yet)
 		others = {}, where = {}, pos = vec(0, 0, 0), exit = vec(50, 0, 0), moved_to = {}, levels = {}, trips = {},
 		starts = { { id = "rookie_village", image = "l01_escape", x = 0, y = 0, z = 0 },
 			{ id = "hidden_base", image = "k00_marsh", x = 0, y = 0, z = 0 } },
 	}
 	local actor = {
+		health = 1,
 		position = function() return f.pos end,
 		set_actor_position = function(_, p) f.pos = vec(p.x, p.y, p.z); f.moved_to[#f.moved_to + 1] = p end,
 	}
@@ -82,6 +84,13 @@ local function fixture(role)
 			is_player_mirror = function() return f.mirror end,
 		},
 		printf = function(fmt, ...) f.log[#f.log + 1] = string.format(fmt, ...) end,
+		getFS = function()
+			return { update_path = function(_, root, name) f.step_root = root; return "stand/" .. name end }
+		end,
+		io = { open = function(p, mode)
+			if p ~= "stand/zz_feed_step.txt" or mode ~= "r" or f.step == nil then return nil end
+			return { read = function() return f.step end, close = function() end }
+		end },
 		get_console = function() return { execute = function(_, cmd) f.commands[#f.commands + 1] = cmd end } end,
 	}, { __index = _G })
 	setfenv(assert(loadfile(path)), e)()
@@ -144,9 +153,9 @@ check(first.commands[#first.commands] == "coop_transition_confirm", "first confi
 first.map = "l02_garbage"
 first.tick()
 check(first.has("[feed] first arrived l01_escape -> l02_garbage"), "first arrives")
-local lines = #first.log
+local lines = #first.log - first.count("[feed] pulse:")
 first.tick(30000)
-check(#first.log == lines, "first is done after his arrival")
+check(#first.log - first.count("[feed] pulse:") == lines, "first is done after his arrival")
 
 -- The second: he goes only FOLLOW_MS after the first left his map, through the nearest exit.
 local second = fixture("feedsecond")
@@ -270,6 +279,54 @@ stays.where[2], stays.levels[2] = "away", 3
 stays.tick()
 stays.tick(21000)
 check(#stays.trips == 0 and stays.has("[feed] feedsecond preparing exit from l01_escape"), "the second follows after the first left")
+
+-- b57f-b57i feed_server: the world placed the second's character on the start map ("here") while his machine still loaded; the
+-- first left then, the second's feed first saw him on the other map and no "went to" came (the scenario timed out, or in b57i
+-- stood 6 minutes in a bandit camp). The first goes only on the scenario's word, written once the second's log says live.
+local early = fixture("feedfirst")
+early.step = nil
+early.start()
+early.others = { { id = 3, nick = "feedsecond", is_self = false } }
+early.where[3] = "here"
+early.tick()
+early.tick(20000)
+check(not early.has("preparing exit") and early.stash["stand.feed_from"] == nil and #early.moved_to == 0,
+	"the first waits for the scenario's go while the second is only placed on his map")
+check(early.step_root == "$fs_root$", "the go is read at the stand's root")
+early.step = "wait"
+early.tick()
+check(not early.has("preparing exit"), "only the word go releases him")
+early.step = "go"
+early.tick()
+check(early.has("[feed] feedfirst preparing exit from l01_escape"), "the first goes on the scenario's go")
+-- The second needs no word: he follows the first's departure.
+local follower = fixture("feedsecond")
+follower.step = nil
+follower.start()
+follower.others = { { id = 2, nick = "feedfirst", is_self = false } }
+follower.where[2] = "away"
+follower.tick()
+follower.tick(21000)
+check(follower.has("[feed] feedsecond preparing exit from l01_escape"), "the second goes without the scenario's word")
+
+-- b57i: after his arrival a player only waits (one of the two ended there in a heap corruption; both logs lost their last
+-- unflushed 4 KB). A flushed pulse every 5 s keeps the log current; nothing else moves.
+local idle = fixture("feedfirst")
+idle.stash["stand.feed_from"] = "l05_bar"
+idle.start()
+idle.tick()
+check(idle.has("[feed] first arrived l05_bar -> l01_escape") and idle.count("[feed] pulse:") == 0, "the arrival, no pulse yet")
+idle.tick(250)
+check(idle.count("[feed] pulse:") == 1 and idle.has("[feed] pulse: feedfirst on l01_escape, health 1.000")
+	and idle.commands[#idle.commands] == "flush", "a flushed pulse right after the arrival")
+idle.tick(4000)
+check(idle.count("[feed] pulse:") == 1, "no second pulse within 5 s")
+idle.tick(1000)
+check(idle.count("[feed] pulse:") == 2 and idle.commands[#idle.commands] == "flush", "the next pulse 5 s later, flushed")
+idle.live = false
+idle.tick(10000)
+check(idle.count("[feed] pulse:") == 2, "no pulse while not live")
+check(#idle.moved_to == 0 and not idle.has("preparing exit"), "a pulse moves nobody")
 
 print(string.format("%d passed, %d failed", passed, failed))
 if failed > 0 then os.exit(1) end
