@@ -545,9 +545,20 @@ def check_published_since(n: Names, verified: dict, run: Runner, root: pathlib.P
                           f"{verified['project'][:8]}: a build goes to Dev first")
 
 
+def release_of_tag(run: Runner, root: pathlib.Path, repo: str, tag: str) -> dict:
+    """The release of `tag` in `repo`, a draft included. GitHub serves releases/tags/<tag> for published releases only:
+    a draft is 404 there (Dev 57, 2026-11-21: the draft step made both drafts, then its own check refused). The list
+    holds drafts for a writer of the repository."""
+    items = json.loads(must(run, ["gh", "api", f"repos/{ORG}/{repo}/releases?per_page=100"], root))
+    found = [r for r in items if isinstance(r, dict) and r.get("tag_name") == tag] if isinstance(items, list) else []
+    if len(found) != 1:
+        raise Refused(f"{repo}: {len(found)} release(s) of the tag {tag}")
+    return found[0]
+
+
 def check_drafts(n: Names, verified: dict, run: Runner, root: pathlib.Path) -> None:
     for repo, key in ((ENGINE_REPO, "exe_sha256"), (COOP_REPO, "zip_sha256")):
-        data = gh_json(run, root, f"repos/{ORG}/{repo}/releases/tags/{n.tag}")
+        data = release_of_tag(run, root, repo, n.tag)
         assets = data.get("assets", [])
         if not data.get("draft") or bool(data.get("prerelease")) != n.prerelease or len(assets) != 1:
             raise Refused(f"{repo}: the draft is not as made (draft {data.get('draft')}, prerelease "

@@ -105,7 +105,16 @@ class Fake:
             repo = path.split("/")[2]
             if path.endswith("/releases/latest"):
                 return done(args, json.dumps(self.latest.get(repo, {"id": 1, "tag_name": "b56"})))
-            return done(args, json.dumps(self.releases.get(repo, {})))
+            rel = self.releases.get(repo)
+            if "/releases/tags/" in path:
+                # GitHub serves releases/tags/<tag> for published releases only: a draft is 404 there (Dev 57's drafts,
+                # 2026-11-21: the draft step made both, then its own check refused)
+                if rel is None or rel.get("draft"):
+                    return done(args, '{"message":"Not Found","status":"404"}gh: Not Found (HTTP 404)', 1)
+                return done(args, json.dumps(rel))
+            if "/releases?" in path:
+                return done(args, json.dumps([rel] if rel else []))
+            return done(args, json.dumps(rel or {}))
         raise AssertionError(f"unexpected call {args[:4]}")
 
 
@@ -524,8 +533,10 @@ def verified(tmp_path, n, **extra):
 
 def drafts(n, prerelease=None, digest_engine=EXE_SHA, digest_coop=ZIP_SHA, draft=True):
     pre = n.prerelease if prerelease is None else prerelease
-    return {release.ENGINE_REPO: {"draft": draft, "prerelease": pre, "assets": [{"digest": "sha256:" + digest_engine}]},
-            release.COOP_REPO: {"draft": draft, "prerelease": pre, "assets": [{"digest": "sha256:" + digest_coop}]}}
+    return {release.ENGINE_REPO: {"tag_name": n.tag, "draft": draft, "prerelease": pre,
+                                  "assets": [{"digest": "sha256:" + digest_engine}]},
+            release.COOP_REPO: {"tag_name": n.tag, "draft": draft, "prerelease": pre,
+                                "assets": [{"digest": "sha256:" + digest_coop}]}}
 
 
 def stable_before(tmp_path, n, latest=None):
