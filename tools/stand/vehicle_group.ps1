@@ -46,7 +46,7 @@ function Wait-VehicleLine([string[]]$Files, [string]$Pattern, [int]$Seconds, [in
         if (-not $AfterQuit -and $client -and $client.HasExited) { throw "test client exited ($($client.ExitCode))" }
         foreach ($log in $logs) {
             if (Test-Path -LiteralPath $log -PathType Leaf) {
-                $bad = Select-StandLogLine $log $badLine | Select-Object -First 1
+                $bad = Select-StandLogLine $log $badLine -Live | Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }
         }

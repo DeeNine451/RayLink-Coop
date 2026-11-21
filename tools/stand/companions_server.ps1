@@ -85,7 +85,7 @@ $restarting = $false
 function Find-Line([string[]]$Paths, [string]$Pattern, [switch]$Errors) {
     foreach ($path in $Paths) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $line = if ($Errors) { Select-StandLogLine $path $Pattern | Select-Object -Last 1 }
+            $line = if ($Errors) { Select-StandLogLine $path $Pattern -Live | Select-Object -Last 1 }
             else { Select-String -LiteralPath $path -Pattern $Pattern | Select-Object -Last 1 }
             if ($line) { return $line }
         }

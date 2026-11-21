@@ -36,7 +36,7 @@ function Assert-S7Logs($Context) {
         if ($file -eq $Context.Logs.world -and $Context.ExpectedMapLoss) {
             $expected = Find-S7Line $file $Context.ExpectedMapLoss.Pattern $Context.ExpectedMapLoss.After
         }
-        $bad = Select-StandLogLine $file $s7Bad | Where-Object { -not $expected -or $_.LineNumber -ne $expected.LineNumber } |
+        $bad = Select-StandLogLine $file $s7Bad -Live | Where-Object { -not $expected -or $_.LineNumber -ne $expected.LineNumber } |
             Select-Object -First 1
         if ($bad) { throw (Hide-Hex "$($bad.Path):$($bad.LineNumber) $($bad.Line)") }
     }

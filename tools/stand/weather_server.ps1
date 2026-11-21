@@ -116,7 +116,7 @@ function Wait-Line([string]$File, [string]$Pattern, [int]$Seconds) {
         }
         foreach ($path in $logs.Values) {
             if (Test-Path -LiteralPath $path -PathType Leaf) {
-                $bad = Select-StandLogLine $path '\[weather-stand\] FAIL:' |
+                $bad = Select-StandLogLine $path '\[weather-stand\] FAIL:' -Live |
                     Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }

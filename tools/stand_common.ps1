@@ -59,30 +59,38 @@ function Test-StandErrorLine([string]$Line) {
     return ($Line -match $script:ErrorPattern -and $Line -notmatch $script:StandNoise)
 }
 
-function Test-StandLogNoise([Microsoft.PowerShell.Commands.MatchInfo]$Hit) {
+$script:StandLuaContext = 8 # the debug header in b56/b57 has up to seven [LUA] lines before its [SCRIPT ERROR] report
+
+# -Live: the log is read while the game writes it (a scenario polling its logs). A header block the end of the file cuts
+# before a decision (a line cut short, a report not written yet) is left for the next read: the b57 stand's progress_group
+# failed on the header of a known GAMMA load error read before its report (2026-11-21). The final read (no -Live) flags it.
+function Test-StandLogNoise([Microsoft.PowerShell.Commands.MatchInfo]$Hit, [switch]$Live) {
     if ($Hit.Line -match $script:StandNoise) { return $true }
     if ($Hit.Line -notmatch $script:StandLuaHeader) { return $false }
     # CScriptStorage prints the error detail, then repeats it in the [SCRIPT ERROR] report.
     # Suppress the bare header only when both lines identify the same known load error.
+    $post = @($Hit.Context.PostContext)
+    $cut = $Live -and $post.Count -lt $script:StandLuaContext # the file ended inside this block's context
     $detail = $null
-    foreach ($line in $Hit.Context.PostContext) {
+    for ($i = 0; $i -lt $post.Count; $i++) {
+        $line = $post[$i]
         if ($line -match $script:StandLuaFrame) { continue }
         if (-not $detail -and $line -match $script:StandGammaDetail) {
             $detail = $Matches.source
             continue
         }
-        return ($detail -and $line -match $script:StandGammaReport -and $Matches.source -eq $detail)
+        if ($detail -and $line -match $script:StandGammaReport -and $Matches.source -eq $detail) { return $true }
+        return ($cut -and $i -eq $post.Count - 1) # only the file's last line, which may be cut short, waits
     }
-    return $false
+    return $cut
 }
 
-function Select-StandLogLine([string]$Path, [string]$Pattern = '', [int]$Last = 0) {
+function Select-StandLogLine([string]$Path, [string]$Pattern = '', [int]$Last = 0, [switch]$Live) {
     $patterns = @($script:ErrorPattern)
     if ($Pattern) { $patterns += $Pattern }
     $select = {
-        # The debug header in b56/b57 has up to seven [LUA] lines before its [SCRIPT ERROR] report.
-        Select-String -LiteralPath $Path -Pattern $patterns -Context 0, 8 |
-            Where-Object { -not (Test-StandLogNoise $_) }
+        Select-String -LiteralPath $Path -Pattern $patterns -Context 0, $script:StandLuaContext |
+            Where-Object { -not (Test-StandLogNoise $_ -Live:$Live) }
     }
     if ($Last -le 0) { & $select; return }
     $hits = @(& $select)

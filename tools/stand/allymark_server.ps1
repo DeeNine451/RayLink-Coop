@@ -44,7 +44,7 @@ function Wait-Line([string]$File, [string]$Pattern, [int]$Seconds) {
         }
         foreach ($path in $logs.Values) {
             if (Test-Path -LiteralPath $path) {
-                $bad = Select-StandLogLine $path '\[allymark\] FAIL:' | Select-Object -First 1
+                $bad = Select-StandLogLine $path '\[allymark\] FAIL:' -Live | Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }
         }

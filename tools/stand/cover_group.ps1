@@ -50,7 +50,7 @@ function Wait-CoverLine([string]$File, [string]$Pattern, [int]$Seconds, [int]$Af
         }
         foreach ($log in $logs) {
             if (Test-Path -LiteralPath $log -PathType Leaf) {
-                $bad = Select-StandLogLine $log $badLine | Where-Object Line -NotMatch $expectedTrust | Select-Object -First 1
+                $bad = Select-StandLogLine $log $badLine -Live | Where-Object Line -NotMatch $expectedTrust | Select-Object -First 1
                 if ($bad) { throw (Hide-Hex $bad.Line) }
             }
         }

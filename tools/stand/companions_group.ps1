@@ -136,7 +136,7 @@ function Wait-CompanionLine([string]$Path, [string]$Pattern, [int]$Seconds) {
         }
         foreach ($log in @($hostLog, $clientLog)) {
             if ($log -and (Test-Path -LiteralPath $log -PathType Leaf)) {
-                $failure = Select-StandLogLine $log '\[companions\] (h|ag) FAIL\b' | Select-Object -First 1
+                $failure = Select-StandLogLine $log '\[companions\] (h|ag) FAIL\b' -Live | Select-Object -First 1
                 if ($failure) { throw (Hide-Hex $failure.Line) }
             }
         }

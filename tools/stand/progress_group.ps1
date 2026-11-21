@@ -44,7 +44,7 @@ function Assert-ProgressHealthy {
     }
     foreach ($log in $logs) {
         if (Test-Path -LiteralPath $log -PathType Leaf) {
-            $bad = Select-StandLogLine $log $badLine | Select-Object -First 1
+            $bad = Select-StandLogLine $log $badLine -Live | Select-Object -First 1
             if ($bad) { throw (Hide-Hex $bad.Line) }
         }
     }

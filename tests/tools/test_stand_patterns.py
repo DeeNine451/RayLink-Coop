@@ -144,3 +144,36 @@ def test_stand_log_classifies_debug_blocks_and_keeps_scenario_mark(tmp_path: Pat
     output = run_powershell(command + " | ForEach-Object Line")
     assert output == expected
     assert run_powershell(command + " -Last 1 | ForEach-Object Line") == expected[:-2] + expected[-1:]
+
+
+@pytest.mark.parametrize(("tail", "live_flags"), [
+    # the game is writing a GAMMA load error: the detail line is cut, or the [SCRIPT ERROR] report is not there yet
+    ("cut-gamma-detail", False),
+    ("gamma-detail-no-report", False),
+    ("header-only", False),
+    ("gamma-report-cut", False),
+    # our own error, its report written: an error at any time
+    ("own-error-complete", True),
+])
+def test_live_read_waits_for_a_block_the_game_is_still_writing(tmp_path: Path, tail: str, live_flags: bool):
+    """b57 stand, progress_group (2026-11-21): a scenario polls its logs while the game writes them and failed on the header
+    of a known GAMMA load error whose report line was not written yet. -Live leaves a block cut by the end of the file for
+    the next read; the final read (no -Live) still flags a header the file ends with."""
+    log = tmp_path / "game.log"
+    header = "! [05:09:56.832]  [LUA] SCRIPT RUNTIME ERROR"
+    frame = "! [05:09:56.832]  [LUA]  0 : [C  ] __index"
+    gamma_detail = GAMMA_REPORTS[2].replace("[SCRIPT ERROR]:", "[LUA]")
+    own_report = "! [05:09:56.832]  [SCRIPT ERROR]: ...\\gamedata\\scripts\\coop_tasks.script:41: attempt to index a nil value"
+    tails = {
+        "cut-gamma-detail": [header, frame, frame, gamma_detail[:60]],
+        "gamma-detail-no-report": [header, frame, frame, frame, gamma_detail, frame],
+        "header-only": [header],
+        "gamma-report-cut": [header, frame, gamma_detail, frame, GAMMA_REPORTS[2][:50]],
+        "own-error-complete": [header, frame, own_report.replace("[SCRIPT ERROR]:", "[LUA]"), frame, own_report],
+    }
+    log.write_text("\n".join(["[05:09:50.000] some line", *tails[tail]]), encoding="ascii")
+    path = str(log).replace("'", "''")
+    live = run_powershell(rf"Select-StandLogLine '{path}' -Live | ForEach-Object Line")
+    final = run_powershell(rf"Select-StandLogLine '{path}' | ForEach-Object Line")
+    assert (header in live) is live_flags, live
+    assert header in final, final
