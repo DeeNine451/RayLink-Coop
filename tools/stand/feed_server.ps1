@@ -64,7 +64,7 @@ function Wait-Line([string]$File, [string]$Pattern, [int]$Seconds) {
 
 function Start-Player([string]$Exe, [string]$Fs, [string]$Role) {
     $p = Start-Process -FilePath $Exe -WorkingDirectory $Stand -WindowStyle Hidden -PassThru -ArgumentList `
-        "-fsltx $Fs -coop_nick $Role -coop_probe $Role -coop_autochoose stalker -coop_connect 127.0.0.1:$Port"
+        "-fsltx $Fs -coop_nick $Role -coop_probe $Role -coop_autochoose dolg -coop_connect 127.0.0.1:$Port"
     $null = $p.Handle
     return $p
 }
@@ -93,7 +93,9 @@ try {
     Copy-StandFile -From (Join-Path $PSScriptRoot 'coop_zz_feed.script') -To $probe
     $created.Add($stage)
     $created.Add("$stage.used")
-    Write-StandText -Path $stage -Text "[world]`nfaction = stalker`ntitle = feed`n" -Encoding ([System.Text.Encoding]::ASCII)
+    # Two players must start on one map: a Server world starts a new character at a random start of its faction
+    # (b57 stand: stalker gave k00_marsh and l01_escape). Duty has one start, the Bar.
+    Write-StandText -Path $stage -Text "[world]`nfaction = dolg`ntitle = feed`n" -Encoding ([System.Text.Encoding]::ASCII)
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $exe
