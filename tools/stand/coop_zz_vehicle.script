@@ -83,13 +83,15 @@ local function heading_forward(h)
 end
 
 local function runway(p, forward, ignore, reach, marks)
-	-- Check the space around the car and `reach` - 2 m in front of it, along `forward` (the spawn: 20 m along its heading).
+	-- Check the space around the car and `reach` - 2 m in front of it, along `forward` (the spawn: 30 m along its heading).
+	-- b57i: 3 s of the client's forward drove 23.8 m and the car coasted on; at the end of a 20 m lane it struck a static
+	-- face, slewed 3.4 m aside, and the host's back lane was blocked. 30 m holds the drive and its coast on open ground.
 	local side = vector():set(forward.z, 0, -forward.x)
 	for _, x in ipairs({-1.25, 0, 1.25}) do
 		local start = vector():set(p.x + side.x * x - forward.x * 2, p.y + 1, p.z + side.z * x - forward.z * 2)
-		if level.ray_pick(start, forward, reach or 22, rq_target.rqtStatic, rq_result(), ignore) then return false end
+		if level.ray_pick(start, forward, reach or 32, rq_target.rqtStatic, rq_result(), ignore) then return false end
 	end
-	for _, d in ipairs(marks or {-2, 4, 10, 16, 20}) do
+	for _, d in ipairs(marks or {-2, 4, 10, 16, 22, 28}) do
 		local gap = ground_gap(vector():set(p.x + forward.x * d, p.y, p.z + forward.z * d), ignore)
 		if not gap or math.abs(gap) > 0.8 then return false end
 	end

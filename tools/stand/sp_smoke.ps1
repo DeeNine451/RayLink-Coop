@@ -149,6 +149,17 @@ catch {
     Write-Host "! $why"
 }
 finally {
+    if ($why -and $game -and -not $game.HasExited) {
+        # b57i: a forced stop left the log cut 1 s after the steps start, so nothing told a hang from a game that ran on.
+        # On a failure the game is asked to close first (WM_CLOSE flushes its log); the CPU it burns says busy or waiting.
+        $game.Refresh(); $cpu0 = $game.TotalProcessorTime
+        Start-Sleep -Seconds 5
+        $game.Refresh(); $cpu1 = $game.TotalProcessorTime
+        Write-Host ("the game is still running: {0:N1} s of CPU in 5 s, responding {1}" -f ($cpu1 - $cpu0).TotalSeconds, $game.Responding)
+        $null = $game.CloseMainWindow()
+        if ($game.WaitForExit(20000)) { Write-Host 'closed on WM_CLOSE (its log is complete)' }
+        else { Write-Host '! did not close on WM_CLOSE in 20 s: the main thread does not take window messages' }
+    }
     if ($game -and -not $game.HasExited) { Stop-Process -Id $game.Id -Force }
     Start-Sleep -Seconds 3
     Get-Process -Name 'AnomalyCoop*' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($Stand, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host "! left running: $($_.Id), stopped"; Stop-Process -Id $_.Id -Force }
