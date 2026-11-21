@@ -101,6 +101,12 @@ local function actor_on_update()
 	end
 	if players() < 2 then return end
 	if ROLE == "ag" and not is_live() then return end
+	if ROLE == "ag" and not t0 then
+		-- The server's debug state reaches a client at the end of its join, after live (b57j carry_group: 4.7 s; the carry
+		-- probe asked before it and got "debug_off"). The gun is asked 6 s after the start: the start waits for it.
+		local ok, st = pcall(function() return coop.debug.state() end)
+		if not (ok and (st == true or (type(st) == "table" and st.on == true))) then return end
+	end
 	if not t0 then
 		t0 = time_global()
 		out("two players, live: the steps start")
