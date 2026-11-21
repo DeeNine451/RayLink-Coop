@@ -168,9 +168,11 @@ local function install_nimble()
 		if not (C().active() and coop_mode.leads_here()) then return end
 		id = object_id(id)
 		local body = id and level.object_by_id(id)
+		-- Every box or corpse a player opens comes here: only Nimble's listed stalkers are this check's case.
+		if not (body and IsStalker(body) and mod.npc_whitelist[body:section()] == true) then return end
 		local who = here(peer) and C().avatar(peer)
-		local ok = body and who and IsStalker(body) and not body:alive() and mod.npc_whitelist[body:section()] == true
-			and who:alive() and who:position():distance_to_sqr(body:position()) <= CORPSE_REACH_SQ
+		local ok = who and not body:alive() and who:alive()
+			and who:position():distance_to_sqr(body:position()) <= CORPSE_REACH_SQ
 		if not coop_trust.pass("g96_nimble_open", ok == true, "peer %s has no eligible Nimble corpse in reach", tostring(peer)) or not ok then return end
 		local items = {}
 		local function collect(_, item) items[item:id()] = true end

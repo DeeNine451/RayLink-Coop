@@ -120,11 +120,13 @@ local function install_search()
 		if not leads() then return end
 		local seat, body_id = uint(peer, 65534), uint(id, 65534)
 		local npc = body_id and body_id > 0 and level.object_by_id(body_id)
+		-- Boxes open through the same callback: they are no corpse search.
+		if not corpse_ok(npc) then return end
 		local local_player = seat and coop_mode.seat_plays(seat) and coop_mode.where(seat) == "here"
 			and coop_mode.decider(seat) == "this" and C().avatar(seat)
 		local character, owner
 		if local_player then character, owner = coop_credit.who(local_player) end
-		local valid = corpse_ok(npc) and character ~= nil and owner == seat and local_player:alive()
+		local valid = character ~= nil and owner == seat and local_player:alive()
 		local near = valid and local_player:position():distance_to_sqr(npc:position()) <= REACH_SQ
 		if not coop_trust.pass("g93_corpse_window", near, "peer %s cannot search corpse %s",
 			tostring(seat), tostring(body_id)) or not valid then return end

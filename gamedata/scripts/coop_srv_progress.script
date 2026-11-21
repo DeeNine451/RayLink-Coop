@@ -2,6 +2,8 @@
 -- The flat event codec carries the t and s tables as coop_mods_core serialized strings.
 -- A map asks for {c,e}. The keeper replies with {c,e,g,q,s}: assignment generation,
 -- last merged batch number and checked skills. A data batch {c,e,g,q,t} advances q by one.
+-- The keeper says nothing of a character to a map before that map asked for him: until his body is in its world the map
+-- has no row for him and refuses the word (progress_skills_route, b57b ms_crash_server: a player loading onto a running map).
 -- INTEG-C: a reply with f = 1 asks the map to flush now; a map with nothing pending answers {c,e}.
 -- The batches of an assignment that closed (the player moved or left) still merge for ROW_TIMEOUT.
 
@@ -149,7 +151,11 @@ function on_game_start()
 								live[c] = old
 							elseif generation < MAX_U32 then
 								generation = generation + 1
-								live[c] = { bridge = bridge, peer = player.id, g = generation, q = 0, fq = 0, dirty = true }
+								-- A renewed assignment on the map that already holds his body goes there at once; a new
+								-- map hears it when it asks for him (claimed).
+								local prev = old or closing[c]
+								local held = prev ~= nil and prev.bridge == bridge and prev.claimed == true
+								live[c] = { bridge = bridge, peer = player.id, g = generation, q = 0, fq = 0, dirty = held, claimed = held }
 							end
 						end
 					end
@@ -169,7 +175,7 @@ function on_game_start()
 				routes = live
 			end
 			local function send_skills(c, route, flush)
-				if not (route and route.bridge) then return end
+				if not (route and route.bridge and route.claimed) then return end
 				local levels = {}
 				for name in pairs(skill_names) do
 					local n, checked = P.skill_of(c, name)
@@ -226,6 +232,7 @@ function on_game_start()
 				end
 				if not required("progress_tally_route", route and route.bridge == from, from) then return end
 				if not required("progress_tally_assignment", t.e == epoch and (request or t.g == route.g), from) then return end
+				route.claimed = true -- his body is in that map's world: it may hear this assignment from now on
 				-- Stop-and-wait keeps the receive window to one batch. Repeat its ACK after loss.
 				if request or q == route.q then
 					send_skills(c, route)
@@ -302,6 +309,9 @@ function on_game_start()
 						if not disputed then return out, fixes end
 						refresh()
 						local route, old = routes[character], closing[character]
+						-- a map that has not asked for him has observed nothing of him: nothing to flush there
+						if route and not route.claimed then route = nil end
+						if old and not old.claimed then old = nil end
 						if not (route or old) then return out, fixes end -- no map to ask: as before
 						held[character] = { peer = peer, report = report, due = time_global() + HOLD }
 						if route then send_skills(character, route, true) end

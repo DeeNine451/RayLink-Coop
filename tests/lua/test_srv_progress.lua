@@ -99,6 +99,12 @@ if mode == "srv_world" then
 	check(reservations[SKILLS], "reserve checked skills at the native relay before the session")
 	active = true
 	tick()
+	-- b57b ms_crash_server: the keeper's word on a player who still loaded onto a running map server found no body there
+	-- (ms1: "[coop-trust] ! progress_skills_route: invalid progress event from peer 0 (refused, ...)")
+	check(sent_count(SKILLS) == 0,
+		"the keeper tells a map nothing of a character before that map asks for him (his body may still load there)")
+	event(TALLY, { c = CHARACTER, e = epoch }, A) -- each map asks once his body is in its world
+	event(TALLY, { c = OTHER, e = epoch }, UNRELATED)
 	local arrivals = {}
 	for _, wire in ipairs(SENT) do
 		if wire.name == SKILLS then
@@ -108,7 +114,7 @@ if mode == "srv_world" then
 	end
 	check(arrivals[CHARACTER] and arrivals[CHARACTER].target == A and next(arrivals[CHARACTER].levels) == nil
 		and arrivals[OTHER] and arrivals[OTHER].target == UNRELATED,
-		"arrival sends an empty checked record to the character's map")
+		"a map's request gets an empty checked record of its character")
 	local function grant(c, bridge)
 		for i = #SENT, 1, -1 do
 			local wire = SENT[i]
@@ -154,7 +160,10 @@ if mode == "srv_world" then
 	check(P.rank_budget(CHARACTER) > after_a and select(2, P.rank_budget(CHARACTER)) == rep,
 		"plain and ranked kill tallies retain rank without granting reputation")
 	bridge = B
+	local skills_before_b = sent_count(SKILLS)
 	tick()
+	check(sent_count(SKILLS) == skills_before_b, "the next map hears nothing of him before it asks")
+	event(TALLY, { c = CHARACTER, e = epoch }, B)
 	tally(B, CHARACTER, 1, { corpse_search_master = 2 })
 	local before = P.rank_budget(CHARACTER)
 	tally(A, CHARACTER, 7, { kill_monster = 1 })
@@ -254,9 +263,10 @@ if mode == "srv_world" then
 		"a log-only, unverified record does not replace checked levels")
 	bridge = A
 	tick()
+	event(TALLY, { c = CHARACTER, e = epoch }, A)
 	checked, wire = sent(SKILLS)
 	check(wire and wire.target == A and C.deser(checked.s).scavenging == 1,
-		"the checked levels follow the player to the next map")
+		"the checked levels follow the player to the next map when it asks")
 	local after_return = P.rank_budget(CHARACTER)
 	tally(A, CHARACTER, 1, { kill_monster = 1 }, original_grant)
 	check(checked.g ~= original_grant.g and P.rank_budget(CHARACTER) == after_return
@@ -280,6 +290,7 @@ if mode == "srv_world" then
 	active, epoch = true, 2
 	tick()
 	check(reservations[SKILLS], "the next session reserves checked skills at the native relay again (INTEG-C)")
+	event(TALLY, { c = CHARACTER, e = epoch }, A)
 	local restored
 	for i = #SENT, 1, -1 do
 		local row = SENT[i]
@@ -298,6 +309,7 @@ if mode == "srv_world" then
 	-- INTEG-C (rv_F5-PRG-4 blocker 3): a disputed Haru report waits for the flush of the player's map, then is checked once
 	T.reset_for_test({ default = "refuse" })
 	tick()
+	event(TALLY, { c = OTHER, e = epoch }, UNRELATED) -- the map of OTHER holds his body
 	local function pdata_of(peer, key, xp, level)
 		event("mods.pd", { k = key, i = 1, n = 1, d = assert(C.ser({ skills_levels = skill_record(xp, level) })) }, peer)
 	end
@@ -324,6 +336,24 @@ if mode == "srv_world" then
 	check(sent_count("mods.pd_fix") == fixes0 + 1, "the held report waits up to its time limit")
 	tick(1)
 	check(sent_count("mods.pd_fix") == fixes0 + 2, "with no flush the held report is checked once at the time limit")
+	local fixes1 = sent_count("mods.pd_fix")
+	bridge = B -- OTHER's map stays; CHARACTER's next map has not asked for him yet
+	tick()
+	tick(30000) -- the assignment of the map he left is closed
+	pdata("order-4", 90000, 9)
+	check(sent_count("mods.pd_fix") == fixes1 + 1,
+		"a disputed report whose map has not asked for him is corrected at once: that map has observed nothing of him")
+	bridge = A
+	tick()
+	event(TALLY, { c = CHARACTER, e = epoch }, A)
+	local renewed_before = grant(CHARACTER, A)
+	bridge = nil -- a moment without his map's bridge, the body stays there
+	tick()
+	bridge = A
+	tick()
+	local renewed = grant(CHARACTER, A)
+	check(renewed_before and renewed and renewed.g > renewed_before.g and renewed.q == 0,
+		"the map that already holds him hears a renewed assignment at once")
 else
 	local function skills(e, g, q, value, from)
 		event(SKILLS, { c = CHARACTER, e = e, g = g, q = q, s = assert(C.ser({ scavenging = value })) }, from or 0)

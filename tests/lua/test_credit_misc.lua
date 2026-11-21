@@ -237,23 +237,41 @@ local function misc(which, m, actor, a, b, away, event, tick)
 		medkit.broadcast(npc)
 		check(sent_count("mods.g96_medkit") == 2, "medkit preserves the excluded factions")
 
+		local function nimble_failed()
+			local row = coop_trust.status().g96_nimble_open
+			return row and row.failed or 0
+		end
 		corpse._alive = true
 		SendScriptCallback("coop_on_container_opened", 1, corpse:id())
 		check(SE[921] ~= nil, "Nimble leaves a living NPC alone")
 		corpse._alive = false
 		corpse._sec = "ordinary"
+		local before = nimble_failed()
 		SendScriptCallback("coop_on_container_opened", 1, corpse:id())
-		check(SE[921] ~= nil, "Nimble leaves an unlisted corpse alone")
+		check(SE[921] ~= nil and nimble_failed() == before,
+			"Nimble leaves an unlisted corpse alone: an honest search is no trust failure")
+		local _, box = spawn("inventory_box", vec3(5, 0, 0), nil, { id = 925, kind = "box" })
+		before = nimble_failed()
+		SendScriptCallback("coop_on_container_opened", 1, box:id())
+		check(nimble_failed() == before, "Nimble raises no trust failure for an opened box")
 		corpse._sec = "nimble"
+		before = nimble_failed()
 		SendScriptCallback("coop_on_container_opened", 2, corpse:id())
 		SendScriptCallback("coop_on_container_opened", 3, corpse:id())
-		check(SE[921] ~= nil, "Nimble leaves corpses alone when the opener is far or away")
+		check(SE[921] ~= nil and nimble_failed() == before + 2,
+			"Nimble leaves its corpse alone and flags the opener who is far or away")
 		SendScriptCallback("coop_on_container_opened", 1, corpse:id())
 		check(SE[921] == nil, "Nimble clears the listed corpse on its map owner without a GUI")
 		if which == "hostplay" then
 			loot(922)
 			actor._pos = vec3(5, 0, 0)
 			ui_inventory = { GUI = { mode = "loot", GetPartner = function() return corpse end } }
+			corpse._sec = "ordinary"
+			before = nimble_failed()
+			nimbleclearinventory.release_itms()
+			check(SE[922] ~= nil and nimble_failed() == before and cleared_stock == 0,
+				"the host's own loot of an ordinary corpse is no Nimble trust case")
+			corpse._sec = "nimble"
 			nimbleclearinventory.release_itms()
 			check(SE[922] == nil and cleared_stock == 0, "Nimble host's own loot window calls the same checks")
 		end

@@ -158,24 +158,24 @@ local function follow_home(l)
 		elseif at and at == l.level_name(l.level_of_player(f.p)) then
 			followers[squad_id] = nil -- he came back before it left: the map server there leads it again (follow_tick)
 		elseif all_home(squad, l) then
+			-- The world server has no level of a player: while the map server of his new level is still starting (b57b stand: 39 s)
+			-- there is nobody to tell, and the squad waits offline. Taken here it was lost: follow_tick put it back on `followers`, the
+			-- next round found it on his level already and forgot it, with no comp_adopt to anybody and no owner in the save.
+			local bridge = l.bridge_of_player(f.p)
 			local body = nil
-			for _, p in ipairs(P.players()) do
-				if p.id == f.p then body = p.avatar_id and alife_object(p.avatar_id) end
+			if bridge then
+				for _, p in ipairs(P.players()) do
+					if p.id == f.p then body = p.avatar_id and alife_object(p.avatar_id) end
+				end
 			end
 			if body then
 				TeleportSquad(squad, body.position, body.m_level_vertex_id, body.m_game_vertex_id)
 				followers[squad_id] = nil
 				C.stats.follow = C.stats.follow + 1
 				if f.b then P.send(EV_DROP, { s = squad_id, m = true }, f.b) end -- the map server it left forgets it, no dismissal
-				local bridge = l.bridge_of_player(f.p)
-				if bridge then
-					set_stock_squad(squad_id, nil)
-					note_far(l.level_of_player(f.p), squad_id, f.l)
-					send_adopt(bridge, squad, f.l, f.p)
-				else
-					note_far(nil, squad_id)
-					adopt(squad_id, f.l)
-				end
+				set_stock_squad(squad_id, nil)
+				note_far(l.level_of_player(f.p), squad_id, f.l)
+				send_adopt(bridge, squad, f.l, f.p)
 			end
 		else
 			ask_recall(l, squad_id, squad, f)
@@ -251,6 +251,7 @@ end
 
 -- Map server: the word that came before its squad.
 local function adopt_tick()
+	if C.sort_pending() then return end -- the leaders of its save are not sorted yet: that sort would take the word back
 	local now = time_global()
 	for squad_id, a in pairs(adopting) do
 		if adopt(squad_id, a.t.l, a.t) or now - a.at > ADOPT_WAIT_MS then adopting[squad_id] = nil end
@@ -292,7 +293,9 @@ local function on_adopt(t, from)
 		and (t.p == nil or player_peer(t.p)) and (t.d == nil or type(t.d) == "boolean")
 		and (t.c == nil or type(t.c) == "boolean")
 	if not transfer_word("comp_adopt", ok, from) then return end
-	if not adopt(t.s, t.l, t) then adopting[t.s] = { t = t, at = time_global() } end
+	-- A map server that has just loaded: its first refresh sorts the leaders of its save by where its copy of the world has their
+	-- squads, and the place of this one comes after the word. The word waits for that sort (adopt_tick).
+	if C.sort_pending() or not adopt(t.s, t.l, t) then adopting[t.s] = { t = t, at = time_global() } end
 end
 
 -- A task of the world server lets a squad go that a map server holds (Hidden Threat, the player left the station): the NPC is there.

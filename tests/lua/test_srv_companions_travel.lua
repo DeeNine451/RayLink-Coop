@@ -62,7 +62,7 @@ local function server(w, bridge, before_session)
 		level_of_player = function(peer) return w.players[peer] and LEVEL[w.players[peer].map] end,
 		level_name = function(id) return MAPS[BRIDGE[id]] end,
 		map_servers = function() return { { level = 7, bridge = A }, { level = 19, bridge = B } } end,
-		bridge_of_player = function(peer) return w.players[peer] and w.players[peer].map end,
+		bridge_of_player = function(peer) local p = w.players[peer]; return p and not (w.loading and w.loading[p.map]) and p.map or nil end,
 		online_at_server = function(id) return w.holder[id] ~= nil end,
 	}
 	e.level.name = function() return MAPS[bridge] or "fake_start" end
@@ -273,7 +273,57 @@ local function test_stand_reads_loaded_owner()
 		"stand confirms the same squad and character from the world save")
 end
 
+-- b57b stand (companions_server, 2026-11-21): the map server of the leader's new level was still starting (39 s live), so it had
+-- no bridge yet. The world took the squad itself and lost it the next round: no comp_adopt, no owner in its save.
+local function test_destination_still_starting()
+	local w, world, source = fixture()
+	w.loading = { [B] = true }
+	w.players[1].map = B
+	tick(w, source)
+	world.hear(source.up(), LEVEL[A])
+	w.holder[401] = nil -- recalled and home: nothing of it is online at a map server
+	tick(w, world)
+	tick(w, world)
+	tick(w, world)
+	check(#w.arrivals == 0 and #sent_named(world, ADOPT) == 0 and owner(world, TRAVELLING) == OWNER,
+		"while B starts the world neither moves nor takes the squad, and its save keeps the owner")
+	w.loading = nil
+	tick(w, world)
+	local adopts = sent_named(world, ADOPT)
+	check(#w.arrivals == 1 and #adopts == 1 and adopts[1].target == B and owner(world, TRAVELLING) == OWNER,
+		"once B is up the squad goes to the leader's body and B is told to adopt it")
+end
+
+-- The new map server's copy is the save made when he left: its leaders row holds the squad, the squad stands on A, and the world's
+-- place of it comes only once B is ready (host_feed after xfer_host_connect). The word is queued at B's transport connect and can
+-- reach its Lua before its first update, whose sort of the saved leaders would take it back.
+local function test_fresh_destination_sort(word_first)
+	local w, world, source = fixture()
+	w.loading = { [B] = true }
+	w.players[1].map = B
+	tick(w, source)
+	world.hear(source.up(), LEVEL[A])
+	w.holder[401] = nil
+	tick(w, world)
+	local _, saved = save(world)
+	local destination = server(w, B)
+	destination.records[TRAVELLING] = squad(TRAVELLING, A)
+	destination.fire("load_state", { [SAVE_KEY] = saved })
+	if not word_first then tick(w, destination) end
+	w.loading = nil
+	tick(w, world) -- the teleport and comp_adopt; pump hands the word to B now
+	tick(w, destination)
+	destination.records[TRAVELLING] = squad(TRAVELLING, B) -- the place arrives
+	tick(w, destination)
+	world.hear(destination.up(), LEVEL[B])
+	check(#sent_named(world, ADOPT) == 1 and owner(destination, TRAVELLING) == OWNER and owner(world, TRAVELLING) == OWNER,
+		"a just started B keeps the adopted owner, the word " .. (word_first and "before" or "after") .. " its first update")
+end
+
 test_handoff_and_save()
+test_destination_still_starting()
+test_fresh_destination_sort(true)
+test_fresh_destination_sort(false)
 -- The stand probe lives under temp until the lead integrates the scenario.
 if os.getenv("COOP_CMP_STAND_PROBE") == "1" then test_stand_reads_loaded_owner() end
 if os.getenv("COOP_CMP_3_REPRO") == "1" then

@@ -160,6 +160,17 @@ if on_map then
 	opened(a, 1)
 	run_time_events(150)
 	check(sent_count(event) == 2 and bonus(a, "bandage") == 1, "two players searching one corpse credit it once")
+	do
+		local function g93_failed()
+			local row = coop_trust.status().g93_corpse_window
+			return row and row.failed or 0
+		end
+		local _, box = spawn("inventory_box", vec3(1, 0, 0), nil, { id = 610, kind = "box" })
+		local before, sent_before = g93_failed(), sent_count(event)
+		opened(box, 1)
+		check(g93_failed() == before and sent_count(event) == sent_before,
+			"an opened box is no corpse window: no trust failure and no search XP")
+	end
 
 	if mode == "hostplay" then
 		local own = body(602)
