@@ -602,3 +602,15 @@ TEST(item_tags_versions_ride_the_blob_as_a_tag_older_readers_skip)
 	CHECK(itemtags::read_versions(p, v, mask) && p.remaining() == 0);
 	CHECK_EQ(v.get(itemtags::Uses), std::uint16_t(8007));
 }
+
+TEST(item_tags_the_protocol_34_blob_tags_take_no_older_number)
+{
+	// coop_items.cpp Tag: 1 .. 11; then the versions (12), the decider's change of the uses (13), a held eatable's own client_data
+	// (14). An older reader skips each by its length.
+	static_assert(itemtags::kVersionsTag == 12, "the field versions");
+	static_assert(itemtags::kUsesDeltaTag == 13, "the decider's change of the uses");
+	static_assert(itemtags::kClientDataTag == 14, "a held eatable's own client_data");
+	const std::uint8_t tags[] = {itemtags::kVersionsTag, itemtags::kUsesDeltaTag, itemtags::kClientDataTag};
+	for (const std::uint8_t tag : tags)
+		CHECK(tag > 11); // past coop_items.cpp's 1 .. 11
+}
