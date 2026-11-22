@@ -154,7 +154,9 @@ def main():
             dst.write_bytes(data)
         copied.append(rel)
         if rel.startswith("src/xrGame/coop/") and rel.endswith((".cpp", ".h")):
-            new_coop.append("coop\\" + Path(rel).name)
+            # the path under src/xrGame with its subfolders (coop\srv\..., coop\hostplay\...): the name alone registered
+            # a missing coop\<name> for every srv/hostplay source and broke build 58 (C1083)
+            new_coop.append(rel[len("src/xrGame/"):].replace("/", "\\"))
     if new_coop and not dry:
         subprocess.run([sys.executable, str(ROOT / "tools" / "vcxproj_add.py"),
                         str(CI / "src/xrGame/xrGame.vcxproj"), "Coop", *new_coop], check=True)
