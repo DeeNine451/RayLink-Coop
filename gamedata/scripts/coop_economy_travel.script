@@ -5,7 +5,7 @@
 	Who travels and what happens to the others:
 	  - Fast travel and backpack travel (PDA map menu), marsh guides (dialogs_mlr *_guid): with the party rule
 	    on (core rule party_fast_travel) the traveller moves as in single player and pays his fare alone, and
-	    every other player on the map is OFFERED the trip (a yes / no window, "economy.tp" with q): who says yes
+	    the other players on the map, except listed arena fighters, are OFFERED the trip (a yes / no window, "economy.tp" with q): who says yes
 	    is moved to the destination for nothing, who says no or does not answer within the vote's time stays
 	    (owner 2026-11-16; before that a trip was refused until the group stood within gather_radius, and who
 	    stood there was moved unasked). Fair Fast Travel's rows count as well: fast travel, backpack travel and a
@@ -130,11 +130,17 @@ local function bring_companions()
 	if not ok then core.log("! the companions were not called after the trip: %s", tostring(err)) end
 end
 
+local function arena_blocks_trip(id)
+	local arena = core.mod("coop_arena")
+	return arena and arena.blocks_trip and arena.blocks_trip(id)
+end
+
 -- This machine's actor follows when it stood within the radius of the origin on the same level; `agreed`: he said yes to an
 -- offer, wherever he stands on that level.
 local function apply_tp(p, by, agreed)
 	local actor = db.actor
 	if not actor or p.l ~= level_name() then return false end
+	if agreed and arena_blocks_trip() then return false end -- he may have entered since he was asked
 	local mine = core.position_of_id(0)
 	if not mine then return false end
 	local dest = { x = p.x, y = p.y, z = p.z }
@@ -164,6 +170,7 @@ end
 local function offer_tp(p, by)
 	local actor = db.actor
 	if not actor or p.l ~= level_name() then return false end
+	if not coop_mode.group_travels() or arena_blocks_trip() then return false end
 	local alive_ok, alive = pcall(function() return actor:alive() end)
 	if alive_ok and alive == false then return false end
 	local mine = core.position_of_id(0)
@@ -204,16 +211,28 @@ local function offer_tp(p, by)
 	return true
 end
 
+local function send_offers(t, except)
+	if not coop_mode.group_travels() then return 0 end
+	local sent = 0
+	for _, p in ipairs(core.players()) do
+		if not p.is_self and p.id ~= except and not arena_blocks_trip(p.avatar_id) and core.send("tp", t, p.id) then
+			sent = sent + 1
+		end
+	end
+	return sent
+end
+
 -- radius OFFER: no radius, every other player of the level is asked (a trip); else the players within `radius` of the origin
 -- follow unasked (a story teleport).
 function group_teleport(dest, heading, origin, radius, kind)
 	dest, origin = vec_of(dest), vec_of(origin)
 	if not (core.live() and dest and origin and dest.x and origin.x) or core.others_count() == 0 then return false end
+	if radius == OFFER and not coop_mode.group_travels() then return false end
 	if radius ~= OFFER and (radius or 0) <= 0 then return false end
 	local t = make_payload(dest, heading, origin, radius, kind)
 	stats.sent = stats.sent + 1
 	if core.owns_world() then
-		core.send_clients("tp", t)
+		if t.q then send_offers(t) else core.send_clients("tp", t) end
 	else
 		core.send("tp", t, 0)
 	end
@@ -310,8 +329,13 @@ local function host_on_tp(t, from)
 		end
 	end
 	t.n = core.nick_of(from)
-	if p.q then offer_tp(p, t.n) else apply_tp(p, t.n) end
-	stats.relayed = stats.relayed + core.send_clients("tp", t, from)
+	if p.q then
+		offer_tp(p, t.n)
+		stats.relayed = stats.relayed + send_offers(t, from)
+	else
+		apply_tp(p, t.n)
+		stats.relayed = stats.relayed + core.send_clients("tp", t, from)
+	end
 end
 
 -- The local actor went from w.o to `dest` by a trip: his companions come after him (not after a story teleport), and the others
@@ -658,7 +682,7 @@ local function actor_on_update()
 		visits.errors = visits.errors + 1
 		core.log("! smart visits: %s", tostring(err))
 	end
-	if asked and core.now() > asked.until_ms then close_offer() end -- nobody answered: he stays
+	if asked and (core.now() > asked.until_ms or arena_blocks_trip()) then close_offer() end
 	local w = watch
 	if not w then return end
 	if moved_check(w, WATCH_JUMP) or core.now() > w.until_ms then watch = nil end

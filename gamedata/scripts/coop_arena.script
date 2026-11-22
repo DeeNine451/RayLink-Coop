@@ -24,12 +24,14 @@
 	    audience rule). Its cutscene plays on the fighters' machines alone, each put at a spot of his own; anywhere else the
 	    section stands still, and on the authority it ends when theirs end (arena.cut), or after CUT_WAIT_MS. One who falls is out;
 	    the fight goes on while a fighter is left.
-	  - His gear: the authority moves it, and keeps a ledger per player (the ids; the ids of the kit his machine made; saved with
+	  - His gear: the authority moves it, and keeps a ledger per character (the ids; the ids of the kit his machine made; saved with
 	    the host's world, and with split levels carried through the world server, the server's share "arena_ledger", coop_srv_levels_share):
 	      in   his whole inventory into box 1;
-	      out  into box 2 what the arena gave him: everything he holds when the fight or the bet just ended or he stands in the
-	           arena (stock), else (a respawn elsewhere, a rejoin, a late answer) only his kit; the arena's purge (not while
-	           another player's fight runs); the ids of his ledger from box 1 back to him. No box 1 here: the ledger waits.
+	      out  into box 2 what the arena gave him: everything he holds in the arena or at the end of a bet; outside the pit
+	           only the kit, by its ids (what he found outside stays his, also for a fighter never seen inside). The arena's
+	           purge (not while another player's fight runs, nor for one never seen inside); the ids of his ledger from box 1
+	           back to him. No box 1 here: the ledger waits. A row of an older save (the avatar id alone) is the character's
+	           that holds the id when it is first looked at; an id with no player character then makes it an orphan for good.
 	    Then his own machine runs the stock call for the rest (the kit, the screen, the way in or out), with both story boxes
 	    hidden (get_story_object answers nil for them) and the purge left out: the boxes are the authority's. The way in waits
 	    until the moved gear has left his machine (IN_WAIT_MS). Mods that wrap these functions (GAMMA: kits, magazines, Powered
@@ -81,6 +83,7 @@ local tostring, tonumber, type, pairs, ipairs, pcall, next = tostring, tonumber,
 
 local TAG = "arena"
 local ARENA_LEVEL = "l05_bar"
+local AVATAR_SECTION = "coop_player_avatar"
 local BOX_IN, BOX_OUT = "bar_arena_inventory_box", "bar_arena_inventory_box_2"
 local MANAGER = "bar_arena_manager"
 local GATHER_RADIUS = 12 -- m around Arnie: the players there at the start go into the fight
@@ -103,7 +106,8 @@ local BET_LV, BET_GV = 37564, 1710
 local P -- coop_npc_players
 local function C() return coop_mods_core end
 
-local ledger = {} -- authority: avatar id -> { kind = "fight" | "bet", items = { id, ... }, kit = { id, ... }, at = time }
+local ledger = {} -- authority: character key -> { id = avatar id, character = key, kind, items, kit, at, ... }
+local cleared = {} -- returns made before the first down share: skip its stale rows and send their removal even with no rows left
 local fight = nil -- authority: { id = the taker's avatar id, n = the fight, ids = the fighters (the taker first; nil while held),
 --   hold = the group gathers at Arnie, modes = { [id] = the last gather mode sent }, vote = a vote runs, cuts = { [id] = his cutscene ended } }
 local pit = nil -- authority: { id = the fighter's avatar id } of Arnie's monster fight (the old arena: its lines are his)
@@ -218,6 +222,13 @@ local function is_fighter(id)
 	return false
 end
 
+-- With an id, the authority answers for a recipient. The recipient can also check its own arena state when it accepts.
+function blocks_trip(id)
+	if level.name() ~= ARENA_LEVEL then return false end
+	if id ~= nil then return is_fighter(id) end
+	return mine == "fight" or (coop_mode.actor_is_player() and is_fighter(own_id()))
+end
+
 -- The players on the Bar (ids): `at` those within GATHER_RADIUS of Arnie, the taker first (he took it: he is in), `all` everybody.
 local function gathered(taker)
 	local man = manager()
@@ -302,6 +313,88 @@ local function items_of(o)
 	return list
 end
 
+local function avatar_key(obj)
+	local ini = obj and obj:spawn_ini()
+	if ini and ini:section_exist("coop") and ini:line_exist("coop", "key") then
+		local key = ini:r_string("coop", "key")
+		if type(key) == "string" and key ~= "" then return key end
+	end
+end
+
+local function character_key(id)
+	if id == nil then return nil end
+	if id == 0 then return coop_mode.actor_is_player() and "actor" or nil end
+	-- The live object's ini has the join key even if ALife cached its ini before the engine set custom data.
+	local o = obj_of(id)
+	if o and o:section() ~= AVATAR_SECTION then return nil end
+	local key = avatar_key(o) or avatar_key(alife_object(id))
+	return key and (tostring(id) .. ":" .. key) or nil
+end
+
+local function row_key(r)
+	if type(r) == "table" and type(r.id) == "number" and type(r.items) == "table" then
+		return type(r.character) == "string" and r.character or ("legacy:" .. r.id)
+	end
+end
+
+local function clear_record(key)
+	ledger[key] = nil
+	if not got_down and not coop_mode.decides_world() then cleared[key] = true end
+end
+
+-- A row of a save made before the ledger was keyed by character names only the avatar id ("legacy:<id>"). The save that holds it
+-- holds that id's character too, so the row is the character's under that id when it is first looked at (his gear waits in
+-- box 1). An id that names no player character then (a retirement released it) makes the row an orphan for good: a later
+-- character under that id never gets it. A character whose join key cannot be read yet is looked at again.
+local function adopt_legacy(id, key)
+	local lk = "legacy:" .. tostring(id)
+	local old = ledger[lk]
+	if not old or old.orphan then return nil end
+	if not key then
+		local se = id ~= 0 and alife_object(id)
+		if not (se and se:section_name() == AVATAR_SECTION) then
+			old.orphan = true
+			log("! a ledger row of an older save names character %s, who is not in the world: it stays in the save", tostring(id))
+		end
+		return nil
+	end
+	if ledger[key] then return nil end
+	clear_record(lk)
+	old.character = key
+	ledger[key] = old
+	log("a ledger row of an older save is character %s's: %d thing(s) of his wait in %s", tostring(id), #old.items, BOX_IN)
+	return old
+end
+
+local function record_of(id)
+	if id == nil then return nil, nil end
+	local key = character_key(id)
+	local rec = key and ledger[key]
+	if not rec then rec = adopt_legacy(id, key) end
+	return rec, key
+end
+
+-- The rows as a list: a loop over it may look a row up (record_of adopts an older save's row under another key).
+local function rows()
+	local list = {}
+	for _, rec in pairs(ledger) do list[#list + 1] = rec end
+	return list
+end
+
+-- Once after rows came in (a load, the world's copy): every older save's row is decided while the world it came with is here.
+local legacy_due = false
+local function legacy_tick()
+	if not legacy_due then return end
+	legacy_due = false
+	for _, rec in ipairs(rows()) do
+		if not rec.character and not rec.orphan then
+			record_of(rec.id)
+			-- his key is not readable yet, or a newer row of his is open: looked at again
+			if not rec.character and not rec.orphan then legacy_due = true end
+		end
+	end
+end
+
 -- His whole inventory into box 1, the ids into his ledger. -> the ids moved now ("1,2,3"), nil: there is no box here, he
 -- keeps his gear.
 local function stow(o, kind)
@@ -311,7 +404,12 @@ local function stow(o, kind)
 		return nil
 	end
 	local id = id_of(o)
-	local rec = ledger[id] or { items = {}, kit = {} }
+	local rec, key = record_of(id)
+	if not key then
+		log("! no character key for %s: his gear stays with him", tostring(id))
+		return nil
+	end
+	rec = rec or { id = id, character = key, items = {}, kit = {} }
 	rec.kind, rec.at = kind, time_global()
 	local moved = {}
 	for _, item in ipairs(items_of(o)) do
@@ -320,7 +418,7 @@ local function stow(o, kind)
 		rec.items[#rec.items + 1] = moved[#moved]
 		stats.stowed = stats.stowed + 1
 	end
-	ledger[id] = rec
+	ledger[key], cleared[key] = rec, nil
 	return table.concat(moved, ",")
 end
 
@@ -342,18 +440,17 @@ local function in_arena(o)
 	return ok and r == true
 end
 
--- What the arena gave him into box 2, the purge, his ledger back to him. `all`: the fight or the bet just ended, or he stands in
--- the arena: everything he holds is the arena's (stock); else (after a respawn elsewhere, a rejoin, a late answer) only the kit
--- his own machine made for him: what he found since stays his. Nothing of his is moved without a ledger: a player whose gear
--- never went in keeps what he has. False: he is not in this world now.
-local function give_back(id, all)
+-- Return the gear and say whether this character needs the arena exit. False: he or box 1 is unavailable. The kit his machine
+-- reported goes into box 2 by its ids wherever he stands (it is the arena's, also for one who never reached the pit).
+local function give_back(id, bet_end)
 	local o = obj_of(id)
 	if not o then return false end
-	local rec = ledger[id]
-	if not rec then return true end
+	local rec, key = record_of(id)
+	if not rec then return true, in_arena(o) end
 	local box = get_story_object(BOX_IN)
 	if not box then return false end -- box 1 is not online here: his ledger waits
-	if not all and in_arena(o) then all = true end
+	local all = bet_end or in_arena(o)
+	local custody = all or rec.kind == "bet" or rec.inside or rec.loose or rec.fell
 	local kit = {}
 	for _, k in ipairs(rec.kit or {}) do kit[k] = true end
 	local box2 = get_story_object(BOX_OUT)
@@ -367,7 +464,7 @@ local function give_back(id, all)
 			end
 		end
 	end
-	purge(id)
+	if custody then purge(id) end
 	local box_id = id_of(box)
 	for _, iid in ipairs(rec.items) do
 		local item = level.object_by_id(iid)
@@ -383,10 +480,10 @@ local function give_back(id, all)
 	end
 	-- one line a give back: what stayed with a player after the arena is read from the log (live 2026-11-15)
 	log("%s: %d of his own given back, %d of the arena's into %s (%s)%s", tostring(o:name()), back, taken, BOX_OUT,
-		all and "everything he held" or (rec.fell and "the rest was taken where he fell" or "the kit by its ids, " .. #(rec.kit or {}) .. " known"),
+		all and "everything he held" or (custody and "the kit by its ids" or "never entered the pit: the kit by its ids"),
 		box2 and "" or ": ! that box is not here, nothing was taken")
-	ledger[id] = nil
-	return true
+	clear_record(key)
+	return true, custody
 end
 
 -------------------------------------------------------------------------------
@@ -560,8 +657,7 @@ go = function(id, what, a, more)
 end
 
 -- The authority: this player's gear back, and his way out (after a respawn, a rejoin, a lost answer: not the fight's end).
-local function out_of(id)
-	local rec = ledger[id]
+local function remove_fighter(id)
 	if fight and is_fighter(id) then
 		local left = {}
 		for _, f in ipairs(fighters()) do if f ~= id then left[#left + 1] = f end end
@@ -572,13 +668,19 @@ local function out_of(id)
 			log("fight %d: character %s is out, %d fighter(s) left", fight.n, tostring(id), #left)
 		end
 	end
+end
+
+local function out_of(id)
+	local rec = record_of(id)
+	remove_fighter(id)
 	if not rec then return go(id, "none") end
 	local what = rec.kind == "bet" and "bet_out" or "out"
-	if give_back(id) then go(id, what) end
+	local ok, exit = give_back(id)
+	if ok then go(id, exit and what or "none") end
 end
 
 add_kit = function(id, made)
-	local rec = ledger[id]
+	local rec = record_of(id)
 	if not (rec and type(made) == "table") then return end
 	rec.kit = rec.kit or {}
 	for _, k in ipairs(made) do rec.kit[#rec.kit + 1] = k end
@@ -589,11 +691,14 @@ end
 -- battle) is given back even when his own ask never came (sent before his game was live, lost with a crash).
 local function heal_tick(now)
 	if level.name() ~= ARENA_LEVEL then return end
-	for id, rec in pairs(ledger) do
-		if now - (rec.at or 0) >= HEAL_GRACE_MS then
-			local busy = (rec.kind == "fight" and is_fighter(id))
+	for _, rec in pairs(ledger) do
+		local id = rec.id
+		local o = obj_of(id)
+		if o and rec.character and now - rec.at >= HEAL_GRACE_MS and P.standing(id) and character_key(id) == rec.character then
+			-- A fighter stranded outside before entering can recover his gear even while the round goes on.
+			local busy = (rec.kind == "fight" and is_fighter(id) and (rec.inside or in_arena(o) ~= false))
 				or (rec.kind == "bet" and has_alife_info("begin_the_battle"))
-			if not busy and obj_of(id) and P.standing(id) then
+			if not busy then
 				log("the gear of character %s waited: given back", tostring(id))
 				return out_of(id) -- one a tick: out_of changes the ledger
 			end
@@ -643,19 +748,20 @@ local function route_out()
 	if fight then
 		ids = fighters()
 	else
-		for id, rec in pairs(ledger) do
-			if rec.kind == "fight" then ids[#ids + 1] = id end
+		for _, rec in ipairs(rows()) do
+			if rec.kind == "fight" and record_of(rec.id) == rec then ids[#ids + 1] = rec.id end
 		end
 	end
 	fight_over()
 	for _, id in ipairs(ids) do
-		if give_back(id, true) then go(id, "out") end
+		local ok, exit = give_back(id)
+		if ok then go(id, exit and "out" or "none") end
 	end
 end
 
 -- A bet takes the gear of a player whose gear is in no box already and who fights no fight.
 local function bet_of(id, o)
-	if ledger[id] or is_fighter(id) then
+	if record_of(id) or is_fighter(id) then
 		log("! a bet of character %s refused: his gear is in the box already", tostring(id))
 		return
 	end
@@ -676,8 +782,8 @@ end
 local function route_bet_out()
 	if not authority() then return end
 	local ids = {}
-	for id, rec in pairs(ledger) do
-		if rec.kind == "bet" and obj_of(id) then ids[#ids + 1] = id end
+	for _, rec in ipairs(rows()) do
+		if rec.kind == "bet" and obj_of(rec.id) and record_of(rec.id) == rec then ids[#ids + 1] = rec.id end
 	end
 	if #ids == 0 then purge() end -- stock: the arena's leftovers go
 	for _, id in ipairs(ids) do
@@ -1482,14 +1588,16 @@ local stashes = {} -- death stash id -> the time it was told
 -- His record is the arena's custody until his character was seen alive outside the arena after it had been inside (a
 -- rejoin somewhere else): then he walks free with what he has, and a later death is not the arena's.
 local function fall_tick(now)
+	if level.name() ~= ARENA_LEVEL then return end
 	local box2 = get_story_object(BOX_OUT)
-	for id, rec in pairs(ledger) do
-		local o = rec.kind == "fight" and not rec.fell and not rec.loose and obj_of(id)
-		if o then
+	for _, rec in pairs(ledger) do
+		local id = rec.id
+		local o = rec.kind == "fight" and not rec.fell and obj_of(id)
+		if o and rec.character and character_key(id) == rec.character then
 			local inside = in_arena(o)
 			if fighting_life(id) then
-				if inside then rec.inside = true elseif rec.inside and inside == false then rec.loose = true end
-			elseif box2 and (rec.inside or is_fighter(id)) then
+				if inside then rec.inside, rec.loose = true, nil elseif rec.inside and inside == false then rec.loose = true end
+			elseif box2 and (inside or (inside == nil and rec.inside and not rec.loose)) then
 				local n = 0
 				for _, item in ipairs(items_of(o)) do
 					o:transfer_item(item, box2)
@@ -1522,10 +1630,36 @@ end
 -- coop_death_marker(player, stash, "drop" | "corpse"), fired by the engine on every machine: the stash of a fighter who
 -- died in the arena.
 local function on_death_marker(player, stash)
-	if not (session() and authority()) or type(stash) ~= "number" then return end
-	local rec = ledger[player]
-	if rec and rec.kind == "fight" and not rec.loose and (rec.inside or rec.fell or is_fighter(player)) then
+	if type(stash) ~= "number" or level.name() ~= ARENA_LEVEL or not authority() then return end
+	local rec = record_of(player)
+	local o = obj_of(player)
+	local inside = o and in_arena(o)
+	if rec and rec.kind == "fight" and (rec.fell or inside or (inside == nil and rec.inside and not rec.loose)) then
 		stashes[stash] = time_global()
+	end
+end
+
+local function forget_character(id)
+	for key, rec in pairs(ledger) do
+		if rec.id == id then clear_record(key) end
+	end
+	for i = #(world_copy or {}), 1, -1 do
+		local rec = world_copy[i]
+		if type(rec) == "table" and rec.id == id then table.remove(world_copy, i) end
+	end
+	remove_fighter(id)
+end
+
+-- A disconnected avatar goes offline. Its ALife entity is unregistered when the character is retired.
+local function on_avatar_unregister(se)
+	if authority() and se:section_name() == AVATAR_SECTION then forget_character(se.id) end
+end
+
+-- The host's new life reuses the actor, so there is no ALife unregister for it.
+local function on_actor_retirement()
+	if authority() and coop_mode.actor_is_player() then
+		forget_character(own_id())
+		play("none")
 	end
 end
 
@@ -1628,7 +1762,11 @@ end
 
 local function ledger_list()
 	local list = {}
-	for id, rec in pairs(ledger) do list[#list + 1] = { id = id, kind = rec.kind, items = rec.items, kit = rec.kit or {} } end
+	for _, rec in pairs(ledger) do
+		list[#list + 1] = { id = rec.id, character = rec.character, kind = rec.kind, items = rec.items, kit = rec.kit,
+			inside = rec.inside, loose = rec.loose, fell = rec.fell, orphan = rec.orphan }
+	end
+	table.sort(list, function(a, b) return row_key(a) < row_key(b) end)
 	return list
 end
 
@@ -1645,8 +1783,13 @@ end
 -- Records from a save or from another process; `only_new`: what is here already stays.
 local function take_list(list, only_new)
 	for _, r in ipairs(type(list) == "table" and list or {}) do
-		if type(r) == "table" and type(r.id) == "number" and type(r.items) == "table" and not (only_new and ledger[r.id]) then
-			ledger[r.id] = { kind = r.kind == "bet" and "bet" or "fight", items = numbers(r.items), kit = numbers(r.kit), at = time_global() }
+		local key = row_key(r)
+		if key and not (only_new and (ledger[key] or cleared[key])) then
+			ledger[key] = { id = r.id, character = r.character, kind = r.kind == "bet" and "bet" or "fight",
+				items = numbers(r.items), kit = numbers(r.kit), at = time_global(),
+				inside = r.inside == true or nil, loose = r.loose == true or nil, fell = r.fell == true or nil,
+				orphan = r.orphan == true or nil }
+			if not r.character then legacy_due = true end
 		end
 	end
 end
@@ -1667,6 +1810,7 @@ local function load_state(m_data)
 	mine = (g == true and "fight") or (g == "bet" and "bet") or false
 	local a = m_data.coop_arena
 	ledger, fight, cut_done, world_copy, pit, fighters_of, pit_won = {}, nil, false, nil, nil, {}, nil
+	cleared, got_down = {}, false
 	pit_fresh = true
 	-- the ledger is the world's: a client loads the host's world, it is not his
 	if type(a) ~= "table" or P.is_client() then return end
@@ -1688,19 +1832,34 @@ end
 -- the world server (kept in its save) and comes down to the next map server of the Bar, which takes the records it has none of.
 local function share_ledger()
 	coop_mode.share_up("arena_ledger", function()
-		if level.name() ~= ARENA_LEVEL or not (got_down or next(ledger)) then return nil end
-		return { list = ledger_list(), based = got_down }
+		if level.name() ~= ARENA_LEVEL or not (got_down or next(ledger) or next(cleared)) then return nil end
+		local removed = {}
+		for key in pairs(cleared) do removed[#removed + 1] = key end
+		table.sort(removed)
+		return { list = ledger_list(), based = got_down, removed = removed }
 	end, function(t)
 		if type(t) ~= "table" or type(t.list) ~= "table" then return end
-		if t.based then
-			world_copy = t.list
-			return
-		end
-		-- a map server that has not heard the world's copy yet: its records join it
+		-- Before the first echo, merge the Bar's changes with the rows it has not seen yet.
 		local by, list = {}, {}
-		for _, r in ipairs(world_copy or {}) do if type(r) == "table" and r.id then by[r.id] = r end end
-		for _, r in ipairs(t.list) do if type(r) == "table" and r.id then by[r.id] = r end end
+		if not t.based then
+			for _, r in ipairs(world_copy or {}) do
+				local key = row_key(r)
+				if key then by[key] = r end
+			end
+		end
+		for _, key in ipairs(type(t.removed) == "table" and t.removed or {}) do
+			if type(key) == "string" then by[key] = nil end
+		end
+		for _, r in ipairs(t.list) do
+			local key = row_key(r)
+			local se = key and alife_object(r.id)
+			if se and se:section_name() == AVATAR_SECTION then
+				local owner = avatar_key(se)
+				if not r.character or not owner or key == tostring(r.id) .. ":" .. owner then by[key] = r end
+			end
+		end
 		for _, r in pairs(by) do list[#list + 1] = r end
+		table.sort(list, function(a, b) return row_key(a) < row_key(b) end)
 		world_copy = list
 	end)
 	coop_mode.share_down("arena_ledger", function()
@@ -1709,6 +1868,7 @@ local function share_ledger()
 		if got_down or level.name() ~= ARENA_LEVEL or type(t) ~= "table" then return end
 		got_down = true
 		take_list(t.list, true)
+		cleared = {}
 	end)
 end
 
@@ -1724,6 +1884,8 @@ local function actor_on_update()
 		death_cb = true
 		-- here, after every on_game_start: coop_death adds the callback in its own on_game_start
 		RegisterScriptCallback("coop_death_marker", on_death_marker)
+		-- coop_menu_char declares this engine callback in its on_game_start.
+		RegisterScriptCallback("coop_host_new_character", on_actor_retirement)
 	end
 	ensure_outer()
 	rep_tick()
@@ -1733,6 +1895,8 @@ local function actor_on_update()
 			local okg, errg = pcall(gather_tick)
 			if not okg then report("gather", errg) end
 		end
+		local okl, errl = pcall(legacy_tick)
+		if not okl then report("an older save's ledger", errl) end
 		-- before the heal: a fighter who is dead is no "player standing here with nothing running"
 		local okf, errf = pcall(fall_tick, now)
 		if not okf then report("a fighter's fall", errf) end
@@ -1785,6 +1949,7 @@ function on_game_start()
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
 	RegisterScriptCallback("coop_respawned", ask_out)
+	RegisterScriptCallback("server_entity_on_unregister", on_avatar_unregister)
 	RegisterScriptCallback("save_state", save_state)
 	RegisterScriptCallback("load_state", load_state)
 	C().status_line(TAG, print_status)

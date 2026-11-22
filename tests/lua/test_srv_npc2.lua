@@ -80,8 +80,11 @@ do
 
 	local arena = load("coop_arena")
 	arena.on_game_start()
+	local key = string.format("%064x", 500)
+	M.add(make_obj(500, 0, 0, 0, { _section = "coop_player_avatar",
+		_spawn_ini = make_ini({ coop = { { "key", key } } }) }))
 	local row = { items = {}, kit = {} }
-	arena._state().ledger[500] = row
+	arena._state().ledger["500:" .. key] = row
 	local function tell_kit(i, from, peer)
 		for _, handle in ipairs(M.handlers["arena.kit"]) do
 			handle(E.coop_main.encode({ i = i, _peer = peer }), from)

@@ -23,8 +23,11 @@ check(shared.up.arena_point ~= nil and shared.up.arena_point.every == 30000, "th
 check(#H.sent == 0, "the co-op host needs no transport for these providers")
 
 trust.reset_for_test({ default = "log" })
+local key = string.format("%064x", 500)
+H.add(make_obj(500, 0, 0, 0, { _section = "coop_player_avatar",
+	_spawn_ini = make_ini({ coop = { { "key", key } } }) }))
 local row = { items = {}, kit = {} }
-arena._state().ledger[500] = row
+arena._state().ledger["500:" .. key] = row
 local function tell_kit(i, from)
 	for _, handle in ipairs(H.handlers["arena.kit"]) do
 		handle(E.coop_main.encode({ i = i, _peer = 2 }), from)

@@ -7,6 +7,7 @@ dofile("tests/lua/support/harness_npc.lua")
 local modes = dofile("tests/lua/support/modes.lua")
 
 local PROXY = 500
+local BRIDGE = 0x101
 local BOX1, BOX2, TRIG, MANAGER, COMMENT, TOTAL, OPPONENT, BODY = 900, 901, 910, 920, 911, 912, 300, 777
 local SR, SPAM = 913, 914 -- Arnie's monster fight (the old arena): restrictors bar_arena_sr and bar_arena_spam
 local THIRD = 501 -- a third player's character (group entry)
@@ -37,6 +38,10 @@ end
 -- An object that holds items: host_id is whose items they are in the world (the client's own actor holds the proxy's).
 local function holder(M, o, host_id)
 	o._host_id = host_id
+	if (host_id == PROXY or host_id == THIRD) and not M.mirror and not o._section then
+		o._section = "coop_player_avatar"
+		o._spawn_ini = make_ini({ coop = { { "key", string.format("%064x", host_id) } } })
+	end
 	function o:inventory_for_each(f)
 		local list = {}
 		for _, it in pairs(W.items) do if it._parent == host_id then list[#list + 1] = it end end
@@ -280,6 +285,12 @@ local function env(M, level_name)
 	end
 	M.level_name = level_name or ARENA
 	E.level.name = function() return M.level_name end
+	E.alife_object = function(id)
+		local o = W.holders[id]
+		if o then
+			return { id = id, section_name = function() return o:section() end, spawn_ini = function() return o:spawn_ini() end }
+		end
+	end
 	M.keys, M.key_sends = {}, 0
 	E.coop_economy_mdata = {
 		register_player_key = function(k, f) M.keys[k] = f end,
@@ -367,9 +378,15 @@ local function setup(opts)
 	reset_world()
 	NOW = NOW + 1000000
 	W = { items = {}, holders = {}, next_id = 2000, moves = 0, infos = {}, talked = {}, created = {}, client_seen = {} }
-	local avatars = { [0] = 0, [1] = PROXY }
+	local map = opts.answer == "srv_map"
+	local avatars = { [1] = PROXY }
+	if not map then avatars[0] = 0 end
 	if opts.third then avatars[2] = THIRD end
-	H = machine("host", 0, avatars)
+	H = machine(map and "client" or "host", map and BRIDGE or 0, avatars)
+	if map then
+		H.env.coop.is_map_server = function() return true end
+		H.env.coop.is_mirror = function() return false end
+	end
 	Cm = nil
 	holder(H, H.env.db.actor, 0)
 	H.env.db.actor._pos = vec(100, 0, 100)
@@ -431,7 +448,16 @@ local function start(n)
 	H.cut, Cm.cut = H.new_cut(), Cm.new_cut()
 	H.cut:zone_enter()
 	Cm.cut:zone_enter()
+	if (Cm.cut_in or 0) > 0 then
+		H.objects[PROXY]._pos = vector():set(Cm.env.db.actor:position())
+	end
 	return aud
+end
+
+local function ledger_for(A, id)
+	for _, rec in pairs(A._state().ledger) do
+		if rec.id == id then return rec end
+	end
 end
 
 local function win(n)
@@ -471,7 +497,7 @@ do
 	check(Cm.cut_in == 1 and at(Cm.env.db.actor, IN_ARENA), "his cutscene takes him into the arena")
 	check(#H.ran == 0, "no stock call on the host for another player")
 	check(CA._state().mine == "fight" and Cm.keys.coop_arena_gear() == true and Cm.key_sends >= 1, "his flag: the host hears at once")
-	check(HA._state().ledger[PROXY] and #HA._state().ledger[PROXY].items == 6, "the host's ledger holds his six items")
+	check(ledger_for(HA, PROXY) and #ledger_for(HA, PROXY).items == 6, "the host's ledger holds his six items")
 
 	H.cut:update()
 	check((H.switched or 0) == 0, "the host waits for the fighter's cutscene")
@@ -496,7 +522,7 @@ do
 	check(Cm.ran[#Cm.ran] == "out" and at(Cm.env.db.actor, DOOR), "he is at the arena's door")
 	check(Cm.purges == 0 and H.purges == 1, "the purge is the host's alone")
 	check(CA._state().mine == false and Cm.keys.coop_arena_gear() == nil, "his flag is gone")
-	check(HA._state().ledger[PROXY] == nil and HA._state().fight == nil, "the ledger and the fight are clean")
+	check(ledger_for(HA, PROXY) == nil and HA._state().fight == nil, "the ledger and the fight are clean")
 	local total = 0
 	for _ in pairs(W.items) do total = total + 1 end
 	check(total == 5 + 6 + 4 + 1, "no item was made or lost on the way: 5 + 6 + the kit + the knife")
@@ -655,13 +681,12 @@ do
 	H.env.coop_npc_players.invalidate()
 	win(3)
 	check(same(owned(BOX1), client_gear), "won without him: his gear waits in box 1")
-	check(HA._state().ledger[PROXY] ~= nil and HA._state().fight == nil, "his ledger stays, the fight is over")
+	check(ledger_for(HA, PROXY) ~= nil and HA._state().fight == nil, "his ledger stays, the fight is over")
 	-- the host saves and loads the world meanwhile
 	local md = {}
 	H.fire("save_state", md)
-	HA._state().ledger[PROXY] = nil
 	H.fire("load_state", md)
-	check(HA._state().ledger[PROXY] and #HA._state().ledger[PROXY].items == 6, "the ledger comes back with the host's world")
+	check(ledger_for(HA, PROXY) and #ledger_for(HA, PROXY).items == 6, "the ledger comes back with the host's world")
 	-- he rejoins: his Lua state is new, his flag comes from the world he loads (a per-player key)
 	H.objects[PROXY] = proxy
 	Cm = client_machine()
@@ -710,7 +735,7 @@ do
 	W.infos.totaliz_money_has_gone = true
 	Cm.env.dialogs_mlr.teleport_for_totaliz(Cm.env.db.actor, nil)
 	pump()
-	check(same(owned(BOX1), client_gear) and HA._state().ledger[PROXY].kind == "bet", "his gear is in box 1, as a bet")
+	check(same(owned(BOX1), client_gear) and ledger_for(HA, PROXY).kind == "bet", "his gear is in box 1, as a bet")
 	check(sections_of(PROXY) == "wpn_binoc" and created_by("client", PROXY) == 1, "his binoculars are his stock call's")
 	check(math.abs(Cm.env.db.actor._pos.x - BET_SPOT_X) < 0.01 and (Cm.requests or 0) == 0, "he stands at the spectators' place, no move of his own asked")
 	check(same(owned(0), host_gear) and at(H.env.db.actor, host_pos), "the host is not touched")
@@ -720,7 +745,7 @@ do
 	check(same(owned(PROXY), client_gear) and sections_of(BOX2) == "wpn_binoc", "the fight is over: his gear back, the binoculars in box 2")
 	check(same(owned(0), host_gear) and #H.ran == 0, "the host's inventory stays his (b-L10: it went into box 2 before)")
 	check(math.abs(Cm.env.db.actor._pos.x - BET_OUT_X) < 0.01 and not released(H, PROXY), "the bettor is out, his character not purged")
-	check(CA._state().mine == false and HA._state().ledger[PROXY] == nil, "flag and ledger clean")
+	check(CA._state().mine == false and ledger_for(HA, PROXY) == nil, "flag and ledger clean")
 end
 
 print("== the host and a client bet at once")
@@ -788,6 +813,7 @@ do
 	start(3)
 	check(#HA._state().ledger == 0 and next(HA._state().ledger) == nil, "no box: no ledger")
 	win(3)
+	check(at(Cm.env.db.actor, DOOR), "no box: a fighter who reached the pit can still leave it after the win")
 	local kept = 0
 	for _, id in ipairs(owned(PROXY)) do for _, g in ipairs(client_gear) do if g == id then kept = kept + 1 end end end
 	check(kept == 6 and #owned(BOX2) == 0, "won: his own gear never went into box 2 (stock would have put it there)")
@@ -799,7 +825,7 @@ do
 	local box = H.objects[BOX1]
 	H.objects[BOX1] = nil -- box 1 is not online (the host stands on another part of the world)
 	win(3)
-	check(same(owned(BOX1), client_gear) and HA._state().ledger[PROXY] ~= nil, "box 1 is not here: his ledger waits, nothing is lost")
+	check(same(owned(BOX1), client_gear) and ledger_for(HA, PROXY) ~= nil, "box 1 is not here: his ledger waits, nothing is lost")
 	check(sections_of(PROXY) == "ammo_12x70_buck,ammo_12x70_buck,stalker_outfit,wpn_bm16", "and nothing of his went to box 2")
 	H.objects[BOX1] = box
 	tick(H, 20000)
@@ -873,7 +899,7 @@ do
 	tick(H)
 	pump()
 	check(same(owned(PROXY), client_gear) and at(Cm.env.db.actor, DOOR), "he stands: the host gives it back, he is at the door")
-	check(CA._state().mine == false and HA._state().ledger[PROXY] == nil, "flag and ledger clean")
+	check(CA._state().mine == false and ledger_for(HA, PROXY) == nil, "flag and ledger clean")
 
 	setup()
 	client_gear = owned(PROXY)
@@ -916,8 +942,9 @@ do
 	local client_gear = owned(PROXY)
 	W.talked[1] = NOW
 	start(3)
-	check(#HA._state().ledger[PROXY].kit == 4, "his machine told the host what the arena gave him")
+	check(#ledger_for(HA, PROXY).kit == 4, "his machine told the host what the arena gave him")
 	-- he falls and keeps his inventory (the keep setting), respawns outside, picks something up, his ask comes late
+	tick(H)
 	Cm.env.db.actor._pos = vec(0, 0, 0)
 	H.objects[PROXY]._pos = vec(0, 0, 0)
 	local found = new_item("bread", PROXY, "world")
@@ -950,7 +977,7 @@ do
 	W.infos.totaliz_money_has_gone = true
 	Cm.env.dialogs_mlr.teleport_for_totaliz(Cm.env.db.actor, nil)
 	pump()
-	check(HA._state().ledger[PROXY].kind == "fight" and #HA._state().ledger[PROXY].items == 6, "his ledger stays the fight's")
+	check(ledger_for(HA, PROXY).kind == "fight" and #ledger_for(HA, PROXY).items == 6, "his ledger stays the fight's")
 	check(#owned(BOX1) == 6 and sections_of(PROXY):find("wpn_binoc", 1, true) == nil, "nothing more went in, no bet")
 end
 
@@ -958,7 +985,6 @@ print("== split levels: the Bar's ledger outlives its map server")
 do
 	reset_world()
 	NOW = NOW + 1000000
-	local BRIDGE = 0x101
 	W = { items = {}, holders = {}, next_id = 2000, moves = 0, infos = {}, talked = {}, created = {}, client_seen = {} }
 	local function share_stub(M)
 		M.ups, M.downs = {}, {}
@@ -996,6 +1022,7 @@ do
 		share_stub(Mk)
 		local A = load_script(Mk, "coop_arena")
 		A.on_game_start()
+		Mk.zone:net_spawn()
 		return Mk, A
 	end
 	local Mk, MA = map_server()
@@ -1008,6 +1035,7 @@ do
 	local up = Mk.ups.arena_ledger.get()
 	check(up and up.based == false and #up.list == 1, "the map server tells the world server its ledger (before it heard the world's copy)")
 	Wd.ups.arena_ledger.set(up, 2)
+	local first_echo = Wd.downs.arena_ledger.get()
 	local md = {}
 	Wd.fire("save_state", md)
 	check(md.coop_arena and md.coop_arena.split and #md.coop_arena.split == 1, "the world server keeps it in its save")
@@ -1018,15 +1046,72 @@ do
 	H = Mk2
 	check(next(MA2._state().ledger) == nil, "a new map server knows nothing")
 	Mk2.downs.arena_ledger.set(Wd.downs.arena_ledger.get())
-	check(MA2._state().ledger[PROXY] and #MA2._state().ledger[PROXY].items == 3, "it takes the world's copy")
+	check(ledger_for(MA2, PROXY) and #ledger_for(MA2, PROXY).items == 3, "it takes the world's copy")
 	Mk2.downs.arena_ledger.set({ list = {} })
-	check(MA2._state().ledger[PROXY] ~= nil, "a later copy does not undo it")
+	check(ledger_for(MA2, PROXY) ~= nil, "a later copy does not undo it")
 	for _, f in ipairs(Mk2.handlers["arena.out"] or {}) do f(Mk2.env.coop_main.encode({ _peer = 1 }), 0) end
 	check(same(owned(PROXY), gear), "he comes back: his gear from box 1")
 	local up2 = Mk2.ups.arena_ledger.get()
 	check(up2 and up2.based == true and #up2.list == 0, "the empty ledger goes up as the truth")
 	Wd.ups.arena_ledger.set(up2, 2)
 	check(#WA._state().world_copy == 0, "the world server's copy is empty again")
+
+	-- V3: an arena return before the Bar receives its first echo. The flush and the delayed echo
+	-- must both preserve the deletion, even though the first up already advertised the row.
+	local Mk3, MA3 = map_server()
+	H = Mk3
+	Mk3.env.xr_effects.bar_arena_teleport(Mk3.env.db.actor, Mk3.objects[TRIG])
+	Wd.ups.arena_ledger.set(Mk3.ups.arena_ledger.get(), 2)
+	local stale = Wd.downs.arena_ledger.get()
+	for _, f in ipairs(Mk3.handlers["arena.out"] or {}) do f(Mk3.env.coop_main.encode({ _peer = 1 }), 0) end
+	local flushed = Mk3.ups.arena_ledger.get()
+	check(flushed ~= nil, "V3: the flush can send a return even before the first down share")
+	if flushed then Wd.ups.arena_ledger.set(flushed, 2) end
+	check(#Wd.downs.arena_ledger.get().list == 0, "V3: the world copy has no row after the return is flushed")
+	local sent_before = #sent_named(Mk3, "arena.go")
+	Mk3.downs.arena_ledger.set(stale)
+	tick(Mk3, 16000)
+	check(next(MA3._state().ledger) == nil and #sent_named(Mk3, "arena.go") == sent_before and same(owned(PROXY), gear),
+		"V3: a delayed echo cannot give back the same gear or send a second way out")
+
+	-- V4: model W6 applying the Bar's save_state before load_state on the next map server.
+	local Mk4, MA4 = map_server()
+	H = Mk4
+	Mk4.env.xr_effects.bar_arena_teleport(Mk4.env.db.actor, Mk4.objects[TRIG])
+	local kit = new_item("wpn_bm16", PROXY, "client")
+	for _, f in ipairs(Mk4.handlers["arena.kit"] or {}) do
+		f(Mk4.env.coop_main.encode({ _peer = 1, i = tostring(kit._id) }), 0)
+	end
+	Mk4.objects[PROXY]._pos = IN_ARENA
+	tick(Mk4)
+	Mk4.objects[PROXY]._pos = vec(146, 1, 70)
+	tick(Mk4)
+	local carried = {}
+	Mk4.fire("save_state", carried)
+	local Mk5, MA5 = map_server()
+	H = Mk5
+	Mk5.objects[PROXY]._pos = IN_ARENA
+	Mk5.fire("load_state", carried)
+	Mk5.downs.arena_ledger.set(first_echo)
+	tick(Mk5, 16000)
+	check(MA5._state().fight ~= nil and same(owned(BOX1), gear) and #sent_named(Mk5, "arena.go") == 0,
+		"V4: a carried running fight stays active after the map restarts")
+	Mk5.objects[PROXY]._pos = vec(146, 1, 70)
+	local outside = new_item("bread", PROXY, "trader")
+	W.infos.bar_arena_fight_3_done = true
+	Mk5.env.xr_effects.bar_arena_teleport_2(Mk5.env.db.actor, nil)
+	check(outside._parent == PROXY and kit._parent == BOX2 and #owned(BOX1) == 0,
+		"V4: restored custody returns the kit and preserves an outside pickup when the fight ends")
+
+	W.infos.bar_arena_fight_3_done = nil
+	Mk5.env.xr_effects.bar_arena_teleport(Mk5.env.db.actor, Mk5.objects[TRIG])
+	local before_retire = Mk5.ups.arena_ledger.get()
+	Wd.ups.arena_ledger.set(before_retire, 2)
+	Wd.fire("server_entity_on_unregister", Wd.env.alife_object(PROXY), "se_stalker")
+	W.holders[PROXY] = nil
+	check(#Wd.downs.arena_ledger.get().list == 0, "V5: the world server clears the retired character from its copy")
+	Wd.ups.arena_ledger.set(before_retire, 2)
+	check(#Wd.downs.arena_ledger.get().list == 0, "V5: an old Bar share cannot recreate the ledger of a released character")
 end
 
 -------------------------------------------------------------------------------
@@ -1915,6 +2000,7 @@ do
 	H.cut, Cm.cut = H.new_cut(), Cm.new_cut()
 	H.cut:zone_enter()
 	Cm.cut:zone_enter()
+	H.objects[PROXY]._pos = vector():set(Cm.env.db.actor:position())
 	check(#owned(BOX1) == #host_gear + #client_gear, "both gears are in box 1")
 	check(created_by("host", 0) == 4 and created_by("client", PROXY) == 4, "each his own kit, made by his own machine")
 	check(H.cut_in == 1 and Cm.cut_in == 1, "both cutscenes play")
@@ -2036,6 +2122,204 @@ do
 	H.objects[PROXY]._pos = vec(149, 1, 74)
 	H.env.db.actor._pos = vec(120, 0, 100)
 	check(xc.bar_actor_rank_stalker(H.env.db.actor, H.objects[SR]) == true, "the client nearest: his rank")
+end
+
+local function stage_fighter(answer, third)
+	setup({ answer = answer, third = third })
+	W.talked[1] = NOW
+	W.infos.bar_arena_fight_3 = true
+	-- The Bar authority stows his gear. Deliberately leave the "in" event in flight.
+	H.env.xr_effects.bar_arena_teleport(H.env.db.actor, H.objects[TRIG])
+end
+
+local function load_travel(M)
+	load_script(M, "coop_economy_core")
+	load_script(M, "coop_economy_group")
+	local travel = load_script(M, "coop_economy_travel")
+	travel.on_game_start()
+	return travel
+end
+
+for _, answer in ipairs(modes.names()) do
+	if answer == "hostplay" or answer == "srv_map" then
+		print("== R32 arena under " .. answer .. ": V1, win and group travel")
+		stage_fighter(answer, true)
+		check(HA._state().fight and HA._state().fight.id == PROXY and CA._state().mine == false,
+			"V1: the authority lists the fighter before his machine sees arena.in")
+		local travel = load_travel(H)
+		load_travel(Cm)
+		local trip = { x = 250, y = 0, z = 250 }
+		local origin = H.env.db.actor:position()
+		H.sent = {}
+		travel.group_teleport(trip, nil, origin, -1, "travel")
+		local offers = sent_named(H, "economy.tp")
+		if answer == "hostplay" then
+			check(#offers == 1 and offers[1].target == 2, "V1: only the unlisted player gets a trip offer")
+		else
+			check(#offers == 0, "V1: the map authority issues no group travel offer")
+		end
+		local bread = new_item("bread", PROXY, "trader")
+		local after_offer = #sent_named(H, "arena.go")
+		win(3)
+		check(bread._parent == PROXY, "V1: a win leaves the never-inside fighter's bread with him")
+		local events = sent_named(H, "arena.go")
+		check(#events == after_offer + 1 and H.env.coop_main.decode(events[#events].payload).f == "none",
+			"V1: the never-inside fighter gets his gear back without a way-out teleport")
+
+		if answer == "hostplay" then
+			setup()
+			travel = load_travel(H)
+			load_travel(Cm)
+			travel.group_teleport(trip, nil, H.env.db.actor:position(), -1, "travel")
+			pump()
+			local offer = Cm.BOX
+			check(offer ~= nil, "V1: the player can receive an offer before he is listed")
+			W.talked[1] = NOW
+			start(3)
+			if offer then offer.ok() end
+			check(at(Cm.env.db.actor, IN_ARENA), "V1: a trip offer already open cannot move him out of the pit")
+		end
+
+		stage_fighter(answer)
+		local kit = new_item("wpn_bm16", PROXY, "client")
+		local payload = H.env.coop_main.encode({ i = tostring(kit._id), _peer = 1 })
+		for _, handler in ipairs(H.handlers["arena.kit"] or {}) do handler(payload, answer == "srv_map" and 0 or 1) end
+		H.objects[PROXY]._pos = IN_ARENA
+		tick(H)
+		H.objects[PROXY]._pos = vec(146, 1, 70)
+		tick(H)
+		bread = new_item("bread", PROXY, "trader")
+		win(3)
+		check(kit._parent == BOX2 and bread._parent == PROXY, "V1: a loose fighter returns his kit and keeps his outside pickup")
+
+		stage_fighter(answer)
+		H.objects[PROXY]._pos = IN_ARENA -- position is already inside, even before the first tick
+		local knife = new_item("wpn_knife", PROXY, "world")
+		win(3)
+		check(knife._parent == BOX2, "V1: a fighter in the pit still returns everything he holds there")
+
+		-- gate WP16: his machine made the kit (its "in" came) but he never reached the pit: the kit is the arena's all the same
+		for _, way in ipairs({ "win", "heal" }) do
+			stage_fighter(answer)
+			local own = owned(BOX1)
+			local made = new_item("wpn_bm16", PROXY, "client")
+			local tell = H.env.coop_main.encode({ i = tostring(made._id), _peer = 1 })
+			for _, handler in ipairs(H.handlers["arena.kit"] or {}) do handler(tell, answer == "srv_map" and 0 or 1) end
+			H.objects[PROXY]._pos = vec(146, 1, 70)
+			tick(H)
+			local found = new_item("bread", PROXY, "trader")
+			if way == "win" then win(3) else tick(H, 16000) end
+			check(made._parent == BOX2 and found._parent == PROXY and #owned(BOX1) == 0 and #owned(PROXY) == #own + 1,
+				"gate WP16 (" .. way .. "): a never-inside fighter's kit goes back by its ids, his pickup stays, his gear comes back")
+		end
+
+		print("== R32 arena under " .. answer .. ": V2, a never-inside death and recovery")
+		stage_fighter(answer)
+		local gear = owned(BOX1)
+		local medkit = new_item("medkit", PROXY, "friend")
+		local bandage = new_item("bandage", BODY, "friend")
+		tick(H)
+		H.env.coop.life_of = function(id) return id == PROXY and "dead" or "alive" end
+		H.fire("coop_death_marker", PROXY, BODY, "drop")
+		tick(H)
+		check(medkit._parent == PROXY, "V2: a never-inside death leaves held items with the fighter")
+		check(bandage._parent == BODY, "V2: a never-inside death leaves the contents of his death stash alone")
+		H.env.coop.life_of = function() return "alive" end
+		tick(H, 20000)
+		check(#gear == 6 and #owned(BOX1) == 0 and #owned(PROXY) == #gear + 1 and HA._state().fight == nil,
+			"V2: the authority returns his stowed gear after the grace period, even with the fight info and no client ask")
+
+		print("== R32 arena under " .. answer .. ": V5, retirement and a reused avatar id")
+		stage_fighter(answer)
+		local retired = H.env.alife_object(PROXY)
+		H.fire("server_entity_on_unregister", retired, "se_stalker")
+		H.objects[PROXY], W.holders[PROXY] = nil, nil
+		local after_retire = {}
+		H.fire("save_state", after_retire)
+		check(not after_retire.coop_arena or #after_retire.coop_arena.ledger == 0,
+			"V5: releasing the retired character clears the ledger immediately")
+
+		stage_fighter(answer)
+		local old = H.env.alife_object(PROXY)
+		local saved = {}
+		H.fire("save_state", saved)
+		H.add(make_obj(PROXY, 146, 1, 70, { _section = "coop_player_avatar",
+			_spawn_ini = make_ini({ coop = { { "key", string.rep("a", 64) } } }) }))
+		holder(H, H.objects[PROXY], PROXY)
+		H.fire("load_state", saved)
+		HA.fight_over()
+		tick(H, 16000)
+		check(#owned(PROXY) == 0 and #owned(BOX1) == 6, "V5: a second character using the same avatar id cannot claim the first one's gear")
+		H.fire("server_entity_on_unregister", old, "se_stalker")
+		saved = {}
+		H.fire("save_state", saved)
+		check(not saved.coop_arena or #saved.coop_arena.ledger == 0, "V5: the retired character's ledger is gone from the save")
+
+		stage_fighter(answer)
+		saved = {}
+		H.fire("save_state", saved)
+		saved.coop_arena.ledger[1].character = nil -- the former save schema recorded only the avatar id
+		H.env.coop_economy_mdata.player_value = function() return true end -- legacy gear flag was keyed by that same id
+		QUEUE = {} -- packets from before the load belong to the old session
+		H.fire("load_state", saved)
+		win(3)
+		check(#owned(PROXY) == 6 and #owned(BOX1) == 0 and ledger_for(HA, PROXY) == nil,
+			"gate WP16: an id-only row of an older save is the character's under that id: his gear comes back")
+
+		-- gate WP16: the same row on a heal after a load, with the fight over (his own ask came before the load)
+		stage_fighter(answer)
+		saved = {}
+		H.fire("save_state", saved)
+		saved.coop_arena.ledger[1].character = nil
+		saved.coop_arena.fight = nil
+		QUEUE = {}
+		H.fire("load_state", saved)
+		tick(H)
+		local adopted = ledger_for(HA, PROXY)
+		check(adopted and adopted.character ~= nil, "gate WP16: the first tick after the load gives the older row its character")
+		local up_rows = {}
+		H.fire("save_state", up_rows)
+		check(up_rows.coop_arena and up_rows.coop_arena.ledger[1] and up_rows.coop_arena.ledger[1].character == adopted.character,
+			"gate WP16: the adopted row is saved under its character")
+		tick(H, 16000)
+		check(#owned(PROXY) == 6 and #owned(BOX1) == 0 and ledger_for(HA, PROXY) == nil,
+			"gate WP16: the heal gives an adopted row back once its player stands on the Bar")
+
+		-- gate WP16: an id-only row whose id named no player character at the load (a retirement released it) is an orphan for
+		-- good: a later character under that id, the same player's included, never gets it, and the save keeps it so
+		stage_fighter(answer)
+		saved = {}
+		H.fire("save_state", saved)
+		saved.coop_arena.ledger[1].character = nil
+		saved.coop_arena.fight = nil
+		H.objects[PROXY], W.holders[PROXY] = nil, nil
+		QUEUE = {}
+		H.fire("load_state", saved)
+		tick(H)
+		H.add(make_obj(PROXY, 146, 1, 70, { _section = "coop_player_avatar",
+			_spawn_ini = make_ini({ coop = { { "key", string.format("%064x", PROXY) } } }) }))
+		holder(H, H.objects[PROXY], PROXY)
+		tick(H, 16000)
+		local kept = {}
+		H.fire("save_state", kept)
+		check(#owned(PROXY) == 0 and #owned(BOX1) == 6 and kept.coop_arena and kept.coop_arena.ledger[1]
+			and kept.coop_arena.ledger[1].orphan == true and kept.coop_arena.ledger[1].character == nil,
+			"gate WP16: an orphan id-only row goes to nobody who takes the id later, and stays an orphan in the save")
+		QUEUE = {}
+		H.fire("load_state", kept)
+		tick(H, 16000)
+		check(#owned(PROXY) == 0 and #owned(BOX1) == 6, "gate WP16: after the next load the orphan still goes to nobody")
+
+		if answer == "hostplay" then
+			setup()
+			W.talked[0] = NOW
+			start(1)
+			tick(H)
+			H.fire("coop_host_new_character", 0)
+			check(ledger_for(HA, 0) == nil and HA._state().mine == false and HA._state().fight == nil,
+				"V5: the host's retirement clears his gear record although the actor id stays the same")
+		end
+	end
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
