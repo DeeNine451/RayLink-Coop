@@ -368,7 +368,7 @@ A default body for each (none's answer, which `NoneMode` keeps); each mode of th
 
 `EntityUp` (H-ENTITYUP) gains `Joined`, `Left` (id: the squad, other: the member), `Info` (id: the object) and `ItemFacts` (id: the
 item) after `Died`; the first four keep their values. `LevelSide::level_entity_up(kind, id, other)` is unchanged: it carries no
-info name nor on/off and no item state, so `Info` and `ItemFacts` carry their payload through `LevelSide::level_info_up(id, info, on)` and `LevelSide::level_item_facts_up(id, const levels::wire::journal::ItemFactsBody&)`, both with empty default bodies (design R32-final.md §8a A7).
+info name nor on/off and no item state, so `Info` and `ItemFacts` carry their payload through `LevelSide::level_info_up(id, info, on)` and `LevelSide::level_item_facts_up(id)` (the journal reads the item's facts from the writer's own object), both with empty default bodies (design R32-final.md §8a A7).
 
 ### 8.3 Lua
 
