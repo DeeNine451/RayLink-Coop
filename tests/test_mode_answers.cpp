@@ -582,3 +582,87 @@ TEST(mode_switchboard_names_each_layer_once)
 		CHECK(code.find("hostplay::") == std::string::npos);
 	}
 }
+
+
+// R32 W1 (design R32-final.md §1 W1.2, §8a A3-A8): every real mode says who writes an object; none is left to Mode's permissive
+// default (This). The co-op host writes everything, a player's machine (co-op client, server player) nothing (its host does), the
+// world server and a map server fill the writer rule's Seat from their own tables. Read from the sources: the engine files cannot
+// run here (the pure rule itself is tests/test_writer_rules.cpp).
+namespace
+{
+std::string class_body(const std::string& code, const std::string& name)
+{
+	const size_t at = code.find("class " + name + " final");
+	if (at == std::string::npos)
+		return "";
+	size_t i = code.find('{', at);
+	if (i == std::string::npos)
+		return "";
+	const size_t start = ++i;
+	int depth = 1;
+	for (; i < code.size() && depth; ++i)
+		depth += code[i] == '{' ? 1 : (code[i] == '}' ? -1 : 0);
+	return depth ? "" : code.substr(start, i - 1 - start);
+}
+
+void expect_in(const std::string& where, const std::string& text, const std::string& what)
+{
+	if (collapse(text).find(collapse(what)) == std::string::npos)
+		t::report_failure(__FILE__, __LINE__, where + " lacks: " + what);
+}
+} // namespace
+
+TEST(mode_writer_answers_of_the_real_modes)
+{
+	const std::string src = engine_src();
+	const std::string coop = code_of(read_text(src + "/xrGame/coop/hostplay/coop_hostplay_mode.cpp"));
+	const std::string srv = code_of(read_text(src + "/xrGame/coop/srv/coop_srv_mode.cpp"));
+	CHECK(!coop.empty() && !srv.empty());
+	expect_in("CoopHostMode", class_body(coop, "CoopHostMode"),
+	    "writer::Writer writer_of(const writer::RootFacts&) const override { return writer::this_process(); }");
+	expect_in("CoopClientMode", class_body(coop, "CoopClientMode"),
+	    "writer::Writer writer_of(const writer::RootFacts&) const override { return writer::other(kHostPeer); }");
+	expect_in("ServerClientMode", class_body(srv, "ServerClientMode"),
+	    "writer::Writer writer_of(const writer::RootFacts&) const override { return writer::other(kHostPeer); }");
+	expect_in("WorldServerMode", class_body(srv, "WorldServerMode"),
+	    "writer::Writer writer_of(const writer::RootFacts& r) const override { return world_writer_of(r); }");
+	expect_in("MapServerMode", class_body(srv, "MapServerMode"),
+	    "writer::Writer writer_of(const writer::RootFacts& r) const override { return map_writer_of(r); }");
+}
+
+TEST(mode_server_writer_reads_its_tables)
+{
+	const std::string srv = code_of(read_text(engine_src() + "/xrGame/coop/srv/coop_srv_mode.cpp"));
+	const std::string lead = body_of(srv, R"(writer::MapLead\s+world_lead_of)");
+	expect_in("world_lead_of", lead, "writer::lead_of(mapserver::host_life_of(level))"); // §8a A4: a stopping server writes
+	expect_in("world_lead_of", lead, "mapserver::bridge_of(level)");
+	CHECK(lead.find("host_ready") == std::string::npos); // §8a A4: never host_ready
+	const std::string world = body_of(srv, R"(writer::Writer\s+world_writer_of)");
+	expect_in("world_writer_of", world, "levels::holder_of(r.root)");
+	expect_in("world_writer_of", world, "mapserver::level_of_bridge(bridge)");
+	expect_in("world_writer_of", world, "seat.map = world_lead_of(r.level);");
+	expect_in("world_writer_of", world,
+	    "return writer::writer_of(r, writer::Process{writer::ProcessKind::World, writer::kNoLevel, kHostPeer}, seat);");
+	const std::string map = body_of(srv, R"(writer::Writer\s+map_writer_of)");
+	expect_in("map_writer_of", map, "levels::xfer_authors(r.root)");
+	expect_in("map_writer_of", map, "mapserver::server_leads() ? writer::Lead::Leads : writer::Lead::Starting");
+	expect_in("map_writer_of", map, "mgr().session().peer(peer)");
+	expect_in("map_writer_of", map, "return writer::writer_of(r, writer::Process{writer::ProcessKind::Level, mine, kHostPeer}, seat);");
+	for (const char* k : {"Character", "Unit", "Resident", "None"})
+	{
+		expect_in("world_writer_of", world, std::string("case writer::RootKind::") + k + ":");
+		expect_in("map_writer_of", map, std::string("case writer::RootKind::") + k + ":");
+	}
+}
+
+// §8a A7: the new EntityUp kinds have explicit cases on the map server (C4062 is off: a missing case would be silent), and the
+// data-carrying ups are overridden there.
+TEST(mode_map_server_ups_have_every_kind)
+{
+	const std::string srv = code_of(read_text(engine_src() + "/xrGame/coop/srv/coop_srv_mode.cpp"));
+	const std::string up = body_of(srv, R"(void\s+level_entity_up)");
+	for (const char* k : {"Spawned", "Released", "Parent", "Died", "Joined", "Left", "Info", "ItemFacts"})
+		expect_in("level_entity_up", up, std::string("case EntityUp::") + k + ":");
+	expect_in("MapLevelSide", class_body(srv, "MapLevelSide"), "void level_info_up(u16 id, const char*, bool) override");
+	expect_in("MapLevelSide", class_body(srv, "MapLevelSide"), "void level_item_facts_up(u16 id) override");
+}

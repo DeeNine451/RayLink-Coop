@@ -246,6 +246,15 @@ LAYER = {
 	hook = hook,
 	facts_of = facts_of,
 	far = far,
+	-- R32 W1: the engine's writer rule (who leads the object's map, who holds its unit); a player's machine writes nothing
+	writes = function(id)
+		if not (map_server() or world_server()) then return false end
+		return api ~= nil and call(api.writes, id) == true
+	end,
+	-- R32 W10 (WP13 fills it from the world's presence): nil until then
+	presence = function() return nil end,
+	-- R32 W7 (WP4 puts it in the level journal as a Done entry): not recorded until then
+	op_done = function() return false end,
 }
 
 local function started()
