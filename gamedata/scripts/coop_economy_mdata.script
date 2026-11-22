@@ -113,6 +113,11 @@ end
 -- se vars the world server does not send its map servers (filled from SE_HOST_ONLY below): NPC state that the authority of each
 -- level keeps itself, as before.
 local se_not_to_bridges = {}
+local se_targets = {} -- optional directed delivery for a variable, supplied by the authority that selects its recipient
+
+function set_se_target(var, target_of)
+	se_targets[var] = target_of
+end
 
 -- Sends `entries` ({ {id, key, packed}, ... }) as batches of `name`.
 -- bridges (world server, split levels): the map servers to send them to as well; `skip`: vars they do not get.
@@ -157,11 +162,23 @@ end
 -- body, and the map server, which had heard only of the strip, found nothing to take off. Every map server gets every such
 -- change, not only the sender's level's: an item moves between levels with its carrier, and a map server holds the entities
 -- of the whole world (it loads the world server's save). What the world server's own scripts write stays as before (its
--- players only): a "parts = nil" of its own bookkeeping must not wipe the table of a level's authority. Item riders (imd) do
--- not go this way.
-local function relay_to_bridges(entries, except)
-	local list = core.bridges()
-	if #list > 0 then send_batches("se", entries, nil, except, list, se_not_to_bridges) end
+-- players only, unless a variable has directed delivery. Item riders (imd) do not go this way.
+local function relay_to_bridges(entries, except, local_write)
+	if not local_write then
+		local list = core.bridges()
+		if #list > 0 then send_batches("se", entries, nil, except, list, se_not_to_bridges) end
+	end
+	local directed = {}
+	for _, entry in ipairs(entries) do
+		local target_of = se_targets[entry[2]]
+		local target = target_of and target_of(entry[1])
+		if target and target ~= except then
+			local batch = directed[target] or {}
+			batch[#batch + 1] = entry
+			directed[target] = batch
+		end
+	end
+	for target, batch in pairs(directed) do send_batches("se", batch, nil, nil, { target }) end
 end
 
 local function read_batch(t)
@@ -249,7 +266,7 @@ local function se_queue(id, varname, val)
 		se_early[key] = { id, varname, val }
 		return
 	end
-	if nobody_to_tell() then return end
+	if nobody_to_tell() and not se_targets[varname] then return end
 	if clone_busy[id] then return end
 	local packed = core.pack(val)
 	local hid = core.host_id(id)
@@ -299,6 +316,7 @@ local function se_flush()
 	table.sort(entries, function(a, b) return a[1] < b[1] or (a[1] == b[1] and a[2] < b[2]) end)
 	stats.se_out = stats.se_out + #entries
 	send_batches("se", entries, 0)
+	if next(se_targets) then relay_to_bridges(entries, nil, true) end
 	if carries() then
 		local t = core.now()
 		for key, e in pairs(se_recent) do

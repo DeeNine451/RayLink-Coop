@@ -6,6 +6,7 @@
 
 #include "coop_id_lease.h"
 #include "coop_spawn.h"
+#include "support/fake_mode.h"
 
 #include <algorithm>
 #include <deque>
@@ -527,6 +528,305 @@ TEST(lease_spec_first_pending)
 	CHECK_EQ(book.first_pending({}), lease::kNoId);
 	// a clone of a weapon the host has not made yet, or of one a pending clone replaces: refused (review C1)
 	CHECK(book.waiting(300) && book.waiting(900) && !book.waiting(5) && !book.waiting(lease::kNoId));
+}
+
+namespace
+{
+template <class Run>
+void request_modes(Run&& run)
+{
+	for (const char* name : {"coop_client", "server_client", "none"})
+	{
+		t::FakeMode mode(t::mode_case(name));
+		const bool mirror = (mode.roles() & uint8_t(ProcessRole::Mirror)) != 0;
+		run(mode, mirror);
+	}
+}
+} // namespace
+
+TEST(lease_wp8_pending_mutations_send_in_order_on_confirmation)
+{
+	request_modes([](t::FakeMode& mode, bool mirror)
+	{
+		constexpr uint16_t item = 300;
+		lease::SpecBook specs;
+		specs.add(item);
+		specs.add(400, 401);
+		specs.sent(item, 1, 0);
+		lease::Held<Msg> held;
+		for (Msg type : {Msg::ReqDestroy, Msg::ReqTransfer, Msg::ReqItemEvent})
+		{
+			if (!specs.can_queue_mutation(item, mirror, false))
+				continue;
+			const uint16_t by = specs.first_pending({item});
+			if (by == lease::kNoId)
+				mode.up(type, Writer{}, Lane::Reliable);
+			else
+				held.hold(by, type);
+		}
+		CHECK(!specs.can_queue_mutation(item, mirror, true)); // give-back or prepared replacement
+		CHECK(!specs.can_queue_mutation(401, mirror, false)); // source released by the clone
+		CHECK(mode.sent_up.empty());
+		CHECK_EQ(held.size(), mirror ? size_t(3) : size_t(0));
+		uint16_t confirmed = lease::kNoId;
+		REQUIRE(specs.answer(1, true, false, 10, confirmed) == lease::Outcome::Confirmed);
+		for (Msg type : held.release(confirmed))
+			mode.up(type, Writer{}, Lane::Reliable);
+		std::vector<Msg> sent;
+		for (const auto& msg : mode.sent_up)
+			sent.push_back(msg.type);
+		if (mirror)
+			CHECK((sent == std::vector<Msg>{Msg::ReqDestroy, Msg::ReqTransfer, Msg::ReqItemEvent}));
+		else
+			CHECK(sent.empty());
+		CHECK(held.release(confirmed).empty());
+	});
+}
+
+TEST(lease_wp8_pending_destroy_blocks_a_second_disassembly_until_removed_or_refused)
+{
+	request_modes([](t::FakeMode&, bool mirror)
+	{
+		constexpr uint16_t item = 301;
+		const int local_item = 1;
+		lease::SpecBook specs;
+		lease::RemovalBook<const int*> removes;
+		const auto waiting = [&] { return specs.waiting(item, removes.pending(item, &local_item)); };
+		unsigned disassemblies = 0;
+		const auto disassemble = [&]
+		{
+			if (!waiting() && specs.can_queue_mutation(item, mirror, false))
+			{
+				removes.begin(item, Msg::ReqDestroy, &local_item);
+				++disassemblies;
+			}
+		};
+		disassemble();
+		disassemble();
+		CHECK_EQ(disassemblies, mirror ? 1u : 0u);
+		CHECK_EQ(waiting(), mirror); // before the first flush
+		if (!mirror)
+			return;
+		removes.sent(item, 10);
+		CHECK(waiting());
+		CHECK(!removes.answer(item, 10, true, false, 10));
+		disassemble();
+		CHECK_EQ(disassemblies, 1u); // Ok can arrive before the local EntityDestroy
+		removes.discard_gone([](uint16_t) -> const int* { return nullptr; });
+		CHECK(!waiting());
+		disassemble();
+		REQUIRE(waiting());
+		removes.sent(item, 11);
+		CHECK(!removes.answer(item, 11, false, false, 11));
+		CHECK(!waiting());
+	});
+}
+
+TEST(lease_wp8_rate_limited_destroy_and_use_return_to_the_pacer)
+{
+	request_modes([](t::FakeMode& mode, bool mirror)
+	{
+		constexpr uint16_t item = 302;
+		const int local_item = 2;
+		const int replacement = 3;
+		for (Msg type : {Msg::ReqDestroy, Msg::ReqUse})
+		{
+			lease::SpecBook specs;
+			lease::RemovalBook<const int*> removes;
+			if (specs.can_queue_mutation(item, mirror, false))
+				removes.begin(item, type, &local_item);
+			CHECK_EQ(removes.ready(item, &local_item, 0), mirror);
+			if (!mirror)
+				continue;
+			removes.sent(item, 20);
+			CHECK(!removes.ready(item, &local_item, 0));
+			const auto retry = removes.answer(item, 20, false, true, 50);
+			REQUIRE(retry.has_value());
+			CHECK(retry->type == type && retry->item == item && retry->identity == &local_item);
+			CHECK(removes.pending(item, &local_item));
+			CHECK(!removes.ready(item, &local_item, 149));
+			CHECK(removes.ready(item, &local_item, 150));
+			CHECK(!removes.ready(item, &replacement, 150));
+			lease::DestroyPacer pacer;
+			for (unsigned i = 0; i < 30; ++i)
+				CHECK(pacer.take(150));
+			CHECK(!pacer.take(189));
+			REQUIRE(pacer.take(190));
+			mode.up(retry->type, Writer{}, Lane::Reliable);
+			REQUIRE(!mode.sent_up.empty());
+			CHECK(mode.sent_up.back().type == type);
+			removes.sent(item, 21);
+			CHECK(!removes.answer(item, 20, false, true, 200)); // an older result never queues it twice
+			CHECK(!removes.ready(item, &local_item, 200));
+			removes.discard_gone([&](uint16_t) { return &replacement; });
+			CHECK(!removes.pending(item, &local_item));
+		}
+		CHECK_EQ(mode.sent_up.size(), mirror ? size_t(2) : size_t(0));
+	});
+}
+
+TEST(lease_wp8_held_actions_disappear_with_watchdog_rollback)
+{
+	request_modes([](t::FakeMode& mode, bool mirror)
+	{
+		constexpr uint16_t holder = 303, item = 304;
+		const int local_holder = 3;
+		lease::SpecBook specs;
+		specs.add(holder);
+		specs.add(item);
+		specs.sent(holder, 30, 0);
+		specs.sent(item, 31, 0);
+		REQUIRE(specs.queued(31)); // the item outlives the holder's unanswered create
+		struct Request
+		{
+			Msg type;
+			uint16_t item;
+			uint16_t holder = lease::kNoId;
+		};
+		lease::Held<Request> held;
+		lease::RemovalBook<const int*> removes;
+		if (mirror)
+		{
+			REQUIRE(removes.begin(holder, Msg::ReqDestroy, &local_holder));
+			for (const Request& req : {Request{Msg::ReqDestroy, holder}, Request{Msg::ReqTransfer, item, holder},
+			         Request{Msg::ReqItemEvent, item}})
+				held.hold(specs.first_pending({req.item, req.holder}), req);
+		}
+		for (uint32_t i = 1; i <= lease::kMaxResends; ++i)
+		{
+			const uint64_t now = i * lease::kAnswerTimeoutMs;
+			REQUIRE((specs.due(now).resend == std::vector<uint16_t>{holder}));
+			specs.sent(holder, 31 + i, now);
+		}
+		const uint64_t deadline = (lease::kMaxResends + 1) * lease::kAnswerTimeoutMs;
+		CHECK(specs.due(deadline - 1).rollback.empty());
+		CHECK((specs.due(deadline).rollback == std::vector<uint16_t>{holder}));
+		const auto mentions = [=](const Request& req) { return req.item == holder || req.holder == holder; };
+		const auto drop = [&](const Request& req)
+		{
+			if (req.type == Msg::ReqDestroy)
+				removes.forget(req.item, &local_holder);
+		};
+		CHECK_EQ(held.drop_matching(holder, mentions, drop), mirror ? size_t(2) : size_t(0));
+		CHECK(!removes.pending(holder, &local_holder));
+		uint16_t answered = lease::kNoId;
+		CHECK(specs.answer(30, true, false, deadline + 1, answered) == lease::Outcome::Unknown);
+		CHECK(held.release(holder).empty());
+		CHECK(specs.answer(31, true, false, deadline + 2, answered) == lease::Outcome::Confirmed);
+		for (const Request& a : held.release(answered))
+			mode.up(a.type, Writer{}, Lane::Reliable);
+		REQUIRE(mode.sent_up.size() == (mirror ? size_t(1) : size_t(0)));
+		if (mirror)
+			CHECK(mode.sent_up.front().type == Msg::ReqItemEvent);
+	});
+}
+
+// R32 addendum P2 (gap-placeables P2, verify-gaps2 P2): a double-click eats a sleeping bag; the tent guard gives a copy back
+// at once (a leased create, pending) before its claim; a second double-click within the round trip eats that copy. The eat
+// is a drop first (client_move), its destroy follows the authority's drop. Held, the copy's drop reaches the authority after
+// its create: one bag in, one placed, none kept. Dropped (the b51c97e3 early return), the copy stays at the authority while
+// the guard gives back one more: one placed and one kept. A refused copy takes its held drop with it.
+TEST(lease_wp8_p2_bag_double_click_on_a_pending_copy_places_one_bag)
+{
+	request_modes([](t::FakeMode&, bool mirror)
+	{
+		for (const bool copy_refused : {false, true})
+		{
+			constexpr uint16_t bag1 = 310, copy1 = 311, copy2 = 312; // the bag in, the give-backs of the first and second eat
+			struct Op
+			{
+				Msg type;
+				uint16_t item;
+			};
+			std::set<uint16_t> bag = {bag1}, ground; // the authority's copies
+			lease::SpecBook specs;
+			lease::Held<Op> held;
+			std::vector<Op> out; // on the way to the authority, in order
+			size_t drops_seen = 0;
+			const auto request = [&](Op op)
+			{
+				if (!specs.can_queue_mutation(op.item, mirror, false))
+					return;
+				const uint16_t by = specs.first_pending({op.item});
+				if (by == lease::kNoId)
+					out.push_back(op);
+				else
+					held.hold(by, op);
+			};
+			const auto authority = [&]
+			{
+				while (!out.empty())
+				{
+					const Op op = out.front();
+					out.erase(out.begin());
+					if (op.type == Msg::ReqDrop && bag.erase(op.item))
+					{
+						++drops_seen;
+						ground.insert(op.item);
+						request({Msg::ReqUse, op.item}); // eatable_item: the destroy follows the authority's drop
+					}
+					else if (op.type == Msg::ReqUse)
+						ground.erase(op.item);
+				}
+			};
+			const auto give_back = [&](uint16_t id, uint32_t seq)
+			{
+				if (!mirror)
+					return; // only a live mirror creates under a leased id
+				specs.add(id);
+				specs.sent(id, seq, 0); // the authority's budget queue keeps it for now
+			};
+			// click 1: the bag goes, the guard gives a copy back, claim 1 waits
+			request({Msg::ReqDrop, bag1});
+			give_back(copy1, 1);
+			authority();
+			// click 2, inside the round trip: the pending copy is eaten, one more give-back, claim 2 refused (busy)
+			request({Msg::ReqDrop, copy1});
+			give_back(copy2, 2);
+			authority();
+			// the creates are answered
+			uint16_t id = lease::kNoId;
+			if (mirror)
+			{
+				const lease::Outcome first = specs.answer(1, !copy_refused, false, 10, id);
+				REQUIRE(id == copy1);
+				if (first == lease::Outcome::Confirmed)
+				{
+					bag.insert(copy1);
+					for (const Op& op : held.release(copy1))
+						out.push_back(op);
+				}
+				else
+				{
+					REQUIRE(first == lease::Outcome::RolledBack);
+					const auto mentions = [&](const Op& op) { return op.item == copy1; };
+					CHECK_EQ(held.drop_matching(copy1, mentions, [](const Op&) {}), size_t(1));
+				}
+				authority();
+				REQUIRE(specs.answer(2, true, false, 20, id) == lease::Outcome::Confirmed);
+				bag.insert(copy2);
+				for (const Op& op : held.release(copy2))
+					out.push_back(op);
+				authority();
+			}
+			// claim 1 is answered: the authority places the lowest id it carries
+			size_t placed = 0;
+			if (mirror && !bag.empty())
+			{
+				bag.erase(bag.begin());
+				++placed;
+			}
+			CHECK_EQ(held.size(), size_t(0));
+			CHECK(ground.empty());
+			if (mirror)
+			{
+				CHECK_EQ(drops_seen, copy_refused ? size_t(1) : size_t(2));
+				CHECK_EQ(placed + bag.size(), size_t(1)); // one bag in: one placed or one kept, never both
+			}
+			else
+				CHECK(drops_seen == 0 && placed == 0 && bag.size() == 1);
+		}
+	});
 }
 
 TEST(lease_quarantine_keeps_other_worlds)

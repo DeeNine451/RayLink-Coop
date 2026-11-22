@@ -317,6 +317,11 @@ do
 	check(#H.env.axr_companions.list_actor_squad_by_id() == 0, "the world server's ghost has no squad list")
 	W.refresh()
 	check(H.teleported == nil and W.CM._leaders()[400] == 501, "with its leader on its level it stays")
+	H.share.up.comp_leaders.set(Mk.share.up.comp_leaders.get(), 2)
+	m = {}
+	H.fire("save_state", m)
+	check(H.env.axr_companions.companion_squads[400] ~= nil and m.coop_npc_leaders[400] == 501,
+		"the map server's word that it took the squad leaves the task's row in the world server's table")
 
 	print("-- with no ban on teleports in the task's call")
 	W.CM._leaders()[400] = nil
@@ -592,20 +597,24 @@ do
 	check(m.coop_npc_leaders[300] == 500 and m.coop_npc_leaders[400] == 501, "the next save has them all")
 end
 
-print("== a map server just loaded: its squad's leader stands elsewhere and was never on it, the world server's word says who he is")
+print("== a map server just loaded: its squad's leader stands elsewhere and was never on it, the world server's owner table says who he is")
 do
 	local W = stand({ dedicated = true })
 	local H, Mk = W.H, W.Mk
 	W.move(1, 1)
+	W.owners[1] = nil -- the world server's AvatarList reaches a map server after its WorldLoaded
 	local saved = { coop_npc_leaders = { [400] = 500 } }
 	H.fire("load_state", saved)
 	Mk.fire("load_state", saved)
 	W.refresh()
-	check(W.CM._leaders()[400] == 500 and #sent_named(Mk, "npc.comp_follow") == 0, "(its session does not know him)")
 	Mk.share.down.comp_leaders.set(H.share.down.comp_leaders.get())
 	W.refresh()
+	check(W.CM._leaders()[400] == 500 and #sent_named(Mk, "npc.comp_follow") == 0,
+		"(its session does not know him, the leaders' word names no seat: it waits)")
+	W.owners[1] = 500
+	W.refresh()
 	check(W.CM._leaders()[400] == 500 and #sent_named(Mk, "npc.comp_follow") == 1,
-		"the map server lets it go, its owner kept until the world server takes it")
+		"the world's owner table names him: the map server lets it go, its owner kept until the world server takes it")
 	W.refresh()
 	check(H.teleported and H.teleported.id == 400 and H.teleported.gvid == 10, "the world server teleports it to his body")
 	check(W.CK._leaders()[400] == 500, "his level takes it")

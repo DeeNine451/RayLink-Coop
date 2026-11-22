@@ -12,6 +12,7 @@ local function start(M, W, role, map)
 	api.is_dedicated = function() return role == "world" end
 	api.is_map_server = function() return role == "map" end
 	api.is_mirror = function() return false end
+	if role == "map" then api.peer_of_avatar = function(id) return id == LEADER and PEER or nil end end
 	api.session_info = function() return { max_players = 16 } end
 	api.levels = {
 		split = function() return W.split end,

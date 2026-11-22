@@ -1,8 +1,8 @@
 -- Server (srv): companion handoff between the world and map authorities (docs/MODES.md).
 -- A map server lets its squad go, the world server moves it to the leader's body, and the destination takes it.
--- The transport supplies the sending authority. The peer in FOLLOW/ADOPT identifies the squad's leader.
--- npc.comp_follow { s = squad, p = peer, l = character }: source map -> world.
--- npc.comp_adopt  { s = squad, p = peer, l = character, d = no dismissal, c = no teleport }: world -> destination.
+-- The transport supplies the sending authority. A peer is only a routing hint; l identifies the leader.
+-- npc.comp_follow { s = squad, p = peer, l = character, r = live rows }: source map -> world.
+-- npc.comp_adopt  { s = squad, l = character, d = no dismissal, c = no teleport, r = live rows, g = transfer }: world -> destination.
 -- npc.comp_drop   { s = squad, m = moved, keep stock marks }: world -> source.
 -- npc.comp_recall { s = squad }: world -> map holding the squad online.
 
@@ -11,6 +11,7 @@ local P, C -- player helpers and the shared companion state
 local EV_FOLLOW, EV_ADOPT, EV_DROP, EV_RECALL = "npc.comp_follow", "npc.comp_adopt", "npc.comp_drop", "npc.comp_recall"
 local RECALLED, RECALL_AGAIN_MS = "recalled", 20000
 local far, far_last = {}, {} -- level id -> leader and previous-leader tables
+local far_state = {} -- level id -> last reported squad rows and stock teleport verdict
 local down_heard = false -- a map server takes the saved leaders of its level once
 local teleport_rule
 local set_stock_squad, set_stock_teleport_rule
@@ -65,21 +66,140 @@ end
 -- A leader on another level (split levels, one player moves): his companions go after him. The authority of the level he left lets
 -- them go; the world server teleports them when none of them is online at a map server, and tells the authority of his level.
 -------------------------------------------------------------------------------
-local followers = {} -- world server: squad id -> { p = peer, l = leader's character, b = bridge of the map server that let it go }
+local followers = {} -- world server: squad id -> { l = leader's character, b = source bridge, rows, recall time }
 -- map server: squad id -> true: let go to the world server, still here and still its owner's until the world server took it (npc.comp_drop
 -- with m): a friend who stays by it keeps it online here, and nothing may forget whose it is meanwhile
 local leaving = {}
-local adopting = {} -- map server: squad id -> { word of the world server, when it came }: the squad is not here yet
-local ADOPT_WAIT_MS = 60000
+local adopting, adopted = {}, {} -- map server: deferred words, then applied transfer numbers for the next leader share
+local deliveries, next_transfer = {}, 0 -- world server: stock row stays here until the destination confirms adoption
+local ADOPT_RETRY_MS = 5000
+local ADOPT_WAIT_MS = 60000 -- map server: the longest an adopt word waits for the record of a member it has a row of
+local ROW_PART_BYTES, ROW_MAX_PARTS = 4500, 64 -- flat event escaping can triple the size; the engine allows 16 KiB
+local follow_parts, adopt_parts = {}, {}
+
+local function assigned_rows()
+	local mods = coop_mods_core
+	local ac = axr_companions
+	-- The stock load callback can replace the upvalue. Read the live table each time.
+	return mods and ac and mods.upvalue(ac.is_overweight, "assigned_items")
+end
+
+local function idiots_storage()
+	local lib = package and package.loaded
+	local npc, beh = lib and lib["illish.lib.npc"], lib and lib["illish.lib.beh"]
+	local mdata = a_idiots_mdata
+	if npc and beh and mdata and mdata.initStorage then return mdata.initStorage(), npc, beh end
+end
+
+local function capture_rows(squad)
+	if not squad then return nil end
+	local assigned = assigned_rows()
+	local data, npc, beh = idiots_storage()
+	if not (assigned or data) then return nil end
+	local rows = {}
+	for member in squad:squad_members() do
+		local id = member.id
+		local row = {}
+		if assigned then row.assigned = assigned[id] or false end
+		if data then
+			local st = db.storage[id]
+			local obj = st and st.object or level.object_by_id(id)
+			local sim = not obj and alife()
+			-- Useful Idiots reads each option through has_info, which also exists in the offline registry.
+			local info = obj or (sim and sim.has_info and { has_info = function(_, name) return sim:has_info(id, name) end })
+			row.states = info and npc.getAllStates(info) or (data.companionStates and data.companionStates[id])
+			row.beh = data.beh and data.beh[id]
+			if obj and st then
+				local storage = {}
+				beh.saveStorage(id, storage)
+				row.beh = storage[id] or false
+			end
+			if obj and obj.iterate_inventory then
+				row.loot = {}
+				obj:iterate_inventory(function(_, item)
+					local item_id = item:id()
+					row.loot[item_id] = npc.LOOT_SHARED_ITEMS[item_id] == true
+					return false
+				end, obj)
+			end
+		end
+		rows[id] = row
+	end
+	return rows
+end
+
+local function unpack_rows(blob)
+	if not blob or not coop_economy_core then return nil end
+	local rows = coop_economy_core.unpack(blob)
+	return type(rows) == "table" and rows or nil
+end
+
+local function pack_rows(rows)
+	return rows and coop_economy_core and coop_economy_core.pack(rows) or nil
+end
+
+local function merge_live_rows(previous, latest)
+	if not previous then return latest end
+	for id, row in pairs(latest or {}) do
+		if type(row) == "table" then
+			local saved = previous[id] or {}
+			for key, value in pairs(row) do saved[key] = value end
+			previous[id] = saved
+		end
+	end
+	return previous
+end
+
+local function apply_rows(squad, rows)
+	if not rows then return end
+	local assigned = assigned_rows()
+	local data, npc, beh = idiots_storage()
+	for member in squad:squad_members() do
+		local id, row = member.id, rows[member.id]
+		if type(row) == "table" then
+			if assigned and (type(row.assigned) == "table" or row.assigned == false) then
+				assigned[id] = row.assigned or nil
+			end
+			if data and type(row.loot) == "table" then
+				for item, mark in pairs(row.loot) do npc.LOOT_SHARED_ITEMS[item] = mark == true or nil end
+			end
+			if data and type(row.states) == "table" then
+				data.companionStates = data.companionStates or {}
+				data.beh = data.beh or {}
+				data.companionStates[id] = row.states
+				data.beh[id] = type(row.beh) == "table" and row.beh or nil
+				local st = db.storage[id]
+				local obj = st and st.object or level.object_by_id(id)
+				if obj then npc.setStates(obj, row.states) end
+				if obj and st then beh.loadStorage(id, data.beh) end
+			end
+		end
+	end
+end
 
 -- This process takes the squad. t: the world server's word with the stock's marks, it writes them for a map server's copy of the world.
 local function adopt(squad_id, lead, t)
 	local leaders = C.leaders()
 	local squad = alife_object(squad_id)
 	if not (squad and axr_companions) then return false end
+	local rows
+	if t and t.r then
+		rows = unpack_rows(t.r)
+		if not rows then return false end
+		local arrived = {}
+		for member in squad:squad_members() do
+			if not alife_object(member.id) then return false end
+			arrived[member.id] = true
+		end
+		-- A row of somebody who is no member of this copy: a record here means he left the squad (died, split off), and his row has
+		-- no member to go to; no record yet waits for it, ADOPT_WAIT_MS at most (a released member never comes).
+		local waited = t.at and time_global() - t.at >= ADOPT_WAIT_MS
+		for id in pairs(rows or {}) do
+			if not arrived[id] and not alife_object(id) and not waited then return false end
+		end
+	end
 	leaders[squad_id] = lead
 	set_stock_squad(squad_id, squad)
-	C.lead_peer[squad_id] = t and t.p or C.lead_peer[squad_id]
 	for k in squad:squad_members() do
 		if t then C.put_marks(k.id, true, t.d or nil, t.c or nil) end
 		local st = db.storage[k.id]
@@ -87,6 +207,10 @@ local function adopt(squad_id, lead, t)
 		if npc and not npc:has_info("npcx_is_companion") then -- a second setup would reset his orders
 			axr_companions.setup_companion_logic(npc, st, false, t and t.d)
 		end
+	end
+	if t then
+		apply_rows(squad, rows)
+		adopted[squad_id] = t.g
 	end
 	return true
 end
@@ -102,9 +226,49 @@ local function map_server_of(squad)
 	return nil
 end
 
-local function send_adopt(bridge, squad, lead, peer)
+-- World server: is `bridge` the map server of level `level_id`?
+local function leads_level(bridge, level_id)
+	local l = split_levels()
+	if not l then return false end
+	for _, ms in ipairs(l.map_servers()) do
+		if ms.bridge == bridge and ms.level == level_id then return true end
+	end
+	return false
+end
+
+local function send_word(name, word, target)
+	local n = word.r and math.ceil(#word.r / ROW_PART_BYTES) or 0
+	if n <= 1 then return P.send(name, word, target) end
+	if n > ROW_MAX_PARTS then
+		P.log(TAG, "%s squad %s has too many rows to send (%s parts)", name, tostring(word.s), tostring(n))
+		return false
+	end
+	local part = { n = n }
+	for key, value in pairs(word) do part[key] = value end
+	for i = 1, n do
+		part.i = i
+		part.r = word.r:sub((i - 1) * ROW_PART_BYTES + 1, i * ROW_PART_BYTES)
+		if not P.send(name, part, target) then return false end
+	end
+	return true
+end
+
+local function send_adopt(delivery, bridge)
+	delivery.sent = time_global()
+	send_word(EV_ADOPT, delivery.word, bridge)
+end
+
+-- own_row: the stock row is this process's own (a task claimed the squad here, HEAD kept it: task scripts ask it), not the handoff's.
+local function begin_adopt(bridge, level_id, squad, lead, peer, rows, own_row)
 	local m = C.marks_of(squad)
-	return P.send(EV_ADOPT, { s = squad.id, l = lead, p = peer, d = m.d, c = m.c }, bridge)
+	local carried = {}
+	for member in squad:squad_members() do carried[member.id] = rows and rows[member.id] or {} end
+	next_transfer = next_transfer + 1
+	local delivery = { level = level_id, own_row = own_row, word = { s = squad.id, l = lead, p = peer, d = m.d, c = m.c,
+		r = pack_rows(carried), g = next_transfer } }
+	deliveries[squad.id] = delivery
+	set_stock_squad(squad.id, squad)
+	send_adopt(delivery, bridge)
 end
 
 -- World server: a squad that was just claimed and stands on a map server's level is that server's to lead.
@@ -116,7 +280,7 @@ local function claimed_far(squad_id, lead, peer)
 	if not bridge then return end
 	leaders[squad_id] = nil
 	note_far(level_id, squad_id, lead)
-	send_adopt(bridge, squad, lead, peer)
+	begin_adopt(bridge, level_id, squad, lead, peer, capture_rows(squad), true)
 end
 
 -- The stock's add_special_squad marks a member only where he is a live NPC, and the world server has none of a map server's level: the
@@ -132,6 +296,12 @@ local function all_home(squad, l)
 		if l.online_at_server(k.id) then return false end
 	end
 	return true
+end
+
+local function world_peer(character)
+	for _, p in ipairs(P.players()) do
+		if p.avatar_id == character then return p.id end
+	end
 end
 
 -- World server: a friend who stays by the squad keeps it online at its map server, and it would never come home. That server is asked to
@@ -151,34 +321,58 @@ end
 local function follow_home(l)
 	for squad_id, f in pairs(followers) do
 		local squad = alife_object(squad_id)
-		local _, at = nil, nil
-		if squad then _, at = C.level_of_squad(squad) end
+		local level_id, at
+		if squad then level_id, at = C.level_of_squad(squad) end
+		local peer = world_peer(f.l)
+		local destination = peer and l.level_of_player(peer)
 		if not squad then
 			followers[squad_id] = nil
-		elseif at and at == l.level_name(l.level_of_player(f.p)) then
-			followers[squad_id] = nil -- he came back before it left: the map server there leads it again (follow_tick)
-		elseif all_home(squad, l) then
+		elseif destination and at and at == l.level_name(destination) then
+			followers[squad_id] = nil -- the character returned before the squad left
+			note_far(level_id, squad_id, f.l)
+			set_stock_squad(squad_id, nil)
+		elseif destination and not all_home(squad, l) then
+			ask_recall(l, squad_id, squad, f)
+		elseif destination and C.may_follow(squad) then
 			-- The world server has no level of a player: while the map server of his new level is still starting (b57b stand: 39 s)
 			-- there is nobody to tell, and the squad waits offline. Taken here it was lost: follow_tick put it back on `followers`, the
 			-- next round found it on his level already and forgot it, with no comp_adopt to anybody and no owner in the save.
-			local bridge = l.bridge_of_player(f.p)
-			local body = nil
-			if bridge then
-				for _, p in ipairs(P.players()) do
-					if p.id == f.p then body = p.avatar_id and alife_object(p.avatar_id) end
-				end
-			end
+			local bridge = l.bridge_of_player(peer)
+			local body = bridge and alife_object(f.l)
 			if body then
 				TeleportSquad(squad, body.position, body.m_level_vertex_id, body.m_game_vertex_id)
 				followers[squad_id] = nil
 				C.stats.follow = C.stats.follow + 1
 				if f.b then P.send(EV_DROP, { s = squad_id, m = true }, f.b) end -- the map server it left forgets it, no dismissal
-				set_stock_squad(squad_id, nil)
-				note_far(l.level_of_player(f.p), squad_id, f.l)
-				send_adopt(bridge, squad, f.l, f.p)
+				C.leaders()[squad_id] = nil
+				note_far(destination, squad_id, f.l)
+				begin_adopt(bridge, destination, squad, f.l, peer, f.rows)
 			end
+		end
+	end
+end
+
+local function retry_adoptions(l)
+	local bridges = {}
+	for _, ms in ipairs(l.map_servers()) do bridges[ms.level] = ms.bridge end
+	local now = time_global()
+	for id, delivery in pairs(deliveries) do
+		local bridge = bridges[delivery.level]
+		local squad = alife_object(id)
+		if not squad then
+			deliveries[id] = nil
+			set_stock_squad(id, nil)
+		elseif bridge then
+			if now - delivery.sent >= ADOPT_RETRY_MS then send_adopt(delivery, bridge) end
 		else
-			ask_recall(l, squad_id, squad, f)
+			-- Its level's map server is gone before it took the squad. While the leader stands there the next map server of that level
+			-- gets the word (all_leaders keeps it pending); once he stands on another level the squad goes after him from here.
+			local peer = world_peer(delivery.word.l)
+			local there = peer and l.level_of_player(peer)
+			if there and there ~= delivery.level and C.may_follow(squad) then
+				deliveries[id] = nil
+				followers[id] = { l = delivery.word.l, rows = unpack_rows(delivery.word.r) }
+			end
 		end
 	end
 end
@@ -193,11 +387,15 @@ local function left_behind(l)
 		if not led[level_id] then
 			for squad_id, lead in pairs(row) do
 				local squad = alife_object(squad_id)
-				local peer = P.peer_of(lead)
+				local peer = world_peer(lead)
 				local there = peer and l.level_name(l.level_of_player(peer))
-				if squad and there and not followers[squad_id] then
+				local state = far_state[level_id] and far_state[level_id][squad_id]
+				if squad and there and not followers[squad_id] and not deliveries[squad_id] and not (state and state.wait) then
 					local _, at = C.level_of_squad(squad)
-					if at and there ~= at and C.may_follow(squad) then followers[squad_id] = { p = peer, l = lead } end
+					if at and there ~= at and C.may_follow(squad) then
+						followers[squad_id] = { l = lead, rows = state and unpack_rows(state.rows) or capture_rows(squad) }
+						set_stock_squad(squad_id, squad)
+					end
 				end
 			end
 		end
@@ -208,9 +406,9 @@ local function follow_tick()
 	local leaders = C.leaders()
 	local l = split_levels()
 	if not l then return end
+	local resolve_peer = P.is_world_server() and world_peer or P.peer_of
 	for squad_id, lead in pairs(leaders) do
-		local peer = P.peer_of(lead) or C.lead_peer[squad_id]
-		C.lead_peer[squad_id] = peer
+		local peer = resolve_peer(lead)
 		local there = peer and l.level_name(l.level_of_player(peer))
 		local squad = alife_object(squad_id)
 		if leaving[squad_id] then
@@ -221,16 +419,19 @@ local function follow_tick()
 		elseif there and there ~= level.name() and (not squad or C.may_follow(squad)) then
 			if P.is_map_server() then
 				-- the squad goes when the engine gives it back (nothing of it online here); a friend by it keeps it here, so the owner stays
-				leaving[squad_id] = P.send(EV_FOLLOW, { s = squad_id, p = peer, l = lead }, 0) or nil
+				next_transfer = next_transfer + 1
+				leaving[squad_id] = send_word(EV_FOLLOW, { s = squad_id, p = peer, l = lead,
+					r = pack_rows(capture_rows(squad)), g = next_transfer }, 0) or nil
 			else
-				leaders[squad_id], C.lead_peer[squad_id] = nil, nil
-				followers[squad_id] = { p = peer, l = lead }
+				leaders[squad_id] = nil
+				followers[squad_id] = { l = lead, rows = capture_rows(squad) }
 			end
 		end
 	end
 	if P.is_world_server() then
 		left_behind(l)
 		follow_home(l)
+		retry_adoptions(l)
 	end
 end
 
@@ -243,7 +444,9 @@ local function wrap_teleport()
 	if type(f) ~= "function" or f == teleport_rule then return end
 	C.remember_teleport_rule(f)
 	teleport_rule = function(squad)
-		if squad and split_levels() and (C.leaders()[squad.id] ~= nil or far_leader(squad.id) ~= nil) then return false end
+		if squad and split_levels() and (C.leaders()[squad.id] or far_leader(squad.id) or followers[squad.id] or deliveries[squad.id]) then
+			return false
+		end
 		return f(squad)
 	end
 	set_stock_teleport_rule(ac, teleport_rule)
@@ -252,9 +455,8 @@ end
 -- Map server: the word that came before its squad.
 local function adopt_tick()
 	if C.sort_pending() then return end -- the leaders of its save are not sorted yet: that sort would take the word back
-	local now = time_global()
-	for squad_id, a in pairs(adopting) do
-		if adopt(squad_id, a.t.l, a.t) or now - a.at > ADOPT_WAIT_MS then adopting[squad_id] = nil end
+	for squad_id, word in pairs(adopting) do
+		if adopt(squad_id, word.l, word) then adopting[squad_id] = nil end
 	end
 end
 
@@ -280,22 +482,66 @@ local function transfer_word(name, ok, from)
 	return coop_trust.pass(name, ok, "invalid companion transfer from peer %s", tostring(from)) and ok
 end
 
+local function valid_word_rows(t)
+	if t.r ~= nil and (type(t.r) ~= "string" or #t.r > ROW_PART_BYTES) then return false end
+	if t.g ~= nil and not integer_in(t.g, 1, 0x7fffffff) then return false end
+	if t.n == nil and t.i == nil then return true end
+	return t.r ~= nil and t.g ~= nil and integer_in(t.n, 2, ROW_MAX_PARTS) and integer_in(t.i, 1, t.n)
+end
+
+-- The reliable lane keeps parts in order. A retry starts a fresh copy with part 1.
+local function collect_word(t, from, pending)
+	if not t.n then
+		pending[t.s] = nil
+		return t
+	end
+	local incoming = pending[t.s]
+	if t.i == 1 then
+		pending[t.s] = { from = from, g = t.g, n = t.n, rows = { t.r } }
+	elseif incoming and incoming.from == from and incoming.g == t.g and incoming.n == t.n and t.i == #incoming.rows + 1 then
+		incoming.rows[t.i] = t.r
+		if t.i == t.n then
+			t.r = table.concat(incoming.rows)
+			pending[t.s] = nil
+			return t
+		end
+	end
+end
+
 local function on_follow(t, from)
 	local ok = P.is_world_server() and integer_in(from, 0x101, 0x107) -- engine map server slots
-		and entity_id(t.s) and entity_id(t.l) and player_peer(t.p)
+		and entity_id(t.s) and entity_id(t.l) and player_peer(t.p) and valid_word_rows(t)
 	if not transfer_word("comp_follow", ok, from) then return end
-	followers[t.s] = { p = t.p, l = t.l, b = from }
+	-- On its way to a map server: only that map server may let it go. It lets go only a squad it leads, and its leader share leaves
+	-- out a squad on its way, so this word is its acknowledgement of the adopt too (the leader left again before that share).
+	local delivery = deliveries[t.s]
+	if delivery and not leads_level(from, delivery.level) then return end
+	t = collect_word(t, from, follow_parts)
+	if not t then return end
+	local squad = alife_object(t.s)
+	if not squad then return end
+	if delivery then deliveries[t.s] = nil end
+	local level_id = C.level_of_squad(squad)
+	local state = far_state[level_id] and far_state[level_id][t.s]
+	local rows = merge_live_rows(state and unpack_rows(state.rows), unpack_rows(t.r))
+	followers[t.s] = { l = t.l, b = from, rows = rows }
 	note_far(nil, t.s)
+	set_stock_squad(t.s, squad)
 end
 
 local function on_adopt(t, from)
 	local ok = P.is_map_server() and from == 0 and entity_id(t.s) and entity_id(t.l)
 		and (t.p == nil or player_peer(t.p)) and (t.d == nil or type(t.d) == "boolean")
-		and (t.c == nil or type(t.c) == "boolean")
+		and (t.c == nil or type(t.c) == "boolean") and valid_word_rows(t)
 	if not transfer_word("comp_adopt", ok, from) then return end
+	if t.g and adopted[t.s] == t.g then return end
+	t = collect_word(t, from, adopt_parts)
+	if not t then return end
+	local waiting = adopting[t.s] -- a retry of the same transfer keeps the time the first copy came
+	t.at = waiting and waiting.g == t.g and waiting.at or time_global()
 	-- A map server that has just loaded: its first refresh sorts the leaders of its save by where its copy of the world has their
 	-- squads, and the place of this one comes after the word. The word waits for that sort (adopt_tick).
-	if C.sort_pending() or not adopt(t.s, t.l, t) then adopting[t.s] = { t = t, at = time_global() } end
+	if C.sort_pending() or not adopt(t.s, t.l, t) then adopting[t.s] = t end
 end
 
 -- A task of the world server lets a squad go that a map server holds (Hidden Threat, the player left the station): the NPC is there.
@@ -304,7 +550,8 @@ local function on_drop(t, from)
 	local ok = P.is_map_server() and from == 0 and entity_id(t.s) and (t.m == nil or type(t.m) == "boolean")
 	if not transfer_word("comp_drop", ok, from) then return end
 	local recalled = leaving[t.s] == RECALLED
-	leaders[t.s], adopting[t.s], C.lead_peer[t.s], leaving[t.s] = nil, nil, nil, nil
+	leaders[t.s], adopting[t.s], adopted[t.s], leaving[t.s] = nil, nil, nil, nil
+	adopt_parts[t.s] = nil
 	if t.m == true then -- m: it went to its leader on another level, the world server took it; no dismissal
 		if axr_companions then set_stock_squad(t.s, nil) end
 		local l = recalled and split_levels()
@@ -336,17 +583,36 @@ end
 local function leaders_here()
 	local leaders = C.leaders()
 	if C.sort_pending() then return nil end -- the leaders of a save are every level's: this word would take them off the rows of the other map servers
-	local t = {}
+	local t, state, ack = {}, {}, {}
 	-- not one on its way out: the world server holds its owner (followers), this word would put it back on this level's row
-	for id, lead in pairs(leaders) do t[id] = not leaving[id] and lead or nil end
-	for id, a in pairs(adopting) do t[id] = a.t.l end
-	return { l = t, b = C.last_leaders() }
+	for id, lead in pairs(leaders) do
+		if not leaving[id] then
+			t[id], ack[id] = lead, adopted[id]
+			local squad = alife_object(id)
+			if squad then state[id] = { wait = not C.may_follow(squad), rows = pack_rows(capture_rows(squad)) } end
+		end
+	end
+	for id, word in pairs(adopting) do t[id] = word.l end
+	return { l = t, b = C.last_leaders(), a = ack, r = state }
 end
 
 local function leaders_heard(v, level_id)
 	if type(v) ~= "table" or type(v.l) ~= "table" or level_id == nil then return end
-	for id in pairs(v.l) do note_far(nil, id) end
-	far[level_id] = v.l
+	local row, state = {}, {}
+	for id, lead in pairs(v.l) do
+		local delivery = deliveries[id]
+		if delivery and delivery.level == level_id
+			and type(v.a) == "table" and v.a[id] == delivery.word.g then
+			if not delivery.own_row then set_stock_squad(id, nil) end
+			deliveries[id], delivery = nil, nil
+		end
+		if not delivery and not followers[id] then
+			note_far(nil, id)
+			row[id] = lead
+			if type(v.r) == "table" and type(v.r[id]) == "table" then state[id] = v.r[id] end
+		end
+	end
+	far[level_id], far_state[level_id] = row, state
 	far_last[level_id] = type(v.b) == "table" and v.b or nil
 end
 
@@ -356,6 +622,7 @@ local function add_saved_leaders(t, gone)
 	end
 	-- on its way to its leader: on_follow took it off `far`; after a load the authority of its level lets it go again (follow_tick)
 	for id, f in pairs(followers) do t[id] = f.l end
+	for id, delivery in pairs(deliveries) do t[id] = delivery.word.l end
 	if gone then
 		for _, row in pairs(far_last) do
 			for id, lead in pairs(row) do gone[id] = lead end
@@ -364,20 +631,18 @@ local function add_saved_leaders(t, gone)
 end
 
 local function all_leaders()
-	local t, peers = {}, {}
+	local t, pending = {}, {}
 	for id, lead in pairs(C.leaders()) do t[id] = lead end
 	add_saved_leaders(t)
-	for _, p in ipairs(P.players()) do
-		if type(p.avatar_id) == "number" then peers[p.avatar_id] = p.id end
-	end
-	return { l = t, p = peers }
+	for id in pairs(deliveries) do pending[id] = true end
+	return { l = t, a = pending }
 end
 
 local function leaders_given(v)
 	local leaders = C.leaders()
 	if down_heard or type(v) ~= "table" or type(v.l) ~= "table" then return end
 	down_heard = true
-	local peers = type(v.p) == "table" and v.p or {}
+	local pending = type(v.a) == "table" and v.a or {}
 	for id, lead in pairs(v.l) do
 		local squad = type(id) == "number" and alife_object(id)
 		local at = nil
@@ -385,23 +650,19 @@ local function leaders_given(v)
 			local _
 			_, at = C.level_of_squad(squad)
 		end
-		if at == level.name() then
-			if leaders[id] == nil then adopt(id, lead) end
-			-- also for a leader of the save: this session may never have seen him, and follow_tick asks where he stands
-			if leaders[id] == lead then C.lead_peer[id] = peers[lead] or C.lead_peer[id] end
-		end
+		if at == level.name() and leaders[id] == nil and not pending[id] then adopt(id, lead) end
 	end
 end
 
 local function dismiss_target(squad)
 	if not squad then return nil end
 	local way = followers[squad.id]
-	return (far_leader(squad.id) and map_server_of(squad)) or (way and way.b)
+	return ((far_leader(squad.id) or deliveries[squad.id]) and map_server_of(squad)) or (way and way.b)
 end
 
 local function dismissed(id, bridge)
 	note_far(nil, id)
-	followers[id], leaving[id] = nil, nil
+	followers[id], leaving[id], deliveries[id], adopted[id] = nil, nil, nil, nil
 	if bridge then P.send(EV_DROP, { s = id }, bridge) end
 end
 
@@ -427,13 +688,28 @@ end
 
 local function reset_travel()
 	-- The saved owners start a new handoff, without the previous world's in-flight records.
-	far, far_last, followers, leaving = {}, {}, {}, {}
+	far, far_last, far_state, followers, leaving, deliveries, adopting, adopted = {}, {}, {}, {}, {}, {}, {}, {}
+	follow_parts, adopt_parts = {}, {}
+	down_heard = false
+end
+
+local function install_mark_delivery()
+	local metadata = coop_economy_mdata
+	if not (metadata and coop_mode.decides_world()) then return end
+	local function holder(id)
+		local l = split_levels()
+		return l and l.holder_of and l.holder_of(id)
+	end
+	for _, key in ipairs({ "companion", "companion_cannot_dismiss", "companion_cannot_teleport" }) do
+		metadata.set_se_target(key, holder)
+	end
 end
 
 function on_game_start()
 	coop_mode.when_srv(function()
 		P = coop_npc_players
 		if not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
+		install_mark_delivery()
 		set_stock_squad = function(id, squad) axr_companions.companion_squads[id] = squad end
 		set_stock_teleport_rule = function(ac, rule) ac.companion_squad_can_teleport = rule end
 		C = coop_npc_companions.set_transfer_hooks({

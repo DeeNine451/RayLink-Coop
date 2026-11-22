@@ -21,7 +21,7 @@ local function new_world()
 			[3] = { id = FAR, map = B }, [4] = { id = NEAR, map = B } },
 		map = { [TRAVELLING] = A, [STAYING] = A }, holder = { [401] = A },
 		body = { position = vec(40, 2, 11), m_level_vertex_id = 87, m_game_vertex_id = 1901 },
-		arrivals = {},
+		arrivals = {}, servers = { { level = 7, bridge = A }, { level = 19, bridge = B } },
 	}
 end
 
@@ -53,6 +53,10 @@ local function server(w, bridge, before_session)
 		end
 	end
 	if bridge == WORLD then objects[OWNER] = w.body end
+	-- The level roster is local. AvatarList still resolves remote characters.
+	e.coop.peer_of_avatar = function(id)
+		for peer, p in pairs(w.players) do if p.id == id then return peer end end
+	end
 	e.coop.is_dedicated = function() return bridge == WORLD end
 	e.coop.is_map_server = function() return bridge ~= WORLD end
 	e.coop.is_mirror = function() return false end
@@ -61,7 +65,7 @@ local function server(w, bridge, before_session)
 		my_level = function() return LEVEL[bridge] end,
 		level_of_player = function(peer) return w.players[peer] and LEVEL[w.players[peer].map] end,
 		level_name = function(id) return MAPS[BRIDGE[id]] end,
-		map_servers = function() return { { level = 7, bridge = A }, { level = 19, bridge = B } } end,
+		map_servers = function() return w.servers end,
 		bridge_of_player = function(peer) local p = w.players[peer]; return p and not (w.loading and w.loading[p.map]) and p.map or nil end,
 		online_at_server = function(id) return w.holder[id] ~= nil end,
 	}
@@ -83,9 +87,25 @@ local function server(w, bridge, before_session)
 		w.arrivals[#w.arrivals + 1] = { id = sq.id, pos = pos, lv = lvid, gv = gvid }
 		sq.m_game_vertex_id, w.map[sq.id] = gvid, BRIDGE[math.floor(gvid / 100)]
 	end
+	local assigned_items, idiots_data = {}, {}
+	local npc = { LOOT_SHARED_ITEMS = {}, LOOT_SHARING_NPCS = {} }
+	local beh = {
+		saveStorage = function(id, rows) rows[id] = e.db.storage[id].beh end,
+		loadStorage = function(id, rows) e.db.storage[id].beh = rows[id] end,
+	}
+	npc.getAllStates = function(obj) return obj.states end
+	npc.setStates = function(obj, states) obj.states = states end
+	e.package = { loaded = { ["illish.lib.npc"] = npc, ["illish.lib.beh"] = beh } }
+	e.a_idiots_mdata = { initStorage = function() return idiots_data end }
+	m.idiots_data, m.idiots = idiots_data, npc
+	m.assigned = assigned_items
 	e.axr_companions = {
 		companion_squads = {},
-		companion_squad_can_teleport = function() return true end,
+		companion_squad_can_teleport = function(sq)
+			return not (m.wait and m.wait[sq:commander_id()])
+		end,
+		is_overweight = function(_, id) return assigned_items[id] ~= nil end,
+		is_assigned_item = function(id, item) return assigned_items[id] and assigned_items[id][item] end,
 		setup_companion_logic = function(npc) npc:give_info_portion("npcx_is_companion") end,
 	}
 	-- Capture the leader share callbacks, the engine boundary for the save's map rows.
@@ -93,6 +113,8 @@ local function server(w, bridge, before_session)
 		share_up = function(key, get, set) if key == "comp_leaders" then m.up, m.hear = get, set end end,
 		share_down = function(key, get, set) if key == "comp_leaders" then m.down, m.give = get, set end end,
 	}
+	load_script(m, "coop_economy_core")
+	load_script(m, "coop_mods_core")
 	load_script(m, "coop_npc_players")
 	load_script(m, "coop_trust").reset_for_test({ default = "log" })
 	local mode = load_script(m, "coop_mode")
@@ -222,7 +244,24 @@ local function test_handoff_and_save()
 		"returning character takes back the squad on a new peer slot even when another player is nearer")
 end
 
--- F5-CMP-3 reproducer. Set COOP_CMP_3_REPRO=1 to include this additional case.
+local function test_recycled_peer_in_flight()
+	local w, world, source = fixture()
+	w.players[1].map = B
+	tick(w, source)
+	tick(w, world)
+	check(#sent_named(source, FOLLOW) == 1 and #w.arrivals == 0, "V-G4a: the squad is held during a real departure")
+	w.players[1] = { id = 505, map = B }
+	world.records[505] = { position = vec(300, 0, 300), m_level_vertex_id = 5, m_game_vertex_id = 1950 }
+	w.holder[401] = nil
+	tick(w, world)
+	check(#w.arrivals == 0 and #sent_named(world, ADOPT) == 0 and owner(world, TRAVELLING) == OWNER,
+		"V-G4a: the world waits for the character when a newcomer reuses his seat in flight")
+	w.players[5] = { id = OWNER, map = B }
+	tick(w, world)
+	check(#w.arrivals == 1 and w.arrivals[1].pos == w.body.position,
+		"V-G4a: the squad resumes towards the original character on his new seat")
+end
+
 local function test_recycled_peer_during_disconnect()
 	local w, world, source = fixture()
 	w.players[1] = nil
@@ -233,7 +272,187 @@ local function test_recycled_peer_during_disconnect()
 	world.hear(source.up(), LEVEL[A])
 	tick(w, world)
 	check(#sent_named(source, FOLLOW) == 0 and #w.arrivals == 0 and owner(world, TRAVELLING) == OWNER,
-		"a replacement on the disconnected player's peer slot cannot take the squad to another map")
+		"V-G4b: a replacement on the disconnected player's peer slot cannot take the squad to another map")
+end
+
+local function test_wait_order_after_map_stop()
+	local w, world, source = fixture()
+	source.wait = { [401] = true }
+	w.players[1].map = B
+	tick(w, source)
+	check(#sent_named(source, FOLLOW) == 0, "V-G5: the writing map observes the wait order")
+	world.hear(source.up(), LEVEL[A])
+	w.servers, w.holder[401] = { { level = LEVEL[B], bridge = B } }, nil
+	tick(w, world)
+	check(#w.arrivals == 0 and #sent_named(world, ADOPT) == 0 and owner(world, TRAVELLING) == OWNER,
+		"V-G5: the world retains the waiting squad on A after the writing map stops")
+end
+
+local function test_adoption_fence_and_rows()
+	local w, world, source, destination = fixture()
+	local member = source.objects[401]
+	member.states = { movement = { follow = true, wait = false } }
+	function member:iterate_inventory(callback)
+		callback(self, make_obj(611, 0, 0, 0))
+		callback(self, make_obj(612, 0, 0, 0))
+	end
+	source.env.db.storage[401] = { object = member, beh = { target = 501, keepType = "follow" } }
+	source.assigned[401] = { [611] = true }
+	source.idiots.LOOT_SHARED_ITEMS[612] = true
+	destination.assigned[401] = { [613] = true }
+	destination.assigned[402] = { [614] = true }
+	w.players[1].map = B
+	tick(w, source)
+	world.hear(source.up(), LEVEL[A])
+	w.holder[401] = nil
+	tick(w, world)
+	check(world.env.axr_companions.companion_squads[TRAVELLING] ~= nil,
+		"V-G9: the world keeps the stock companion row after sending adopt")
+	NOW = NOW + 61000
+	tick(w, destination)
+	world.hear(destination.up(), LEVEL[B])
+	check(owner(world, TRAVELLING) == OWNER and world.env.axr_companions.companion_squads[TRAVELLING] ~= nil,
+		"V-G9: a destination still missing the squad after 60 seconds cannot erase the world owner or stock row")
+	destination.records[TRAVELLING] = squad(TRAVELLING, B)
+	tick(w, destination)
+	world.hear(destination.up(), LEVEL[B])
+	check(owner(destination, TRAVELLING) == nil and world.env.axr_companions.companion_squads[TRAVELLING] ~= nil,
+		"V-G9: the squad record alone cannot acknowledge unapplied member rows")
+	local arriving = destination.add(make_obj(401, 40, 2, 11))
+	destination.records[401] = arriving
+	destination.env.db.storage[401] = { object = arriving }
+	tick(w, destination)
+	check(owner(destination, TRAVELLING) == OWNER, "V-G9: the destination adopts when the record finally arrives")
+	check(destination.env.axr_companions.is_assigned_item(401, 611) and not destination.assigned[401][613]
+		and destination.assigned[402][614], "adopt replaces the travelling companion's live stock gift row only")
+	check(destination.idiots.LOOT_SHARED_ITEMS[612] == true, "adopt carries the squad's Useful Idiots loot flags")
+	local states, beh = destination.idiots_data.companionStates, destination.idiots_data.beh
+	check(states and states[401].movement.follow and beh and beh[401].target == 501
+		and arriving.states == states[401] and destination.env.db.storage[401].beh == beh[401],
+		"adopt installs and applies Useful Idiots state and behaviour for an already-online companion")
+	world.hear(destination.up(), LEVEL[B])
+	check(owner(world, TRAVELLING) == OWNER and world.env.axr_companions.companion_squads[TRAVELLING] == nil,
+		"V-G9: confirmed adopt removes the temporary world stock row and retains the saved character")
+end
+
+local function test_large_handoff_rows()
+	local w, world, source, destination = fixture()
+	for _, m in ipairs({ world, source }) do
+		local send = m.env.coop.send_event
+		m.env.coop.send_event = function(name, payload, target)
+			if #payload > 16384 then return false end -- engine ScriptEvent limit
+			return send(name, payload, target)
+		end
+	end
+	source.assigned[401] = {}
+	for id = 15001, 17000 do source.assigned[401][id] = true end
+	w.players[1].map, w.holder[401] = B, nil
+	destination.records[TRAVELLING], destination.records[401] = squad(TRAVELLING, B), make_obj(401, 40, 2, 11)
+	tick(w, source)
+	tick(w, world)
+	tick(w, destination)
+	local row = destination.assigned[401]
+	check(owner(destination, TRAVELLING) == OWNER and row and row[15001] and row[17000],
+		"the transport limit cannot drop the beginning or end of a large assigned-items row")
+end
+
+local function test_adoption_delivery_retry()
+	local w, world, source, destination = fixture()
+	local send = world.env.coop.send_event
+	local refused = false
+	world.env.coop.send_event = function(name, payload, target)
+		if name == ADOPT and not refused then refused = true; return false end
+		return send(name, payload, target)
+	end
+	source.assigned[401] = { [611] = true }
+	w.players[1].map, w.holder[401] = B, nil
+	destination.records[TRAVELLING], destination.records[401] = squad(TRAVELLING, B), make_obj(401, 40, 2, 11)
+	tick(w, source)
+	tick(w, world)
+	check(refused and owner(destination, TRAVELLING) == nil and world.env.axr_companions.companion_squads[TRAVELLING] ~= nil,
+		"a refused adopt send leaves the stock row with the world")
+	NOW = NOW + 5000
+	tick(w, world)
+	check(owner(destination, TRAVELLING) == OWNER and destination.assigned[401] and destination.assigned[401][611],
+		"retrying the refused adopt installs the gift row")
+	if destination.assigned[401] then destination.assigned[401][611] = nil end
+	NOW = NOW + 5000
+	tick(w, world)
+	check(destination.assigned[401] and not destination.assigned[401][611],
+		"a duplicate adopt cannot restore a gift removed after adoption")
+	world.hear(destination.up(), LEVEL[B])
+	check(world.env.axr_companions.companion_squads[TRAVELLING] == nil, "the retry completes at the destination's acknowledgement")
+end
+
+-- Gate WP17: the destination adopted the squad, and the leader leaves again before its next leader share (the acknowledgement)
+-- reached the world. Its share leaves out a squad on its way, so only its comp_follow can say it took the squad.
+local function test_destination_lets_go_before_its_ack()
+	local w, world, source, destination = fixture()
+	w.players[1].map, w.holder[401] = B, nil
+	destination.records[TRAVELLING], destination.records[401] = squad(TRAVELLING, B), make_obj(401, 40, 2, 11)
+	tick(w, source)
+	tick(w, world)
+	tick(w, destination)
+	check(#w.arrivals == 1 and owner(destination, TRAVELLING) == OWNER, "(B adopted the squad)")
+	w.players[1].map = A
+	tick(w, destination)
+	check(#sent_named(destination, FOLLOW) == 1, "(B lets it go after its leader)")
+	world.hear(destination.up(), LEVEL[B])
+	tick(w, world)
+	local adopts = sent_named(world, ADOPT)
+	check(#w.arrivals == 2 and adopts[#adopts].target == A and owner(world, TRAVELLING) == OWNER,
+		"the world takes B's comp_follow as its acknowledgement: the squad goes back to its leader on A")
+end
+
+-- Gate WP17: the destination's map server stopped before it adopted the squad, and the leader went on to another level. The world's
+-- adopt word has nobody to go to; the squad must not wait for that map server forever.
+local function test_destination_gone_before_adopt()
+	local w, world, source = fixture()
+	w.players[1].map, w.holder[401] = B, nil
+	tick(w, source)
+	tick(w, world)
+	check(#w.arrivals == 1 and #sent_named(world, ADOPT) == 1, "(the world sent the adopt word to B)")
+	w.servers = { { level = LEVEL[A], bridge = A } }
+	w.players[1].map = A
+	tick(w, world)
+	tick(w, world)
+	local adopts = sent_named(world, ADOPT)
+	check(#w.arrivals == 2 and adopts[#adopts].target == A and owner(world, TRAVELLING) == OWNER,
+		"B is gone and its leader stands on A: the squad goes after him, the owner kept")
+end
+
+-- Gate WP17: a member of the squad on its way is no member of it on the destination any more (he died there, his body stays; or his
+-- record was released). The adopt word must not wait for his row for ever.
+local function test_member_gone_before_adopt()
+	local function two(id, map, list)
+		local t = squad(id, map)
+		t.squad_members = function()
+			local i = 0
+			return function() i = i + 1; return list[i] and { id = list[i] } or nil end
+		end
+		return t
+	end
+	for _, released in ipairs({ false, true }) do
+		local w, world, source, destination = fixture()
+		world.records[TRAVELLING] = two(TRAVELLING, A, { 401, 451 })
+		world.records[451] = make_obj(451, 40, 2, 11)
+		w.players[1].map, w.holder[401] = B, nil
+		destination.records[TRAVELLING] = two(TRAVELLING, B, { 401 })
+		destination.records[401] = make_obj(401, 40, 2, 11)
+		if not released then destination.records[451] = make_obj(451, 40, 2, 11) end
+		tick(w, source)
+		tick(w, world)
+		tick(w, destination)
+		if released then
+			check(owner(destination, TRAVELLING) == nil, "(a row of a member whose record is not here yet: B waits)")
+			NOW = NOW + 61000
+			tick(w, destination)
+		end
+		world.hear(destination.up(), LEVEL[B])
+		check(owner(destination, TRAVELLING) == OWNER and world.env.axr_companions.companion_squads[TRAVELLING] == nil,
+			released and "a member released meanwhile: B adopts after the wait, the world takes its word"
+			or "a member who left the squad on B: B adopts without his row, the world takes its word")
+	end
 end
 
 local function test_world_hooks_before_session()
@@ -314,6 +533,7 @@ local function test_fresh_destination_sort(word_first)
 	tick(w, world) -- the teleport and comp_adopt; pump hands the word to B now
 	tick(w, destination)
 	destination.records[TRAVELLING] = squad(TRAVELLING, B) -- the place arrives
+	destination.records[401] = make_obj(401, 40, 2, 11)
 	tick(w, destination)
 	world.hear(destination.up(), LEVEL[B])
 	check(#sent_named(world, ADOPT) == 1 and owner(destination, TRAVELLING) == OWNER and owner(world, TRAVELLING) == OWNER,
@@ -321,13 +541,21 @@ local function test_fresh_destination_sort(word_first)
 end
 
 test_handoff_and_save()
+test_recycled_peer_in_flight()
+test_recycled_peer_during_disconnect()
+test_wait_order_after_map_stop()
+test_adoption_fence_and_rows()
+test_large_handoff_rows()
+test_adoption_delivery_retry()
+test_destination_lets_go_before_its_ack()
+test_destination_gone_before_adopt()
+test_member_gone_before_adopt()
 test_destination_still_starting()
 test_fresh_destination_sort(true)
 test_fresh_destination_sort(false)
 -- The stand probe lives under temp until the lead integrates the scenario.
 if os.getenv("COOP_CMP_STAND_PROBE") == "1" then test_stand_reads_loaded_owner() end
 if os.getenv("COOP_CMP_3_REPRO") == "1" then
-	test_recycled_peer_during_disconnect()
 	test_world_hooks_before_session()
 end
 print(string.format("\n%d passed, %d failed", PASSES, FAILS))

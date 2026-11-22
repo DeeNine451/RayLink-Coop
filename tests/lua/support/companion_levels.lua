@@ -132,10 +132,22 @@ local function stand(opts)
 	B.to_host, B.to_local = swap(0, 501), swap(0, 501)
 	W.H, W.Mk, W.A, W.B = H, Mk, A, B
 	W.mk_avatars = mk_avatars
+	-- The world server's AvatarList: who plays each character in the world. A map server is a client of the world and takes it
+	-- (coop_join.cpp send_owners -> to_bridges, bridge_takes(AvatarList); client_on_avatar_list -> world::client_set_owners), so its
+	-- coop.peer_of_avatar knows the players of every level, while its own session (coop.players) lists only the players of its
+	-- level. A player who left the world is in no row: a test removes him here.
+	W.owners = { [1] = 500, [2] = 501 }
+	local function world_owner(id)
+		for p, av in pairs(W.owners) do
+			if av == id then return p end
+		end
+		return nil
+	end
 	-- The tunnel delivers map-server replies to players with the world server as sender.
 	local function map_server(M, level_id)
 		M.env.coop.is_map_server = function() return true end
 		M.env.coop.is_mirror = function() return false end
+		M.env.coop.peer_of_avatar = world_owner
 		M.env.level.name = function() return NAMES[level_id] end
 		local send = M.env.coop.send_event
 		M.env.coop.send_event = function(name, payload, target)
