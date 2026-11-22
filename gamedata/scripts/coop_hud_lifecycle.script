@@ -1,0 +1,486 @@
+--[[
+	Anomaly Coop - the life cycle of the HUD (TZ Р38). Ядро: every process, every mode, single player too; it is a crash
+	fix, not a co-op feature.
+
+	The rule: no Lua handle to a freed HUD window survives a HUD rebuild.
+
+	CHUDManager::OnScreenResolutionChanged (engine src\xrGame\HUDManager.cpp:664-691; a change of the device size, a
+	vid_mode change in a world, level.reload_hud_xml, a language reload) deletes the windows of the game UI
+	(CUIGameCustom::UnLoad, UIGameCustom.cpp:277-283: the actor menu, the PDA, get_hud():GetWindow(), the main HUD
+	ActorMenu.get_maingame() with every child, the messages), builds new ones (Load, OnConnected) and then sends
+	on_screen_resolution_changed, all in one call. A Lua variable that kept one of the old windows, or a window made under
+	one, now points at freed memory; luabind cannot tell, so the next method call reads it (the crashes of 2026-11-21 20:46:
+	ui_hud_dotmarks.script:5627 in CUIWindow::Show, modxml_tutorial_hooks UIStaticTutorials in CUILines::SetText).
+	CustomStatics (get_hud():AddCustomStatic) and dialogs given to AddDialogToRender are not deleted, but a CustomStatic
+	keeps the layout of the size its MsgConfig was read for.
+
+	One place for the rule: every script that keeps such a handle across frames has an adapter here, or is marked safe in
+	tests\lua\test_hud_holders_scan.lua, which reads the stand's scripts and fails on a holder that is neither (that is how a
+	mod added later is caught). The adapters use the addons' own functions where the addons have them and never edit their
+	files (they are hard links of the profile, TZ Р21).
+
+	An adapter: { scripts = { <script> = { <kind>, ... } }, drop = function() end, rebuild = function(main) end }
+	  scripts  what the scan finds in the addon and the adapter answers for (kinds: main, anchor, static, dialog; the test
+	           explains them)
+	  drop     forget or neutralise what died with the old HUD, without touching it
+	  rebuild  get the new windows, or have the addon build its windows again, on the new main HUD `main`
+	Both run at the start of _G.CHUDManager_OnScreenResolutionChanged (wrapped here), right after the engine built the new
+	HUD and before the stock body's DestroyAll_UI() closes the open script GUIs (their GUI_on_hide reaches scripts) and sends
+	on_screen_resolution_changed; that event runs them only when the function could not be wrapped. First every drop, then
+	every rebuild, each in ORDER, then the adapters a later mod gave to register() by name. The rebuilds are skipped when the
+	process has no main HUD. Every call is under pcall: one failing adapter stops none.
+--]]
+
+local type, pairs, ipairs, pcall, tostring, rawget, rawequal = type, pairs, ipairs, pcall, tostring, rawget, rawequal
+local string_format, table_sort, math_max = string.format, table.sort, math.max
+
+local started = false -- the actor's first update ran: the addons have taken their windows
+local tracking = false -- ui_timed_prompt.show_tutorial_prompt is wrapped
+local timed = setmetatable({}, { __mode = "k" }) -- the prompts ui_timed_prompt.show_tutorial_prompt made
+local extra = {} -- name -> an adapter given to register()
+stats = { rebuilds = 0, errors = 0 }
+
+local function log(fmt, ...)
+	local ok, line = pcall(string_format, fmt, ...)
+	printf("[coop-hud-life] %s", ok and line or tostring(fmt))
+end
+
+local reported = {}
+local function report(what, err)
+	stats.errors = stats.errors + 1
+	local n = (reported[what] or 0) + 1
+	reported[what] = n
+	if n <= 3 then log("! %s failed: %s", what, tostring(err)) end
+end
+
+local function C() return coop_mods_core end
+
+-- A script module that is loaded, or nil: an addon that is not there holds nothing.
+local function loaded(name)
+	local m = rawget(_G, name)
+	return type(m) == "table" and m or nil
+end
+
+local function field(o, k)
+	local ok, v = pcall(function() return o[k] end)
+	return ok and v or nil
+end
+
+-- A file local of an addon: the upvalue `name` of its own function `fname` (exact), else any function of the module that
+-- keeps it (coop_mods_core.find_local: also behind one wrapper). Returns value, holder, index.
+local function addon_local(m, fname, name)
+	local core = C()
+	if not (core and m) then return nil end
+	local f = field(m, fname)
+	local val, holder, index = core.upvalue(f, name)
+	if holder then return val, holder, index end
+	return core.find_local(m, name)
+end
+
+local function forget(o, fields)
+	if o == nil then return end
+	for _, k in ipairs(fields) do o[k] = nil end
+end
+
+-- Removes a CustomStatic by its name (every copy of it): the next AddCustomStatic makes it from the MsgConfig of now.
+local function remove_static(hud, name)
+	for _ = 1, 8 do
+		if not hud:GetCustomStatic(name) then return end
+		hud:RemoveCustomStatic(name)
+	end
+end
+
+-------------------------------------------------------------------------------
+-- modxml_tutorial_hooks (G.A.M.M.A., Interaction Dot Marks): UIStaticTutorials
+-------------------------------------------------------------------------------
+-- GAMMA's modxml_tutorial_hooks prints its prompts into UIStaticTutorials, a child of the main game window that it builds
+-- once (actor_on_first_update) and keeps in a Lua global. CHUDManager::OnScreenResolutionChanged (a size or aspect
+-- change, a language reload, level.reload_hud_xml) deletes that window with the old HUD, builds a new HUD and then
+-- sends on_screen_resolution_changed. From then on the global is a dangling pointer, and the next prompt start or stop
+-- (SetText) reads freed memory: R38, the client crash of 2026-11-21 20:46. Lua cannot test such a handle (its methods
+-- read the freed object), so the window is built again on every rebuild, in any mode (bd13fa88, moved here from
+-- coop_npc_logic).
+local function rebuild_tutorial_monitor()
+	local hooks = rawget(_G, "modxml_tutorial_hooks")
+	if not (hooks and hooks.UIStaticTutorials and type(hooks.actor_on_first_update) == "function") then return end
+	if not (coop_mode.actor_is_player() and db.actor and ActorMenu and ActorMenu.get_maingame()) then return end
+	hooks.actor_on_first_update()
+end
+
+-------------------------------------------------------------------------------
+-- ui_circular_progress (Catspaw): the default anchor
+-------------------------------------------------------------------------------
+-- Its file local maingameui (taken at its first update) anchors an indicator made without an anchor. Its own
+-- actor_on_first_update takes the main HUD of now. The indicators themselves belong to the prompts that made them:
+-- the Dot Marks and Timed Prompts adapters build those again.
+local INDICATOR_WINDOWS = { "wnd", "ind_base", "ind_left", "ind_right", "ind_mask" } -- UICircularProgress:InitIndicator
+
+local function rebuild_circular_progress()
+	local m = loaded("ui_circular_progress")
+	if not (started and m and type(m.actor_on_first_update) == "function") then return end
+	m.actor_on_first_update()
+end
+
+-------------------------------------------------------------------------------
+-- ui_hud_dotmarks (Interaction Dot Marks): the main HUD, its quick help, the interaction prompts
+-------------------------------------------------------------------------------
+-- Every window an InteractPrompt makes (ui_hud_dotmarks.script, class InteractPrompt: `self.<field> = ...xml:Init...`
+-- and its long-press indicator). A prompt made under the main HUD lost all of them; they are forgotten before the addon
+-- builds the prompt again, so that its setup never touches an old one (SetupItemCard shows its old card first).
+local DOTMARKS_WINDOWS = { "wnd", "drop", "prompt", "prompt_l", "prompt_c", "prompt_r", "bind", "bind_sh", "label",
+	"label_sh", "line", "longpress", "lref", "itemcard", "card_wgt", "card_wgt_icon", "card_wgt_sh", "card_wgt_text",
+	"card_val", "card_val_icon", "card_val_sh", "card_val_text", "card_sp_icon", "parts_container", "parts_indicators",
+	"parts_shadows" }
+
+local function is_dotmarks_prompt(p)
+	if p == nil then return false end
+	local ok, yes = pcall(function()
+		return type(p.uid) == "string" and p.uid:sub(1, 9) == "dotmarks_" and type(p.args) == "table"
+			and type(p.on_option_change) == "function" and type(p.ShowPrompt) == "function"
+	end)
+	return ok and yes == true
+end
+
+-- A prompt made under the main HUD. InteractPrompt:__init anchors a fixed prompt (args.fixed: a tutorial prompt, and every
+-- prompt while the MCM option "fixed screen position" is on) and a prompt without a marker to the main HUD; a tutorial
+-- prompt is kept by cfg.markers itself (setup_tutorial_prompt). A prompt on its marker's window lives in that marker's
+-- dialog to render, which the rebuild keeps. A destroyed prompt counts too: its mark can keep it (end_mark_wounded_state,
+-- ui_hud_dotmarks.script:1288-1290; InteractPrompt:UpdateMark, 3128-3133) and hide it on every update (409), which goes
+-- to its line and window (3190-3211).
+local function dotmarks_stale(p, owner)
+	if p.wnd == nil then return false end
+	if owner == nil or p.args.fixed then return true end
+	return not rawequal(p.anchor, field(owner, "marker"))
+end
+
+local function rebuild_dotmarks_prompt(p, main)
+	forget(p, DOTMARKS_WINDOWS)
+	p.anchor = main
+	local built = p.init_done
+	p.init_done = nil -- the addon destroys a built tutorial prompt on an option change; this one is built again instead
+	p:on_option_change() -- the addon's own rebuild: its keys, BuildUI under the anchor, its drop shadows
+	p.init_done = built or p.init_done
+	if p.destroyed then
+		p:ShowPrompt(false, "coop: HUD rebuilt") -- hidden, as its Destroy left the old windows (3448)
+	else
+		p:ShowPrompt(not p.disabled, "coop: HUD rebuilt") -- shown or hidden as before
+	end
+end
+
+-- Its file local maingameui is cleared (its update shows maingameui.UIStaticQuickHelp while cfg.main_ui_drawn is true,
+-- ui_hud_dotmarks.script:5626-5628), and its own check_for_main_ui takes the new one (6295-6303). Not its
+-- actor_on_first_update: that one also runs validate_object_tables, which drops the records of every container that is
+-- not online now (the stash progress the player made).
+local dotmarks_cleared = false
+
+local function drop_dotmarks()
+	local m = loaded("ui_hud_dotmarks")
+	local cfg = m and field(m, "cfg")
+	if type(cfg) ~= "table" then return end
+	cfg.main_ui_drawn = false
+	local mg, holder, index = addon_local(m, "check_for_main_ui", "maingameui")
+	if holder and mg ~= nil then
+		debug.setupvalue(holder, index, nil)
+		dotmarks_cleared = true
+	elseif not holder then
+		report("ui_hud_dotmarks", "its file local maingameui is not found (another version of the addon)")
+	end
+end
+
+local function rebuild_dotmarks(main)
+	local m = loaded("ui_hud_dotmarks")
+	local cfg = m and field(m, "cfg")
+	if not (dotmarks_cleared and type(cfg) == "table" and type(m.check_for_main_ui) == "function") then return end
+	dotmarks_cleared = false
+	local ok, err = pcall(m.check_for_main_ui) -- its own: maingameui of the new HUD, cfg.main_ui_drawn
+	if not ok then report("ui_hud_dotmarks.check_for_main_ui", err) end
+	local anchor = addon_local(m, "check_for_main_ui", "maingameui") or main
+	local list = {}
+	for _, v in pairs(type(cfg.markers) == "table" and cfg.markers or {}) do
+		if is_dotmarks_prompt(v) then
+			list[#list + 1] = { v }
+		elseif v ~= nil then
+			for _, k in ipairs({ "use_pri", "alt_interact" }) do
+				local p = field(v, k)
+				if is_dotmarks_prompt(p) then list[#list + 1] = { p, v } end
+			end
+		end
+	end
+	local n = 0
+	for _, e in ipairs(list) do
+		if dotmarks_stale(e[1], e[2]) then
+			local ok2, err2 = pcall(rebuild_dotmarks_prompt, e[1], anchor)
+			if ok2 then n = n + 1 else report("ui_hud_dotmarks prompt", err2) end
+		end
+	end
+	if n > 0 then log("Interaction Dot Marks: %d prompt(s) built again on the new HUD", n) end
+end
+
+-------------------------------------------------------------------------------
+-- ui_timed_prompt (Catspaw's Timed Tutorial Prompts): the offers on screen and their rings
+-------------------------------------------------------------------------------
+-- show_tutorial_prompt makes an offer under the main HUD (ui_timed_prompt.script:237) and keeps no list of them, so its
+-- result is noted here (a wrapper that only notes it). The windows of an offer, of its key prompts and of their
+-- indicators (their BuildUI / InitIndicator):
+local TIMED_WINDOWS = { "wnd", "drop", "frame", "header", "title_ref", "title_b", "title_f", "desc_b", "desc_f" }
+local KEY_WINDOWS = { "wnd", "drop", "frame", "textlabel", "text_bg", "text_fg", "shownbind", "prompt", "prompt_l",
+	"prompt_c", "prompt_r", "bind_sh", "bind" }
+
+local function track_timed_prompts()
+	if tracking then return end
+	local core = C()
+	local m = core and core.mod("ui_timed_prompt")
+	if not (m and type(m.show_tutorial_prompt) == "function") then return end
+	tracking = core.wrap(m, "show_tutorial_prompt", "ui_timed_prompt.show_tutorial_prompt (HUD rebuild)", function(orig)
+		return function(...)
+			local prompt = orig(...)
+			if prompt ~= nil then timed[prompt] = true end
+			return prompt
+		end
+	end) == true
+end
+
+-- do_timed_anim moves the window it was given (a closure) while the record active_anims[uid][type] is active, and finds
+-- that record by the uid on every run (ui_timed_prompt.script:1072-1145). Set inactive, the record ends it without a move;
+-- but an offer that closes in the first update after the rebuild makes a new record under the same uid (slide_window_out)
+-- before that last run, which would then move the old window. So the event itself goes too: its id is
+-- "animate_<type>_<uid>" and its action id the time_global() its record keeps as start_time (the same call).
+local function stop_slides(m, uid)
+	local anims = addon_local(m, "do_timed_anim", "active_anims")
+	local mine = type(anims) == "table" and anims[uid]
+	if type(mine) ~= "table" then return false end
+	for kind, a in pairs(mine) do
+		if type(a) == "table" then
+			a.active = false
+			if type(kind) == "string" and a.start_time ~= nil and type(RemoveTimeEvent) == "function" then
+				local ok, err = pcall(RemoveTimeEvent, "animate_" .. kind .. "_" .. tostring(uid), a.start_time)
+				if ok then mine[kind] = nil else report("ui_timed_prompt slide", err) end
+			end
+		end
+	end
+	return true
+end
+
+local function drop_timed()
+	local m = loaded("ui_timed_prompt")
+	for prompt in pairs(timed) do
+		if prompt.destroyed or prompt.wnd == nil then
+			timed[prompt] = nil
+		else
+			stop_slides(m, prompt.uid)
+			for _, key in ipairs(type(prompt.prompts) == "table" and prompt.prompts or {}) do
+				forget(key.prog, INDICATOR_WINDOWS)
+				key.prog = nil
+				forget(key, KEY_WINDOWS)
+				local ok, err = pcall(key.Destroy, key) -- its own unregistering; no window of it is left to touch
+				if not ok then report("ui_timed_prompt key prompt", err) end
+			end
+			prompt.prompts = nil
+			forget(prompt.timer, INDICATOR_WINDOWS)
+			prompt.timer = nil
+			forget(prompt, TIMED_WINDOWS)
+			prompt.coop_hud_dropped = true
+			if m and type(m.wnds) == "table" then m.wnds[prompt.uid] = nil end
+		end
+	end
+end
+
+local function rebuild_timed_prompt(m, prompt, main)
+	local now = time_global()
+	-- An offer that was taken, timed out or is sliding out stays without windows: its own time event finds no window to
+	-- slide (slide_window_out returns), as its stock end does nothing more either (the delayed Destroy never gets queued:
+	-- CreateTimeEvent keeps the running event of the same id). Its reminder, if it timed out now, comes on the new HUD.
+	if prompt.triggered or now > (prompt.timeout or 0) or now > (prompt.cleanup or 0) then return end
+	if m and type(m.update_unsquish_ratio) == "function" then
+		local ratio = m.update_unsquish_ratio() -- the size of now, as its option change takes it
+		prompt.aspect = prompt.args.no_aspect_correction and 1 or ratio or prompt.aspect
+	end
+	prompt:BuildUI(main) -- the addon's own: every window again under the new main HUD, new key prompts
+	if prompt.args.show_timer and prompt.timer_set and prompt.timeout then
+		-- SetTimer makes the ring only while no timer is set; its time event is still queued and CreateTimeEvent keeps a
+		-- queued one, so the ring goes on from its own start time
+		local timeout, cleanup, set = prompt.timeout, prompt.cleanup, prompt.timer_set
+		prompt.timer_set = nil
+		prompt:SetTimer(math_max(0, timeout - now))
+		prompt.timeout, prompt.cleanup, prompt.timer_set = timeout, cleanup, set
+	end
+	if m and type(m.wnds) == "table" then m.wnds[prompt.uid] = prompt.wnd end
+end
+
+local function rebuild_timed(main)
+	local m = loaded("ui_timed_prompt")
+	for prompt in pairs(timed) do
+		if prompt.coop_hud_dropped then
+			prompt.coop_hud_dropped = nil
+			local ok, err = pcall(rebuild_timed_prompt, m, prompt, main)
+			if not ok then report("ui_timed_prompt offer", err) end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- actor_effects (G.A.M.M.A. 3D PDA and Headlamp Animations): the breath fog's CustomStatics
+-------------------------------------------------------------------------------
+-- HUD_fog keeps 40 CustomStatic windows (hud_blur<i>_<ii>) in its file local `fogs` and gathers them only when it is nil.
+-- They are removed and the local cleared, so that HUD_fog makes them again from the MsgConfig of the new size.
+local function rebuild_pda_fogs()
+	local m = loaded("actor_effects")
+	if not m then return end
+	local fogs, holder, index = addon_local(m, "HUD_fog", "fogs")
+	if type(fogs) ~= "table" or not holder then return end -- not made yet: HUD_fog makes them on its first call
+	local hud = get_hud()
+	for i, row in ipairs(fogs) do
+		for ii in ipairs(type(row) == "table" and row or {}) do
+			remove_static(hud, "hud_blur" .. i .. "_" .. ii)
+		end
+	end
+	debug.setupvalue(holder, index, nil)
+end
+
+-------------------------------------------------------------------------------
+-- sr_timer (stock): the hud_timer of a running timer restrictor
+-------------------------------------------------------------------------------
+-- set_scheme keeps the window of the hud_timer CustomStatic in st.timer and writes the time into it on every update. It is
+-- made again from the MsgConfig of the new size and taken the way set_scheme takes it, with its title static.
+local function rebuild_sr_timer()
+	if not loaded("sr_timer") then return end
+	local hud = get_hud()
+	local renewed = {}
+	local function renew(id)
+		if renewed[id] then return end
+		renewed[id] = true
+		remove_static(hud, id)
+		hud:AddCustomStatic(id, true)
+	end
+	for _, storage in pairs(db.storage or {}) do
+		local st = type(storage) == "table" and storage.active_scheme == "sr_timer" and storage.sr_timer
+		if type(st) == "table" and type(st.timer_id) == "string" and st.timer ~= nil then
+			renew(st.timer_id)
+			st.timer = hud:GetCustomStatic(st.timer_id):wnd()
+			if st.string ~= nil then
+				renew("hud_timer_text")
+				hud:GetCustomStatic("hud_timer_text"):wnd():TextControl():SetTextST(st.string)
+			end
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- the registry
+-------------------------------------------------------------------------------
+local ORDER = { "circular_progress", "tutorial_monitor", "dotmarks", "timed_prompt", "pda_fogs", "sr_timer" }
+local ADAPTERS = {
+	circular_progress = { scripts = { ui_circular_progress = { "main" } }, rebuild = rebuild_circular_progress },
+	tutorial_monitor = { scripts = { modxml_tutorial_hooks = { "main" } }, rebuild = rebuild_tutorial_monitor },
+	dotmarks = { scripts = { ui_hud_dotmarks = { "main" } }, drop = drop_dotmarks, rebuild = rebuild_dotmarks },
+	timed_prompt = { scripts = { ui_timed_prompt = { "anchor" } }, drop = drop_timed, rebuild = rebuild_timed },
+	pda_fogs = { scripts = { actor_effects = { "static" } }, rebuild = rebuild_pda_fogs },
+	sr_timer = { scripts = { sr_timer = { "static" } }, rebuild = rebuild_sr_timer },
+}
+
+-- A later mod's adapter (the same shape as above). Returns true when it is taken.
+function register(name, adapter)
+	if type(name) ~= "string" or name == "" or ADAPTERS[name] or type(adapter) ~= "table" then return false end
+	if adapter.drop ~= nil and type(adapter.drop) ~= "function" then return false end
+	if adapter.rebuild ~= nil and type(adapter.rebuild) ~= "function" then return false end
+	extra[name] = adapter
+	return true
+end
+
+local function ordered()
+	local list = {}
+	for _, name in ipairs(ORDER) do list[#list + 1] = { name, ADAPTERS[name] } end
+	local names = {}
+	for name in pairs(extra) do names[#names + 1] = name end
+	table_sort(names)
+	for _, name in ipairs(names) do list[#list + 1] = { name, extra[name] } end
+	return list
+end
+
+local function run_phase(list, phase, main)
+	for _, e in ipairs(list) do
+		local f = e[2][phase]
+		if type(f) == "function" then
+			local ok, err = pcall(f, main)
+			if not ok then report(e[1] .. "." .. phase, err) end
+		end
+	end
+end
+
+-- The engine has built the new HUD in this same call (CHUDManager::OnScreenResolutionChanged).
+function on_hud_rebuilt()
+	stats.rebuilds = stats.rebuilds + 1
+	local list = ordered()
+	run_phase(list, "drop")
+	local main = ActorMenu and ActorMenu.get_maingame and ActorMenu.get_maingame()
+	if main == nil then return end
+	run_phase(list, "rebuild", main)
+end
+
+-- The engine calls _G.CHUDManager_OnScreenResolutionChanged right after it built the new HUD (HUDManager.cpp:687-689; it
+-- looks the name up on every call). The stock one (_g.script:1304-1307) runs DestroyAll_UI() before it sends the event:
+-- hide_hud_all() closes the script GUIs that are open, and their GUI_on_hide reaches scripts (a HUD marker updates its
+-- Dot Marks prompts) before any on_screen_resolution_changed handler. So the registry runs first, in front of it; the
+-- event handler is the fallback for a process where the function was not there to wrap.
+local in_entry = false
+local entry_wrapped = false
+
+local function on_screen_resolution_changed()
+	if in_entry then return end -- done at the start of this rebuild
+	on_hud_rebuilt()
+end
+
+local function wrap_rebuild_entry()
+	local core = C()
+	if entry_wrapped or not core then return end
+	local label = "CHUDManager_OnScreenResolutionChanged (HUD rebuild)"
+	entry_wrapped = core.wrap(_G, "CHUDManager_OnScreenResolutionChanged", label, function(orig)
+		return function(...)
+			on_hud_rebuilt()
+			in_entry = true
+			local ok, err = pcall(orig, ...)
+			in_entry = false
+			if not ok then error(err, 0) end
+		end
+	end) == true
+end
+
+-- script -> { kind -> adapter name }: what the adapters answer for (tests\lua\test_hud_holders_scan.lua)
+function covered()
+	local out = {}
+	for _, e in ipairs(ordered()) do
+		for script, kinds in pairs(type(e[2].scripts) == "table" and e[2].scripts or {}) do
+			out[script] = out[script] or {}
+			for _, kind in ipairs(type(kinds) == "table" and kinds or { kinds }) do out[script][kind] = e[1] end
+		end
+	end
+	return out
+end
+
+local function actor_on_first_update()
+	started = true
+	track_timed_prompts()
+end
+
+local function actor_on_net_destroy()
+	started = false
+end
+
+function print_status()
+	log("HUD rebuilds %d, adapter errors %d, timed prompts %s, rebuild entry %s", stats.rebuilds, stats.errors,
+		tracking and "noted" or "not noted", entry_wrapped and "wrapped" or "not wrapped (the event only)")
+end
+
+function on_game_start()
+	wrap_rebuild_entry()
+	RegisterScriptCallback("on_screen_resolution_changed", on_screen_resolution_changed)
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+	RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+	track_timed_prompts()
+end
+
+-- Tests: the window fields the adapters forget (compared with the real addons in tests\lua\test_hud_lifecycle.lua).
+function _contract()
+	return { dotmarks = DOTMARKS_WINDOWS, indicator = INDICATOR_WINDOWS, timed = TIMED_WINDOWS, key = KEY_WINDOWS }
+end
+function _state() return { started = started, tracking = tracking, timed = timed } end

@@ -397,19 +397,8 @@ local function local_player_ui(actor)
 	return not ActorMenu or ActorMenu.get_maingame() ~= nil
 end
 
--- GAMMA's modxml_tutorial_hooks prints its prompts into UIStaticTutorials, a child of the main game window that it builds
--- once (actor_on_first_update) and keeps in a Lua global. CHUDManager::OnScreenResolutionChanged (a size or aspect
--- change, a language reload, level.reload_hud_xml) deletes that window with the old HUD, builds a new HUD and then
--- sends on_screen_resolution_changed. From then on the global is a dangling pointer, and the next prompt start or stop
--- (SetText) reads freed memory: R38, the client crash of 2026-11-21 20:46. Lua cannot test such a handle (its methods
--- read the freed object), so the window is built again on every rebuild, in any mode.
-local function rebuild_tutorial_monitor()
-	local hooks = rawget(_G, "modxml_tutorial_hooks")
-	if not (hooks and hooks.UIStaticTutorials and type(hooks.actor_on_first_update) == "function") then return end
-	if not (coop_mode.actor_is_player() and db.actor and ActorMenu and ActorMenu.get_maingame()) then return end
-	hooks.actor_on_first_update()
-end
-
+-- GAMMA's modxml_tutorial_hooks prints its prompts into UIStaticTutorials, a child of the main game window. A HUD rebuild
+-- deletes it; coop_hud_lifecycle builds it again (R38, the rule for every HUD window a script keeps).
 -- Its stop and start functions index that window: before the mod's first update it is nil.
 local function tutorial_monitor_built()
 	local hooks = rawget(_G, "modxml_tutorial_hooks")
@@ -1819,7 +1808,6 @@ function on_game_start()
 	if not ok then report("install", err) end
 	register_events()
 	RegisterScriptCallback("actor_on_update", actor_on_update)
-	RegisterScriptCallback("on_screen_resolution_changed", rebuild_tutorial_monitor)
 end
 
 -- Tests and diagnostics.

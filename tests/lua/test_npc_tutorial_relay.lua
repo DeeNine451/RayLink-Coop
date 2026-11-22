@@ -62,6 +62,9 @@ local function install(M, set, mirror)
 	E.coop_npc_players = load_script(M, "coop_npc_players")
 	E.coop_npc_logic = load_script(M, "coop_npc_logic")
 	E.coop_npc_logic.on_game_start()
+	-- the HUD rebuild of the monitor window moved to the registry of the HUD's life cycle (R38)
+	E.coop_hud_lifecycle = load_script(M, "coop_hud_lifecycle")
+	E.coop_hud_lifecycle.on_game_start()
 	E.coop_npc_logic._set_host_on(not mirror)
 end
 
