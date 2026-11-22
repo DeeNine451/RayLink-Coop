@@ -96,7 +96,7 @@ TEST(protocol_game_protocol_is_11)
 	// 31 (split levels native, stage 1): Welcome.flags (HostSeatPlays), PeerList rows end with u8 flags (Operator), core
 	// OperatorCommand.
 	// 33 (two modes, step S3; the only bump of build 57): Welcome ends with u8 mode (SessionMode), test below.
-	CHECK_EQ(kProtocolVersion, 33u);
+	CHECK_EQ(kProtocolVersion, 34u);
 }
 
 // ---------------------------------------------------------------- protocol 31: a seat without a character, the operator

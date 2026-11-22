@@ -382,3 +382,223 @@ TEST(item_tags_taken_item_keeps_only_what_its_take_changed)
 	CHECK_EQ(itemtags::push_keeps(false, itemtags::kAll), itemtags::kOwnerTakeTags); // never the upgrade list
 	CHECK_EQ(itemtags::push_keeps(false, 0u), 0u);
 }
+
+// ---------------------------------------------------------------- TZ R32 W8.2 (protocol 34): a version per tagged field
+
+namespace
+{
+constexpr itemtags::Bit kEveryBit[] = {itemtags::Cond, itemtags::Upgrades, itemtags::Box, itemtags::Addons, itemtags::Scope,
+	itemtags::Main, itemtags::Launcher, itemtags::Uses};
+
+std::vector<std::uint8_t> versions_bytes(const itemtags::FieldVersions& v, std::uint32_t mask)
+{
+	Writer w;
+	itemtags::write_versions(w, v, mask);
+	return w.data();
+}
+
+bool read_whole(const std::vector<std::uint8_t>& b, itemtags::FieldVersions& v, std::uint32_t& mask)
+{
+	Reader r(b.data(), b.size());
+	return itemtags::read_versions(r, v, mask) && r.remaining() == 0;
+}
+
+itemtags::FieldVersions sample_versions()
+{
+	itemtags::FieldVersions v;
+	std::uint16_t n = 1;
+	for (const itemtags::Bit b : kEveryBit)
+		v.set(b, std::uint16_t(n++ * 1000 + 7));
+	return v;
+}
+} // namespace
+
+TEST(item_tags_versions_one_per_tag)
+{
+	static_assert(itemtags::kTagCount == sizeof(kEveryBit) / sizeof(kEveryBit[0]), "one version per tag");
+	std::uint32_t all = 0;
+	for (size_t i = 0; i < itemtags::kTagCount; ++i)
+	{
+		CHECK_EQ(itemtags::tag_index(kEveryBit[i]), i);
+		all |= kEveryBit[i];
+	}
+	CHECK_EQ(all, itemtags::kAll);
+	// not one tag: no index
+	CHECK_EQ(itemtags::tag_index(0u), itemtags::kTagCount);
+	CHECK_EQ(itemtags::tag_index(itemtags::Cond | itemtags::Uses), itemtags::kTagCount);
+	CHECK_EQ(itemtags::tag_index(1u << 8), itemtags::kTagCount);
+	// a new state has no deliberate write of its decider on any tag
+	const itemtags::FieldVersions none;
+	for (const itemtags::Bit b : kEveryBit)
+		CHECK_EQ(none.get(b), std::uint16_t(0));
+	// the blob tag after the last tag coop_items.cpp has (TagCartridges = 11): a reader of protocol 33 skips it by its length
+	static_assert(itemtags::kVersionsTag == 12, "the blob tag after TagCartridges = 11");
+}
+
+TEST(item_tags_versions_round_trip)
+{
+	const itemtags::FieldVersions v = sample_versions();
+	// every tag: u8 mask, 8 x u16, lowest bit first
+	std::vector<std::uint8_t> b = versions_bytes(v, itemtags::kAll);
+	REQUIRE(b.size() == size_t(1 + 8 * 2));
+	CHECK_EQ(int(b[0]), int(itemtags::kAll));
+	CHECK_EQ(int(b[1] | (b[2] << 8)), 1007); // Cond, little endian as every u16 of the wire
+	CHECK_EQ(int(b[15] | (b[16] << 8)), 8007); // Uses, last
+	itemtags::FieldVersions back;
+	std::uint32_t mask = 0;
+	CHECK(read_whole(b, back, mask));
+	CHECK_EQ(mask, itemtags::kAll);
+	CHECK(back == v);
+	CHECK(versions_bytes(back, mask) == b);
+
+	// a part: the condition and the portions only (what a decider writes on purpose most); the others read as 0
+	b = versions_bytes(v, itemtags::Cond | itemtags::Uses);
+	REQUIRE(b.size() == size_t(1 + 2 * 2));
+	CHECK(read_whole(b, back, mask));
+	CHECK_EQ(mask, std::uint32_t(itemtags::Cond | itemtags::Uses));
+	CHECK_EQ(back.get(itemtags::Cond), std::uint16_t(1007));
+	CHECK_EQ(back.get(itemtags::Uses), std::uint16_t(8007));
+	CHECK_EQ(back.get(itemtags::Upgrades), std::uint16_t(0));
+	CHECK_EQ(back.get(itemtags::Main), std::uint16_t(0));
+
+	// every single tag alone
+	for (const itemtags::Bit bit : kEveryBit)
+	{
+		b = versions_bytes(v, bit);
+		CHECK_EQ(b.size(), size_t(3));
+		CHECK(read_whole(b, back, mask));
+		CHECK_EQ(mask, std::uint32_t(bit));
+		CHECK_EQ(back.get(bit), v.get(bit));
+	}
+
+	// none: the mask alone; bits outside the tags are not written
+	b = versions_bytes(v, 0u);
+	CHECK_EQ(b.size(), size_t(1));
+	CHECK(read_whole(b, back, mask));
+	CHECK_EQ(mask, 0u);
+	CHECK(versions_bytes(v, itemtags::kAll | (1u << 9)) == versions_bytes(v, itemtags::kAll));
+}
+
+TEST(item_tags_versions_refused_whole)
+{
+	const std::vector<std::uint8_t> b = versions_bytes(sample_versions(), itemtags::kAll);
+	for (size_t cut = 0; cut < b.size(); ++cut)
+	{
+		Reader r(b.data(), cut);
+		itemtags::FieldVersions v = sample_versions();
+		std::uint32_t mask = 5;
+		CHECK(!itemtags::read_versions(r, v, mask));
+		CHECK_EQ(mask, 0u); // nothing of a cut payload is kept
+		CHECK(v == itemtags::FieldVersions());
+	}
+	// the mask is a u8 and kAll fills it: no bit names a field that has no version. What follows the versions of the mask is the
+	// caller's to refuse (the blob tag's length bounds the payload), as every reader of the wire leaves it
+	Writer w2;
+	w2.u8(0);
+	w2.u16(7);
+	Reader r2(w2.ptr(), w2.size());
+	itemtags::FieldVersions v2;
+	std::uint32_t mask2 = 0;
+	CHECK(itemtags::read_versions(r2, v2, mask2));
+	CHECK_EQ(r2.remaining(), size_t(2));
+}
+
+TEST(item_tags_a_deliberate_write_moves_its_versions_on)
+{
+	itemtags::FieldVersions v;
+	itemtags::bump(v, itemtags::Uses);
+	CHECK_EQ(v.get(itemtags::Uses), std::uint16_t(1));
+	CHECK_EQ(v.get(itemtags::Cond), std::uint16_t(0)); // only the tags written
+	itemtags::bump(v, itemtags::Uses | itemtags::Cond);
+	CHECK_EQ(v.get(itemtags::Uses), std::uint16_t(2));
+	CHECK_EQ(v.get(itemtags::Cond), std::uint16_t(1));
+	itemtags::bump(v, 0u);
+	CHECK_EQ(v.get(itemtags::Uses), std::uint16_t(2));
+	// 0 means "never written": the version after 65535 is 1
+	v.set(itemtags::Box, 0xFFFF);
+	itemtags::bump(v, itemtags::Box);
+	CHECK_EQ(v.get(itemtags::Box), std::uint16_t(1));
+	CHECK_EQ(itemtags::next_version(0), std::uint16_t(1));
+	CHECK_EQ(itemtags::next_version(41), std::uint16_t(42));
+	CHECK_EQ(itemtags::next_version(0xFFFF), std::uint16_t(1));
+}
+
+TEST(item_tags_a_report_counts_only_on_the_latest_version_of_its_field)
+{
+	// The decider (the writer of a medkit) took 2 of its 5 uses on purpose (a script's set_remaining_uses): version 1 of Uses.
+	// The owner's game reported "5 uses" before that push reached it (made on version 0): stale, refused. His own wear of the
+	// condition is on the latest version of Cond (nobody wrote it): kept. g4 F1/F2: a stale report never restores a debit.
+	itemtags::FieldVersions latest;
+	itemtags::bump(latest, itemtags::Uses);
+	itemtags::FieldVersions stale; // the owner had applied nothing of the decider's
+	const std::uint32_t carried = itemtags::Uses | itemtags::Cond;
+	CHECK_EQ(itemtags::fresh(latest, stale, carried), std::uint32_t(itemtags::Cond));
+
+	// He applies the push (version 1 of Uses), then eats one portion himself: his report is made on version 1, it counts
+	itemtags::FieldVersions applied;
+	itemtags::take(applied, latest, itemtags::Uses);
+	CHECK_EQ(applied.get(itemtags::Uses), std::uint16_t(1));
+	CHECK_EQ(itemtags::fresh(latest, applied, carried), carried);
+
+	// The decider writes the condition too (version 1 of Cond) before his next report: the condition of that report is stale, his
+	// portions are not
+	itemtags::bump(latest, itemtags::Cond);
+	CHECK_EQ(itemtags::fresh(latest, applied, carried), std::uint32_t(itemtags::Uses));
+	// only the tags the report carries are asked about
+	CHECK_EQ(itemtags::fresh(latest, applied, itemtags::Box), std::uint32_t(itemtags::Box));
+	CHECK_EQ(itemtags::fresh(latest, applied, 0u), 0u);
+	CHECK_EQ(itemtags::fresh(latest, applied, itemtags::kAll | (1u << 12)), itemtags::kAll & ~std::uint32_t(itemtags::Cond));
+
+	// take() moves only the tags of the push
+	itemtags::take(applied, latest, itemtags::Cond);
+	CHECK_EQ(applied.get(itemtags::Cond), std::uint16_t(1));
+	CHECK(applied == latest);
+	// a version that wrapped is still one value: fresh compares, it does not order
+	latest.set(itemtags::Uses, 0xFFFF);
+	applied.set(itemtags::Uses, 0xFFFF);
+	itemtags::bump(latest, itemtags::Uses);
+	CHECK_EQ(itemtags::fresh(latest, applied, itemtags::Uses), 0u);
+	itemtags::take(applied, latest, itemtags::Uses);
+	CHECK_EQ(itemtags::fresh(latest, applied, itemtags::Uses), std::uint32_t(itemtags::Uses));
+}
+
+TEST(item_tags_versions_ride_the_blob_as_a_tag_older_readers_skip)
+{
+	// The ItemState blob is u8 version, then {u8 tag, varu len, payload} (coop_items.cpp write_data); a reader skips a tag it does
+	// not know by its length. The versions are such a tag: a reader of protocol 33 reads the condition after it as before.
+	Writer payload;
+	itemtags::write_versions(payload, sample_versions(), itemtags::Cond | itemtags::Uses);
+	Writer blob;
+	blob.u8(1); // the blob's own version byte
+	blob.u8(itemtags::kVersionsTag);
+	blob.varu(payload.size());
+	blob.bytes(payload.ptr(), payload.size());
+	blob.u8(1); // TagCondition
+	blob.varu(2);
+	blob.u16(40000);
+	// an old reader: skips 12 by length, finds the condition
+	Reader r(blob.ptr(), blob.size());
+	CHECK_EQ(int(r.u8()), 1);
+	bool found = false;
+	std::uint16_t cond = 0;
+	while (r.ok() && r.remaining() > 0)
+	{
+		const std::uint8_t tag = r.u8();
+		const std::uint64_t len = r.varu();
+		REQUIRE(r.ok() && len <= r.remaining());
+		if (tag == 1)
+		{
+			cond = r.u16();
+			found = true;
+		}
+		else
+			r.skip(size_t(len));
+	}
+	CHECK(found && cond == 40000);
+	// a new reader: the tag's payload is exactly the versions
+	Reader p(payload.ptr(), payload.size());
+	itemtags::FieldVersions v;
+	std::uint32_t mask = 0;
+	CHECK(itemtags::read_versions(p, v, mask) && p.remaining() == 0);
+	CHECK_EQ(v.get(itemtags::Uses), std::uint16_t(8007));
+}

@@ -1257,6 +1257,8 @@ constexpr Direction kDirections[] = {
 	{Msg::LevelFlush, kHost},
 	{Msg::LevelSnapshot, kTrunk},
 	{Msg::LevelEntity, kTrunk},
+	{Msg::LevelJournal, kTrunk},
+	{Msg::LevelJournalAck, kHost},
 	{Msg::LevelXferUp, kTrunk},
 	{Msg::LevelXferDown, kHost},
 	{Msg::LevelBrain, kHost},

@@ -322,6 +322,56 @@ TEST(a_map_server_says_nothing_of_a_body_it_does_not_have)
 		CHECK(map_server_sends(m));
 }
 
+// TZ R32 W5 (protocol 34; the verifier's probe_mk_rules.cpp case A): a map server is a client of the world for every object it does
+// not write. It asks for an entity it misses (StateDumpRequest: client_on_switch for a squad it misses, client_on_spawn's holder
+// refetch, client_ask_entity) and for the rows of a bucket whose digest differs (EntityResync). Before, MapServerMode::up dropped
+// both as messages of the map scope: a missing squad or member was never asked for.
+TEST(r32_a_map_server_asks_the_world_for_what_it_misses)
+{
+	CHECK_EQ(std::string("StateDumpRequest ") + (map_server_sends(Msg::StateDumpRequest) ? "goes up" : "is dropped"),
+	    std::string("StateDumpRequest goes up"));
+	CHECK_EQ(std::string("EntityResync ") + (map_server_sends(Msg::EntityResync) ? "goes up" : "is dropped"),
+	    std::string("EntityResync goes up"));
+	// ... and nothing else of the map scope: its actor is a ghost, what it would say of a body or of hands is nobody's
+	size_t map_messages = 0;
+	for (uint32_t v = 0; v <= 0xffff; ++v)
+	{
+		const Msg m = Msg(uint16_t(v));
+		if (!scope_listed(m) || scope_of(m) != Scope::Map)
+			continue;
+		++map_messages;
+		const bool asks = m == Msg::StateDumpRequest || m == Msg::EntityResync;
+		CHECK_EQ(std::string(msg_name(m)) + (map_server_sends(m) ? " goes up" : " is dropped"),
+		    std::string(msg_name(m)) + (asks ? " goes up" : " is dropped"));
+	}
+	CHECK(map_messages > 50);
+}
+
+// TZ R32 W3 (protocol 34, world-view D2): the world server tells every map server of a death and of the roster's digest. to_bridges
+// (coop_srv_mode.cpp) dropped EntityDied: another map server never heard of a death on a level it does not lead. EntityHash lets a
+// map server compare its copy of what it does not write with the world (W5). The stream of a level stays its own.
+TEST(r32_the_world_tells_every_map_server_a_death_and_the_roster)
+{
+	CHECK_EQ(std::string("EntityDied ") + (bridge_takes(Msg::EntityDied) ? "reaches the map servers" : "stays here"),
+	    std::string("EntityDied reaches the map servers"));
+	CHECK_EQ(std::string("EntityHash ") + (bridge_takes(Msg::EntityHash) ? "reaches the map servers" : "stays here"),
+	    std::string("EntityHash reaches the map servers"));
+	for (uint32_t v = 0; v <= 0xffff; ++v)
+	{
+		const Msg m = Msg(uint16_t(v));
+		if (!scope_listed(m) || scope_of(m) != Scope::Map)
+			continue;
+		const bool want = reaches_every_level(m) || m == Msg::EntityDied || m == Msg::EntityHash;
+		CHECK_EQ(std::string(msg_name(m)) + (bridge_takes(m) ? " reaches the map servers" : " stays here"),
+		    std::string(msg_name(m)) + (want ? " reaches the map servers" : " stays here"));
+	}
+	// the world and the registry as before; a player on another level hears neither a death nor the digest of a level he is not on
+	for (const Msg m : {Msg::TimeSync, Msg::InfoPortion, Msg::EntitySpawn, Msg::EntityDestroy, Msg::EntityParent, Msg::EntitySquad})
+		CHECK(bridge_takes(m));
+	CHECK(!level_passes(Msg::EntityDied, true, false));
+	CHECK(!level_passes(Msg::EntityHash, true, false));
+}
+
 TEST(tunnel_lane_both_ways)
 {
 	for (const Lane l : {Lane::Reliable, Lane::Unreliable, Lane::Bulk})

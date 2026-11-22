@@ -160,6 +160,9 @@ constexpr Row kExpected[] = {
 	{Msg::Tunnel, kTrunk},
 	{Msg::MapServerState, kTrunk},
 	{Msg::MapServerOrder, kTrunk},
+	// R32 (protocol 34): the journal of a map server and its answer, over the trunk alone
+	{Msg::LevelJournal, kTrunk},
+	{Msg::LevelJournalAck, kTrunk},
 	// F5 vehicles: a car of the sender's level (test_protocol_f5.cpp)
 	{Msg::VehicleReq, kMap},
 	{Msg::VehicleSeat, kMap},
@@ -221,7 +224,8 @@ TEST(scope_trunk_matches_the_senders)
 	}
 	// Level* are the trunk's, except the three a player sees and sends; Tunnel and MapServer* too (§2.2)
 	for (Msg m : {Msg::LevelFlush, Msg::LevelSnapshot, Msg::LevelEntity, Msg::LevelXferUp, Msg::LevelXferDown, Msg::LevelBrain,
-	         Msg::LevelHash, Msg::LevelResync, Msg::Tunnel, Msg::MapServerState, Msg::MapServerOrder})
+	         Msg::LevelHash, Msg::LevelResync, Msg::Tunnel, Msg::MapServerState, Msg::MapServerOrder, Msg::LevelJournal,
+	         Msg::LevelJournalAck})
 		CHECK(scope_of(m) == Scope::Trunk);
 	for (Msg m : {Msg::LevelMap, Msg::LevelMove, Msg::LevelMoveResult, Msg::LoadWait, Msg::LoadReady})
 		CHECK(scope_of(m) == Scope::World);
@@ -352,4 +356,66 @@ TEST(scope_also_to_level_authority)
 		CHECK(!also_to_level_authority(m));
 	CHECK(!also_to_level_authority(Msg::Hello));
 	CHECK(!also_to_level_authority(Msg::Tunnel));
+}
+
+// ---------------------------------------------------------------------------------------------- R32: the co-op rows stay
+
+namespace
+{
+// The messages of the whole range for which `pred` holds.
+template <class P>
+std::vector<std::string> names_where(P&& pred)
+{
+	std::vector<std::string> out;
+	for (uint32_t v = 0; v <= 0xFFFFu; ++v)
+	{
+		const Msg m = static_cast<Msg>(uint16_t(v));
+		if (scope_listed(m) && pred(m))
+			out.push_back(msg_name(m));
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+std::string joined(const std::vector<std::string>& v)
+{
+	std::string s;
+	for (const std::string& n : v)
+		s += (s.empty() ? "" : ", ") + n;
+	return s;
+}
+} // namespace
+
+TEST(scope_r32_the_coop_rows_are_unchanged)
+{
+	// TZ R32 (protocol 34) changes what a map server may ask its world (StateDumpRequest, EntityResync) and what the world tells the
+	// map servers (EntityDied, EntityHash): coop_mapserver_rules.h, the Server's. The scopes and the players' rows of every message
+	// are protocol 33's: a co-op session (split off) and a player on another level see no change.
+	CHECK_EQ(joined(names_where([](Msg m) { return reaches_every_level(m); })),
+	    std::string("EntityDestroy, EntityParent, EntitySpawn, EntitySquad"));
+	CHECK_EQ(joined(names_where([](Msg m) { return kept_from_every_level(m); })),
+	    std::string("IdLeaseAck, ItemState, PlayerEquip, PlayerVitals, StateDumpRequest"));
+	CHECK_EQ(joined(names_where([](Msg m) { return also_to_level_authority(m); })),
+	    std::string("CheckpointClaim, PlayerDied, PlayerRevive, PlayerWounded, RestRequest"));
+	// co-op: every message goes and is taken as always, wherever the player stands
+	CHECK(names_where([](Msg m) { return !level_passes(m, false, false) || !level_passes(m, false, true); }).empty());
+	CHECK(names_where([](Msg m) { return !level_takes(m, false, false) || !level_takes(m, false, true); }).empty());
+	// the four messages of R32 keep their scope, their route and their rows for the players
+	for (const Msg m : {Msg::EntityDied, Msg::EntityHash, Msg::StateDumpRequest, Msg::EntityResync})
+	{
+		CHECK_EQ(std::string(msg_name(m)) + " is " + scope_name(scope_of(m)), std::string(msg_name(m)) + " is Map");
+		CHECK(route(scope_of(m), false) == Route::TunnelToServer);
+		CHECK(level_passes(m, true, true));
+	}
+	CHECK(!level_passes(Msg::EntityDied, true, false)); // a player on another level hears a death from the map server of his own
+	CHECK(!level_passes(Msg::EntityHash, true, false));
+	CHECK(level_takes(Msg::StateDumpRequest, true, false)); // his repair: the world's copy answers it, as before
+	CHECK(!level_takes(Msg::EntityResync, true, false));
+	// the journal is the trunk's: never a player's, never on a co-op player's way
+	for (const Msg m : {Msg::LevelJournal, Msg::LevelJournalAck})
+	{
+		CHECK(route(scope_of(m), false) == Route::RefuseNotTrunk);
+		CHECK(route(scope_of(m), true) == Route::HandleHere);
+		CHECK(!also_to_level_authority(m));
+	}
 }

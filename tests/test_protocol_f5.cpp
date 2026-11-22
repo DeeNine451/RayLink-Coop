@@ -125,7 +125,7 @@ TEST(protocol_f5_ids_collide_with_no_other_message)
 		CHECK_EQ(hex(v) + (unnamed(v) ? " is free" : " is taken"), hex(v) + " is free");
 	// the neighbours keep their own: F3a ends at LoadReady, 0x01E0..0x01EF stays free
 	CHECK_EQ(std::string(msg_name(uint16_t(0x01DF))), std::string("LoadReady"));
-	CHECK(unnamed(0x01E0));
+	CHECK(unnamed(0x01E2)); // 0x01E0/0x01E1: R32 LevelJournal / LevelJournalAck
 	CHECK(unnamed(0x01EF));
 }
 

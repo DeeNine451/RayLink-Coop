@@ -105,7 +105,7 @@ TEST(protocol_f3a_sixteen_messages_fill_the_range)
 		CHECK_EQ(std::string(hex) + (named ? " is named" : " has no name"), std::string(hex) + " is named");
 	}
 	// the neighbours are not ours: F3 ends at 0x01C6, the range after the F3a one is free
-	CHECK(std::strncmp(msg_name(uint16_t(0x01E0)), "Msg_0x", 6) == 0);
+	CHECK(std::strncmp(msg_name(uint16_t(0x01E2)), "Msg_0x", 6) == 0);
 	CHECK(std::strncmp(msg_name(uint16_t(0x01CF)), "Msg_0x", 6) == 0);
 	CHECK(std::strncmp(msg_name(Msg::NewCharacter), "Msg_0x", 6) != 0);
 }
@@ -170,7 +170,7 @@ TEST(protocol_f3a_version_is_11)
 {
 	// 11: the F3a messages, Hello carries a role and a token, PlayerState carries the vertices, TransitionState a flags
 	// byte, WeatherSync a weather set; a protocol 10 peer is refused at the handshake.
-	CHECK_EQ(kProtocolVersion, 33u); // 30: atomic weapon replacement and initial spawn metadata; 33: the Welcome's mode
+	CHECK_EQ(kProtocolVersion, 34u); // 34: R32 level journal; 30: atomic weapon replacement and initial spawn metadata; 33: the Welcome's mode
 }
 
 TEST(protocol_f3a_a_trip_round_trip)

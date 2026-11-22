@@ -25,6 +25,14 @@
 // VEH-DISC: departure(peer, character) answers Disconnected in every kind but a map server, which answers what its world's LevelMap
 // said when that player left its level: m.departed(peer, character, why) writes it, m.came(peer) drops it
 // (tests/test_vehicle_departure.cpp checks the real modes' answers against these).
+//
+// R32 (temp/r30/design/R32-final.md §8): writer_of(root) answers through the pure rule (xrCoop/coop_writer_rules.h writer_of) with the
+// kind the answers of the case make (writer::process_kind: a mirror, decides_world, leads_level) and the facts the test gives:
+// m.own_level(level) (the map a map server leads), m.lead(level, lead, peer) (the server of a map as this process knows it, the peer
+// that names it here), m.moving(character, from) / m.moved(character) (his move fence from that map is open / through),
+// m.holds(unit, level, holder[, how]) / m.home(unit) (a map server holds the unit / it is at home in the world). reconcile_world()
+// counts in m.reconciles for a map server; save_ready() is false on a world server while m.flush_pending(true) holds
+// (tests/test_writer_rules.cpp).
 #pragma once
 
 #include "srv/coop_ghost_rules.h"
@@ -223,6 +231,25 @@ public:
 	void departed(coop::PeerId peer, uint16_t character, coop::Departure why) { m_gone[peer] = {character, why}; }
 	void came(coop::PeerId peer) { m_gone.erase(peer); }
 	FakeLevelSide& side() { return m_side; }
+	// R32: what this process's tables say of the roots (writer_of)
+	void own_level(uint16_t level) { m_own_level = level; }
+	void lead(uint16_t level, coop::writer::Lead l, coop::PeerId peer = coop::kInvalidPeer) { m_leads[level] = {l, peer}; }
+	void moving(uint16_t character, uint16_t from) { m_moving[character] = from; }
+	void moved(uint16_t character) { m_moving.erase(character); }
+	void holds(uint16_t unit, uint16_t level, coop::PeerId holder, coop::writer::Hold how = coop::writer::Hold::Held)
+	{
+		m_holds[unit] = {how, level, holder};
+	}
+	void home(uint16_t unit) { m_holds.erase(unit); }
+	void flush_pending(bool pending) { m_flush_pending = pending; }
+	// The process as the writer rule sees it: the kind of this case's answers, its own map, its world (the host of its session or
+	// of its bridge).
+	coop::writer::Process process() const
+	{
+		return {coop::writer::process_kind(coop::has(m_case.answers.roles, coop::ProcessRole::Mirror), m_case.answers.decides_world,
+		            m_case.answers.leads_level),
+		    m_own_level, coop::kHostPeer};
+	}
 
 	const char* name() const override { return m_case.name; }
 	coop::Where where(coop::PeerId peer) const override
@@ -332,18 +359,63 @@ public:
 			return coop::Departure::Disconnected;
 		return it->second.second;
 	}
+	// R32, as the real modes answer: through the pure rule, from the facts the test gave
+	coop::writer::Writer writer_of(const coop::writer::RootFacts& r) const override
+	{
+		coop::writer::Seat seat;
+		seat.map = lead_of(r.level);
+		if (r.kind == coop::writer::RootKind::Character)
+		{
+			const auto it = m_moving.find(r.root);
+			if (it != m_moving.end())
+			{
+				seat.from = it->second;
+				seat.from_map = lead_of(it->second);
+			}
+		}
+		if (r.kind == coop::writer::RootKind::Unit)
+		{
+			const auto it = m_holds.find(r.root);
+			if (it != m_holds.end())
+			{
+				seat.hold = it->second.how;
+				seat.holder_level = it->second.level;
+				seat.holder = it->second.holder;
+			}
+		}
+		return coop::writer::writer_of(r, process(), seat);
+	}
+	void reconcile_world() override
+	{
+		if (process().kind == coop::writer::ProcessKind::Level)
+			++reconciles;
+	}
+	bool save_ready(uint64_t) override { return process().kind != coop::writer::ProcessKind::World || !m_flush_pending; }
 
 	std::vector<Sent> delivered; // deliver and stream, when this kind delivers
 	std::vector<Sent> sent_up; // up, when this kind sends up
 	std::vector<Link> linked; // deliver_links, when this kind has links
 	std::vector<Link> to_levels; // to_level_of that went to another process
 	int installs = 0, frames = 0, overs = 0, lives = 0;
+	int reconciles = 0; // R32: reconcile_world() of a map server
 
 private:
+	struct Held
+	{
+		coop::writer::Hold how;
+		uint16_t level;
+		coop::PeerId holder;
+	};
+
 	Spot spot_of(coop::PeerId peer) const
 	{
 		const auto it = m_spots.find(peer);
 		return it == m_spots.end() ? Spot::Stranger : it->second;
+	}
+	coop::writer::MapLead lead_of(uint16_t level) const
+	{
+		const auto it = m_leads.find(level);
+		return it == m_leads.end() ? coop::writer::MapLead{} : it->second;
 	}
 
 	ModeCase m_case;
@@ -354,5 +426,11 @@ private:
 	uint16_t m_world_level = 0xffff;
 	std::map<coop::PeerId, std::pair<uint16_t, coop::Departure>> m_gone; // VEH-DISC: peer -> his character here, how he left
 	FakeLevelSide m_side;
+	// R32 (writer_of)
+	uint16_t m_own_level = coop::writer::kNoLevel;
+	std::map<uint16_t, coop::writer::MapLead> m_leads; // map -> its server as this process knows it
+	std::map<uint16_t, uint16_t> m_moving; // character -> the map whose move fence is open
+	std::map<uint16_t, Held> m_holds; // unit -> who holds it
+	bool m_flush_pending = false;
 };
 } // namespace t

@@ -5,8 +5,11 @@
 #include "test_util.h"
 #include "srv/coop_levels_wire.h"
 #include "coop_protocol.h"
+#include "coop_spawn.h" // kMaxItemState: the bound of an ItemFacts blob
+#include "srv/coop_mapserver_rules.h" // R32: where the journal and its Ack go (map_server_sends, bridge_takes)
 #include "srv/coop_xfer.h" // the core's ops: every one has its wire value (levels_wire_xfer_ops_*)
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -1030,4 +1033,795 @@ TEST(levels_wire_blob_kind_is_three)
 {
 	// BlobWorldSave is 1 (coop_join.h); the full state of a level is 3 (plan §2.1, LevelSnapshot round > 0)
 	CHECK_EQ(kBlobLevelState, 3u);
+}
+
+// ---------------------------------------------------------------------------------------------- LevelJournal / Ack (protocol 34)
+// TZ R32 W3 (temp/r30/design/R32-final.md sections 1 and 5): a map server's facts go up in one ordered batch, answered; the
+// world server reads a batch whole before it applies any entry.
+
+namespace
+{
+namespace jr = coop::levels::journal;
+using Head = LevelEntityHead;
+
+jr::ObjectHead head_of(uint16_t id, uint16_t crc, uint32_t gen = 0)
+{
+	jr::ObjectHead h;
+	h.id = id;
+	h.crc = crc;
+	h.gen = gen;
+	return h;
+}
+
+// an entry of a per-object op from today's LevelEntity layout (built by hand, as coop_levels_xfer.cpp writes it)
+jr::Entry object_entry(uint8_t op, const jr::ObjectHead& h, const Writer& layout)
+{
+	jr::Entry e;
+	CHECK_EQ(std::string(jr::op_name(op)) + (jr::object_entry(op, h, layout, e) ? " is made" : " is refused"),
+	    std::string(jr::op_name(op)) + " is made");
+	return e;
+}
+
+template <class B>
+jr::Entry body_entry(uint8_t op, const B& body)
+{
+	jr::Entry e;
+	CHECK_EQ(std::string(jr::op_name(op)) + (jr::body_entry(op, body, e) ? " is made" : " is refused"),
+	    std::string(jr::op_name(op)) + " is made");
+	return e;
+}
+
+// a raw entry, for what no builder makes
+jr::Entry raw_entry(uint8_t op, const Writer& body)
+{
+	jr::Entry e;
+	e.op = op;
+	e.body = body.data();
+	return e;
+}
+
+jr::ItemFactsBody sample_item_facts(uint16_t item)
+{
+	jr::ItemFactsBody f;
+	f.item = item;
+	f.section = "medkit";
+	f.flags = 0;
+	f.blob = {1, 8, 1, 3, 0}; // the ItemState blob's own version byte, then tag Uses 3
+	f.source = jr::ItemFactsBody::Decider;
+	return f;
+}
+
+Writer state_layout(uint16_t proxy)
+{
+	Writer w;
+	w.u16(proxy);
+	const float pos[3] = {10.f, 2.f, -30.f};
+	const float ang[3] = {0.f, 1.f, 0.f};
+	w.vec3(pos);
+	w.vec3(ang);
+	w.u32(1234);
+	w.u16(77);
+	LevelBodyFacts facts;
+	facts.write(w);
+	return w;
+}
+
+// One entry of every op a journal carries (Report is a LevelEntity of its own), with the size of its body.
+struct Sample
+{
+	jr::Entry entry;
+	size_t body;
+};
+
+std::vector<Sample> every_op()
+{
+	std::vector<Sample> out;
+	const uint16_t crc = jr::section_crc("stalker_bandit_squad");
+	{
+		Writer l;
+		l.u16(900);
+		out.push_back({object_entry(Head::Destroy, head_of(900, crc, 3), l), 8 + 2});
+	}
+	{
+		Writer l;
+		l.u16(901);
+		l.u16(17);
+		const float pos[3] = {1.f, 2.f, 3.f};
+		l.vec3(pos);
+		out.push_back({object_entry(Head::Parent, head_of(901, crc), l), 8 + 2 + 2 + 12});
+	}
+	{
+		Writer l;
+		l.u16(902);
+		l.u16(0xFFFF);
+		const uint8_t st[3] = {9, 8, 7};
+		l.bytes(st, 3);
+		out.push_back({object_entry(Head::Died, head_of(902, crc, 5), l), 8 + 2 + 2 + 3});
+	}
+	out.push_back({object_entry(Head::State, head_of(903, crc), state_layout(903)), 8 + 2 + 12 + 12 + 4 + 2 + 28});
+	{
+		Writer l; // ItemFacts: the ItemState layout (u16 item, str section, u8 flags, varu n, blob) plus a source byte
+		CHECK(sample_item_facts(904).write(l));
+		out.push_back({object_entry(Head::Item, head_of(904, jr::section_crc("medkit")), l), 8 + 2 + (1 + 6) + 1 + 1 + 5 + 1});
+	}
+	{
+		Writer l;
+		l.u16(905);
+		l.u16(0xFFFF);
+		l.u8(1);
+		l.u32(0xA5A5A5A5u);
+		out.push_back({object_entry(Head::Spawn, head_of(905, crc), l), 8 + 2 + 2 + 1 + 4});
+	}
+	{
+		Writer l;
+		l.u32(3);
+		l.u64(uint64_t(-250));
+		l.u8(1);
+		out.push_back({raw_entry(Head::Money, l), 4 + 8 + 1});
+	}
+	{
+		Writer l;
+		l.u16(906);
+		l.u16(500);
+		out.push_back({object_entry(Head::Tent, head_of(906, crc), l), 8 + 2 + 2});
+	}
+	{
+		Writer l;
+		l.u16(500);
+		l.u8(1);
+		out.push_back({object_entry(Head::Stash, head_of(500, crc), l), 8 + 2 + 1});
+	}
+	{
+		LevelLogicBody b;
+		b.id = 907;
+		b.bytes = {1, 2, 3};
+		Writer l;
+		REQUIRE(b.write(l));
+		out.push_back({object_entry(Head::Logic, head_of(907, crc), l), 8 + 2 + 2 + 3});
+	}
+	jr::MemberBody joined;
+	joined.squad = 910;
+	joined.member = 911;
+	out.push_back({body_entry(Head::Joined, joined), 4});
+	jr::MemberBody left = joined;
+	left.member = 912;
+	out.push_back({body_entry(Head::Left, left), 4});
+	jr::InfoBody info;
+	info.id = 911;
+	info.on = 1;
+	info.info = "jup_b4_said";
+	out.push_back({body_entry(Head::Info, info), 2 + 1 + 1 + 11});
+	jr::AskBody ask;
+	ask.what = jr::AskBody::Release;
+	ask.id = 913;
+	ask.crc = crc;
+	out.push_back({body_entry(Head::Ask, ask), 1 + 2 + 2});
+	out.push_back({raw_entry(Head::IdAsk, Writer()), 0});
+	jr::CarryBody carry;
+	carry.part = 0;
+	carry.total = 2;
+	carry.blob = {'a', 'b', 'c', 'd'};
+	out.push_back({body_entry(Head::Carry, carry), 2 + 2 + 4});
+	jr::DoneBody done;
+	done.origin = 500;
+	done.op = 41;
+	done.answer = "ok";
+	out.push_back({body_entry(Head::Done, done), 4 + 4 + 1 + 2});
+	jr::FlushedBody flushed;
+	flushed.round = 12;
+	out.push_back({body_entry(Head::Flushed, flushed), 4});
+	return out;
+}
+
+LevelJournalMsg journal_of(uint32_t seq, const std::vector<jr::Entry>& entries)
+{
+	LevelJournalMsg m;
+	m.seq = seq;
+	m.entries = entries;
+	return m;
+}
+
+// a batch as bytes, whatever its entries say
+Writer batch_bytes(uint32_t seq, const std::vector<jr::Entry>& entries, uint16_t n_override = 0xFFFF)
+{
+	Writer w;
+	w.u32(seq);
+	w.u16(n_override == 0xFFFF ? uint16_t(entries.size()) : n_override);
+	for (const jr::Entry& e : entries)
+	{
+		w.u8(e.op);
+		w.varu(e.body.size());
+		w.bytes(e.body.data(), e.body.size());
+	}
+	return w;
+}
+
+// The verdict on a batch: read whole, or refused with nothing kept.
+std::string batch_verdict(const Writer& w)
+{
+	LevelJournalMsg m;
+	m.seq = 99;
+	m.entries.push_back(jr::Entry());
+	Reader r(w.ptr(), w.size());
+	if (m.read(r))
+		return r.remaining() == 0 ? "read" : "read with bytes left";
+	return m.seq == 0 && m.entries.empty() ? "refused whole" : "refused, but kept a part";
+}
+} // namespace
+
+TEST(levels_wire_journal_is_protocol_34_and_its_two_messages)
+{
+	static_assert(kProtocolVersion == 34u, "R32: the journal is protocol 34");
+	static_assert(uint16_t(Msg::LevelJournal) == 0x01E0 && uint16_t(Msg::LevelJournalAck) == 0x01E1, "the ids are the wire");
+	CHECK_EQ(std::string(msg_name(Msg::LevelJournal)), std::string("LevelJournal"));
+	CHECK_EQ(std::string(msg_name(Msg::LevelJournalAck)), std::string("LevelJournalAck"));
+	// up from the bridge alone; down from the world server alone, addressed to one bridge (never a broadcast's)
+	CHECK(msg_sender(Msg::LevelJournal) == MsgSender::TrunkOnly);
+	CHECK(msg_sender(Msg::LevelJournalAck) == MsgSender::HostOnly);
+	CHECK(scope_of(Msg::LevelJournal) == Scope::Trunk);
+	CHECK(scope_of(Msg::LevelJournalAck) == Scope::Trunk);
+	CHECK(mapserver::map_server_sends(Msg::LevelJournal));
+	CHECK(!mapserver::bridge_takes(Msg::LevelJournal));
+	CHECK(!mapserver::bridge_takes(Msg::LevelJournalAck));
+}
+
+TEST(levels_wire_journal_ops_follow_logic)
+{
+	// section 5: the new ops come after Logic = 10; LevelEntity itself carries today's ops alone (it stays for Report)
+	static_assert(Head::Joined == 11 && Head::Left == 12 && Head::Info == 13 && Head::Ask == 14 && Head::IdAsk == 15 &&
+	        Head::Carry == 16 && Head::Done == 17 && Head::Flushed == 18 && jr::kLastOp == 18,
+	    "section 5: Joined = 11 .. Flushed = 18");
+	for (unsigned op = 0; op < 256; ++op)
+	{
+		Writer w;
+		w.u8(uint8_t(op));
+		LevelEntityHead e;
+		Reader r(w.ptr(), w.size());
+		CHECK_EQ(std::string("LevelEntity op ") + std::to_string(op) + (e.read(r) ? " read" : " refused"),
+		    std::string("LevelEntity op ") + std::to_string(op) + (op <= Head::Logic ? " read" : " refused"));
+		const bool known = op <= 18 && op != Head::Report;
+		CHECK_EQ(std::string("journal op ") + std::to_string(op) + (jr::known_op(uint8_t(op)) ? " known" : " unknown"),
+		    std::string("journal op ") + std::to_string(op) + (known ? " known" : " unknown"));
+		const bool object = op == Head::Destroy || op == Head::Parent || op == Head::Died || op == Head::State || op == Head::Item ||
+		    op == Head::Spawn || op == Head::Tent || op == Head::Stash || op == Head::Logic;
+		CHECK_EQ(std::string("journal op ") + std::to_string(op) + (jr::names_object(uint8_t(op)) ? " has a head" : " has none"),
+		    std::string("journal op ") + std::to_string(op) + (object ? " has a head" : " has none"));
+	}
+	// every op has its own name for the logs, the rest is "?"
+	std::vector<std::string> names;
+	for (uint8_t op = 0; op <= jr::kLastOp; ++op)
+	{
+		const std::string n = jr::op_name(op);
+		CHECK(n != "?");
+		CHECK(std::find(names.begin(), names.end(), n) == names.end());
+		names.push_back(n);
+	}
+	CHECK_EQ(std::string(jr::op_name(19)), std::string("?"));
+}
+
+TEST(levels_wire_journal_round_trip_of_every_op)
+{
+	const std::vector<Sample> samples = every_op();
+	CHECK_EQ(samples.size(), size_t(18)); // 0 .. 18 but Report
+	std::vector<jr::Entry> entries;
+	size_t expected = 4 + 2;
+	for (const Sample& s : samples)
+	{
+		CHECK_EQ(std::string(jr::op_name(s.entry.op)) + " body " + std::to_string(s.entry.body.size()),
+		    std::string(jr::op_name(s.entry.op)) + " body " + std::to_string(s.body));
+		CHECK(jr::body_ok(s.entry.op, s.entry.body));
+		entries.push_back(s.entry);
+		expected += 1 + 1 + s.body; // op, a one-byte varu length (every body here is under 128 bytes), the body
+		// each op alone is a batch too
+		check_roundtrip(std::string("journal of ") + jr::op_name(s.entry.op), journal_of(7, {s.entry}), 4 + 2 + 1 + 1 + s.body);
+	}
+	const LevelJournalMsg m = journal_of(0xC0FFEE01u, entries);
+	CHECK(m.fits());
+	CHECK_EQ(m.wire_size(), expected);
+	check_roundtrip("journal of every op", m, expected);
+	LevelJournalMsg back;
+	REQUIRE(read_all(back, bytes_of(m)));
+	CHECK_EQ(back.seq, 0xC0FFEE01u);
+	REQUIRE(back.entries.size() == entries.size());
+	for (size_t i = 0; i < entries.size(); ++i)
+		CHECK(back.entries[i] == entries[i]);
+}
+
+TEST(levels_wire_journal_per_object_head_and_todays_layout)
+{
+	// A per-object entry: u16 id, u16 section crc, u32 keeper generation, then today's LevelEntity layout whole (it starts with the
+	// same id), so today's readers (coop_levels_xfer.cpp host_on_level_entity) take it after the head unchanged.
+	Writer l;
+	l.u16(901);
+	l.u16(17);
+	const float pos[3] = {1.f, 2.f, 3.f};
+	l.vec3(pos);
+	const jr::Entry e = object_entry(Head::Parent, head_of(901, 0xBEEF, 0x01020304u), l);
+	REQUIRE(e.body.size() == size_t(8 + 16));
+	CHECK_EQ(int(e.body[0] | (e.body[1] << 8)), 901);
+	CHECK_EQ(int(e.body[2] | (e.body[3] << 8)), 0xBEEF);
+	CHECK_EQ(int(e.body[4]), 4); // the generation, little endian
+	jr::ObjectHead h;
+	REQUIRE(jr::object_of(e, h));
+	CHECK_EQ(h.id, uint16_t(901));
+	CHECK_EQ(h.crc, uint16_t(0xBEEF));
+	CHECK_EQ(h.gen, 0x01020304u);
+	Reader rest = jr::layout_of(e);
+	CHECK_EQ(rest.remaining(), size_t(16));
+	CHECK_EQ(rest.u16(), uint16_t(901)); // today's layout: item, parent, position
+	CHECK_EQ(rest.u16(), uint16_t(17));
+	// an op without a head has none
+	jr::MemberBody mb;
+	mb.squad = 1;
+	mb.member = 2;
+	const jr::Entry j = body_entry(Head::Joined, mb);
+	CHECK(!jr::object_of(j, h));
+	CHECK_EQ(jr::layout_of(j).remaining(), size_t(0));
+	// the builder refuses what a reader refuses: a layout of another object, no id, a fixed layout of the wrong size
+	jr::Entry out;
+	Writer other;
+	other.u16(902);
+	other.u16(17);
+	other.vec3(pos);
+	CHECK(!jr::object_entry(Head::Parent, head_of(901, 1), other, out));
+	CHECK(!jr::object_entry(Head::Parent, head_of(kNoObject, 1), l, out));
+	Writer longer = l;
+	longer.u8(0);
+	CHECK(!jr::object_entry(Head::Parent, head_of(901, 1), longer, out));
+	CHECK(!jr::object_entry(Head::Joined, head_of(901, 1), l, out)); // no head for a membership
+	CHECK(!jr::object_entry(Head::Report, head_of(901, 1), l, out));
+	CHECK(out.body.empty());
+}
+
+TEST(levels_wire_journal_section_crc)
+{
+	// FNV-1a 32 of the section name, its halves xor-ed: the same name is the same crc on every process of one exe
+	CHECK_EQ(jr::section_crc("medkit"), jr::section_crc(std::string("medkit")));
+	CHECK(jr::section_crc("medkit") != jr::section_crc("medkit_army"));
+	CHECK(jr::section_crc("wpn_ak74") != jr::section_crc("wpn_ak74u"));
+	CHECK_EQ(jr::section_crc(""), uint16_t((2166136261u >> 16) ^ (2166136261u & 0xFFFFu)));
+	uint32_t h = 2166136261u;
+	for (const char c : std::string("stalker_bandit_squad"))
+		h = (h ^ uint8_t(c)) * 16777619u;
+	CHECK_EQ(jr::section_crc("stalker_bandit_squad"), uint16_t((h >> 16) ^ (h & 0xFFFFu)));
+}
+
+TEST(levels_wire_journal_bodies_round_trip)
+{
+	jr::MemberBody mb;
+	mb.squad = 910;
+	mb.member = 911;
+	check_roundtrip("Joined/Left", mb, 4);
+	jr::InfoBody ib;
+	ib.id = 911;
+	ib.on = 0;
+	ib.info = "esc_mechanic_flash_card";
+	check_roundtrip("Info", ib, 2 + 1 + 1 + 23);
+	jr::AskBody ab;
+	ab.what = jr::AskBody::Release;
+	ab.id = 913;
+	ab.crc = 0x1234;
+	check_roundtrip("Ask release", ab, 5);
+	ab.what = jr::AskBody::GiveInfo;
+	ab.info = "xcv_phantoms_gone";
+	check_roundtrip("Ask give info", ab, 5 + 1 + 17);
+	ab.what = jr::AskBody::DisableInfo;
+	check_roundtrip("Ask disable info", ab, 5 + 1 + 17);
+	jr::DoneBody db;
+	db.origin = 0xFFFFFFFFu;
+	db.op = 0;
+	db.answer = "";
+	check_roundtrip("Done, an empty answer", db, 4 + 4 + 1);
+	db.answer = std::string(jr::DoneBody::kMaxAnswer, 'x');
+	CHECK(db.fits());
+	check_write_at_limit("Done at its longest answer", db);
+	db.answer.push_back('x');
+	check_write_refused("Done over its longest answer", db);
+	jr::FlushedBody fb;
+	fb.round = 0xFFFFFFFFu;
+	check_roundtrip("Flushed", fb, 4);
+	jr::ItemFactsBody f = sample_item_facts(904);
+	check_roundtrip("ItemFacts", f, 2 + 7 + 1 + 1 + 5 + 1);
+	for (uint8_t src : {uint8_t(jr::ItemFactsBody::Loot), uint8_t(jr::ItemFactsBody::Decider), uint8_t(jr::ItemFactsBody::Owner)})
+	{
+		f.source = src;
+		jr::ItemFactsBody back;
+		REQUIRE(read_all(back, bytes_of(f)));
+		CHECK_EQ(back.source, src);
+		CHECK(back.blob == f.blob && back.section == f.section && back.item == f.item);
+	}
+	// the blob bound is the ItemState's (coop_spawn.h kMaxItemState)
+	static_assert(jr::ItemFactsBody::kMaxBlob == kMaxItemState, "the ItemState's bound");
+	f.blob.assign(jr::ItemFactsBody::kMaxBlob, 1);
+	check_write_at_limit("ItemFacts at its longest blob", f);
+	f.blob.push_back(1);
+	check_write_refused("ItemFacts over its longest blob", f);
+
+	// Carry: the blob is the rest of the body, a part of `total`
+	jr::CarryBody cb;
+	cb.part = 1;
+	cb.total = 3;
+	cb.blob = {1, 2, 3};
+	check_roundtrip("Carry", cb, 4 + 3, false);
+	cb.blob.assign(jr::CarryBody::kMaxPart, 7);
+	check_write_at_limit("Carry at its longest part", cb);
+	cb.blob.push_back(7);
+	check_write_refused("Carry over its longest part", cb);
+	static_assert(jr::CarryBody::kMaxPart + 4 <= jr::kMaxBody, "a carry part fits an entry");
+}
+
+TEST(levels_wire_journal_bodies_refused)
+{
+	auto member = [](uint16_t squad, uint16_t member) {
+		Writer w;
+		w.u16(squad);
+		w.u16(member);
+		return refused<jr::MemberBody>(w);
+	};
+	CHECK_EQ(member(1, 2), std::string("read"));
+	CHECK_EQ(member(kNoObject, 2), std::string("refused"));
+	CHECK_EQ(member(1, kNoObject), std::string("refused"));
+	CHECK_EQ(member(5, 5), std::string("refused")); // a squad is no member of itself
+
+	auto info = [](uint16_t id, uint8_t on, const std::string& s) {
+		Writer w;
+		w.u16(id);
+		w.u8(on);
+		w.str(s);
+		return refused<jr::InfoBody>(w);
+	};
+	CHECK_EQ(info(3, 1, "x"), std::string("read"));
+	CHECK_EQ(info(kNoObject, 1, "x"), std::string("refused"));
+	CHECK_EQ(info(3, 2, "x"), std::string("refused")); // on is 0 or 1
+	CHECK_EQ(info(3, 1, ""), std::string("refused")); // no info named
+	CHECK_EQ(info(3, 1, std::string("a\nb")), std::string("refused")); // not a name
+	CHECK_EQ(info(3, 1, std::string(jr::InfoBody::kMaxInfo, 'a')), std::string("read"));
+	CHECK_EQ(info(3, 1, std::string(jr::InfoBody::kMaxInfo + 1, 'a')), std::string("refused"));
+
+	auto ask = [](uint8_t what, uint16_t id, const std::string* s) {
+		Writer w;
+		w.u8(what);
+		w.u16(id);
+		w.u16(0x1234);
+		if (s)
+			w.str(*s);
+		return refused<jr::AskBody>(w);
+	};
+	const std::string name = "xcv_gone";
+	const std::string empty;
+	CHECK_EQ(ask(jr::AskBody::Release, 4, nullptr), std::string("read"));
+	CHECK_EQ(ask(jr::AskBody::Release, 4, &name), std::string("refused")); // a release names no info: bytes left over
+	CHECK_EQ(ask(jr::AskBody::GiveInfo, 4, &name), std::string("read"));
+	CHECK_EQ(ask(jr::AskBody::GiveInfo, 4, nullptr), std::string("refused"));
+	CHECK_EQ(ask(jr::AskBody::DisableInfo, 4, &empty), std::string("refused"));
+	CHECK_EQ(ask(0, 4, nullptr), std::string("refused"));
+	CHECK_EQ(ask(4, 4, nullptr), std::string("refused"));
+	CHECK_EQ(ask(jr::AskBody::Release, kNoObject, nullptr), std::string("refused"));
+	jr::AskBody a;
+	a.what = jr::AskBody::Release;
+	a.id = 4;
+	a.info = "x"; // the writer refuses what the reader would
+	check_write_refused("a release that names an info", a);
+	a.what = jr::AskBody::GiveInfo;
+	a.info.clear();
+	check_write_refused("an info ask without its info", a);
+
+	auto carry = [](uint16_t part, uint16_t total, size_t n) {
+		Writer w;
+		w.u16(part);
+		w.u16(total);
+		const std::vector<uint8_t> b(n, 1);
+		w.bytes(b.data(), b.size());
+		return refused<jr::CarryBody>(w);
+	};
+	CHECK_EQ(carry(0, 1, 1), std::string("read"));
+	CHECK_EQ(carry(1, 1, 1), std::string("refused")); // part < total
+	CHECK_EQ(carry(0, 0, 1), std::string("refused"));
+	CHECK_EQ(carry(0, 1, 0), std::string("refused")); // an empty part carries nothing
+	CHECK_EQ(carry(0, 1, jr::CarryBody::kMaxPart + 1), std::string("refused"));
+
+	Writer fl;
+	fl.u32(0); // round 0 is the snapshot stream, no flush round (FlushRound::start)
+	CHECK_EQ(refused<jr::FlushedBody>(fl), std::string("refused"));
+
+	auto facts = [](uint16_t item, const std::string& section, uint8_t flags, size_t n, uint8_t source) {
+		Writer w;
+		w.u16(item);
+		w.str(section);
+		w.u8(flags);
+		w.varu(n);
+		const std::vector<uint8_t> b(n, 1);
+		w.bytes(b.data(), b.size());
+		w.u8(source);
+		return refused<jr::ItemFactsBody>(w);
+	};
+	CHECK_EQ(facts(4, "medkit", 0, 3, 0), std::string("read"));
+	CHECK_EQ(facts(4, "medkit", 1, 3, 2), std::string("read")); // the authority flag of an ItemState
+	CHECK_EQ(facts(kNoObject, "medkit", 0, 3, 0), std::string("refused"));
+	CHECK_EQ(facts(4, "", 0, 3, 0), std::string("refused"));
+	CHECK_EQ(facts(4, "med kit\t", 0, 3, 0), std::string("refused"));
+	CHECK_EQ(facts(4, "medkit", 2, 3, 0), std::string("refused")); // a flag no ItemState has
+	CHECK_EQ(facts(4, "medkit", 0, 0, 0), std::string("refused")); // an empty blob says nothing
+	CHECK_EQ(facts(4, "medkit", 0, 3, 3), std::string("refused")); // a source none of the three
+	CHECK_EQ(facts(4, "medkit", 0, jr::ItemFactsBody::kMaxBlob + 1, 0), std::string("refused"));
+}
+
+TEST(levels_wire_journal_a_malformed_batch_is_refused_whole)
+{
+	const std::vector<Sample> samples = every_op();
+	std::vector<jr::Entry> good;
+	for (const Sample& s : samples)
+		good.push_back(s.entry);
+	CHECK_EQ(batch_verdict(batch_bytes(5, good)), std::string("read"));
+
+	// one bad entry in the middle: the batch goes, the good entries before it with it (a frame is applied whole or not at all)
+	auto with = [&](const jr::Entry& bad) {
+		std::vector<jr::Entry> v = good;
+		v.insert(v.begin() + 3, bad);
+		return batch_verdict(batch_bytes(5, v));
+	};
+	Writer none;
+	CHECK_EQ(with(raw_entry(19, none)), std::string("refused whole")); // no such op
+	CHECK_EQ(with(raw_entry(255, none)), std::string("refused whole"));
+	{
+		Writer b;
+		b.u32(1);
+		b.u16(0);
+		CHECK_EQ(with(raw_entry(Head::Report, b)), std::string("refused whole")); // Report stays a LevelEntity of its own
+	}
+	{
+		Writer b; // a head of no object
+		head_of(kNoObject, 1).write(b);
+		b.u16(kNoObject);
+		CHECK_EQ(with(raw_entry(Head::Destroy, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // the head names 900, today's layout 901
+		head_of(900, 1).write(b);
+		b.u16(901);
+		CHECK_EQ(with(raw_entry(Head::Destroy, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // a head and nothing after it
+		head_of(900, 1).write(b);
+		CHECK_EQ(with(raw_entry(Head::Spawn, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // a destroy is its id alone
+		head_of(900, 1).write(b);
+		b.u16(900);
+		b.u8(0);
+		CHECK_EQ(with(raw_entry(Head::Destroy, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // a cut head
+		b.u16(900);
+		b.u16(1);
+		CHECK_EQ(with(raw_entry(Head::Died, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // a parent without its position
+		head_of(901, 1).write(b);
+		b.u16(901);
+		b.u16(17);
+		CHECK_EQ(with(raw_entry(Head::Parent, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // ItemFacts of another item than its head
+		head_of(904, 1).write(b);
+		REQUIRE(sample_item_facts(905).write(b));
+		CHECK_EQ(with(raw_entry(Head::Item, b)), std::string("refused whole"));
+	}
+	{
+		Writer b; // money with a trade byte of 2 (host_on_level_entity refuses it too)
+		b.u32(3);
+		b.u64(10);
+		b.u8(2);
+		CHECK_EQ(with(raw_entry(Head::Money, b)), std::string("refused whole"));
+		Writer c; // money of no player slot
+		c.u32(kMaxPeerSlots);
+		c.u64(10);
+		c.u8(0);
+		CHECK_EQ(with(raw_entry(Head::Money, c)), std::string("refused whole"));
+	}
+	{
+		Writer b;
+		b.u16(5);
+		b.u16(5);
+		CHECK_EQ(with(raw_entry(Head::Joined, b)), std::string("refused whole"));
+	}
+	{
+		Writer b;
+		b.u8(0);
+		CHECK_EQ(with(raw_entry(Head::IdAsk, b)), std::string("refused whole")); // an id ask has no body
+	}
+	{
+		Writer b;
+		b.u32(0);
+		CHECK_EQ(with(raw_entry(Head::Flushed, b)), std::string("refused whole"));
+		Writer c;
+		c.u32(4);
+		c.u8(0); // more than its round
+		CHECK_EQ(with(raw_entry(Head::Flushed, c)), std::string("refused whole"));
+	}
+	{
+		Writer b;
+		b.u32(1);
+		b.u32(2);
+		b.str(std::string(jr::DoneBody::kMaxAnswer + 1, 'x'));
+		CHECK_EQ(with(raw_entry(Head::Done, b)), std::string("refused whole"));
+	}
+	{
+		jr::Entry big; // a body over kMaxBody
+		big.op = Head::Carry;
+		big.body.assign(jr::kMaxBody + 1, 1);
+		big.body[0] = 0;
+		big.body[1] = 0;
+		big.body[2] = 1;
+		big.body[3] = 0;
+		CHECK_EQ(with(big), std::string("refused whole"));
+	}
+
+	// the batch's own fields
+	CHECK_EQ(batch_verdict(batch_bytes(0, good)), std::string("refused whole")); // batches count from 1
+	CHECK_EQ(batch_verdict(batch_bytes(5, {})), std::string("refused whole")); // an empty batch says nothing
+	CHECK_EQ(batch_verdict(batch_bytes(5, good, uint16_t(good.size() + 1))), std::string("refused whole")); // n lies
+	CHECK_EQ(batch_verdict(batch_bytes(5, good, uint16_t(jr::kMaxEntries + 1))), std::string("refused whole"));
+	{
+		Writer w = batch_bytes(5, {good[0]});
+		w.bytes("\x05\x80", 2); // an entry's length that runs on past the packet: a cut entry
+		std::vector<uint8_t> b = w.data();
+		b[4] = 2; // n = 2
+		Writer w2;
+		w2.bytes(b.data(), b.size());
+		CHECK_EQ(batch_verdict(w2), std::string("refused whole"));
+	}
+	{
+		Writer w = batch_bytes(5, good);
+		w.u8(0); // bytes after the last entry: the caller's to refuse, as for every message of this file
+		CHECK_EQ(batch_verdict(w), std::string("read with bytes left"));
+	}
+	// a cut anywhere refuses it whole
+	const Writer whole = batch_bytes(5, good);
+	for (size_t cut = 0; cut < whole.size(); ++cut)
+	{
+		Writer w;
+		w.bytes(whole.ptr(), cut);
+		CHECK_EQ(std::string("cut at ") + std::to_string(cut) + ": " + batch_verdict(w),
+		    std::string("cut at ") + std::to_string(cut) + ": refused whole");
+	}
+}
+
+TEST(levels_wire_journal_the_writer_never_writes_what_a_reader_refuses)
+{
+	std::vector<jr::Entry> good;
+	for (const Sample& s : every_op())
+		good.push_back(s.entry);
+	std::vector<jr::Entry> with_bad = good;
+	Writer b;
+	b.u16(5);
+	b.u16(5);
+	with_bad.push_back(raw_entry(Head::Joined, b));
+	check_write_refused("a batch with an entry that does not read", journal_of(5, with_bad));
+	check_write_refused("an empty batch", journal_of(5, {}));
+	check_write_refused("a batch of seq 0", journal_of(0, good));
+	check_write_refused("a batch with a Report", journal_of(5, {raw_entry(Head::Report, Writer())}));
+	// over kMaxBatch bytes: not written (a frame that big goes as two batches, in order)
+	jr::CarryBody cb;
+	cb.total = 1;
+	cb.blob.assign(jr::CarryBody::kMaxPart, 3);
+	const jr::Entry part = body_entry(Head::Carry, cb);
+	std::vector<jr::Entry> many;
+	size_t bytes = 6;
+	while (bytes <= jr::kMaxBatch)
+	{
+		many.push_back(part);
+		bytes += 1 + 3 + part.body.size();
+	}
+	LevelJournalMsg huge = journal_of(5, many);
+	CHECK_EQ(huge.wire_size(), bytes);
+	check_write_refused("a batch over kMaxBatch", huge);
+	huge.entries.pop_back();
+	CHECK(huge.fits());
+	check_write_at_limit("a batch under kMaxBatch", huge);
+	// the entry builders refuse a body that would not read
+	jr::Entry out;
+	jr::FlushedBody fb;
+	fb.round = 0;
+	CHECK(!jr::body_entry(Head::Flushed, fb, out));
+	jr::MemberBody mb;
+	mb.squad = 3;
+	mb.member = 4;
+	CHECK(!jr::body_entry(Head::Info, mb, out)); // the layout of another op
+	CHECK(!jr::body_entry(Head::Destroy, mb, out)); // a per-object op takes its head
+	CHECK(out.body.empty());
+}
+
+TEST(levels_wire_journal_ack_round_trip)
+{
+	LevelJournalAckMsg m;
+	m.upto = 7;
+	m.refusals = {{5, Head::Spawn, 900, jr::IdRange}, {7, Head::Destroy, 901, jr::NotWriter}};
+	m.has_block = true;
+	m.first = 30000;
+	m.count = 512;
+	// u32 upto, u8 n, n x {u32 seq, u8 op, u16 id, u8 why}, u8 has_block, u16 first, u16 count
+	check_roundtrip("LevelJournalAck", m, 4 + 1 + 2 * 8 + 1 + 2 + 2);
+	LevelJournalAckMsg back;
+	REQUIRE(read_all(back, bytes_of(m)));
+	CHECK_EQ(back.upto, 7u);
+	REQUIRE(back.refusals.size() == 2);
+	CHECK_EQ(back.refusals[1].seq, 7u);
+	CHECK_EQ(int(back.refusals[1].op), int(Head::Destroy));
+	CHECK_EQ(back.refusals[1].id, uint16_t(901));
+	CHECK_EQ(int(back.refusals[1].why), int(jr::NotWriter));
+	CHECK(back.has_block && back.first == 30000 && back.count == 512);
+
+	LevelJournalAckMsg plain; // a batch applied whole, no block
+	plain.upto = 1;
+	check_roundtrip("LevelJournalAck plain", plain, 4 + 1 + 1);
+	// a refusal of an op with no object (Money, Done, Carry) names none
+	plain.refusals = {{1, Head::Money, kNoObject, jr::Refused}};
+	check_roundtrip("LevelJournalAck of a deal", plain, 4 + 1 + 8 + 1);
+
+	// every reason has a name, and 255 refusals is the most one Ack carries
+	for (uint8_t why = 1; why <= jr::kLastWhy; ++why)
+		CHECK(std::string(jr::why_name(why)) != "?");
+	CHECK_EQ(std::string(jr::why_name(0)), std::string("?"));
+	LevelJournalAckMsg full;
+	full.upto = 9;
+	full.refusals.assign(LevelJournalAckMsg::kMaxRefusals, {9, Head::Destroy, 1, jr::Identity});
+	check_write_at_limit("an Ack of 255 refusals", full);
+	full.refusals.push_back({9, Head::Destroy, 1, jr::Identity});
+	check_write_refused("an Ack of 256 refusals", full);
+}
+
+TEST(levels_wire_journal_ack_refusals)
+{
+	auto ack = [](uint32_t upto, uint32_t seq, uint8_t op, uint8_t why, uint8_t has_block, uint16_t first, uint16_t count) {
+		Writer w;
+		w.u32(upto);
+		w.u8(seq ? 1 : 0);
+		if (seq)
+		{
+			w.u32(seq);
+			w.u8(op);
+			w.u16(42);
+			w.u8(why);
+		}
+		w.u8(has_block);
+		if (has_block)
+		{
+			w.u16(first);
+			w.u16(count);
+		}
+		return refused<LevelJournalAckMsg>(w);
+	};
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 1, 100, 10), std::string("read"));
+	CHECK_EQ(ack(0, 0, 0, 0, 0, 0, 0), std::string("refused")); // every Ack answers a batch: batches count from 1
+	CHECK_EQ(ack(7, 8, Head::Destroy, jr::NotWriter, 0, 0, 0), std::string("refused")); // a refusal past what it acknowledges
+	CHECK_EQ(ack(7, 0xFFFFFFFFu, Head::Destroy, jr::NotWriter, 0, 0, 0), std::string("refused"));
+	CHECK_EQ(ack(7, 7, 19, jr::NotWriter, 0, 0, 0), std::string("refused")); // no such op
+	CHECK_EQ(ack(7, 7, Head::Report, jr::NotWriter, 0, 0, 0), std::string("refused"));
+	CHECK_EQ(ack(7, 7, Head::Destroy, 0, 0, 0, 0), std::string("refused")); // a refusal has a reason
+	CHECK_EQ(ack(7, 7, Head::Destroy, uint8_t(jr::kLastWhy + 1), 0, 0, 0), std::string("refused"));
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::kLastWhy, 0, 0, 0), std::string("read"));
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 2, 100, 10), std::string("refused")); // has_block is 0 or 1
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 1, kNoObject, 1), std::string("refused"));
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 1, 100, 0), std::string("refused")); // an empty block
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 1, 0xFFF0, 0x10), std::string("refused")); // runs into kNoObject
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 1, 0xFFF0, 0x0F), std::string("read")); // the last id 0xFFFE
+	CHECK_EQ(ack(7, 7, Head::Destroy, jr::NotWriter, 1, 0, 1), std::string("read"));
+	// the writer refuses the same
+	LevelJournalAckMsg m;
+	m.upto = 0;
+	check_write_refused("an Ack of upto 0", m);
+	m.upto = 3;
+	m.refusals = {{4, Head::Destroy, 1, jr::NotWriter}};
+	check_write_refused("an Ack with a refusal past upto", m);
+	m.refusals.clear();
+	m.has_block = true;
+	m.first = 100;
+	m.count = 0;
+	check_write_refused("an Ack with an empty block", m);
 }

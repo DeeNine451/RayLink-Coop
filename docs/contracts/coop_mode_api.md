@@ -18,6 +18,11 @@ Changed 2026-11-20 (A-S6-IF, through the lead's brief): **section 7**, the answe
 `facts_of`, `far`, `share_up`, `share_down` (and three optional layer fields); in C++ `Mode::level()` / `LevelSide` and the
 world-side `Mode` members, plus two process hooks of `Layer`. Nothing before section 7 changed in behaviour.
 
+Changed 2026-11-22 (R32 WP0, `temp/r30/design/R32-final.md` §8): **section 8**, one writer per object: in C++
+`Mode::writer_of(RootFacts)`, `reconcile_world()`, `save_ready(now)`, four new `EntityUp` kinds, and the pure rules of
+`engine/src/xrCoop/coop_writer_rules.h` (namespace `coop::writer`); in Lua the frozen name `coop_mode.writes(id)` (its facade and
+layer answers are WP2's). Nothing before section 8 changed in behaviour.
+
 Changed 2026-11-20 (review A-REV-E-1, finding 4; wording only): the srv layer of a world server answers from
 `coop_srv_mode.on_game_start` on, not from the process's start: axr_main loads every script, then runs `on_game_start` in
 file order, so a Core script's file level, or its `on_game_start` that runs before `coop_srv_mode`'s, gets the "none"
@@ -318,3 +323,55 @@ string argument: the guard reads no string, so `coop_mode.hook("levels.level_of_
 - Mode H-OPCMD `send_operator_command(line)`: none, хост и клиент кооп-режима, сервер мира и сервер карты отвечают Unreachable; игрок сервера — Refused при `!op::allowed`, иначе Sent или Unreachable от сессии.
 - Mode VEH-DISC `departure(peer, character)` → `Departure`: none, хост и клиент кооп-режима, сервер мира и игрок сервера отвечают Disconnected; сервер карты — `mapserver::departure_of`: что сказал `LevelMap` мира, когда ушёл его виртуальный узел (нет строки — Disconnected, строка на другой карте — LeftLevel, строка на этой — Replaced; без записи — Disconnected). Ядро спрашивает только пира, которого нет в сессии (`session_facts`).
 - Layer `join_request(address, via)`: слой Коопа возвращает приглашение Steam; слой Сервера и none — false.
+
+## 8. One writer per object (R32 WP0, 2026-11-22)
+
+TZ Р32, `temp/r30/design/R32-final.md` §1 W1, W2a, W4, W6 and §8. The owner's rule as a contract: every object has exactly one
+writer; only its word changes the object; everybody else keeps a copy and asks. Frozen names: the types and functions below, the
+`Mode` members of 8.2, the `EntityUp` kinds, the Lua call `coop_mode.writes(id)`. Tests: `tests/test_writer_rules.cpp` (the pure
+rules, the gate table row by row and under the six answer sets of `tests/support/fake_mode.h`, none's answers, the fake's answers);
+the real modes' answers: `tests/test_mode_answers.cpp` (WP2).
+
+**Namespace.** Everything of 8.1 is in `coop::writer`. `coop::Writer` is the wire writer (`xrCoop/coop_wire.h:14`, declared at
+`coop_mode.h:38` and taken by `deliver` / `stream` / `up`), so §8's `struct Writer` cannot be `coop::Writer`: it is
+`coop::writer::Writer`, and `Mode::writer_of` returns `writer::Writer`. The names and fields are §8's.
+
+### 8.1 The pure rules (`engine/src/xrCoop/coop_writer_rules.h`, Core, header-only)
+
+| name | what |
+|---|---|
+| `RootKind { Character, Unit, Resident, None }`, `RootFacts { kind, root, level }` | the root the Core found: a player's character (and the ghost), a squad or a creature in no squad, anything else on a map, an object of no map; `level` the map it stands on (a character: stands on or loads into), `kNoLevel` for none |
+| `root_of(id, parent_of, squad_of)` | W1.2: `ID_Parent` to the top (at most `kRootHops` = 8, as `host_apply_release`), a top in a squad gives its squad. The Core passes its ALife lookups (`kNoId` for none) |
+| `WriterIs { This, Other, Nobody }`, `Writer { is, peer }`; `this_process()`, `other(peer)`, `nobody()`, `==` | `peer` for Other only: the world server names a map server by its bridge; a map server names every writer it is not by its world (`kHostPeer` of its bridge); a player's machine by the host of its session |
+| `ProcessKind { Whole, Mirror, World, Level }`, `process_kind(mirror, decides_world, leads_level)` | the kind from answers the Core already has: `is_mirror()`, `Mode::decides_world()`, `Mode::leads_level()`. Whole: the co-op host and no session; Mirror: a co-op client, a server player; World: the world server; Level: a map server |
+| `Process { kind, level, world }` | this process: its kind, the map it leads (Level), the peer of its world |
+| `Lead { None, Starting, Leads, Stopping }`, `writes(lead)`, `lead_of(levels::ServerState)` | a map's server as this process knows it. It writes its map's residents and characters while `Leads` (Ready, Serving, Draining) **and `Stopping`** (until its Stopped, after its journal is acknowledged: W1.3, W4.3); Off, Lost, Starting: the world |
+| `MapLead { lead, peer }`, `Hold { Home, Held, Born }`, `Seat { map, from, from_map, hold, holder_level, holder }` | what the mode's tables say of a root: the server of its map; a character's open move fence (`from`, the map he left); a unit at home, granted, or made by a map server under its slice (held from its birth) and its holder |
+| `writer_of(root, self, seat)` | W1.2, first match: the ghost (`Character`, id `kGhostId` = 0, on World / Level) Nobody; Whole This; Mirror Other(its host); a character: the old map's server while his fence is open and it writes, else his map's server while it writes, else the world; a unit held or born: its holder wherever it stands, at home: the world; a resident: its map's server while it writes, else the world; anything else: the world |
+| `WriteOp { Create, Release, State, Info }`, `CodeScope { LevelCode, Decision, Unknown }`, `GateVerdict { Run, Mirror, Refuse, Ask, Order }` | W2a's inputs and verdicts; Unknown counts as Decision on the world server |
+| `gate(p, w, op, s, root_on_own_level, ghost_target)` | W2a, in this order: WS or Mk and the ghost: Create, Info Refuse; `w` This: Run; Whole: Run; Mirror: Mirror (today's `calls::decide`); WS and Nobody: Release, State Run; WS and a Mk: LevelCode Refuse, else Create Run, Release / State / Info Order; Mk and not This: Release, Info on its own map Ask, else Refuse |
+| `fence_admits(entry_epoch, fence_epoch)`, `kNoFence` | W2b, W4.2: an entry at or before the sender's fence is in, one after it is refused; `kNoFence`: no fence |
+| `same_object(crc_here, crc_report, gen_here, gen_report)` | W2b, W3: the section crc and the keeper generation (0 for no unit) both match; a reused id or a unit granted again is another object |
+| `CarryEntry { set, base, value }`, `carry_merge(e, base, value)` → `Stored / Chained / Same / Conflict`, `carry_apply(current, e)` → `Set / Done / Dropped`, `carry_admits(row_of_object, writer_here, sender)` | W6.5-W6.7 as the reference of `coop_srv_carry.script` (WP10, Lua): a leaf made on the kept value chains (the first base stays), the kept value again changes nothing, any other base keeps the stored value; at a load base → set, value → done, else dropped; a row about a live object only from its writer |
+| `writer_name`, `verdict_name`, `op_name`, `kind_name` | the words of the log and `coop_status` |
+
+### 8.2 `Mode` (`engine/src/xrCoop/coop_mode.h`)
+
+A default body for each (none's answer, which `NoneMode` keeps); each mode of the two layers writes its own (WP2: hostplay
+`coop_hostplay_mode.cpp`, srv `coop_srv_mode.cpp`).
+
+| member | none (default) | co-op host | co-op client | world server | map server | server player |
+|---|---|---|---|---|---|---|
+| `writer::Writer writer_of(const writer::RootFacts&) const` | This | This | Other(its host) | `writer::writer_of` over its keeper, holder, map servers' table (`lead_of(life.state())`, the bridge peer), move fences | `writer::writer_of` over its holder (`authors`), its own state, its world's LevelMap, its players | Other(its host) |
+| `void reconcile_world()` | nothing | nothing | nothing | nothing | `client_reconcile` over the ids it does not write (W5.1) | nothing |
+| `bool save_ready(uint64_t now)` | true | true | true | its flush round is done or timed out (W4.5) | true | true |
+
+`EntityUp` (H-ENTITYUP) gains `Joined`, `Left` (id: the squad, other: the member), `Info` (id: the object) and `ItemFacts` (id: the
+item) after `Died`; the first four keep their values. `LevelSide::level_entity_up(kind, id, other)` is unchanged: it carries no
+info name nor on/off and no item state, so `Info` and `ItemFacts` carry their payload through `LevelSide::level_info_up(id, info, on)` and `LevelSide::level_item_facts_up(id, const levels::wire::journal::ItemFactsBody&)`, both with empty default bodies (design R32-final.md §8a A7).
+
+### 8.3 Lua
+
+`coop_mode.writes(id)` → boolean: this process writes the object `id` (its root's writer is This). The facade and the layer
+answers are WP2's (`coop_mode.script`, `coop_hostplay_mode.script`, `coop_srv_mode.script`); none and the co-op host: true, a
+co-op client and a server player: false.
