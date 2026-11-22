@@ -118,16 +118,18 @@ TEST(s6_integration_coop_my_level_is_the_guarded_getter)
 	CHECK(getter.find("return wire::kNoLevel;") != std::string::npos);
 }
 
-// Review A-S6-E-econ2 (a gap HEAD had): a map server's LevelEntity::Money is bounded before it reaches the world's balance. The
-// trade byte is 0 or 1, and the s64 delta is capped to what a u32 balance can take, so money::adjust's s64(balance) + delta cannot
-// overflow; capped_balance gives a delta beyond +-UINT32_MAX the same result, so an honest report changes nothing.
+// Review A-S6-E-econ2 (a gap HEAD had): a map server's Money is bounded before it reaches the world's balance. The trade byte is 0
+// or 1, and the s64 delta is capped to what a u32 balance can take, so money::adjust's s64(balance) + delta cannot overflow;
+// capped_balance gives a delta beyond +-UINT32_MAX the same result, so an honest report changes nothing. R32 WP4: the Money comes in
+// the map server's journal and the world's one apply takes it (coop_levels_alife.cpp apply_money, its refusal counted and logged);
+// a LevelEntity Money is no longer applied (coop_levels_xfer.cpp host_on_level_entity keeps Report alone).
 TEST(s6_integration_level_money_report_is_bounded)
 {
-	const std::string xfer = engine_file("xrGame/coop/srv/coop_levels_xfer.cpp");
-	REQUIRE(!xfer.empty());
-	const size_t start = xfer.find("case Head::Money:");
+	const std::string alife = engine_file("xrGame/coop/srv/coop_levels_alife.cpp");
+	REQUIRE(!alife.empty());
+	const size_t start = alife.find("ApplyVerdict apply_money(");
 	REQUIRE(start != std::string::npos);
-	const std::string money = xfer.substr(start, xfer.find("case Head::Tent:", start) - start);
+	const std::string money = alife.substr(start, alife.find("return applied(e.op);", start) - start);
 	const size_t read_trade = money.find("const u8 trade = r.u8();");
 	const size_t refuse = money.find("trade > 1");
 	const size_t cap = money.find("kMaxLevelMoneyDelta");
@@ -135,8 +137,11 @@ TEST(s6_integration_level_money_report_is_bounded)
 	CHECK(read_trade != std::string::npos && refuse != std::string::npos && read_trade < refuse);
 	CHECK(cap != std::string::npos && adjust != std::string::npos && cap < adjust && refuse < adjust);
 	CHECK(money.find("const bool trade = r.u8() != 0;") == std::string::npos);
-	CHECK(xfer.find("constexpr s64 kMaxLevelMoneyDelta = s64(0xffffffffu);") != std::string::npos);
-	CHECK(money.find("::Msg(\"! [coop] levels: money report") != std::string::npos);
+	CHECK(money.find("constexpr s64 kMaxLevelMoneyDelta = s64(0xffffffffu);") != std::string::npos);
+	CHECK(money.find("return refuse(author, e.op, wire::kNoObject, journal::Malformed, why);") != std::string::npos);
+	const std::string xfer = engine_file("xrGame/coop/srv/coop_levels_xfer.cpp");
+	REQUIRE(!xfer.empty());
+	CHECK(xfer.find("money::host_adjust(") == std::string::npos);
 }
 
 TEST(s6_integration_money_has_no_server_balance)

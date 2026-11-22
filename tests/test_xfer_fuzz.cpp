@@ -47,6 +47,7 @@
 #include "test_util.h"
 
 #include "srv/coop_xfer.h"
+#include "srv/coop_levels_journal.h" // R32 WP4: the journal fuzz below
 
 #include <algorithm>
 #include <atomic>
@@ -1756,4 +1757,179 @@ TEST(xfer_fuzz)
 	if (runs == kDefaultRuns && forced < 0 && ms > kTimeLimitMs)
 		std::printf("    WARNING: %" PRIu64 " runs on %u threads took %.1f s, over the %.0f s budget\n", all.runs,
 			threads, double(ms) / 1000.0, double(kTimeLimitMs) / 1000.0);
+}
+
+
+// ---------------------------------------------------------------- R32 WP4 (W3): the level journal under fuzz
+
+// The writer (a map server) makes, moves, groups and destroys objects at random; its facts go into the journal, are cut at random
+// frames and by big carry parts (A11), every batch goes over the wire and is read whole, some are delivered twice. The world applies
+// each batch once, in order. Whatever the cut: no world object stays alive after its writer's Destroy, and the world ends with the
+// writer's objects, holders and squad members.
+namespace
+{
+struct JournalWorld
+{
+	std::set<uint16_t> alive;
+	std::map<uint16_t, uint16_t> parent;
+	std::map<uint16_t, std::set<uint16_t>> squads;
+
+	void apply(const coop::levels::journal::Entry& e)
+	{
+		using H = coop::levels::wire::LevelEntityHead;
+		namespace jr = coop::levels::journal;
+		if (jr::names_object(e.op))
+		{
+			jr::ObjectHead h;
+			REQUIRE(jr::object_of(e, h));
+			coop::Reader r = jr::layout_of(e);
+			if (e.op == H::Spawn)
+				alive.insert(h.id);
+			else if (e.op == H::Destroy)
+			{
+				alive.erase(h.id);
+				parent.erase(h.id);
+				squads.erase(h.id);
+				for (auto& s : squads)
+					s.second.erase(h.id);
+			}
+			else if (e.op == H::Parent)
+			{
+				r.u16();
+				const uint16_t to = r.u16();
+				if (alive.count(h.id))
+					parent[h.id] = to;
+			}
+			return;
+		}
+		coop::Reader r(e.body.data(), e.body.size());
+		jr::MemberBody b;
+		if ((e.op == H::Joined || e.op == H::Left) && jr::reads_whole(r, b))
+		{
+			if (e.op == H::Joined && alive.count(b.squad) && alive.count(b.member))
+				squads[b.squad].insert(b.member);
+			else if (e.op == H::Left)
+				squads[b.squad].erase(b.member);
+		}
+	}
+};
+
+struct JournalLcg
+{
+	uint64_t s;
+	uint32_t next(uint32_t n)
+	{
+		s = s * 6364136223846793005ull + 1442695040888963407ull;
+		return uint32_t((s >> 33) % n);
+	}
+};
+} // namespace
+
+TEST(xfer_fuzz_journal_no_world_object_outlives_its_writers_destroy)
+{
+	namespace jr = coop::levels::journal;
+	using H = coop::levels::wire::LevelEntityHead;
+	uint64_t batches = 0, repeats = 0;
+	for (uint64_t run = 0; run < 60; ++run)
+	{
+		JournalLcg rng{0x5EEDull + run * 0x9E3779B97F4A7C15ull};
+		jr::Batcher out;
+		jr::Receiver rx;
+		JournalWorld world, writer;
+		std::set<uint16_t> destroyed;
+		uint16_t next_id = 0x9000;
+		const auto entry = [&](uint8_t op, uint16_t id, const coop::Writer& layout) {
+			jr::Entry e;
+			REQUIRE(jr::object_entry(op, jr::ObjectHead{id, jr::section_crc("obj"), 0}, layout, e));
+			REQUIRE(out.add(e));
+			writer.apply(e);
+		};
+		const auto deliver = [&]() {
+			for (const coop::levels::wire::LevelJournalMsg& m : out.take())
+			{
+				CHECK(m.wire_size() <= jr::kMaxSendBytes);
+				coop::Writer w;
+				REQUIRE(m.write(w));
+				for (int copy = 0; copy < (rng.next(8) == 0 ? 2 : 1); ++copy)
+				{
+					coop::Reader r(w.ptr(), w.size());
+					coop::levels::wire::LevelJournalMsg in;
+					REQUIRE(in.read(r));
+					if (rx.look(1, in.seq) == jr::Receiver::Seen::Repeat)
+					{
+						++repeats;
+						continue;
+					}
+					for (const jr::Entry& e : in.entries)
+						world.apply(e);
+					rx.applied(1, in.seq);
+					++batches;
+				}
+			}
+		};
+		for (uint32_t op = 0; op < 300; ++op)
+		{
+			const uint32_t pick = rng.next(100);
+			const std::vector<uint16_t> live(writer.alive.begin(), writer.alive.end());
+			coop::Writer w;
+			if (pick < 30 || live.empty())
+			{
+				const uint16_t id = next_id++;
+				w.u16(id);
+				w.u16(0xffff);
+				entry(H::Spawn, id, w);
+			}
+			else if (pick < 50)
+			{
+				const uint16_t id = live[rng.next(uint32_t(live.size()))];
+				const uint16_t to = rng.next(3) == 0 ? uint16_t(0xffff) : live[rng.next(uint32_t(live.size()))];
+				w.u16(id);
+				w.u16(to);
+				const float p[3] = {0.f, 0.f, 0.f};
+				w.vec3(p);
+				entry(H::Parent, id, w);
+			}
+			else if (pick < 70 && live.size() >= 2)
+			{
+				jr::MemberBody b;
+				b.squad = live[rng.next(uint32_t(live.size()))];
+				b.member = live[rng.next(uint32_t(live.size()))];
+				if (b.squad == b.member)
+					continue;
+				jr::Entry e;
+				REQUIRE(jr::body_entry(rng.next(3) == 0 ? uint8_t(H::Left) : uint8_t(H::Joined), b, e));
+				REQUIRE(out.add(e));
+				writer.apply(e);
+			}
+			else if (pick < 92)
+			{
+				const uint16_t id = live[rng.next(uint32_t(live.size()))];
+				w.u16(id);
+				entry(H::Destroy, id, w);
+				destroyed.insert(id);
+			}
+			else if (pick < 93)
+			{
+				jr::CarryBody c; // a big part: the frame is cut under 1 MiB
+				c.part = 0;
+				c.total = 1;
+				c.blob.assign(jr::CarryBody::kMaxPart, uint8_t(op));
+				jr::Entry e;
+				REQUIRE(jr::body_entry(H::Carry, c, e));
+				for (int k = 0; k < 20; ++k)
+					REQUIRE(out.add(e));
+			}
+			if (rng.next(10) == 0)
+				deliver(); // a frame ends
+		}
+		deliver();
+		for (const uint16_t id : destroyed)
+			if (!writer.alive.count(id))
+				CHECK(!world.alive.count(id)); // no world object stays alive after its writer's Destroy
+		CHECK(world.alive == writer.alive);
+		CHECK(world.parent == writer.parent);
+		CHECK(world.squads == writer.squads);
+	}
+	CHECK(batches > 0);
+	CHECK(repeats > 0);
 }

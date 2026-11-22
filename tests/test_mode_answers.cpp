@@ -663,6 +663,6 @@ TEST(mode_map_server_ups_have_every_kind)
 	const std::string up = body_of(srv, R"(void\s+level_entity_up)");
 	for (const char* k : {"Spawned", "Released", "Parent", "Died", "Joined", "Left", "Info", "ItemFacts"})
 		expect_in("level_entity_up", up, std::string("case EntityUp::") + k + ":");
-	expect_in("MapLevelSide", class_body(srv, "MapLevelSide"), "void level_info_up(u16 id, const char*, bool) override");
+	expect_in("MapLevelSide", class_body(srv, "MapLevelSide"), "void level_info_up(u16 id, const char* info, bool on) override");
 	expect_in("MapLevelSide", class_body(srv, "MapLevelSide"), "void level_item_facts_up(u16 id) override");
 }
