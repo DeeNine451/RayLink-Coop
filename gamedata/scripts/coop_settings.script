@@ -875,15 +875,26 @@ end
 -- an animation has put there for a while: every weapon drawn after that shrank the view (live 2026-11-01). Nothing the host
 -- sets is theirs (free_zoom/* and the console are the player's), so the host's settings pass them by.
 local OWN_CONSOLE_READERS = { "free_zoomv2_mcm", "lam_fov_manager" }
+-- G.A.M.M.A.'s New Player Experience starts its tutorials anew on this callback (npe_director.script:1197-1235,
+-- mcm_on_option_change): its runners stop and start again 2 s later, every lesson not yet played goes back into the
+-- activation queue and its event handler runs again. A lesson that is already counting down (npe_director.script:866-891)
+-- is activated a second time and played twice; Timed Tutorial Prompts (z_npe_timed_prompt) opens the second offer under the
+-- same tutorial id, its timer CreateTimeEvent(uid, 0, ...) (ui_timed_prompt.script:418) is dropped while the first offer's
+-- is queued, and that offer never closes (TZ Р43, Dev 58: "Artefact System Tutorial" on a server-mode player, whom the
+-- host's settings reach at every world entry). Its options (npe/*) and its lessons (npe_module/*) are the player's
+-- (configs\coop_settings.ltx [mcm_player]): nothing it reads comes with the host's settings.
+local OWN_SETTINGS_READERS = { "npe_director" }
 
 local function hold_console_readers()
 	local held = {}
 	local route = mod("coop_route")
 	if not (route and route.handlers_of) then return held end
-	for _, script in ipairs(OWN_CONSOLE_READERS) do
-		for _, f in ipairs(route.handlers_of("on_option_change", script)) do
-			UnregisterScriptCallback("on_option_change", f)
-			held[#held + 1] = f
+	for _, list in ipairs({ OWN_CONSOLE_READERS, OWN_SETTINGS_READERS }) do
+		for _, script in ipairs(list) do
+			for _, f in ipairs(route.handlers_of("on_option_change", script)) do
+				UnregisterScriptCallback("on_option_change", f)
+				held[#held + 1] = f
+			end
 		end
 	end
 	return held
