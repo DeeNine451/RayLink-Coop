@@ -1602,8 +1602,8 @@ local function install_gadgets()
 	installed[#installed + 1] = "hf_gadgets.showcase"
 	-- R32 P4 (temp/r30/design/R32-addendum-gaps2.md): a display copy is a real weapon in its case, and the mod's veto runs only on
 	-- the picker's machine. The process that applies a move asks coop_mods_move_limits.admit first (engine admitted_move): every
-	-- move of a display copy is refused there, whoever asks and wherever it goes. The engine asks today for a container only; a
-	-- take into a player's character reaches this rule once admitted_move asks for that destination too (engine part, P4).
+	-- move of a display copy is refused there, whoever asks and wherever it goes: into a container, and into a player's
+	-- character (admitted_move asks for that destination too, without held moves: §8a A21 E-3, tests/lua/test_move_rules_player.lua).
 	local limits = C().mod("coop_mods_move_limits")
 	if limits and type(limits.add_rule) == "function" then
 		limits.add_rule("hf_showcase_display", function(_, item)

@@ -9,8 +9,11 @@
 	admit() on the process that applies a move into a container - the co-op host, or in the Server mode the map server of
 	the player's level - before it moves the item: a client's ReqTake / ReqTransfer (host_move) and that process's own script
 	and window moves (host_transfer_item: G.A.M.M.A.'s ui_inventory moves items with transfer_item). The windows of the mods
-	stay a preview. A move into a player's character or onto the ground is not asked about. A refusal goes back to a client
-	as the existing ReqResult "not allowed" (its window shows the real content again).
+	stay a preview. A move onto the ground is not asked about. A move into a character whose root is a player is asked too
+	(R32 WP18 P4, temp/r30/design/R32-final.md §8a A21 E-3), with pending 0 and nothing held: only a refusal stops it (the
+	Weapon Showcase display copy), so every rule must answer nil for an ordinary pickup into a player
+	(tests/lua/test_move_rules_player.lua lists every registered rule and proves it). A refusal goes back to a client as the
+	existing ReqResult "not allowed" (its window shows the real content again).
 
 	add_rule(name, fn) -> bool   fn(container_id, item_id, pending_count, pending_weight, from_id) ->
 	                                 true          the rule judged the move and lets it in (the engine holds it until the
@@ -32,7 +35,10 @@
 	               inventory_box, or placeable_type = stash) takes an item while the weight its game inventory shows + the
 	               held moves + the item <= its capacity (ltx `capacity`, 60 when absent), the arithmetic of the mod's window
 	               check (stash_capacities.script:100-111). The decider applies it only to moves from a player's character.
-	               Script transfers from that character into a backpack stash also count towards its capacity.
+	               Script transfers from that character into a backpack stash also count towards its capacity. A player's
+	               character is no stash section: a move into a player is never this rule's (nil).
+	Rules installed elsewhere: hf_showcase_display (coop_mods_hf.script, any move of a Weapon Showcase display copy: false),
+	companion_assigned_weight (coop_mods_move_limits_companions.script, a gift into a companion).
 
 	Nothing here runs by itself: no callback, no timer, no network verb. The engine asks only while it applies a move of a
 	session, on the process that decides for that container's map; single player is unchanged.
