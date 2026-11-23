@@ -14,7 +14,10 @@ std::unique_ptr<CInventoryItem> repair_item(const RepairRow& row, u16 root, bool
     std::unique_ptr<CInventoryItem> item;
     if (row.multi) {
         auto food = std::make_unique<CEatableItem>();
-        food->uses = u8(after ? row.after_uses : row.before_uses);
+        // CEatableItem::Load takes the section's max_uses (the G.A.M.M.A. ini is not read here): at least every value of the
+        // Lua outcome, so the engine's bound in SetRemainingUses accepts what the repair really set.
+        food->m_iMaxUses = u8(std::max(row.before_uses, row.after_uses));
+        food->m_iRemainingUses = u8(after ? row.after_uses : row.before_uses);
         item = std::move(food);
     } else {
         item = std::make_unique<CInventoryItem>();
@@ -40,6 +43,7 @@ int main(int argc, char** argv) {
         }
         client_objects.clear(); host_objects.clear(); client_entities.clear(); host_entities.clear();
         g_sent.clear(); g_owned.clear(); g_take_base.clear(); g_pending.clear(); outgoing.clear();
+        g_versions.clear(); g_applied.clear(); g_uses_history.clear(); g_facts_source.clear(); decider_pushes.clear();
         actor.inv.m_all.clear();
         std::vector<std::unique_ptr<CInventoryItem>> storage;
         std::vector<std::unique_ptr<CSE_ALifeInventoryItem>> server_storage;

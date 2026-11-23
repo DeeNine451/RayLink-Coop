@@ -11,8 +11,11 @@
 #include <string>
 #include <vector>
 #include "coop_item_tags.h"
+#include "coop_initial_rules.h" // pure (TZ R32 W8.3): initial::kMaxClientData of blob tag 14
+#include "coop_owner_rules.h" // pure (TZ R32 W8.1/W8.2): the decider's versions, the owner's report field by field
 #include "coop_wire.h"
 using u8 = uint8_t;
+using s16 = int16_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
@@ -30,6 +33,8 @@ using std::uint32_t;
 using coop::Writer;
 using coop::Reader;
 namespace itemtags = coop::itemtags;
+namespace owner = coop::owner;
+namespace initial = coop::initial;
 #define VERIFY(x) assert(x)
 #define TRUE true
 template<class T> T _min(T a, T b) { return std::min(a,b); }
@@ -57,8 +62,10 @@ struct CCartridge {
     void Load(const char* section, u8 type, float) { m_ammoSect = section; m_LocalAmmoType = type; }
 };
 class CInventory;
+struct CEatableItem;
 struct CInventoryItem {
     virtual ~CInventoryItem() = default;
+    virtual CEatableItem* cast_eatable_item() { return nullptr; } // inventory_item.h
     u16 id = 0, root = 0;
     shared_str section;
     float condition = 1.f;
@@ -151,7 +158,24 @@ struct CWeaponShotgun : CWeaponMagazined {
     bool HaveCartridgeInInventory(u8) { return m_pInventory->GetAny(m_ammoTypes[m_ammoType]); }
     u8 AddCartridge(u8);
 };
-struct CEatableItem : CInventoryItem { u8 GetRemainingUses() { return 0; } void SetRemainingUses(u8) {} };
+// eatable_item.h: the portions and their bound (CEatableItem::Load reads the section's max_uses, 1 without the line).
+struct CEatableItem : CInventoryItem {
+    u8 m_iMaxUses = 1, m_iRemainingUses = 1;
+    CEatableItem* cast_eatable_item() override { return this; }
+    u8 GetMaxUses() const { return m_iMaxUses; }
+    u8 GetRemainingUses() const { return m_iRemainingUses; }
+    void SetRemainingUses(u8 value) { if (value <= m_iMaxUses) m_iRemainingUses = value; }
+};
+// The section ini (pSettings): only the lines the extracted code reads (section_max_uses: max_uses).
+struct CInifile {
+    std::map<std::string, std::map<std::string, std::string>> lines;
+    bool line_exist(const shared_str& section, const char* line) const {
+        auto it = lines.find(section.value);
+        return it != lines.end() && it->second.count(line) != 0;
+    }
+    u8 r_u8(const shared_str& section, const char* line) const { return u8(std::stoul(lines.at(section.value).at(line))); }
+} g_ini;
+CInifile* pSettings = &g_ini;
 struct CSE_Abstract {
     virtual ~CSE_Abstract() = default;
     u16 ID = 0, root = 0;
@@ -178,8 +202,6 @@ constexpr u8 kBlobVersion = 1, kFlagAuthority = 1;
 enum Tag : u8 { TagCondition=1, TagUpgrades, TagBox, TagAddons, TagScope, TagMain, TagLauncher, TagUses, TagMode, TagFireMode, TagCartridges };
 enum class Op : u8 { State = 1 };
 enum class Msg { ItemState };
-enum class Reason { Malformed, NoProxy, Missing, Section, NotOwner, Moved, Insane };
-enum class Access { Denied, Owned, Foreign };
 bool host = false;
 u64 now_ms = 1;
 struct Manager {
@@ -190,11 +212,15 @@ struct Manager {
 Manager& mgr() { return manager; }
 bool is_live_mirror() { return !host; }
 bool is_map_authority() { return host; }
+struct LevelSide { void level_item_facts_up(u16) {} }; // coop_mode.h: a map server's side of its level
 struct Mode {
     bool decides_world() const { return host; }
     bool leads_level() const { return host; }
+    LevelSide* level() const { return nullptr; } // Coop: the co-op host and client have no level side (coop_mode.h Mode::level)
 };
 Mode mode() { return {}; }
+// coop_writer.cpp writing::writes, Coop: the co-op host writes every object, a player's machine (a mirror) none.
+namespace writing { bool writes(u16) { return host; } }
 u16 quant(float n) { return u16(std::lround(n * 65535.f)); }
 float dequant(u16 n) { return n / 65535.f; }
 bool same_str(const shared_str& a, const char* b) { return a == shared_str(b); }
@@ -208,14 +234,13 @@ namespace sync { bool host_peer_joining(PeerId) { return false; } }
 namespace ledger { void host_keeps_own_upgrades(ItemData& d) { d.has_upgrades = false; } }
 namespace trade { void client_on_item_state(u16) {} }
 std::vector<Blob> outgoing;
+std::vector<std::pair<PeerId, Blob>> decider_pushes; // host -> one owner (host_push_decider)
 namespace net {
 void client_send(Msg, Writer& w) { outgoing.push_back(w.data()); }
 void host_broadcast(Msg, Writer&) {}
+void host_send(PeerId to, Msg, Writer& w) { decider_pushes.emplace_back(to, w.data()); }
 }
-struct Stats {
-    u64 sent=0, take_kept=0, authority_applied=0, authority_skipped=0, ignored=0, applied=0;
-    u64 received=0, pending_dropped=0, relayed=0, enforced=0, rejected[7]={};
-} g_stats;
+Stats g_stats;
 std::map<u16, Blob> g_sent;
 std::mutex g_lock;
 xr_vector<u16> g_touched;

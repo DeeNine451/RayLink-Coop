@@ -25,6 +25,48 @@ def definition(source, signature):
     raise ValueError(signature)
 
 
+def declaration(source, signature):
+    """One production declaration that ends at its first ';' (a constant or a namespace-scope variable)."""
+    start = source.index(signature)
+    return source[start:source.index(";", start) + 1]
+
+
+# coop_items.cpp, in its own order: the item state the extracted methods keep (R32 W8: the decider's versions, the owner's
+# applied versions, the uses history, the setter guard's counter), the types, then the methods. pelican_repair_native.py takes
+# the same lists.
+ITEM_STATE = (
+    "constexpr u8 kFlagDecider", "int g_applying", "constexpr u8 kFactsDecider", "constexpr u8 kFactsOwner",
+    "xr_map<u16, itemtags::FieldVersions> g_versions", "xr_map<u16, owner::CounterHistory> g_uses_history",
+    "xr_map<u16, u8> g_staged_uses", "xr_map<u16, itemtags::FieldVersions> g_applied", "xr_map<u16, u8> g_facts_source",
+)
+ITEM_TYPES = (
+    "struct ItemData", "enum class Reason : u8", "struct Stats", "struct TakeBase", "struct Owned", "struct Pending",
+    "struct Applying", "enum class Access : u8",
+)
+ITEM_METHODS = (
+    "void put(", "void write_data(", "bool read_data(", "bool same_upgrades(",
+    "u32 carried_tags(", "u32 diverged_tags(", "void capture_object(", "void capture_blob(",
+    "void attach_versions(", "itemtags::FieldVersions versions_in(", "owner::CounterHistory uses_history_in(",
+    "u32 section_max_uses(", "int max_uses_here(", "void capture_report(",
+    "void set_current(", "void set_other(", "void apply_object(", "void apply_entity(",
+    "void write_state(", "void send_state(", "u32 take_changes(", "u32 push_keeps(",
+    "void scan_local(", "bool client_apply(", "void client_on_state(",
+    "void process_pending(", "void note_facts(", "void host_push_decider(",
+    "void filter_detached_silencer(", "void host_on_state(", "void host_enforce(",
+)
+
+
+def item_types(source):
+    """The // ITEM_TYPES part of fixtures/client_ammo_reload.cpp: production state declarations and types."""
+    return "\n".join([declaration(source, signature) for signature in ITEM_STATE] +
+                     [definition(source, signature) + ";" for signature in ITEM_TYPES])
+
+
+def item_methods(source):
+    """The production coop_items.cpp methods of the // ENGINE_METHODS part."""
+    return "\n".join(definition(source, signature) for signature in ITEM_METHODS)
+
+
 @pytest.fixture(scope="module")
 def ammo_runner():
     # Native products and pytest's own cache stay on the project temp volume.
@@ -32,17 +74,8 @@ def ammo_runner():
     work.mkdir(parents=True, exist_ok=True)
     game = ROOT / "engine/src/xrGame"
     source = (game / "coop/coop_items.cpp").read_text(encoding="utf-8-sig")
-    types = "\n".join(definition(source, signature) + ";" for signature in (
-        "struct ItemData", "struct TakeBase", "struct Owned", "struct Pending"))
-    signatures = (
-        "void put(", "void write_data(", "bool read_data(", "bool same_upgrades(",
-        "u32 diverged_tags(", "void capture_object(", "void capture_blob(",
-        "void set_current(", "void set_other(", "void apply_object(", "void apply_entity(",
-        "void write_state(", "void send_state(", "u32 take_changes(", "u32 push_keeps(",
-        "void scan_local(", "bool client_apply(", "void client_on_state(",
-        "void process_pending(", "void filter_detached_silencer(", "void host_on_state(", "void host_enforce(",
-    )
-    methods = "\n".join(definition(source, signature) for signature in signatures)
+    types = item_types(source)
+    methods = item_methods(source)
     methods += "\n" + definition((game / "WeaponAmmo.cpp").read_text(encoding="utf-8-sig"),
                                 "bool CWeaponAmmo::Get(")
     methods += "\n" + definition((game / "WeaponMagazined.cpp").read_text(encoding="utf-8-sig"),

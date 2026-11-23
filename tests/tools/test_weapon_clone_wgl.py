@@ -52,8 +52,16 @@ def clone_runner():
     source = source.replace("// ITEM_METHODS", methods)
     source = source.replace("// CLONE_METHOD", requests)
     source = source.replace("// RELEASE_HOOK", definition(game / "coop/coop_entities.cpp", "void host_on_entity_released("))
+    # R32 W2a: the writer gate's target kinds (pure coop_calls.h) and the script gate's own helpers before the gated methods.
+    calls_path = ROOT / "engine/src/xrCoop/coop_calls.h"
+    source = source.replace("// CALL_TARGETS", "\n".join(definition(calls_path, signature) + ";" for signature in (
+        "enum class Target : uint8_t", "struct WriteTarget",
+    )))
     gate_path = game / "alife_simulator_script.cpp"
     source = source.replace("// GATE_METHODS", "\n".join(definition(gate_path, signature) for signature in (
+        "static bool coop_writer_refuses(const char* call, coop::writer::WriteOp op, ALife::_OBJECT_ID id,",
+        "static bool coop_writer_refuses(const char* call, coop::writer::WriteOp op, ALife::_OBJECT_ID parent,",
+        "static coop::calls::Target coop_new_root_kind(", "static GameGraph::_GRAPH_ID coop_vertex_of(",
         "CSE_Abstract* reprocess_spawn(", "CSE_Abstract* try_to_clone_object(",
     )))
     (work / "weapon_clone_wgl.cpp").write_text(source, encoding="utf-8")

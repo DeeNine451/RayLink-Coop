@@ -10,10 +10,14 @@
 #include <set>
 #include "lua.hpp"
 #include "coop_item_tags.h"
+#include "coop_initial_rules.h" // pure (TZ R32 W8.3): initial::kMaxClientData of blob tag 14
+#include "coop_owner_rules.h" // pure (TZ R32 W8.2): owner::CounterHistory
 #include "coop_wire.h"
 #include "coop_replacement.h"
+#include "coop_writer_rules.h" // pure (R32 W1/W2a): writer::WriteOp, writer::is_unit, kNoLevel
 
 using u8 = std::uint8_t;
+using s16 = std::int16_t;
 using u16 = std::uint16_t;
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
@@ -25,6 +29,8 @@ using coop::Reader;
 using coop::Writer;
 using coop::kMaxItemState;
 namespace itemtags = coop::itemtags;
+namespace owner = coop::owner;
+namespace initial = coop::initial;
 namespace replacement = coop::replacement;
 constexpr u16 kNoId = 65535;
 constexpr u8 kBlobVersion = 1;
@@ -50,7 +56,12 @@ struct CSE_Abstract {
     const char* name_replace() const { return name.c_str(); }
     void Spawn_Write(NET_Packet&, bool);
 };
-struct CSE_ALifeInventoryItem : CSE_Abstract {
+// xrServer_Objects_ALife.h: an ALife object stands on a game vertex; an item is one (CSE_ALifeItem derives from it).
+struct CSE_ALifeObject : CSE_Abstract { u16 m_tGraphID = 0xffff; };
+struct CSE_ALifeOnlineOfflineGroup : CSE_ALifeObject {};
+struct CSE_ALifeCreatureAbstract : CSE_ALifeObject { float fHealth = 1.f; bool g_Alive() const { return fHealth > 0.f; } };
+struct CSE_ALifeMonsterAbstract : CSE_ALifeCreatureAbstract {};
+struct CSE_ALifeInventoryItem : CSE_ALifeObject {
     float m_fCondition = 0.83f;
     UpgradeList m_upgrades;
 };
@@ -143,6 +154,10 @@ std::map<u16,int> g_detached_silencers;
 std::set<u16> g_releasing;
 std::set<u32> g_logged_tags;
 std::map<u16,std::vector<u16>> g_proxy_items;
+// TZ R32 W8 (coop_items.cpp): the decider's and the owner's field versions, the uses history, staged uses, the facts source.
+std::map<u16, itemtags::FieldVersions> g_versions, g_applied;
+std::map<u16, owner::CounterHistory> g_uses_history;
+std::map<u16, u8> g_staged_uses, g_facts_source;
 struct SpawnReq {u16 weapon, parent;};
 std::vector<SpawnReq> g_spawns;
 std::vector<u16> g_touched, g_made_here, g_forgotten, g_clear_pending;
@@ -248,6 +263,8 @@ struct ClientID { void set(u16) {} };
 struct FakeServer {
     int freed = 0;
     void FreeID(u16, int) { ++freed; }
+    // xrServer.h (R32 W9): false only on a map server whose own id pool is empty under coop_writer_gate = enforce.
+    bool CoopMayCreate(const char*) { return true; }
     CSE_Abstract* Process_spawn(NET_Packet& packet, ClientID) {
         auto* e = make_temp(packet.section.c_str(), Fvector{}, 0, 0, 0);
         e->s_name = packet.section;
@@ -268,7 +285,15 @@ struct CALifeSimulator {
     void release(CSE_Abstract* e, bool) { host_destroy(Req{}, e->ID); }
 };
 namespace coop {
-namespace calls { enum class Gate { Request, Refuse, Run }; bool own_spawn(bool, bool) { return true; } }
+namespace calls {
+enum class Gate { Request, Refuse, Run };
+bool own_spawn(bool, bool) { return true; }
+// CALL_TARGETS
+}
+// coop_router.cpp writer_refuses (R32 W2a): the co-op host, a player's machine and single player never refuse a write.
+namespace router { bool writer_refuses(const char*, writer::WriteOp, const calls::WriteTarget&) { return false; } }
+// coop_levels.h: the map of a game vertex (the game graph is outside this harness: no map).
+namespace levels { using LevelId = u16; LevelId level_of_vertex(u16) { return writer::kNoLevel; } }
 namespace callgate { bool is_own(u16) { return true; } }
 namespace requests {
 using ::lua_clone; using ::prepare_local_clone; using ::before_clone_register; using ::after_clone_register;
