@@ -28,6 +28,13 @@
 	Every call is counted by the engine (coop.route.note: ran, skipped, error per domain; skips per script), shown by
 	coop_status.
 
+	Code scope (R32 W2a, temp\r30\design\R32-final.md): the engine's writer gate asks which code a script write comes from. Every
+	wrapper is registered with the engine (coop.route.scoped(wrapper, domain)) and stays on the Lua stack while its handler runs
+	(no tail call, also on the host), so the engine reads the scope from the live stack: the innermost registered wrapper. A
+	handler's wrapper has the handler's domain. A time event and a unique call keep the scope of the code that set them
+	(kept_scope: host where either the setter or the function's own domain is host; the setter's level, owner or view domain
+	where the function also runs on a map server; else "?", unknown). An error leaves nothing stale: the scope is the stack.
+
 	API:
 		coop_route.install() -> bool                   idempotent; false on an exe without coop.route
 		coop_route.on_game_start()                     wraps AddUniqueCall / RemoveUniqueCall / CreateTimeEvent again
@@ -40,6 +47,8 @@
 		coop_route.script_of(fn) -> script key ("?" without the router)
 		coop_route.inherit_source(wrapper, fn)         route a compatibility wrapper as the handler it replaces
 		coop_route.handler_domain(fn) -> domain of a function registered as a handler, nil for any other function
+		coop_route.kept_scope(setter, own) -> the scope a time event or unique call runs under (R32 W2a)
+		coop_route.scope_now() -> the scope of the running code: the innermost wrapper's ("?" for an unknown one), nil outside
 		coop_route.print_status()
 --]]
 
@@ -55,6 +64,7 @@ end
 
 local route -- coop.route once installed
 local runs, note -- coop.route.runs / coop.route.note
+local scoped, scope -- coop.route.scoped / coop.route.scope (R32 W2a); nil on an exe without them
 local installed = false
 local client = false -- this Lua state is a co-op client's (a client's state never becomes the host's)
 local cb_table -- axr_main's local `intercepts`
@@ -71,7 +81,8 @@ local origin = setmetatable({}, { __mode = "k" }) -- wrapper -> { fn = handler, 
 local handler_dom = setmetatable({}, { __mode = "k" }) -- handler function (the method of an object) -> domain
 local wrapped = {} -- callback -> { [handler] = wrapper }
 local uc_wrap = setmetatable({}, { __mode = "kv" }) -- AddUniqueCall: function -> wrapper
-local te_wrap = setmetatable({}, { __mode = "kv" }) -- CreateTimeEvent: function -> wrapper
+local te_wrap = {} -- CreateTimeEvent: kept scope -> { function -> wrapper } (weak): one wrapper per function and scope
+local te_route = setmetatable({}, { __mode = "k" }) -- CreateTimeEvent: function -> { domain, script } of its time_event route
 local uc_add_w, uc_rem_w, te_w -- our current replacements of the three globals
 
 local counts = { host = 0, owner = 0, view = 0, none = 0, level = 0 } -- wrappers made, by domain
@@ -153,6 +164,34 @@ local function orphaned(d)
 	return not (ok and on == true)
 end
 
+-- R32 W2a: the scope of the running code. The engine keeps every wrapper's domain (coop.route.scoped) and reads the scope from the
+-- live Lua stack (coop.route.scope: the innermost registered wrapper), so a wrapper must stay on the stack while its handler runs.
+local UNKNOWN_SCOPE = "?" -- a time event or unique call set by code of no known scope (coop_calls.h kUnknownScope)
+local LEVELISH = { level = true, owner = true, view = true } -- domains that run on a map server too
+
+local function mark(w, domain)
+	if scoped then scoped(w, domain) end
+end
+
+-- the values of a call, returned by a frame that stays on the stack while it runs (not a tail call)
+local function pass(...) return ... end
+
+-- The scope a time event or a unique call runs under: the code that set it (`setter`, nil when it was no wrapper's), narrowed by
+-- where its own function runs (`own`, its route): host where either is host (it runs only where the world is decided); the
+-- setter's level, owner or view domain where the function also runs on a map server; else unknown.
+function kept_scope(setter, own)
+	if setter == "host" or own == "host" then return "host" end
+	if LEVELISH[setter] and LEVELISH[own] then return setter end
+	return UNKNOWN_SCOPE
+end
+
+-- The scope of the running code as the engine reads it: the innermost wrapper's domain, nil outside any (or without the engine API).
+function scope_now()
+	if not scope then return nil end
+	local d = scope()
+	return type(d) == "string" and d or nil
+end
+
 local function guard(f, d, script, what, skip_ret, err_ret)
 	local w = function(...)
 		if not runs(d) or orphaned(d) then
@@ -165,10 +204,12 @@ local function guard(f, d, script, what, skip_ret, err_ret)
 			if rotate then return finish(d, script, what, err_ret, pcall(as_player_in_turn, script, f, ...)) end
 			return finish(d, script, what, err_ret, pcall(f, ...))
 		end
-		if rotate then return as_player_in_turn(script, f, ...) end
-		return f(...)
+		-- no tail call: this wrapper stays on the stack while the handler runs (its scope, R32 W2a); no pcall: the stock behaviour
+		if rotate then return pass(as_player_in_turn(script, f, ...)) end
+		return pass(f(...))
 	end
 	wrappers[w] = true
+	mark(w, d)
 	return w
 end
 
@@ -324,6 +365,41 @@ local function wrap_once(cache, f, what, skip_ret)
 	return w
 end
 
+-- AddUniqueCall: one wrapper per function (the call is unique by its function), its scope the one kept from the code that added
+-- it last (R32 W2a).
+local function wrap_unique(f)
+	local w = wrap_once(uc_wrap, f, "unique_call", false)
+	if w then mark(w, kept_scope(scope_now(), origin[w].domain)) end
+	return w
+end
+
+-- CreateTimeEvent: one wrapper per function and kept scope (time events are keyed by their ids, not by the function), routed by the
+-- function's own script; a broken one returns true: it is removed.
+local function wrap_time_event(f)
+	local r = te_route[f]
+	if not r then
+		local d, script = route_of("time_event", f)
+		if not d then return nil end
+		r = { d, script }
+		te_route[f] = r
+	end
+	local d, script = r[1], r[2]
+	local kept = kept_scope(scope_now(), d)
+	local cache = te_wrap[kept]
+	if not cache then
+		cache = setmetatable({}, { __mode = "kv" })
+		te_wrap[kept] = cache
+	end
+	local w = cache[f]
+	if w then return w end
+	handler_dom[f] = d
+	w = guard(f, d, script, "time_event", true, true)
+	mark(w, kept)
+	cache[f] = w
+	remember(w, f, d, script, "time_event")
+	return w
+end
+
 -- Wraps each of the three globals unless it is our wrapper already (a later script may have replaced it: wrapping its
 -- version is safe, a handler is never wrapped twice).
 local function wrap_globals()
@@ -331,7 +407,7 @@ local function wrap_globals()
 	if type(add) == "function" and add ~= uc_add_w then
 		uc_add_w = function(f)
 			if type(f) ~= "function" or wrappers[f] then return add(f) end
-			return add(wrap_once(uc_wrap, f, "unique_call", false) or f)
+			return add(wrap_unique(f) or f)
 		end
 		_G.AddUniqueCall = uc_add_w
 	end
@@ -346,7 +422,7 @@ local function wrap_globals()
 	if type(cte) == "function" and cte ~= te_w then
 		te_w = function(ev_id, act_id, timer, f, ...)
 			if type(f) == "function" and not wrappers[f] then
-				f = wrap_once(te_wrap, f, "time_event", true) or f
+				f = wrap_time_event(f) or f
 			end
 			return cte(ev_id, act_id, timer, f, ...)
 		end
@@ -366,6 +442,7 @@ function install()
 		return false
 	end
 	route, runs, note = r, r.runs, r.note
+	if type(r.scoped) == "function" and type(r.scope) == "function" then scoped, scope = r.scoped, r.scope end
 	local ok, is_client = pcall(api.is_client)
 	client = ok and is_client == true
 	installed = true
