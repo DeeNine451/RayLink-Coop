@@ -1,0 +1,267 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- R58-R60: send a VAR line after local playback, then play it at the peer's head.
+local api = rawget(_G, "coop")
+local REQ, VOICE = "core.actor_voice_req", "core.actor_voice"
+local GAP_MS, SLACK_MS = 400, 50
+local MIN_DISTANCE, NORMAL_DISTANCE, LOUD_DISTANCE = 2, 24, 60
+local HEAD = "bip01_head"
+local MAX_PEER_ID = 0xfffffffe -- PeerId is u32; the number of playable seats is a separate limit.
+
+local next_from, playing = {}, {}
+local last_sent
+local started, first_update, wrapped
+local stats = { sent = 0, relayed = 0, played = 0, local_rate = 0, rate = 0, bad = 0, non_player = 0, foreign = 0 }
+
+local function refuse(event, peer, counter, reason)
+	stats[counter] = stats[counter] + 1
+	if coop_trust then coop_trust.guard(event .. "." .. counter, false, "peer %s: %s", tostring(peer), reason) end
+end
+
+local function peer_id(peer)
+	return type(peer) == "number" and peer >= 0 and peer <= MAX_PEER_ID and peer % 1 == 0
+end
+
+local function coord(n)
+	return type(n) == "number" and math.abs(n) < 100000
+end
+
+local function valid_line(t)
+	local file, lvl, gain = t.file, t.level, t.volume
+	return type(file) == "string" and #file <= 160 and file:match("^[a-z0-9_./%-]+$")
+		and file:sub(1, 1) ~= "/" and not file:find("..", 1, true)
+		and type(lvl) == "string" and #lvl <= 64 and lvl:match("^[A-Za-z0-9_.%-]+$")
+		and type(gain) == "number" and gain >= 0 and gain <= 10 and type(t.loud) == "boolean"
+		and coord(t.x) and coord(t.y) and coord(t.z)
+end
+
+local function local_path(file)
+	local path = file:gsub("/", "\\")
+	if getFS():exist("$game_sounds$", path .. ".ogg") then return path end
+end
+
+local function local_player()
+	if api.is_active() and coop_mode.actor_is_player() and (coop_mode.decides_world() or api.is_live()) then
+		return db.actor
+	end
+end
+
+local function stop(peer)
+	local voice = playing[peer]
+	if voice then
+		playing[peer] = nil
+		if voice.sound:playing() then voice.sound:stop() end
+	end
+end
+
+local function clear()
+	for peer in pairs(playing) do stop(peer) end
+	next_from, last_sent = {}, nil
+end
+
+local function avatar_at_head(peer)
+	if coop_mode.where(peer) ~= "here" then return end
+	local avatar = coop_mods_core.avatar(peer)
+	if not avatar then return end
+	local ok, pos = pcall(avatar.bone_position, avatar, HEAD)
+	return avatar, (ok and pos) or avatar:position()
+end
+
+local function receiver_gain(gain)
+	local core = coop_mods_core
+	local var = core.mod("agdd_voiced_actor")
+	local options = var and var.on_option_change
+	local shouts = core.upvalue(options, "mcm_shouts_volume") or 2
+	local master = core.upvalue(options, "mcm_master_volume") or 1
+	local influence = core.upvalue(options, "mcm_va_global_volume_influence") or 0
+	return shouts * gain * (1 + (master - 1) * influence)
+end
+
+local function flat_gain(gain, distance, limit)
+	return gain * math.max(0, math.min(1, (limit - distance) / (limit - MIN_DISTANCE)))
+end
+
+local function at_origin(pos)
+	return pos.x == 0 and pos.y == 0 and pos.z == 0
+end
+
+local function spatial_flag()
+	-- Older luabind builds raise on an unknown enum value.
+	local ok, downmix = pcall(function() return sound_object.mono3d end)
+	return ok and downmix or sound_object.s3d
+end
+
+local function play_at_head(path, pos, distance, limit, gain, avatar_id, lvl)
+	-- CSoundPlayer's Lua play_sound only takes timing and a variant index. sound_object
+	-- uses the same 3D mixer and lets us set VAR's gain and range per line.
+	local sound = sound_object(path)
+	-- A legacy forced-2D stereo emitter pins its position to zero. Starting with a
+	-- nonzero position distinguishes it from a real 3D source at the world origin.
+	local at_zero = at_origin(pos)
+	local start = at_zero and vector():set(1, 0, 0) or pos
+	sound:play_at_pos(nil, start, 0, spatial_flag())
+	if not sound:playing() then return end
+	local flat = at_origin(sound:get_position())
+	if at_zero and not flat then sound:set_position(pos) end
+	sound.min_distance, sound.max_distance = MIN_DISTANCE, limit
+	sound.volume = flat and flat_gain(gain, distance, limit) or gain
+	return { sound = sound, flat = flat, gain = gain, limit = limit, avatar_id = avatar_id, level = lvl }
+end
+
+local function receive(t)
+	local actor, peer = local_player(), t.speaker
+	if not actor or peer == coop_mods_core.self_peer() or t.level ~= level.name() then return end
+	stop(peer)
+	if not coop_menu_options.actor_voice_enabled() then return end
+	local avatar, pos = avatar_at_head(peer)
+	if not avatar then return end
+	local limit = t.loud and LOUD_DISTANCE or NORMAL_DISTANCE
+	local distance = pos:distance_to(actor:position())
+	if distance > limit then return end
+	local path = local_path(t.file)
+	if not path then return refuse(VOICE, peer, "bad", "sound file does not exist on the listener") end
+	local voice = play_at_head(path, pos, distance, limit, receiver_gain(t.volume), avatar:id(), t.level)
+	if voice then
+		playing[peer] = voice
+		stats.played = stats.played + 1
+	end
+end
+
+local function on_voice(payload, from)
+	if not api.is_active() or coop_mode.decides_world() then return end
+	if from ~= 0 then return refuse(VOICE, from, "foreign", "relay did not come from the world") end
+	local t = coop_main.decode(payload)
+	if not (valid_line(t) and peer_id(t.speaker)) then
+		return refuse(VOICE, from, "bad", "invalid voice relay")
+	end
+	receive(t)
+end
+
+local function accept(t, from, now)
+	if not valid_line(t) then return refuse(REQ, from, "bad", "invalid voice request") end
+	for peer, due in pairs(next_from) do
+		if due <= now or due > now + GAP_MS + SLACK_MS then next_from[peer] = nil end
+	end
+	local due = next_from[from]
+	if due and now < due - SLACK_MS then return refuse(REQ, from, "rate", "voice line sent too soon") end
+	if not local_path(t.file) then return refuse(REQ, from, "bad", "sound file does not exist on the world") end
+	-- Borrow a little time for jitter without letting successive sends run faster than 400 ms.
+	next_from[from] = (due or now) + GAP_MS
+	local line = { file = t.file, volume = t.volume, level = t.level, x = t.x, y = t.y, z = t.z,
+		loud = t.loud, speaker = from }
+	if coop_mode.publish(VOICE, line) then stats.relayed = stats.relayed + 1 end
+	receive(line) -- the playing decider's own Lua does not get its broadcast back
+	return true
+end
+
+local function on_request(payload, from)
+	if not (api.is_active() and coop_mode.decides_world()) then return end
+	if not (peer_id(from) and from ~= 0 and coop_mode.seat_plays(from)) then
+		return refuse(REQ, from, "non_player", "sender is not a remote player")
+	end
+	accept(coop_main.decode(payload), from, time_global())
+end
+
+local function is_loud(file, can_hear)
+	if can_hear == true then return true end
+	-- Random long shouts and mid/far commands pass no squad flag to actor_speak_base.
+	local family, category = file:match("^characters_voice/([a-z_]+)/([^/]+)/")
+	if family == "random_shouts" or family == "random_shouts_eng" then return category == "random_long" end
+	if family == "commands" or family == "commands_eng" then
+		local command = category:gsub("_aic$", "")
+		return command:match("_com_mid$") ~= nil or command:match("_com_far$") ~= nil
+	end
+	return false
+end
+
+local function share(file, gain, can_hear)
+	local actor = local_player()
+	if not actor or type(file) ~= "string" then return end
+	local now = time_global()
+	if last_sent and now >= last_sent and now - last_sent < GAP_MS then
+		stats.local_rate = stats.local_rate + 1
+		return
+	end
+	file = file:gsub("\\", "/"):lower()
+	local pos = actor:position()
+	local line = { file = file, volume = gain, level = level.name(), x = pos.x, y = pos.y, z = pos.z,
+		loud = is_loud(file, can_hear) }
+	if not valid_line(line) then return end
+	local sent
+	if coop_mode.decides_world() then
+		sent = accept(line, coop_mods_core.self_peer(), now)
+	else
+		sent = api.send_event(REQ, coop_main.encode(line), 0) -- a request to the world decider
+	end
+	if sent then
+		last_sent = now
+		stats.sent = stats.sent + 1
+	end
+end
+
+local function install_wrapper()
+	if wrapped or not api.is_active() or not coop_mode.actor_is_player() then return end
+	local core = coop_mods_core
+	wrapped = core.wrap(core.mod("agdd_voiced_actor"), "actor_speak_base", "actor_voice.share", function(original)
+		return function(file, gain, cooldown, chance, near, can_hear, ...)
+			local accepted = original(file, gain, cooldown, chance, near, can_hear, ...)
+			if accepted == true then
+				local ok, err = pcall(share, file, gain, can_hear)
+				if not ok then core.report("actor_voice", "share", err) end
+			end
+			return accepted
+		end
+	end)
+end
+
+local function on_first_update()
+	-- axr_main starts all the mods first, including the Gunslinger and standing wrappers.
+	first_update = true
+	install_wrapper()
+end
+
+local function update()
+	if not api.is_active() then
+		if last_sent or next(next_from) or next(playing) then clear() end
+		return
+	end
+	if first_update and not wrapped then install_wrapper() end -- a session can start after the first update
+	if not next(playing) then return end
+	local actor = local_player()
+	if not actor or not coop_menu_options.actor_voice_enabled() then
+		for peer in pairs(playing) do stop(peer) end
+		return
+	end
+	local here, listener = level.name(), actor:position()
+	for peer, voice in pairs(playing) do
+		local avatar, pos
+		if voice.level == here and voice.sound:playing() then avatar, pos = avatar_at_head(peer) end
+		if not avatar or avatar:id() ~= voice.avatar_id then
+			stop(peer)
+		elseif voice.flat then
+			voice.sound.volume = flat_gain(voice.gain, pos:distance_to(listener), voice.limit)
+		else
+			voice.sound:set_position(pos)
+		end
+	end
+end
+
+local function on_destroy()
+	first_update = nil
+	clear()
+end
+
+function print_status()
+	printf("[coop] actor voice: sent %d, relayed %d, played %d, refused: local rate %d, rate %d, bad %d, non-player %d, foreign %d",
+		stats.sent, stats.relayed, stats.played, stats.local_rate, stats.rate, stats.bad, stats.non_player, stats.foreign)
+end
+
+-- axr_main discovers all script modules with on_game_start.
+function on_game_start()
+	if started or not api then return end
+	started = true
+	coop_main.add_event_handler(REQ, on_request)
+	coop_main.add_event_handler(VOICE, on_voice)
+	RegisterScriptCallback("actor_on_first_update", on_first_update)
+	RegisterScriptCallback("actor_on_update", update)
+	RegisterScriptCallback("actor_on_net_destroy", on_destroy)
+end

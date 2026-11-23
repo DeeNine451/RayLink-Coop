@@ -26,6 +26,7 @@ local names = {
 	-- the player-facing news (coop_core_world): a map server reports its news as core.news_up to the world's Lua, which
 	-- checks it and sends core.news; reserved here so that every hosting (a rehost too) refuses a bridge's core.news
 	"core.news",
+	"core.actor_voice",
 }
 
 function on_game_start()

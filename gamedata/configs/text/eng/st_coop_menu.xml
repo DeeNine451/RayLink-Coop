@@ -418,6 +418,12 @@
 	<string id="ui_mm_coop_coop_player_chat_feed_desc">
 		<text>Show new chat lines for a few seconds while the chat window is closed.</text>
 	</string>
+	<string id="ui_mm_coop_coop_player_actor_voice">
+		<text>Hear other players' voice lines</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_actor_voice_desc">
+		<text>Play nearby players' character voice lines at their in-game position.</text>
+	</string>
 	<string id="st_coop_opt_session_note">
 		<text>These are the host's rules. While you are connected to another player's game his rules apply and these fields are locked; they take effect when you host.</text>
 	</string>

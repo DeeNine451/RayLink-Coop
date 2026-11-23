@@ -1356,6 +1356,7 @@ STATUS_MODULES = {
 	"coop_tasks",
 	"coop_loot_claim",
 	"coop_mods_core",
+	"coop_mods_actor_voice",
 }
 
 function print_status()

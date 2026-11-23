@@ -47,6 +47,7 @@ function build_page()
 				flag("party_hud", true),
 				flag("player_spots", true),
 				flag("chat_feed", true),
+				flag("actor_voice", true),
 				-- HUD v2 (docs\HUD_V2.md): the compass bar, its field of view, where the ping key is
 				flag("compass_hud", true),
 				{ id = "compass_fov", type = "list", val = 0, def = "160", no_str = true,
@@ -104,6 +105,8 @@ local function player_flag(id, def)
 	if ok and v == true then return true end
 	return def
 end
+
+function actor_voice_enabled() return player_flag("actor_voice") end
 
 local function player_value(id, def)
 	local am = rawget(_G, "axr_main")

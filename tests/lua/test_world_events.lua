@@ -8,6 +8,7 @@ local expected = {
 	-- world turns it into core.news, so a bridge's core.news is refused before the relay rewrites its sender to 0 - on
 	-- every hosting, including a rehost of the same Lua state after the native session end cleared the reservations
 	"core.news",
+	"core.actor_voice",
 }
 local path = "gamedata/scripts/coop_world_events.script"
 local passed, failed = 0, 0

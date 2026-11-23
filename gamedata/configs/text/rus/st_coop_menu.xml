@@ -418,6 +418,12 @@
 	<string id="ui_mm_coop_coop_player_chat_feed_desc">
 		<text>ѕоказывать новые строки чата несколько секунд, пока окно чата закрыто.</text>
 	</string>
+	<string id="ui_mm_coop_coop_player_actor_voice">
+		<text>—лышать реплики других игроков</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_actor_voice_desc">
+		<text>¬оспроизводить реплики ближайших игроков от их персонажей.</text>
+	</string>
 	<string id="st_coop_opt_session_note">
 		<text>Ёто правила хоста. ѕока вы подключены к чужой игре, действуют правила хоста, а эти пол€ заблокированы; ваши значени€ работают, когда хост - вы.</text>
 	</string>
