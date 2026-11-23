@@ -7,6 +7,10 @@
 
 #include "coop_checkpoint_source_rules.h"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 
 using namespace coop;
@@ -449,4 +453,115 @@ TEST(cpsrc_tent_bound)
 	CHECK(!b.set_owner(60000, kKeyA));
 	CHECK(b.set_owner(1, kKeyB)); // a known tent changes hands
 	CHECK_EQ(b.owner_of(1), kKeyB);
+}
+
+// Compile the producer and consumer from the engine source with only their world/level lookups stubbed.
+TEST(cpsrc_footing_from_map_server)
+{
+	namespace fs = std::filesystem;
+	const fs::path root = fs::absolute(__FILE__).parent_path().parent_path();
+	const fs::path engine = root / "engine/src";
+	std::ifstream input(engine / "xrGame/coop/coop_checkpoint_sources.cpp");
+	REQUIRE(input.good());
+	const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+	const auto definition = [&](const char* signature) {
+		const size_t first = source.find(signature);
+		REQUIRE(first != std::string::npos);
+		// The closing brace of these free functions is at column one.
+		const size_t last = source.find("\n}", first);
+		REQUIRE(last != std::string::npos);
+		return source.substr(first, last + 2 - first);
+	};
+
+	const char* output = std::getenv("COOP_TEST_OUT");
+	const fs::path out = (output && *output ? fs::absolute(output) : root / "temp/tests") / "checkpoint_footing";
+	fs::create_directories(out);
+	const fs::path cpp = out / "footing.cpp";
+	const fs::path exe = out / "footing.exe";
+	{
+		std::ofstream slice(cpp);
+		REQUIRE(slice.good());
+		slice << R"cpp(
+#include "coop_checkpoint_base_rules.h"
+#include <cstdio>
+#include <map>
+
+using namespace coop;
+using u16 = uint16_t;
+using u32 = uint32_t;
+namespace base = checkpoint::base;
+
+constexpr u16 kLevel = 3;
+constexpr u16 kZone = 42;
+constexpr u16 kGameVertex = 77;
+constexpr u32 kFootLogs = 3;
+
+struct Fvector { float x, y, z; };
+struct LevelBase { base::Spot spot; u32 lv; u16 gv; };
+struct BaseSeen { base::Spot spot; Fvector zone_pos; u16 level; };
+struct StartSeen { base::Start s; };
+
+struct World {
+	std::vector<LevelBase> level_bases;
+	std::map<u16, base::Key> foot_current;
+	BaseSeen zone;
+} g;
+struct { float base_leave_margin = 10.0f, base_start_radius = 50.0f; } g_set;
+struct { u32 feet_sent = 0, feet = 0, feet_refused = 0; } g_stat;
+struct Mode {
+	bool on_map = true;
+	bool level() const { return on_map; }
+	bool decides_world() const { return !on_map; }
+} process;
+const Mode& mode() { return process; }
+
+void Msg(const char*, ...) {}
+bool ensure_world() { return true; }
+std::string level_here() { return "l03_agroprom"; }
+const LevelBase* level_base(base::Key key) { return key == kZone ? &g.level_bases.front() : nullptr; }
+const BaseSeen* base_of_bed(u16 id) { return id == kZone ? &g.zone : nullptr; }
+const StartSeen* start_of_key(base::Key) { return nullptr; }
+void to_array(const Fvector& v, float p[3]) { p[0] = v.x; p[1] = v.y; p[2] = v.z; }
+namespace levels {
+u16 level_of_vertex(u16 gv) { return gv == kGameVertex ? kLevel : base::kNoLevel; }
+}
+)cpp" << definition("void map_server_footing(") << '\n'
+			<< definition("bool host_footing(") << R"cpp(
+int main()
+{
+	g.zone.level = kLevel;
+	g.zone.zone_pos = {100.0f, 5.0f, 20.0f};
+	g.zone.spot.radius = 50.0f;
+
+	LevelBase bed = {g.zone.spot, 123, kGameVertex};
+	bed.spot.id = base::zone_key(kZone);
+	bed.spot.bed = kZone;
+	bed.spot.level = level_here();
+	const Fvector at_bed = {170.0f, 5.0f, 20.0f};
+	to_array(at_bed, bed.spot.pos);
+	g.level_bases.push_back(bed);
+
+	base::Footing sent;
+	map_server_footing(8, at_bed, sent);
+	if (sent.kind != base::kFootZone || sent.ref != kZone || sent.pos[0] != 170.0f || sent.lv != 123 || sent.gv != kGameVertex)
+		return 1;
+
+	process.on_map = false;
+	g.level_bases.clear();
+	const float body[3] = {170.0f, 5.0f, 20.0f};
+	if (!host_footing(sent, kLevel, body))
+	{
+		std::fputs("host_footing refused the map server's report for a body at the offset bed\n", stderr);
+		return 2;
+	}
+	const float away_from_bed[3] = {99.0f, 5.0f, 20.0f};
+	return host_footing(sent, kLevel, away_from_bed) ? 3 : 0;
+}
+)cpp";
+		REQUIRE(slice.good());
+	}
+	const std::string compile = "cl /nologo /std:c++17 /EHsc /utf-8 /I\"" + (engine / "xrCoop").string() +
+		"\" /Fo\"" + (out / "footing.obj").string() + "\" /Fe\"" + exe.string() + "\" \"" + cpp.string() + "\"";
+	REQUIRE(std::system(compile.c_str()) == 0);
+	CHECK_EQ(std::system(("call \"" + exe.string() + "\"").c_str()), 0);
 }

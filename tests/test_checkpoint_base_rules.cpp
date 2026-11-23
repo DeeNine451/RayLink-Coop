@@ -784,86 +784,86 @@ TEST(cp_base_footing)
 // The point is on the base's ground: horizontally within its radius plus the leave margin, in height within 2 x kHeight.
 TEST(cp_base_footing_check)
 {
-	Footing z;
-	CHECK(footing_of(Key(1234), z));
-	z.pos[0] = 100.0f;
-	z.pos[1] = 5.0f;
-	z.pos[2] = 0.0f;
-	z.gv = 77;
+	Footing start;
+	CHECK(footing_of(start_key(2), start));
+	start.pos[0] = 100.0f;
+	start.pos[1] = 5.0f;
+	start.pos[2] = 0.0f;
+	start.gv = 77;
 	FootBase b;
 	b.known = true;
 	b.level = 3;
-	b.pos[0] = 70.0f; // the zone's own position: 30 m from the bed point
+	b.pos[0] = 70.0f; // the authored start position, 30 m from the reported point
 	b.pos[1] = 0.0f;
 	b.pos[2] = 0.0f;
 	b.radius = 50.0f;
 	const float body[3] = {95.0f, 1.0f, 3.0f}; // the body of the same report, near the bed point
-	CHECK(footing_check(z, 3, 3, b, 10.0f, body) == FootCheck::Ok);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	// none: nothing to keep, nothing refused
 	CHECK(footing_check(Footing(), 3, 3, b, 10.0f, body) == FootCheck::None);
 	// not sound
-	Footing bad = z;
+	Footing bad = start;
 	bad.kind = 7;
 	CHECK(footing_check(bad, 3, 3, b, 10.0f, body) == FootCheck::NotSound);
 	bad = Footing();
 	bad.ref = 4; // "none" naming something
 	CHECK(footing_check(bad, 3, 3, b, 10.0f, body) == FootCheck::NotSound);
 	// its game vertex is not on the sender's level (or no level at all)
-	CHECK(footing_check(z, 3, 4, b, 10.0f, body) == FootCheck::VertexOff);
-	CHECK(footing_check(z, 3, kNoLevel, b, 10.0f, body) == FootCheck::VertexOff);
-	CHECK(footing_check(z, kNoLevel, kNoLevel, b, 10.0f, body) == FootCheck::VertexOff);
+	CHECK(footing_check(start, 3, 4, b, 10.0f, body) == FootCheck::VertexOff);
+	CHECK(footing_check(start, 3, kNoLevel, b, 10.0f, body) == FootCheck::VertexOff);
+	CHECK(footing_check(start, kNoLevel, kNoLevel, b, 10.0f, body) == FootCheck::VertexOff);
 	// the base is not one of this world's (unknown zone, merged or unknown start)
 	FootBase unknown = b;
 	unknown.known = false;
-	CHECK(footing_check(z, 3, 3, unknown, 10.0f, body) == FootCheck::NoBase);
+	CHECK(footing_check(start, 3, 3, unknown, 10.0f, body) == FootCheck::NoBase);
 	// the base is on another level than the sender's
 	FootBase other = b;
 	other.level = 4;
-	CHECK(footing_check(z, 3, 3, other, 10.0f, body) == FootCheck::OtherLevel);
+	CHECK(footing_check(start, 3, 3, other, 10.0f, body) == FootCheck::OtherLevel);
 	// the point is off its ground: horizontally beyond radius + margin, or too high
-	Footing far_off = z;
+	Footing far_off = start;
 	far_off.pos[0] = 70.0f + 60.5f;
 	CHECK(footing_check(far_off, 3, 3, b, 10.0f, body) == FootCheck::OffGround);
 	far_off.pos[0] = 70.0f + 59.5f; // within 50 + 10
 	CHECK(footing_check(far_off, 3, 3, b, 10.0f, body) == FootCheck::Ok);
-	Footing high = z;
+	Footing high = start;
 	high.pos[1] = 2.0f * kHeight + 0.5f;
 	CHECK(footing_check(high, 3, 3, b, 10.0f, body) == FootCheck::OffGround);
 	high.pos[1] = -(2.0f * kHeight - 0.5f); // a cellar: within 2 x kHeight
 	CHECK(footing_check(high, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	// 3D would refuse this one (horizontal 59 m, 15 m down: 60.9 m), the ground rule takes it
-	Footing slope = z;
+	Footing slope = start;
 	slope.pos[0] = 70.0f + 59.0f;
 	slope.pos[1] = -15.0f;
 	CHECK(footing_check(slope, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	FootBase nan_base = b;
 	nan_base.pos[0] = std::nanf("");
-	CHECK(footing_check(z, 3, 3, nan_base, 10.0f, body) == FootCheck::OffGround);
-	// a start base the same way
-	Footing st;
-	CHECK(footing_of(start_key(2), st));
+	CHECK(footing_check(start, 3, 3, nan_base, 10.0f, body) == FootCheck::OffGround);
+	// an ordinary sleep zone also accepts a body near the reported bed
+	Footing bed;
+	CHECK(footing_of(zone_key(1234), bed));
 	for (int i = 0; i < 3; ++i)
-		st.pos[i] = z.pos[i];
-	st.gv = 9;
-	CHECK(footing_check(st, 3, 3, b, 10.0f, body) == FootCheck::Ok);
+		bed.pos[i] = start.pos[i];
+	bed.gv = 9;
+	CHECK(footing_check(bed, 3, 3, b, 10.0f, body) == FootCheck::Ok);
 	// Build 57 round 3 (lead's ruling on review S5): the body of the same report must stand on the base's ground too:
 	// horizontally within radius + 2 x margin (50 + 20) of the base's position, within 2 x kHeight in height
 	const float edge[3] = {70.0f + 69.5f, 0.0f, 0.0f};
-	CHECK(footing_check(z, 3, 3, b, 10.0f, edge) == FootCheck::Ok);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, edge) == FootCheck::Ok);
 	const float beyond[3] = {70.0f + 70.5f, 0.0f, 0.0f};
-	CHECK(footing_check(z, 3, 3, b, 10.0f, beyond) == FootCheck::BodyOff);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, beyond) == FootCheck::BodyOff);
 	const float diagonal[3] = {70.0f + 50.0f, 0.0f, 50.0f}; // 70.7 m: beyond
-	CHECK(footing_check(z, 3, 3, b, 10.0f, diagonal) == FootCheck::BodyOff);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, diagonal) == FootCheck::BodyOff);
 	const float above[3] = {80.0f, 2.0f * kHeight + 0.5f, 0.0f};
-	CHECK(footing_check(z, 3, 3, b, 10.0f, above) == FootCheck::BodyOff);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, above) == FootCheck::BodyOff);
 	const float cellar[3] = {80.0f, -(2.0f * kHeight - 0.5f), 0.0f};
-	CHECK(footing_check(z, 3, 3, b, 10.0f, cellar) == FootCheck::Ok);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, cellar) == FootCheck::Ok);
 	const float nan_body[3] = {std::nanf(""), 0.0f, 0.0f};
-	CHECK(footing_check(z, 3, 3, b, 10.0f, nan_body) == FootCheck::BodyOff);
-	CHECK(footing_check(z, 3, 3, b, 10.0f, nullptr) == FootCheck::BodyOff);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, nan_body) == FootCheck::BodyOff);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, nullptr) == FootCheck::BodyOff);
 	// a stale base of a map server: the footing names the Bar's bed, the body stands at the other end of the level
 	const float elsewhere[3] = {900.0f, 0.0f, -400.0f};
-	CHECK(footing_check(z, 3, 3, b, 10.0f, elsewhere) == FootCheck::BodyOff);
+	CHECK(footing_check(start, 3, 3, b, 10.0f, elsewhere) == FootCheck::BodyOff);
 	// the footing's own refusals come first
 	CHECK(footing_check(far_off, 3, 3, unknown, 10.0f, elsewhere) == FootCheck::NoBase);
 	far_off.pos[0] = 70.0f + 60.5f;
@@ -874,6 +874,29 @@ TEST(cp_base_footing_check)
 	for (FootCheck c : {FootCheck::Ok, FootCheck::None, FootCheck::NotSound, FootCheck::VertexOff, FootCheck::NoBase,
 	         FootCheck::OtherLevel, FootCheck::OffGround, FootCheck::BodyOff})
 		CHECK(foot_check_name(c) != nullptr && *foot_check_name(c) != 0);
+}
+
+TEST(cp_base_footing_check_offset_zone_bed)
+{
+	Footing foot;
+	REQUIRE(footing_of(zone_key(1234), foot));
+	foot.pos[0] = 170.0f;
+	foot.pos[1] = 5.0f;
+	foot.gv = 77;
+
+	FootBase zone;
+	zone.known = true;
+	zone.level = 3;
+	zone.pos[0] = 100.0f;
+	zone.pos[1] = 5.0f;
+	zone.radius = 50.0f;
+
+	CHECK_EQ(footing_check(foot, 3, 3, zone, 10.0f, foot.pos), FootCheck::Ok);
+	const float outside[3] = {99.0f, 5.0f, 0.0f}; // 71 m from the bed, past radius + 2 x leave margin
+	CHECK_EQ(footing_check(foot, 3, 3, zone, 10.0f, outside), FootCheck::BodyOff);
+	CHECK_EQ(footing_check(foot, 3, 4, zone, 10.0f, foot.pos), FootCheck::VertexOff);
+	zone.known = false;
+	CHECK_EQ(footing_check(foot, 3, 3, zone, 10.0f, foot.pos), FootCheck::NoBase);
 }
 
 // Build 57 round 2 (lead's ruling on review S1): what the world server keeps of a map server's body report is usable only
