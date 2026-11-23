@@ -1,10 +1,11 @@
 -- Split levels: the far view works on what the task scripts read while they run. This reads the scripts of the GAMMA profile
--- (E:\GAMMA, the winner of each file by modlist.txt, the stock under it) and fails on what would slip past it:
+-- (the winners of the merged game: temp\review\corpus\merged, made by temp/review/make_corpus.py; the stock
+-- under it; tests never read the owner's MO2 folder or game) and fails on what would slip past it:
 --   a script that keeps level.object_by_id, level.name and the like in a file-scope local before coop_quests_core wraps them;
 --   a file-scope local of db.anomaly_by_name (the far view swaps that table for one call) or of alife (the same);
 --   `.online` of a smart in a task script that no rewrite of coop_npc_compat covers: it is a field of a C++ class;
 --   a rewrite of coop_npc_compat that does not fit the profile's version.
--- Without E:\GAMMA the test says so and passes. Run: tools\test_lua.cmd far_scan
+-- Without the corpus the test says so and passes. Run: tools\test_lua.cmd far_scan
 PASSES, FAILS = 0, 0
 local function check(cond, what)
 	if cond then
@@ -16,11 +17,9 @@ local function check(cond, what)
 end
 
 local BS = string.char(92)
--- the MO2 folder of the profile: where the launcher keeps it now, then where it was before the move (2026-11)
-local ROOTS = { "E:" .. BS .. "RayLinkGames" .. BS .. "GAMMA" .. BS .. "mo2", "E:" .. BS .. "GAMMA" }
-local GAMMA = ROOTS[1]
+-- the winners of the profile's merged game (a copy made by the lead: tests never read the owner's MO2 folder or game)
+local MERGED = "temp" .. BS .. "review" .. BS .. "corpus" .. BS .. "merged"
 local STOCK = ".." .. BS .. "anomaly-ref" .. BS .. "unpacked" .. BS .. "scripts"
-local PROFILES = { "G.A.M.M.A original 920", "G.A.M.M.A. original 920", "G.A.M.M.A" }
 
 local function read(path)
 	local fh = io.open(path, "rb")
@@ -30,32 +29,20 @@ local function read(path)
 	return s
 end
 
-local modlist = nil
-for _, root in ipairs(ROOTS) do
-	for _, name in ipairs(PROFILES) do
-		if not modlist then
-			modlist = read(root .. BS .. "profiles" .. BS .. name .. BS .. "modlist.txt")
-			if modlist then GAMMA = root end
-		end
-	end
+local function corpus_here()
+	local pipe = io.popen('dir /b "' .. MERGED .. BS .. '*.script" 2>nul')
+	local first = pipe and pipe:read("*l")
+	if pipe then pipe:close() end
+	return first ~= nil and first ~= ""
 end
-if not modlist then
-	print("  (" .. GAMMA .. " not found: the scan is skipped)")
+if not corpus_here() then
+	print("  (" .. MERGED .. " not found: the scan is skipped)")
 	print("0 passed, 0 failed")
 	return
 end
 
-local mods = {} -- the first wins: MO2 writes the highest priority first
-for line in modlist:gmatch("[^\r\n]+") do
-	if line:sub(1, 1) == "+" then mods[#mods + 1] = line:sub(2) end
-end
-
 local function winner(name)
-	for _, m in ipairs(mods) do
-		local s = read(GAMMA .. BS .. "mods" .. BS .. m .. BS .. "gamedata" .. BS .. "scripts" .. BS .. name .. ".script")
-		if s then return s end
-	end
-	return read(STOCK .. BS .. name .. ".script")
+	return read(MERGED .. BS .. name .. ".script") or read(STOCK .. BS .. name .. ".script")
 end
 
 -- every tasks_*.script any mod or the stock has
@@ -70,7 +57,7 @@ local function add_names(cmd)
 	pipe:close()
 end
 add_names('dir /b "' .. STOCK .. BS .. 'tasks_*.script" 2>nul')
-add_names('dir /b "E:' .. BS .. 'AnomalyCoopGamma' .. BS .. 'gamedata' .. BS .. 'scripts' .. BS .. 'tasks_*.script" 2>nul')
+add_names('dir /b "' .. MERGED .. BS .. 'tasks_*.script" 2>nul')
 add_names('dir /b "E:' .. BS .. 'RayLinkGames' .. BS .. 'GAMMA' .. BS .. 'game-dev' .. BS .. 'gamedata' .. BS .. 'scripts' .. BS .. 'tasks_*.script" 2>nul')
 
 local sources = {}

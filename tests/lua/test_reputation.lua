@@ -70,8 +70,10 @@ E.xr_conditions = {
 }
 E.news_manager.send_tip = function() end
 local K = load_script(M, "coop_npc_compat")
-local file = io.open(os.getenv("GAMMA_KILL_SCRIPT") or ((os.getenv("GAMMA_MODS") or "E:/RayLinkGames/GAMMA/mo2/mods") ..
- "/G.A.M.M.A. Killing Friends Reduces Goodwill/gamedata/scripts/grok_killing_friends_reduces_goodwill.script"), "rb")
+-- the mod's script: GAMMA_KILL_SCRIPT, else a mods folder in GAMMA_MODS, else the review corpus copy (never the owner's MO2)
+local KILL_SCRIPT = "G.A.M.M.A. Killing Friends Reduces Goodwill/gamedata/scripts/grok_killing_friends_reduces_goodwill.script"
+local file = io.open(os.getenv("GAMMA_KILL_SCRIPT") or (os.getenv("GAMMA_MODS") and os.getenv("GAMMA_MODS") .. "/" .. KILL_SCRIPT)
+ or "temp/review/corpus/mods/G.A.M.M.A. Killing Friends Reduces Goodwill/grok_killing_friends_reduces_goodwill.script", "rb")
 load_script(M, "coop_reputation")
 companion.has_info = function(_, name) return name == "npcx_is_companion" end
 if file then
