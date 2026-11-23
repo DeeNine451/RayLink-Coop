@@ -32,7 +32,7 @@
 	  numbering }), the answer to "fetch_belt_ask" (event mods.fetch_belt_ask: { o, s = section, t = task }). The readiness check
 	  asks at most every 2 s per player and section and uses a report up to 10 s old; a hand-over asks every player who holds the
 	  section again and waits up to 3 s (from the hand-over) for those answers: only an answer to its own ask counts there. A
-	  report that answers no open ask of its sender is dropped (coop_trust guard fetch_belt_fresh, always on). A player whose
+	  report that answers no open ask of its sender is dropped (coop_trust check fetch_belt_fresh). A player whose
 	  belt is not known has no loose item that counts, and none is taken from him.
 
 	Layer: the Core, no question of the mode. It runs where the mod's effects run (the process that ends tasks); the ask is
@@ -49,7 +49,7 @@ local KEY = "delay_reward" -- the mod's timer (tasks_fetch.script fetch_reward_a
 local WAIT_MS = 3000 -- a hand-over waits this long (from the hand-over) for the belt reports it asked for
 local ASK_MS = 2000 -- the readiness check asks a player about a section again after this long
 local READY_MS = 10000 -- a belt report counts for the readiness and hand-over checks this long
-local ASK_TTL_MS = 10000 -- an ask nobody answered is forgotten after this long
+local ASK_TTL_MS = 10000 -- an unanswered ask expires, then its sender is remembered for one more TTL
 local MAX_ASKS = 256 -- open asks at most
 local MAX_BELT = 64 -- item ids in one report
 local MAX_SEC = 64 -- characters of a section name in an ask
@@ -67,6 +67,7 @@ local handover_seq = 0
 local ask_seq = 0
 local ask_n = 0
 local asks = {} -- ask id -> { peer, char, sec, task, at, ho }
+local expired_asks = {} -- ask id -> { peer, until_at }
 local belts = {} -- character -> section -> { at, ids = set of local ids }: the last report of his machine
 local asked_at = {} -- "<character>|<section>" -> when the readiness check asked last
 
@@ -255,7 +256,12 @@ local function prune()
 		if t - a.at > ASK_TTL_MS then
 			asks[op] = nil
 			ask_n = ask_n - 1
+			local until_at = a.at + 2 * ASK_TTL_MS
+			if t <= until_at then expired_asks[op] = { peer = a.peer, until_at = until_at } end
 		end
+	end
+	for op, a in pairs(expired_asks) do
+		if t > a.until_at then expired_asks[op] = nil end
 	end
 	for k, at in pairs(asked_at) do
 		if t - at > ASK_TTL_MS then asked_at[k] = nil end
@@ -268,9 +274,23 @@ local function prune()
 	end
 end
 
+local function load_pending(peer)
+	local api = rawget(_G, "coop")
+	local session = api and api.session_info and api.session_info()
+	for _, row in ipairs(session and session.players or {}) do
+		if row.id == peer and row.joined == false then return true end
+	end
+	local transition = api and api.transition and api.transition()
+	for _, row in ipairs(transition and transition.rows or {}) do
+		if row.peer == peer and row.mark == "loading" then return true end
+	end
+	return false
+end
+
 -- Asks holder h's machine which items of `sec` are on his belt. True when the ask went out.
 local function ask(h, sec, task, ho)
 	if type(h.peer) ~= "number" or type(h.id) ~= "number" or #sec > MAX_SEC or #task > MAX_TASK then return false end
+	if load_pending(h.peer) then return false end
 	prune()
 	if ask_n >= MAX_ASKS then return false end
 	ask_seq = ask_seq % MAX_OP + 1
@@ -317,20 +337,23 @@ local function on_ask(t, from)
 	C().to_host("fetch_belt", out)
 end
 
-local function guard_fresh(ok, from, op)
-	local tr = C().mod("coop_trust")
-	if tr and type(tr.guard) == "function" then
-		return tr.guard("fetch_belt_fresh", ok, "player #%d: a belt report that answers no open ask of his (ask %d)", from, op)
-	end
-	return ok
-end
-
 -- The owner of the world data: a player's report. Only the answer to an open ask of his counts; the sender is the transport's.
 local function on_report(t, from)
+	prune()
 	local op = whole(t.o, 1, MAX_OP)
-	local a = op and asks[op] or nil
+	local a = op and asks[op]
+	local expired = op and expired_asks[op]
+	if not a and expired and expired.peer == from then
+		stats.late = stats.late + 1
+		return
+	end
 	local fresh = a ~= nil and a.peer == from and t.t == a.task
-	if not guard_fresh(fresh, tonumber(from) or -1, op or 0) then
+	local tr = C().mod("coop_trust")
+	if tr and type(tr.pass) == "function" then
+		tr.pass("fetch_belt_fresh", fresh, "player #%d: dropped a belt report answering no open ask of his (ask %d)",
+			tonumber(from) or -1, op or 0)
+	end
+	if not fresh then
 		stats.stale = stats.stale + 1
 		return
 	end

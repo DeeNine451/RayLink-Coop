@@ -34,7 +34,8 @@ local table_concat = table.concat
 
 local TAG = "offer"
 local OFFER_TTL = 180000 -- ms a host offer stays usable on the client
-local REQ_GAP = 1000 -- ms between two requests for one NPC
+local REQ_GAP = 1000 -- ms between two client requests for one NPC
+local HOST_REQ_GAP = REQ_GAP / 2 -- allow for differences in delivery time
 local BATCH_TIMEOUT = 5 -- s the taskboard waits for the host
 local MAX_DIST_DIALOG = 30 -- m between the requester's character and the NPC (host check)
 local MAX_DIST_BOARD = 200 -- m for the PDA taskboard
@@ -223,7 +224,19 @@ local function host_generate(npc, is_sim)
 		end
 	end)
 	if not ok then
-		qc.report(TAG, "generate for " .. tostring(npc:name()), err)
+		local oks, squad = pcall(function()
+			local se = alife_object(npc:id())
+			return se and se.group_id
+		end)
+		local okv, vertex = pcall(npc.game_vertex_id, npc)
+		local okl, level_id = pcall(function()
+			local graph = game_graph()
+			if okv and type(vertex) == "number" and graph:valid_vertex_id(vertex) then
+				return graph:vertex(vertex):level_id()
+			end
+		end)
+		qc.report(TAG, string.format("generate for %s (squad=%d vertex=%d level=%d)", npc:name(),
+			oks and tonumber(squad) or -1, okv and tonumber(vertex) or -1, okl and tonumber(level_id) or -1), err)
 		return nil, {}
 	end
 	return list, data
@@ -356,22 +369,24 @@ local function offer_here(t, from, relayed)
 	local kind = t.k == "sim" and "sim" or "dyn"
 	local npc = npc_id and level.object_by_id(npc_id)
 	local function refuse(why)
-		-- These checks are mandatory in every trust mode. Pass records why the request failed; the shipped settings name
-		-- offer_request "refuse", so its line says what happens (review A-REV-E-2 finding 3, mod_system_coop_trust.ltx).
-		local trust = coop_trust
-		if trust and type(trust.pass) == "function" then
-			trust.pass("offer_request", false, "peer %d, NPC %d, sequence %d: %s", from, npc_id or 0, seq, why)
+		if why == "error" then
+			qc.log(TAG, "offer generation failed for peer %d, NPC %d, sequence %d", from, npc_id or 0, seq)
+		else
+			-- These request checks are mandatory in every trust mode.
+			local trust = coop_trust
+			if trust and type(trust.pass) == "function" then
+				trust.pass("offer_request", false, "peer %d, NPC %d, sequence %d: %s", from, npc_id or 0, seq, why)
+			end
 		end
 		stats.refused = stats.refused + 1
-		-- round 6 (S3 of the round 5 review): his machine now makes this NPC's offers itself; an older offer of the host kept for
-		-- him is no longer what his dialog shows
-		forget_offers(from, npc_id)
+		-- Rate and sequence refusals leave the prior answer usable in the player's dialog.
+		if why ~= "rate" and why ~= "seq" then forget_offers(from, npc_id) end
 		qc.send("offer", { n = npc_id or 0, q = seq, k = kind, e = why, l = "" }, from)
 	end
 	if not (npc and talker(npc) and npc:alive()) then return refuse("npc") end
 	if not valid_seq then return refuse("seq") end
 	local key = tostring(from) .. ":" .. npc_id
-	if last_req[key] and now() - last_req[key] < REQ_GAP then return refuse("rate") end -- W5: answer, or a board batch waits
+	if last_req[key] and now() - last_req[key] < HOST_REQ_GAP then return refuse("rate") end -- W5: answer, or a board batch waits
 	local av = qc.avatar_obj(from)
 	if relayed and not (av and from ~= 0 and from ~= qc.self_peer()) then return refuse("avatar") end
 	local max = t.b == true and MAX_DIST_BOARD or MAX_DIST_DIALOG
@@ -415,7 +430,7 @@ end
 -------------------------------------------------------------------------------
 -- Client: offers from the host
 -------------------------------------------------------------------------------
-local offers = {} -- local npc id -> { q, kind, list, tasks = {tid = {vars, msgs, bounty}}, at, complete }
+local offers = {} -- local npc id -> { q, kind, list, tasks = {tid = {vars, msgs, bounty}}, asked, at, complete }
 local incoming = {} -- seq -> { npc, tasks }
 local seq = 0
 local batch = nil -- { pending = {npc_id = true}, left, done }
@@ -434,9 +449,20 @@ local function batch_note(npc_id)
 	end
 end
 
+local function offer_target(npc)
+	if not talker(npc) then return nil end
+	local id = npc:id()
+	local host_id = qc.to_host_id(id)
+	if type(host_id) ~= "number" or host_id < 1 or host_id > 65534 or host_id % 1 ~= 0
+		or qc.is_character_id(id) or npc:section() == "coop_player_avatar" then return nil end
+	return host_id
+end
+
 -- Client: asks the host for the offer of one NPC (local object). board = from the PDA taskboard.
 function request_offer(npc, kind, board)
-	if not (qc.client_live() and npc) then return false end
+	if not qc.client_live() then return false end
+	local host_id = offer_target(npc)
+	if not host_id then return false end
 	local id = npc:id()
 	local o = offers[id]
 	if o and o.asked and now() - o.asked < REQ_GAP then return true, false end -- asked already: no new answer comes
@@ -445,7 +471,6 @@ function request_offer(npc, kind, board)
 	for q, inc in pairs(incoming) do
 		if now() - inc.at > 60000 then incoming[q] = nil end -- never answered
 	end
-	local host_id = qc.to_host_id(id)
 	incoming[seq] = { npc = id, board_npc = board and host_id or nil, tasks = {}, at = now() }
 	offers[id] = offers[id] or { tasks = {} }
 	offers[id].asked = now()
@@ -553,7 +578,7 @@ local function client_on_offer(t, from)
 	offers[npc_id] = {
 		q = q, kind = t.k == "sim" and "sim" or "dyn", list = list, tasks = inc and inc.tasks or {},
 		board_npc = inc and not t.f and inc.board_npc == tonumber(t.n) and inc.board_npc or nil,
-		at = now(), complete = true,
+		asked = offers[npc_id] and offers[npc_id].asked, at = now(), complete = true,
 	}
 	batch_note(npc_id)
 end
@@ -564,16 +589,19 @@ local function fresh_offer(npc_id, kind)
 	return o
 end
 
--- The talking NPC on this machine (pda.script's way).
+-- The engine opens the granted dialog with this actor's actual talk partner.
 local function talking_npc()
+	local actor = db.actor
+	local partner = actor and actor.get_talking_npc and actor:get_talking_npc()
+	if offer_target(partner) then return partner end
 	local id = type(rawget(_G, "GetEvent")) == "function" and GetEvent("used_npc_id")
-	local o = id and level.object_by_id(id)
-	if o then return o end
+	local o = type(id) == "number" and level.object_by_id(id)
+	if offer_target(o) then return o end
 	for _, st in pairs(db.storage) do
 		local obj = st.object
-		if obj and obj:id() ~= db.actor:id() then
+		if obj then
 			local ok, talking = pcall(obj.is_talking, obj)
-			if ok and talking then return obj end
+			if ok and talking and offer_target(obj) then return obj end
 		end
 	end
 	return nil
@@ -582,7 +610,7 @@ end
 local function on_gui_show(name)
 	if name ~= "Dialog" or not qc.client_live() then return end
 	local npc = talking_npc()
-	if npc and talker(npc) then request_offer(npc) end
+	if npc then request_offer(npc) end
 end
 
 -- Offer lines on the client, one frame later (the talk window must be settled).

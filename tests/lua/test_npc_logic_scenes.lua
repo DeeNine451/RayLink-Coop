@@ -306,6 +306,39 @@ local function run_scene(set, second_map)
 	checks = host.env.coop_trust.status()
 	check(abuse.abuse_value == 6 and checks.npc_abuse_target and checks.npc_abuse_target.refused == 1,
 		label .. " s42:4 the decider records a use of no NPC stalker through coop_trust")
+	NOW = NOW + 2000
+	local trust = host.env.coop_trust
+	trust.reset_for_test({ default = "log" })
+	host.env.coop.life_of = function(id) return id == client_body and "wounded" or "alive" end
+	local logs = #host.log
+	client.env.coop_mods_core.to_host("npc_abuse_use", { i = npc_id })
+	dispatch()
+	check(abuse.abuse_value == 6 and #host.log == logs and next(trust.status()) == nil,
+		label .. " REP-TRUST: a downed requester causes no abuse or trust audit")
+	client.env.coop.life_of = function() return "wounded" end
+	local sent = #sent_named(client, "mods.npc_abuse_use")
+	client.fire("on_key_press", client.env.key_bindings.kUSE)
+	dispatch()
+	check(#sent_named(client, "mods.npc_abuse_use") == sent, label .. " REP-TRUST: a downed client sends no USE")
+	client.env.coop.life_of = function() return "dead" end
+	client.fire("on_key_press", client.env.key_bindings.kUSE)
+	dispatch()
+	check(#sent_named(client, "mods.npc_abuse_use") == sent, label .. " REP-TRUST: a dead client sends no USE")
+	host.env.coop.life_of, client.env.coop.life_of = function() return "alive" end, function() return "alive" end
+	body._pos = vec(22.5, 0, 0)
+	client.fire("on_key_press", client.env.key_bindings.kUSE)
+	dispatch()
+	local reach = trust.status().npc_abuse_reach
+	check(abuse.abuse_value == 8 and reach and reach.failed == 0, label .. " REP-TRUST: USE passes at 2.5 m")
+	body._pos = vec(27, 0, 0)
+	trust.reset_for_test({ default = "refuse" })
+	logs = #host.log
+	client.fire("on_key_press", client.env.key_bindings.kUSE)
+	dispatch()
+	reach = trust.status().npc_abuse_reach
+	check(abuse.abuse_value == 8 and reach and reach.refused == 1 and #host.log > logs,
+		label .. " REP-TRUST: USE at 7 m is audited and refused")
+
 	if not server then
 		abuse.abuse_value = 0
 		nr.meet.meet_manager.a.abuse, nr.meet.meet_manager.abuse_mode = "true", "true"

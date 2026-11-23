@@ -129,6 +129,49 @@ local function guards()
 	check(trust.status().offer_request.refused == 2, "the refusals are counted as refused")
 end
 
+local function repeat_offer(M, from, label)
+	request(M, from, from == 0 and PLAYER or nil)
+	expect_list(M, "stock_task", label .. ": first request generates")
+	local function ask(q)
+		M.handlers[REQ](M.env.coop_main.encode({ n = NPC, k = "dyn", q = q, b = true,
+			_peer = from == 0 and PLAYER or nil }), from)
+	end
+	NOW = NOW + 499
+	ask(13)
+	expect_refusal(M, "rate", NPC, 13, label .. ": a duplicate at 499 ms is refused")
+	check(M.env.coop_quests_offer.offers_of(PLAYER, "stock_task") ~= nil, label .. ": rate preserves the offer")
+	ask(1e9 + 1)
+	expect_refusal(M, "seq", NPC, 0, label .. ": an invalid sequence is refused")
+	check(M.env.coop_quests_offer.offers_of(PLAYER, "stock_task") ~= nil, label .. ": seq preserves the offer")
+	NOW = NOW + 1
+	ask(14)
+	expect_list(M, "stock_task", label .. ": the authority accepts the next request at 500 ms")
+end
+
+local function generator_error()
+	local host = boot(machine("host", 0), "hostplay")
+	host.npc._group, host.npc._gv = 701, 185
+	host.env.game_graph = function()
+		return {
+			valid_vertex_id = function(_, id) return id == 185 end,
+			vertex = function(_, id)
+				assert(id == 185)
+				return { level_id = function() return 5 end }
+			end,
+		}
+	end
+	host.env.axr_task_manager.generate_available_tasks = function() error("sfind bad argument #2 (nil)") end
+	local trust = load_script(host, "coop_trust")
+	trust.reset_for_test({ default = "log" })
+	request(host, PLAYER)
+	expect_refusal(host, "error", NPC, 12, "the client receives an error reply when the generator throws")
+	check(not trust.status().offer_request and not has_log(host, "[coop-trust]"),
+		"a generator fault does not audit the request")
+	check(has_log(host, "[coop-quests][offer] ! generate for esc_m_trader")
+		and has_log(host, "squad=701 vertex=185 level=5") and has_log(host, "sfind bad argument #2 (nil)"),
+		"the generator fault records the NPC and numeric squad, game vertex, and level")
+end
+
 local function hosted()
 	local host = boot(machine("host", 0), "hostplay")
 	request(host, 0, PLAYER)
@@ -138,6 +181,8 @@ local function hosted()
 	expect_list(host, "stock_task", "the co-op host replies directly to the player")
 	check(host.env.coop_quests_offer.offers_of(PLAYER, "stock_task") ~= nil, "the co-op host keeps its offer for the give")
 	guards()
+	repeat_offer(boot(machine("host", 0), "hostplay"), PLAYER, "co-op")
+	generator_error()
 end
 
 local function world_server()
@@ -312,7 +357,12 @@ local function offline()
 		"single player uses stock task generation")
 end
 
-local tests = { hostplay = hosted, srv_world = world_server, srv_map = map_server, none = offline }
+local function mapped()
+	map_server()
+	repeat_offer(boot(machine("host", 0), "srv_map"), 0, "map server")
+end
+
+local tests = { hostplay = hosted, srv_world = world_server, srv_map = mapped, none = offline }
 for _, name in ipairs(modes.names()) do
 	print("== " .. name)
 	MACHINES, QUEUE = {}, {}

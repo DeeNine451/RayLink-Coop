@@ -75,7 +75,8 @@ local EV_SECTION, EV_REQ, EV_ALL, EV_FX = "npc.logic", "npc.logic_req", "npc.log
 local EV_PAD, EV_PAD_CODE, EV_VISE = "npc.pad", "npc.pad_code", "npc.vise"
 local SCENE_END, ABUSE_USE = "npc_scene_end", "npc_abuse_use" -- mods.*
 local CUT_TIMEOUT = 300000 -- allow the long multi-camera scenes to finish before releasing a missing participant
-local USE_REACH_SQR = 4
+local USE_REACH_SQR = 36 -- 6 m between bodies, as for the talk lock
+local USE_RAY_M = 2
 local MAX_OBJECT_ID, MAX_SCENE_RUN = 65534, 2147483647
 local MAX_SCENE_AUDIENCE = 16
 local cut_run = 0
@@ -1554,13 +1555,14 @@ local function abuse_rules(npc, actor, meet)
 end
 
 local function abuse_use(t, from, add)
+	local actor = coop_mode.decider(from) == "this" and player_here(from)
+	if not actor then return end
 	local valid = bounded_int(t.i, 1, MAX_OBJECT_ID)
 	if not coop_trust.pass("npc_abuse_shape", valid, "peer %s: invalid NPC use id", tostring(from)) then return end
 	if not valid then return end
-	local actor = coop_mode.decider(from) == "this" and player_here(from)
 	local id = coop_mods_core.lid(t.i)
 	local npc = id and level.object_by_id(id)
-	local reach = actor and npc and actor:position():distance_to_sqr(npc:position()) <= USE_REACH_SQR
+	local reach = npc and actor:position():distance_to_sqr(npc:position()) <= USE_REACH_SQR
 	if not coop_trust.pass("npc_abuse_reach", reach, "peer %s: NPC %d is out of use reach", tostring(from), t.i) then return end
 	local st = npc and storage_of(npc)
 	local meet = st and st.meet and st.meet.meet_manager
@@ -1570,7 +1572,7 @@ local function abuse_use(t, from, add)
 	-- on the map that runs the NPC. Only a target that is no NPC stalker is a request no honest client sends. Whether this
 	-- use irritates (a dead NPC, no [meet], a talk, abuse off, no friend) is the NPC's own answer, and stock
 	-- xr_meet.notify_on_use answers it with no effect: so does this use (stand b57h: a talk to the Marsh barman).
-	local target = actor and npc and IsStalker(npc) and P.peer_of(id) == nil
+	local target = npc and IsStalker(npc) and P.peer_of(id) == nil
 	if not coop_trust.pass("npc_abuse_target", target, "peer %s: object %d is no NPC stalker", tostring(from), t.i) then
 		return
 	end
@@ -1590,11 +1592,13 @@ end
 local function ask_abuse(key)
 	if not (P.active() and coop_mode.is_player_mirror() and coop_mode.actor_is_player()) then return end
 	if dik_to_bind(key) ~= key_bindings.kUSE or (_GUIs and next(_GUIs)) then return end
+	local actor = db.actor
+	if not (actor and actor:alive() and P.standing(actor)) then return end
 	if not game.hud_motion_allowed() or game.only_movekeys_allowed() then return end
 	local npc = level.get_target_obj()
 	if not (npc and IsStalker(npc) and npc:alive() and P.peer_of(npc:id()) == nil) then return end
 	local distance = level.get_target_dist()
-	if type(distance) ~= "number" or distance <= 0 or distance * distance > USE_REACH_SQR then return end
+	if type(distance) ~= "number" or distance <= 0 or distance > USE_RAY_M then return end
 	local id = coop_mods_core.hid(npc:id())
 	if id then coop_mods_core.to_host(ABUSE_USE, { i = id }) end
 end

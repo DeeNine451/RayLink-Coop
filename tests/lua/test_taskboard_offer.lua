@@ -133,6 +133,7 @@ do
 	}
 	-- an answer with tasks made over the far view is used as before
 	Hm.far_open = { level = "l05_bar" }
+	NOW = NOW + 1000
 	Cm.env.coop_quests_offer.request_offer(Cm.npc, nil, true)
 	pump()
 	Cm.gen_calls = 0
@@ -156,6 +157,66 @@ do
 	Cm.gen_calls = 0
 	a.generate_available_tasks(Cm.npc)
 	check(Cm.gen_calls == 0 and #a.available_tasks[700] == 0, "the host's own empty list stands: the NPC has no task for this player")
+end
+
+print("== REP-TRUST: a fast dialog answer and a duplicate before taking its offer")
+do
+	Hm.npc_tasks[700] = { "fetch_t" }
+	NOW = NOW + 1000
+	local e = Cm.env
+	e.EVENTS.used_npc_id = 700
+	local sends = count_sent(Cm, "quests.offer_req")
+	fire(Cm, "GUI_on_show", "Dialog")
+	check(count_sent(Cm, "quests.offer_req") == sends + 1, "opening the dialog sends one request")
+	NOW = NOW + 100
+	pump()
+	NOW = NOW + 200
+	fire(Cm, "GUI_on_show", "Dialog")
+	check(count_sent(Cm, "quests.offer_req") == sends + 1, "reopening at 300 ms sends nothing after the fast answer")
+	-- Deliver a duplicate directly, independent of the client-side cooldown.
+	e.coop_quests_core.send("offer_req", { n = 700, q = 900, k = "dyn" }, 0)
+	pump()
+	local reply = last_sent(Hm, "quests.offer")
+	check(reply and reply.e == "rate", "the host refuses a duplicate in its rate window")
+	check(Hm.env.coop_quests_offer.offers_of(1, "fetch_t") ~= nil, "the refused duplicate preserves the host's offer")
+	check(e.pda_taskboard.get_details({ npc_id = 700, task_id = "fetch_t" }) ~= nil, "the client still has the offer")
+	local trust = load_script(Hm, "coop_trust")
+	trust.reset_for_test({ default = "log" })
+	Cm.tm:give_task("fetch_t", 700)
+	pump()
+	local audit = trust.status().task_give_offer
+	check(Hm.tm.task_info.fetch_t ~= nil and audit and audit.checked == 1 and audit.failed == 0
+		and not has_log(Hm, "task_give_offer"), "giving with the offered vars succeeds without a task_give_offer line")
+end
+
+print("== REP-TRUST: the dialog picks an NPC, even when the host's body is talking")
+do
+	local e = Cm.env
+	local body = Cm.objects[500]
+	local other = Cm.new_obj(701, "sim_default_stalker_1", vec(5, 0, 0), { _stalker = true })
+	e.coop.to_host_id = function(id) return id == 500 and 0 or id == 701 and 702 or id end
+	body.is_talking = function() return true end
+	other.is_talking = function() return true end
+	e.db.storage[500], e.db.storage[701] = { object = body }, { object = other }
+	e.EVENTS.used_npc_id = 500
+	local sends = count_sent(Cm, "quests.offer_req")
+	fire(Cm, "GUI_on_show", "Dialog")
+	local req = last_sent(Cm, "quests.offer_req")
+	check(count_sent(Cm, "quests.offer_req") == sends + 1 and req and req.n == 702,
+		"the storage fallback sends the talking NPC's host id, skipping the host body")
+	e.db.storage[701] = nil
+	sends = count_sent(Cm, "quests.offer_req")
+	fire(Cm, "GUI_on_show", "Dialog")
+	local sent_body = e.coop_quests_offer.request_offer(body)
+	check(not sent_body and count_sent(Cm, "quests.offer_req") == sends,
+		"with only a talking player body, neither the dialog nor a direct call requests an offer")
+	NOW = NOW + 1000
+	e.EVENTS.used_npc_id = 700
+	Cm.actor.get_talking_npc = function() return other end
+	fire(Cm, "GUI_on_show", "Dialog")
+	req = last_sent(Cm, "quests.offer_req")
+	check(count_sent(Cm, "quests.offer_req") == sends + 1 and req and req.n == 702,
+		"the actual talk partner after a granted lock wins over the old stock event")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

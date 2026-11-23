@@ -576,6 +576,52 @@ check(carries(502, b3._id), "[m15:2] server: no fresh belt report in time: his a
 check(has_log(W, "no fresh belt report"), "[m15:2] server: the world server says why")
 check(granted(W, 2) == s2, "[m15:2] server: nothing was taken, nothing is paid")
 
+print("== REP-TRUST: the world skips known loaders and ignores a belated answer")
+do
+	clear_srv()
+	fetch_task(W, "fetch_expired", "af_x", 1)
+	player_item(P2, 502, "af_x", false)
+	local p2_joined = false
+	W.env.coop.session_info = function()
+		return { players = { { id = 1, joined = true }, { id = 2, joined = p2_joined } } }
+	end
+	local held
+	P2.handlers["mods.fetch_belt_ask"] = function(payload, from) held = { payload, from } end
+	NOW = NOW + 11000
+	local sent = count_sent(W, "mods.fetch_belt_ask")
+	readiness(W, "fetch_expired")
+	check(count_sent(W, "mods.fetch_belt_ask") == sent and not held, "a peer still loading gets no belt ask")
+	p2_joined = true
+	NOW = NOW + 2100
+	sent = count_sent(W, "mods.fetch_belt_ask")
+	readiness(W, "fetch_expired")
+	check(count_sent(W, "mods.fetch_belt_ask") == sent + 1 and held ~= nil, "the ask goes out once the peer has joined")
+	P2.handlers["mods.fetch_belt_ask"] = ask_handler
+
+	NOW = NOW + 10001
+	readiness(W, "fetch_expired") -- a new ask prunes the outstanding old one
+	local _, failed = trust(W, "fetch_belt_fresh")
+	if held then
+		local ask = H.decode(held[1])
+		report_in(H.encode({ o = ask.o, t = ask.t, n = 0 }), 1)
+	end
+	local _, foreign_failed = trust(W, "fetch_belt_fresh")
+	check(foreign_failed == failed + 1, "an expired ask never excuses another player's answer")
+	local logs = #W.log
+	if held then ask_handler(unpack(held)) end
+	pump()
+	local _, late_failed = trust(W, "fetch_belt_fresh")
+	check(late_failed == foreign_failed and #W.log == logs, "the owner of the expired ask answers without a trust line")
+	W.env.coop_mods_core.print_status()
+	check(has_log(W, "late 1)"), "the late report increments the fetch counter")
+	NOW = NOW + 10000
+	if held then ask_handler(unpack(held)) end
+	pump()
+	local _, gone_failed = trust(W, "fetch_belt_fresh")
+	check(gone_failed == late_failed + 1, "the expired ask is forgotten after a second TTL")
+	W.env.coop.session_info = nil
+end
+
 print("== [m15:2] server: two players on two maps hand over in the same second, each with a worn and a spare artefact")
 clear_srv()
 fetch_task(W, "fetch_t1", "af_x", 1)
