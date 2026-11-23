@@ -105,11 +105,6 @@ local function log(fmt, ...) qc.log(TAG, fmt, ...) end
 -------------------------------------------------------------------------------
 -- Small helpers
 -------------------------------------------------------------------------------
-local function alive(o)
-	local ok, v = pcall(function() return o:alive() end)
-	return ok and v ~= false
-end
-
 -- Object id on the wire: a whole number in the range of a game object id.
 local function id16(v)
 	if type(v) ~= "number" or v ~= v or v < 0 or v > 65534 or v % 1 ~= 0 then return nil end
@@ -130,6 +125,13 @@ end
 
 local function is_monster(o)
 	return type(IsMonster) == "function" and IsMonster(o) == true
+end
+
+-- nil for objects that cannot be alive or dead.
+local function alive(o)
+	if not (is_stalker(o) or is_monster(o)) then return nil end
+	local ok, v = pcall(function() return o:alive() end)
+	return ok and v ~= false
 end
 
 -------------------------------------------------------------------------------
@@ -262,7 +264,9 @@ end
 local function useless(vid, c)
 	local victim = level.object_by_id(vid)
 	if victim then
-		if alive(victim) then return "the id is a live creature again" end
+		local living = alive(victim)
+		if living == nil then return "the body id was reused" end
+		if living then return "the id is a live creature again" end
 	elseif not alife_object(vid) then
 		return "the body is gone"
 	end
@@ -366,7 +370,7 @@ local function decide(peer, vid)
 	local row = claims[vid]
 	if not row then return { v = vid, a = "gone" } end
 	local body = level.object_by_id(vid)
-	if not body or alive(body) or body:position():distance_to(who:position()) > DEAL.reach_m then return nil end
+	if not body or alive(body) ~= false or body:position():distance_to(who:position()) > DEAL.reach_m then return nil end
 	local killer = level.object_by_id(row.k)
 	if not (killer and alive(killer) and is_stalker(killer)) then
 		release(vid, "the killer is dead or gone")
@@ -502,7 +506,7 @@ local function body_in_reach()
 	if not (ok and target) then return nil end
 	local d_ok, dist = pcall(level.get_target_dist)
 	if not (d_ok and type(dist) == "number" and dist > 0 and dist < USE_REACH) then return nil end
-	if alive(target) or not (is_stalker(target) or is_monster(target)) then return nil end
+	if alive(target) ~= false then return nil end
 	return target
 end
 

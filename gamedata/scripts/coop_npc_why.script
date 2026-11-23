@@ -72,7 +72,7 @@ local function scan()
 	for i = 1, #ids do
 		if lines >= LINES then return end
 		local npc = level.object_by_id(ids[i])
-		if npc and not P.is_proxy(ids[i]) then
+		if npc and not P.is_proxy(ids[i]) and IsStalker(npc) then
 			local ok, enemy = pcall(function() return npc:alive() and npc:best_enemy() or nil end)
 			if ok and enemy and enemy:id() ~= 0 then
 				if P.is_proxy(enemy:id()) then

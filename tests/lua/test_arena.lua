@@ -2132,6 +2132,54 @@ local function stage_fighter(answer, third)
 	H.env.xr_effects.bar_arena_teleport(H.env.db.actor, H.objects[TRIG])
 end
 
+for _, answer in ipairs(modes.names()) do
+	if answer == "hostplay" or answer == "srv_map" then
+		print("== " .. answer .. ": give-back after a refused box-2 move")
+		local fighter, parent, bout
+		if answer == "hostplay" then
+			setup()
+			W.talked[0] = NOW
+			start(1)
+			fighter, parent, bout = 0, PROXY, 1
+		else
+			stage_fighter(answer, true)
+			fighter, parent, bout = PROXY, THIRD, 3
+			H.objects[fighter]._pos = IN_ARENA
+		end
+		local rec = assert(ledger_for(HA, fighter))
+		local iid = rec.items[1]
+		local item = W.items[iid]
+		item._parent = fighter -- the online inventory still shows the item with the fighter
+		local alife_object = H.env.alife_object
+		H.env.alife_object = function(id)
+			if id == iid then
+				return { id = iid, parent_id = parent, section_name = function() return item:section() end }
+			end
+			return alife_object(id)
+		end
+		local owner = H.objects[fighter]
+		local transfer_item = owner.transfer_item
+		local refused = false
+		function owner:transfer_item(it, to)
+			if it:id() == iid and to:id() == BOX2 then -- server ownership already changed
+				refused = true
+				return
+			end
+			transfer_item(self, it, to)
+		end
+		H.zone.saved_obj = { [iid] = true, [OPPONENT] = true }
+		win(bout)
+		check(refused and released(H, OPPONENT), answer .. ": the refused transfer is followed by the arena purge")
+		check(not released(H, iid), answer .. ": the purge leaves the other player's item intact")
+		local detail = false
+		for _, line in ipairs(H.log) do
+			if line:find("item " .. iid .. " of ", 1, true) and line:find("not given back", 1, true)
+				and line:find(item:section(), 1, true) and line:find("parent " .. parent, 1, true) then detail = true end
+		end
+		check(detail, answer .. ": the give-back line names the section and current server parent")
+	end
+end
+
 local function load_travel(M)
 	load_script(M, "coop_economy_core")
 	load_script(M, "coop_economy_group")

@@ -161,6 +161,15 @@ local function patch_rankings()
 	if not (type(p) == "table" and type(p.calculate_rankings) == "function") then return end
 	local size_of = function() return p.get_rankings_array_size and p.get_rankings_array_size() or 100 end
 	local function cached() return qc.client_live() and rank.cache ~= nil end
+	local stock_list
+	local function stock_entry_ok(index)
+		if not p.get_coc_ranking_list then return true end
+		-- The stock calculator updates this table in place. Its getter logs the top ten.
+		stock_list = stock_list or p.get_coc_ranking_list()
+		local id = stock_list and stock_list[index]
+		local se = id and alife_object(id)
+		return se and IsStalker(se)
+	end
 	local function entry(i)
 		if i == size_of() + 1 then return own_entry() end
 		return rank.cache[i]
@@ -184,7 +193,9 @@ local function patch_rankings()
 	local can_show = p.coc_rankings_can_show
 	if type(can_show) == "function" then
 		p.coc_rankings_can_show = function(index, ...)
-			if not cached() then return can_show(index, ...) end
+			if not qc.active() then return can_show(index, ...) end -- single player: the stock, untouched (W5)
+			if not coop_mode.actor_is_player() then return false end
+			if not cached() then return stock_entry_ok(index) and can_show(index, ...) or false end
 			if has_alife_info("ui_pda_hide") then return false end
 			if index == size_of() + 1 then
 				-- the own row is drawn once more after a new answer so it shows the new place
@@ -200,7 +211,9 @@ local function patch_rankings()
 	local set_name = p.coc_rankings_set_name
 	if type(set_name) == "function" then
 		p.coc_rankings_set_name = function(index, ...)
-			if not cached() then return set_name(index, ...) end
+			if not qc.active() then return set_name(index, ...) end -- single player: the stock, untouched (W5)
+			if not coop_mode.actor_is_player() then return "" end
+			if not cached() then return stock_entry_ok(index) and set_name(index, ...) or "" end
 			local e = entry(index)
 			if not e then return "" end
 			local own = index == size_of() + 1 or e.me
@@ -210,7 +223,9 @@ local function patch_rankings()
 	local set_desc = p.coc_rankings_set_description
 	if type(set_desc) == "function" then
 		p.coc_rankings_set_description = function(index, ...)
-			if not cached() then return set_desc(index, ...) end
+			if not qc.active() then return set_desc(index, ...) end -- single player: the stock, untouched (W5)
+			if not coop_mode.actor_is_player() then return "" end
+			if not cached() then return stock_entry_ok(index) and set_desc(index, ...) or "" end
 			local e = entry(index)
 			if not e then return "" end
 			if e.me then e = own_entry() end
@@ -221,14 +236,18 @@ local function patch_rankings()
 	local set_hint = p.coc_rankings_set_hint
 	if type(set_hint) == "function" then
 		p.coc_rankings_set_hint = function(index, ...)
-			if not cached() then return set_hint(index, ...) end
+			if not qc.active() then return set_hint(index, ...) end -- single player: the stock, untouched (W5)
+			if not coop_mode.actor_is_player() then return "" end
+			if not cached() then return stock_entry_ok(index) and set_hint(index, ...) or "" end
 			return ""
 		end
 	end
 	local set_icon = p.coc_rankings_set_icon
 	if type(set_icon) == "function" then
 		p.coc_rankings_set_icon = function(index, ...)
-			if not cached() then return set_icon(index, ...) end
+			if not qc.active() then return set_icon(index, ...) end -- single player: the stock, untouched (W5)
+			if not coop_mode.actor_is_player() then return "" end
+			if not cached() then return stock_entry_ok(index) and set_icon(index, ...) or "" end
 			local e = entry(index)
 			if not e then return "" end
 			if index == size_of() + 1 or e.me then return db.actor:character_icon() or "ui\\ui_noise" end
@@ -238,7 +257,9 @@ local function patch_rankings()
 	local border = p.coc_rankings_show_border
 	if type(border) == "function" then
 		p.coc_rankings_show_border = function(index, ...)
-			if not cached() then return border(index, ...) end
+			if not qc.active() then return border(index, ...) end -- single player: the stock, untouched (W5)
+			if not coop_mode.actor_is_player() then return false end
+			if not cached() then return stock_entry_ok(index) and border(index, ...) or false end
 			if index == size_of() + 1 then return true end
 			local e = rank.cache[index]
 			return e and e.me == true or false

@@ -1233,32 +1233,51 @@ local function marks_of(squad)
 		c = se_load_var(id, name, "companion_cannot_teleport") and true or nil }
 end
 
+local function squad_at(id)
+	local squad = alife_object(id)
+	if not squad then return nil end
+	local group = clsid and clsid.online_offline_group_s
+	if group and squad.clsid and squad:clsid() ~= group then return nil end
+	if type(squad.commander_id) == "function" then return squad end
+end
+
 local function host_refresh()
 	if not axr_companions then return end
 	if sort_due then
 		sort_due = false
-		if transfer then transfer.sort_loaded_leaders() end
+		if transfer then
+			-- A reused id must not be moved to the saved leaders of another map.
+			for id in pairs(leaders) do
+				if not squad_at(id) then leaders[id] = nil end
+			end
+			transfer.sort_loaded_leaders()
+		end
 	end
 	local cs = axr_companions.companion_squads
 	local live = {}
 	for squad_id in pairs(cs) do
-		local squad = alife_object(squad_id)
+		local squad = squad_at(squad_id)
 		if squad then
 			for k in squad:squad_members() do live[k.id] = true end
 			push_squad(squad, control_peer(squad))
 		end
 	end
 	for squad_id in pairs(leaders) do
-		local squad = alife_object(squad_id)
-		-- recruited on a map server the table of the save has no line of it, the stock's mark on its members stays (the binder reads it)
-		if squad and cs[squad_id] == nil and marks_of(squad).m then cs[squad_id] = squad end
-		if cs[squad_id] == nil or not squad then -- a loaded squad is false until its first update
-			leaders[squad_id] = nil -- dismissed by the host, dead or released
+		local squad = squad_at(squad_id)
+		if not squad then
+			leaders[squad_id] = nil
+		elseif cs[squad_id] == nil then -- a loaded squad is false until its first update
+			-- The binder's saved mark can restore a companion recruited on another map.
+			if marks_of(squad).m then
+				cs[squad_id] = squad
+			else
+				leaders[squad_id] = nil
+			end
 		end
 	end
 	if transfer then transfer.prune_missing() end
 	for squad_id in pairs(last_leader) do
-		if not alife_object(squad_id) then last_leader[squad_id] = nil end
+		if not squad_at(squad_id) then last_leader[squad_id] = nil end
 	end
 	-- the last word about whom this was: a contract's end, a dismissal by the host, a death
 	for id, told in pairs(sent_info) do

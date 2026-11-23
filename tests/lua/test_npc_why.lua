@@ -160,5 +160,17 @@ db.OnlineStalkers = { 3000, 3001 }
 tick()
 check(lines_with("angry") == 1, "the NPC after a failing one is still looked at")
 
+print("-- a stale online stalker id now belongs to a physic object")
+local alive_calls = 0
+OBJ[3000] = { alive = function()
+	alive_calls = alive_calls + 1
+	error("cannot access class member Alive")
+end }
+M._reset()
+LOGS = {}
+local ok = pcall(tick)
+check(ok and alive_calls == 0, "the physics object is passed without calling alive")
+check(lines_with("angry") == 1, "the scan still looks at the next stalker")
+
 print(string.format("%d passed, %d failed", CHECKS - FAILS, FAILS))
 if FAILS > 0 then os.exit(1) end

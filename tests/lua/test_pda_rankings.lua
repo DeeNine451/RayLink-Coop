@@ -53,6 +53,8 @@ Hm.env.alife = function() return { object = function(_, id)
 		community = function() return "stalker" end, reputation = function() return 0 end,
 		character_icon = function() return "ic" end, clsid = function() return 1 end, alive = function() return true end }
 end } end
+Hm.actor._stalker = true
+Hm.env.alife_object = function(id) return Hm.objects[id] end
 Hm.host_calcs = 0
 Hm.env.pda = {
 	calculate_rankings = function() Hm.host_calcs = Hm.host_calcs + 1 end,
@@ -188,6 +190,59 @@ Cm.handlers["quests.rank"](Cm.env.coop_main.encode({ q = 5, k = 1, m = 1, w = 1,
 NOW = NOW + 3000
 pass(Cm, w)
 check(shown(w) == OWN, "peer 7's 'answer' neither clears the rows nor replaces the list")
+
+do
+	local modes = dofile("tests/lua/support/modes.lua")
+	local gamma = os.getenv("GAMMA_SCRIPTS")
+	local stock_pda = loadfile("temp/review/corpus/merged/pda.script") or (gamma and loadfile(gamma .. "/pda.script"))
+	assert(stock_pda, "the active GAMMA pda.script is required")
+	for _, answer in ipairs(modes.names()) do
+		if answer ~= "none" then
+			print("== " .. answer .. ": the stock ranking list contains a reused id")
+			local M = machine("host", 0)
+			local E = M.env
+			local p = setmetatable({}, { __index = E })
+			setfenv(stock_pda, p)()
+			E.pda = p
+			E.ranks, E.utils_obj, E.game_relations = Hm.env.ranks, Hm.env.utils_obj, Hm.env.game_relations
+			E.ui_options = { get = function() return false end }
+			E.alife_storage_manager = { get_se_obj_state = function() return {} end }
+			E.IsStalker = function(o, cls) return (cls or (o and o:clsid())) == 1 end
+			local npc = {
+				id = 700, clsid = function() return 1 end, character_name = function() return "Krot" end,
+				community = function() return "stalker" end, reputation = function() return 0 end,
+				rank = function() return 900 end, character_icon = function() return "ui_npc" end,
+			}
+			local objects = { [700] = npc, [701] = { id = 701, clsid = function() return 2 end } }
+			local reads = 0
+			E.alife_object = function(id) reads = reads + 1; return objects[id] end
+			local list = p.get_coc_ranking_list()
+			list[1], list[2] = 700, 701
+			local getters = { "name", "description", "hint", "icon" }
+			local stock = {}
+			for _, name in ipairs(getters) do stock[name] = p["coc_rankings_set_" .. name](1) end
+
+			modes.install(load_script(M, "coop_mode"), answer)
+			load_script(M, "coop_quests_core").on_game_start()
+			load_script(M, "coop_quests_pda").on_game_start()
+			fire(M, "actor_on_first_update")
+			reads = 0
+			for _, name in ipairs(getters) do
+				local getter = p["coc_rankings_set_" .. name]
+				local ok, value = pcall(getter, 2)
+				check(ok and value == "", answer .. ": reused id returns an empty " .. name)
+				if answer == "hostplay" then
+					check(getter(1) == stock[name], "hostplay: a stalker keeps the stock " .. name)
+				else
+					check(getter(1) == "", answer .. ": even a valid row is hidden for the ghost actor")
+				end
+			end
+			check(p.coc_rankings_can_show(2) == false and p.coc_rankings_show_border(2) == false,
+				answer .. ": the item has no ranking row or border")
+			if answer ~= "hostplay" then check(reads == 0, answer .. ": no stock ALife reads") end
+		end
+	end
+end
 
 print(string.format("== %d passed, %d failed", PASSES, FAILS))
 if FAILS > 0 then error("failures") end

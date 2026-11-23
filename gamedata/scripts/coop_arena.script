@@ -307,6 +307,13 @@ local function parent_id(item)
 	return ok and p and id_of(p) or nil
 end
 
+-- A script transfer can be refused while the online inventory still shows its old holder.
+local function item_place(id, item)
+	local se = alife_object(id)
+	if se and type(se.parent_id) == "number" then return se.parent_id, se end
+	return item and parent_id(item), se
+end
+
 local function items_of(o)
 	local list = {}
 	o:inventory_for_each(function(item) list[#list + 1] = item end)
@@ -456,11 +463,19 @@ local function give_back(id, bet_end)
 	local box2 = get_story_object(BOX_OUT)
 	local taken, back = 0, 0
 	if box2 then
+		local box2_id = id_of(box2)
 		for _, item in ipairs(items_of(o)) do
-			if all or kit[id_of(item)] then
+			local iid = id_of(item)
+			if all or kit[iid] then
 				o:transfer_item(item, box2)
-				stats.to_box2 = stats.to_box2 + 1
-				taken = taken + 1
+				local at, se = item_place(iid, item)
+				if at == box2_id then
+					stats.to_box2 = stats.to_box2 + 1
+					taken = taken + 1
+				else
+					log("item %s of %s (section %s, parent %s) is not in %s: not moved",
+						tostring(iid), tostring(o:name()), tostring(se and se:section_name() or item:section()), tostring(at), BOX_OUT)
+				end
 			end
 		end
 	end
@@ -468,14 +483,20 @@ local function give_back(id, bet_end)
 	local box_id = id_of(box)
 	for _, iid in ipairs(rec.items) do
 		local item = level.object_by_id(iid)
-		local at = item and parent_id(item)
+		local at, se = item_place(iid, item)
 		if item and box_id and at == box_id then
 			box:transfer_item(item, o)
-			stats.returned = stats.returned + 1
-			back = back + 1
-		elseif not (item and at == id) then
+			at, se = item_place(iid, item)
+			if at == id then
+				stats.returned = stats.returned + 1
+				back = back + 1
+			end
+		end
+		if at ~= id then
 			stats.missing = stats.missing + 1
-			log("! item %s of %s is not in %s: not given back", tostring(iid), tostring(o:name()), BOX_IN)
+			local section = se and se:section_name() or item and item:section()
+			log("%sitem %s of %s (section %s, parent %s) is not in %s: not given back",
+				P.is_player_id(at) and "" or "! ", tostring(iid), tostring(o:name()), tostring(section), tostring(at), BOX_IN)
 		end
 	end
 	-- one line a give back: what stayed with a player after the arena is read from the log (live 2026-11-15)
@@ -1563,6 +1584,8 @@ local function patch_zone()
 				if P.is_player_id(id) then
 					self.saved_obj[id] = nil
 					stats.players_kept = stats.players_kept + 1
+				elseif P.is_player_id(item_place(id)) then
+					self.saved_obj[id] = nil -- the zone can still remember an item picked up by a player
 				end
 			end
 		end

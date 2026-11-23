@@ -219,5 +219,46 @@ check(next_host.comp.owner_character(next_host.objects[201]) == 500
 	and next_host.comp.owner_character(next_host.objects[211]) == 501
 	and next_host.comp.owner_character(next_host.objects[221]) == 0, "the new host state restores all three owners")
 
+for _, answer in ipairs(modes.names()) do
+	if answer == "hostplay" or answer == "srv_map" then
+		print("== " .. answer .. ": a saved squad id now names an item")
+		local host = stand()
+		local npc = host.objects[201]
+		action(host, recruit, 201) -- establish a live squad for the outgoing notification
+		modes.install(host.env.coop_mode, answer)
+		NOW = NOW + 2100
+		host.fire("actor_on_update")
+		local pruned, sorted = 0, false
+		local hooks = host.comp.set_transfer_hooks({
+			wrap_teleport = function() end,
+			refresh = function() end,
+			reset_travel = function() end,
+			sort_loaded_leaders = function() sorted = host.comp._leaders()[300] == nil end,
+			prune_missing = function() pruned = pruned + 1 end,
+		})
+		local previous = host.env.alife_object
+		host.env.clsid = { online_offline_group_s = 1 }
+		host.env.alife_object = function(id)
+			if id == 300 then return luabind_object({ clsid = function() return 2 end }) end
+			return previous(id)
+		end
+		host.fire("load_state", { coop_npc_leaders = { [300] = 500 }, coop_npc_last_leaders = { [999] = 500 } })
+		host.env.axr_companions.companion_squads[300] = nil
+		host.sent = {}
+		local logs = #host.log
+		NOW = NOW + 2100
+		host.fire("actor_on_update")
+		check(sorted and hooks.leaders()[300] == nil, answer .. ": the reused id is dropped before sorting loaded leaders")
+		check(#host.log == logs and pruned == 1 and hooks.last_leaders()[999] == nil,
+			answer .. ": refresh reaches the remaining cleanup without errors")
+		local gone = false
+		for _, event in ipairs(sent_named(host, "npc.comp_info")) do
+			local data = host.env.coop_main.decode(event.payload)
+			if event.target == 1 and data.i == npc:id() and data.s == "" and data.l == nil then gone = true end
+		end
+		check(gone, answer .. ": the client receives the end notification")
+	end
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))
 os.exit(FAILS == 0 and 0 or 1)

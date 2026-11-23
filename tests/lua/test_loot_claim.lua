@@ -34,7 +34,7 @@ local function setup_world(M)
 		is_factions_friends = function(a, b) return M.comm[a .. ">" .. b] == "friend" end,
 		is_factions_enemies = function(a, b) return M.comm[a .. ">" .. b] == "enemy" end,
 	}
-	M.actor._comm = "actor_stalker"
+	M.actor._comm, M.actor._kind = "actor_stalker", STALKER
 	e.rules = { ["core/loot_claim"] = true }
 	e.coop_settings = { rule = function(key) return e.rules[key] end }
 	M.msgs, M.tips = {}, {}
@@ -752,6 +752,38 @@ do
 	fire(Ms, "npc_on_death_callback", Ms.victim, Ms.killer)
 	check(LM.claim_of(701) == 801, "a stalker's kill on a map server's level is claimed there")
 	check(LM.claim_count() == 1, "in its own table")
+end
+
+print("== the authority scans claims after corpse and killer ids were reused")
+for _, map in ipairs({ false, true }) do
+	local M = machine(map and "client" or "host", map and 0x101 or 0)
+	setup_world(M)
+	if map then M.env.coop.is_map_server = function() return true end end
+	M.players = { { id = 1, is_self = false, avatar_id = 500 } }
+	local first = stalker(M, 701, vec(10, 0, 0))
+	local second = stalker(M, 702, vec(10, 0, 0))
+	local killer = stalker(M, 801, vec(20, 0, 0), "bandit")
+	local other = stalker(M, 802, vec(20, 0, 0), "bandit")
+	first._dead, second._dead = true, true
+	boot(M)
+	fire(M, "npc_on_death_callback", first, killer)
+	fire(M, "npc_on_death_callback", second, other)
+	local claims = M.env.coop_loot_claim
+	local mode = map and "srv_map" or "hostplay"
+	check(claims.claim_count() == 2, mode .. ": both claims recorded before the id reuse")
+	local alive_calls = 0
+	for _, row in ipairs({ { 701, "prt_o_fabrics_3" }, { 802, "placeable_door04" } }) do
+		M.objects[row[1]] = nil
+		local prop = M.new_obj(row[1], row[2], vec(10, 0, 0))
+		prop.alive = function()
+			alive_calls = alive_calls + 1
+			error("cannot access class member Alive")
+		end
+	end
+	NOW = NOW + 3500
+	local ok = pcall(fire, M, "actor_on_update")
+	check(ok and alive_calls == 0, mode .. ": the scan calls no alive method on a physic object")
+	check(claims.claim_count() == 0, mode .. ": both claims are dropped")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))
