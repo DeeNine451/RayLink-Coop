@@ -277,6 +277,56 @@ reset()
 ROLE = "client"
 
 -------------------------------------------------------------------------------
+print("== F7: a captured object may disappear while the window or confirmation is open")
+modes.each(coop_mode, function(mode)
+	reset()
+	DEBUG.on = true
+	local first, lookup = TARGET, level.object_by_id
+	client.capture_target()
+	local npc_53504 = npc(53504, "bandit_53504")
+	local gone, stale_calls = false, 0
+	local old = setmetatable({}, { __index = function(_, key)
+		if gone then
+			stale_calls = stale_calls + 1
+			error("method " .. key .. " on destroyed object 53504")
+		end
+		return npc_53504[key]
+	end })
+	TARGET = old
+	level.object_by_id = function(id)
+		if id == 42 then return first end
+		if id == 53504 and not gone then return old end
+	end
+	local w = press_f7()
+	w:select_page("target")
+	check(w.t_name.text == "Sanya", mode .. ": F7 captures object 53504")
+	click(w, "btn_act_release")
+	check(w.modal == "release", mode .. ": a confirmation is open for 53504")
+	gone = true
+	w:BindTarget()
+	check(w.t_name.text == EN.st_coop_dbg_no_target and not w.actions.kill.enabled and stale_calls == 0,
+		mode .. ": target panel shows no target without touching destroyed object 53504")
+	local before = stale_calls
+	w:BindOverview()
+	check(w.c_target.vals.name.text == EN.st_coop_dbg_no_target and stale_calls == before,
+		mode .. ": overview clears the missing target without touching the old object")
+	before = stale_calls
+	click(w, "btn_modal_ok")
+	check(#REQUESTS == 0 and stale_calls == before, mode .. ": confirming a vanished target sends nothing and does not touch it")
+
+	TARGET = npc(53504, "bandit_53504")
+	before = stale_calls
+	client.capture_target()
+	local previous = client.get_previous()
+	check(previous == first and stale_calls == before, mode .. ": recapturing the same id keeps the previous target and never reads the old object")
+	level.object_by_id = function() return nil end
+	previous = client.get_previous()
+	check(previous == nil, mode .. ": an offline previous target resolves to nil")
+	level.object_by_id, TARGET = lookup, first
+end)
+modes.live(coop_mode, load_module)
+
+-------------------------------------------------------------------------------
 print("== server debug off: view only")
 reset()
 DEBUG.on = false
@@ -591,6 +641,7 @@ T = EN
 print("== a spawn into my inventory: what I had and have of it, with the ids (live 2026-11-08: 10 asked, 20 came)")
 do
 	reset()
+	local client = load_module("coop_debug_client")
 	local INV = {}
 	local function item(id, sec) return { id = function() return id end, section = function() return sec end } end
 	actor.iterate_inventory = function(_, f, o) for _, it in ipairs(INV) do f(o, it) end end
@@ -606,20 +657,20 @@ do
 	check(logged("spawn_item medkit x2 asked %(inv%): 1 of it here before: ids 1200") ~= nil, "the request: what I have of it before")
 	REQUESTS[#REQUESTS].cb(true, "forwarded")
 	check(logged("spawn_item medkit .*now") == nil, "forwarded: nothing counted yet")
-	-- two from the map server's slice (0x9000.. is map server 1) and one more under a world id came meanwhile
+	-- three items came meanwhile, with ids from different parts of the id space
 	INV[3] = item(36870, "medkit")
 	INV[4] = item(36871, "medkit")
 	INV[5] = item(1500, "medkit")
-	EVENT["coop.dbg.note"]("ok=1;msg=medkit x2;cmd=spawn_item;rid=7", 0)
-	local l = logged("spawn_item medkit rid 7")
+	client.on_note("ok=1;msg=medkit x2;cmd=spawn_item;rid=7", 0)
+	local l = logged("spawn_item medkit made by a map server, rid 7")
 	check(l ~= nil and l:find("asked 2, had 1, have 4 %(%+3%)") ~= nil, "the note: asked, had, have", tostring(l))
 	check(l ~= nil and l:find("%] ! spawn_item") ~= nil, "more than asked: the line starts with '!'", tostring(l))
-	check(l ~= nil and l:find("new ids 1500 %(world%), 36870%-36871 %(map server 1%)") ~= nil, "the new ids and whose range they are in",
+	check(l ~= nil and l:find("new ids 1500,36870%-36871") ~= nil, "the new ids without an ownership label for each range",
 		tostring(l))
 	check(#TE == 1 and TE[1].delay >= 2, "and a second look a few seconds later (the world server's copy comes after)")
 	INV[6] = item(36872, "medkit")
 	if TE[1] then TE[1].f(unpack(TE[1].args)) end
-	l = logged("spawn_item medkit rid 7, .*later")
+	l = logged("spawn_item medkit made by a map server, rid 7, .*later")
 	check(l ~= nil and l:find("have 5 %(%+4%)") ~= nil, "the second look counts again", tostring(l))
 	-- a spawn the server ran itself (the host's level): the answer is the result, no rid
 	TE = {}
@@ -627,14 +678,17 @@ do
 	client.run("spawn_item", { sec = "wpn_ak74", n = 1, at = "inv" })
 	INV[8] = item(1600, "wpn_ak74")
 	REQUESTS[#REQUESTS].cb(true, { msg = "wpn_ak74 x1 (inv)", id = 1600 })
-	l = logged("spawn_item wpn_ak74 rid %-")
+	l = logged("spawn_item wpn_ak74 made by the decider")
 	check(l ~= nil and l:find("asked 1, had 1, have 2 %(%+1%)") ~= nil and l:find("%] ! ") == nil, "a direct answer: counted, as asked",
 		tostring(l))
+	if TE[1] then TE[1].f() end
+	TE = {}
 	-- a note of another section does not end this watch; a refusal ends the oldest
 	client.run("spawn_item", { sec = "medkit", n = 1, at = "inv" })
 	REQUESTS[#REQUESTS].cb(true, "forwarded")
-	EVENT["coop.dbg.note"]("ok=1;msg=wpn_ak74 x3 (inv);cmd=spawn_item;rid=9", 0)
-	check(logged("spawn_item medkit rid 9") == nil, "a note of another section is not this one's")
+	client.on_note("ok=1;msg=wpn_ak74 x3 (inv);cmd=spawn_item;rid=9", 0)
+	check(logged("spawn_item medkit made by a map server, rid 9") == nil, "a note of another section is not this one's")
+	client.on_note("ok=0;cmd=spawn_item;rid=9;code=failed", 0)
 	-- Live, build 54 (RL-BWXX-F77V): a silencer that fits a gun the player holds never came (wpn_sil_vihr with wpn_vihr), one
 	-- that fits none came. The cause is not known: when the asked item is missing, the line names the guns here that take
 	-- this section as their silencer and whether it is on them now.
@@ -646,7 +700,7 @@ do
 		INV[9] = gun
 		client.run("spawn_item", { sec = "wpn_sil_vihr", n = 1, at = "inv" })
 		REQUESTS[#REQUESTS].cb(true, { msg = "wpn_sil_vihr x1 (inv)", id = 1701 })
-		l = logged("spawn_item wpn_sil_vihr rid %-")
+		l = logged("spawn_item wpn_sil_vihr made by the decider")
 		check(l ~= nil and l:find("have 0 %(%+0%)") ~= nil and l:find("guns here that take it: wpn_vihr 1700 %(silencer on: true%)") ~= nil,
 			"a silencer that did not come: the gun it fits and whether it carries one", tostring(l))
 		-- Stand, build 57: on a client the answer comes before the item (the host's copy travels), so "fewer than asked" at
@@ -654,13 +708,14 @@ do
 		check(l ~= nil and l:find("%] ! ") == nil, "fewer than asked at the answer: no '!' yet", tostring(l))
 		local second = TE[#TE]
 		if second then second.f(unpack(second.args)) end
-		l = logged("spawn_item wpn_sil_vihr rid %-, .*later")
+		l = logged("spawn_item wpn_sil_vihr made by the decider, .*later")
 		check(l ~= nil and l:find("%] ! spawn_item") ~= nil and l:find("have 0 %(%+0%)") ~= nil,
 			"still missing at the second look: the line starts with '!'", tostring(l))
 		client.run("spawn_item", { sec = "wpn_ak74", n = 3, at = "inv" })
 		REQUESTS[#REQUESTS].cb(true, { msg = "wpn_ak74 x3 (inv)" })
-		l = logged("spawn_item wpn_ak74 rid %-: asked 3")
+		l = logged("spawn_item wpn_ak74 made by the decider: asked 3")
 		check(l ~= nil and l:find("guns here") == nil, "an item no gun takes as a silencer: the plain line", tostring(l))
+		if TE[#TE] then TE[#TE].f() end
 		INV[9] = nil
 		SECTIONS.wpn_sil_vihr, SECTIONS.wpn_vihr = nil, nil
 	end
@@ -670,6 +725,100 @@ do
 	check(#LOG == n_log, "at=near: no inventory count")
 	actor.iterate_inventory, CreateTimeEvent = nil, nil
 end
+
+-------------------------------------------------------------------------------
+print("== inventory probe: overlapping requests, wallet conversion and note pairing")
+modes.each(coop_mode, function(mode)
+	reset()
+	local client = load_module("coop_debug_client")
+	DEBUG.on = true
+	local inv, timers = {}, {}
+	local old_is_item = IsItem
+	IsItem = function(kind, sec) return kind == "money" and sec == "money_1000" end
+	SECTIONS.money_1000 = { class = "II_ATTCH", inv_weight = "0", inv_name = "st_money_1000" }
+	actor.iterate_inventory = function(_, f, o)
+		for _, item in ipairs(inv) do f(o, item) end
+	end
+	CreateTimeEvent = function(_, _, _, f) timers[#timers + 1] = f end
+	local function put(id, sec)
+		inv[#inv + 1] = { id = function() return id end, section = function() return sec end }
+	end
+	local function spawn(sec, n)
+		client.run("spawn_item", { sec = sec, n = n, at = "inv" })
+		return REQUESTS[#REQUESTS].cb
+	end
+	local function answer_spawn(cb, id)
+		cb(true, { msg = "spawned", id = id })
+	end
+	local function inspect(from, fragment)
+		for i = #LOG, from + 1, -1 do
+			if LOG[i]:find(fragment, 1, true) then return LOG[i] end
+		end
+	end
+	local function second_look()
+		-- Later answers can be checked before earlier ones.
+		for i = #timers, 1, -1 do timers[i]() end
+		timers = {}
+	end
+
+	local mark = #LOG
+	answer_spawn(spawn("medkit", 2), 36870)
+	local other = spawn("medkit", 2)
+	for id = 36870, 36873 do put(id, "medkit") end
+	answer_spawn(other, 36873)
+	check(#timers == 2, mode .. ": both direct answers schedule a second look")
+	second_look()
+	check(not inspect(mark, "] ! spawn_item"), mode .. ": overlap never raises an error report")
+	check(inspect(mark, "other requests of it overlap") ~= nil, mode .. ": the log explains the overlap")
+	check(not inspect(mark, "map server") and inspect(mark, "made by the decider") ~= nil,
+		mode .. ": a high id in a direct answer has decider provenance")
+
+	mark = #LOG
+	local money = spawn("money_1000", 1)
+	put(37000, "money_1000")
+	answer_spawn(money, 37000)
+	inv[#inv] = nil
+	second_look()
+	check(not inspect(mark, "] ! spawn_item") and inspect(mark, "money item: converted on take") ~= nil,
+		mode .. ": a money item converted before the second look is expected")
+
+	mark = #LOG
+	spawn("medkit", 1)(true, "forwarded")
+	spawn("medkit", 2)(true, "forwarded")
+	client.on_note("ok=1;msg=medkit x2 (4 uses) (inv);cmd=spawn_item;rid=91", 0)
+	local line = inspect(mark, "rid 91")
+	check(line and line:find("asked 2", 1, true), mode .. ": a later note skips an older request with a different count")
+	client.on_note("ok=1;msg=medkit x1 (inv);cmd=spawn_item;rid=92", 0)
+	line = inspect(mark, "rid 92")
+	check(line and line:find("asked 1", 1, true), mode .. ": an out-of-order note can still match its own count")
+	second_look()
+
+	-- Refusals, a failed send, the pending cap, and the timer must all release their watches.
+	spawn("medkit", 2)(false, "failed")
+	spawn("medkit", 2)(true, "forwarded")
+	client.on_note("ok=0;cmd=spawn_item;rid=93;code=failed", 0)
+	local send = coop.sync.request
+	coop.sync.request = function() return false, "failed" end
+	check(client.run("spawn_item", { sec = "medkit", n = 2, at = "inv" }) == false, mode .. ": failed send")
+	coop.sync.request = function() error("failed", 0) end
+	check(client.run("spawn_item", { sec = "medkit", n = 2, at = "inv" }) == false, mode .. ": throwing send")
+	coop.sync.request = send
+	local dropped = spawn("medkit", 1)
+	for _ = 1, 8 do spawn("wpn_ak74", 1)(true, "forwarded") end
+	answer_spawn(dropped, 36874)
+	check(#timers == 0, mode .. ": an evicted watch ignores a late reply")
+	for _ = 1, 8 do client.on_note("ok=0;cmd=spawn_item;rid=94;code=failed", 0) end
+	mark = #LOG
+	answer_spawn(spawn("medkit", 1), 36874)
+	second_look()
+	check(inspect(mark, "] ! spawn_item") ~= nil and not inspect(mark, "overlap"),
+		mode .. ": after watches close, a single missing item is reported again")
+
+	actor.iterate_inventory, CreateTimeEvent, IsItem = nil, nil, old_is_item
+	SECTIONS.money_1000 = nil
+end)
+coop_debug_client = client
+modes.live(coop_mode, load_module)
 
 -------------------------------------------------------------------------------
 print("== the server's order: a level change on this machine (registry `level`, K38)")

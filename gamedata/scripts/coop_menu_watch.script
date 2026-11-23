@@ -10,7 +10,7 @@
 		Overlapped_UI                  another registered window stops UIInventory:Update, so no cell is under the pointer
 		game.only_movekeys_allowed     Inventory Anti-Closing turns off the drag, the double click and the context menu; the
 		                               flag is one global of the engine and a mod's animation sets it
-	A clean inventory is not worth a line: if the bug comes back and none of these is in the log, the cause is elsewhere.
+	The inventory can open over a brief animation or another window. Report only blockers still present three seconds later.
 
 	"Esc, and no way back from the main menu" (a client, then the host). The stock line returns to the game only for a living
 	actor, so every Esc of a session goes into the log, with what that line is going to do.
@@ -18,6 +18,7 @@
 
 local pairs, pcall, rawget, tostring, type = pairs, pcall, rawget, tostring, type
 
+local BLOCK_RECHECK_S = 3
 local MAX_CLICK_LINES = 3
 local clicks_said = 0
 
@@ -25,34 +26,78 @@ local function log(fmt, ...)
 	printf("[coop-menu] " .. fmt, ...)
 end
 
--- What keeps clicks away from the inventory right now: a list of words, empty when nothing does.
-function blocks()
-	local why = {}
+-- Input flags are boolean; a window's registry entry identifies this particular registration.
+local function collect_blocks(guis)
+	local why, sources = {}, {}
+	local function add(reason, source)
+		why[#why + 1] = reason
+		sources[reason] = source
+	end
 	local gm = rawget(_G, "game")
 	if gm and gm.only_movekeys_allowed and gm.only_movekeys_allowed() then
-		why[#why + 1] = "movement keys only"
+		add("movement keys only", true)
 	end
 	local fdda = rawget(_G, "liz_fdda_input_manager")
-	if type(fdda) == "table" and fdda.is_input_disabled then
-		why[#why + 1] = "an animation holds the input"
+	if type(fdda) == "table" and fdda.is_input_disabled == true then
+		add("an animation holds the input", true)
 	end
-	local guis = rawget(_G, "_GUIs")
 	if type(guis) == "table" then
-		for name in pairs(guis) do
+		for name, entry in pairs(guis) do
 			if name ~= "UIInventory" and name ~= "Dialog" then -- the stock lets a talk stay under the inventory
-				why[#why + 1] = "window " .. tostring(name)
+				add("window " .. tostring(name), entry)
 			end
 		end
 	end
+	return why, sources
+end
+
+-- What keeps clicks away from the inventory right now: a list of words, empty when nothing does.
+function blocks()
+	local why = collect_blocks(rawget(_G, "_GUIs"))
 	return why
 end
 
-local function on_gui_show(name)
-	if name ~= "UIInventory" then return end
-	local why = blocks()
-	if #why > 0 then
-		log("! the inventory opens with its clicks in danger: %s", table.concat(why, ", "))
+local function window_visibility(entry)
+	local ui = type(entry) == "table" and rawget(_G, entry.path)
+	local window = type(ui) == "table" and rawget(ui, entry.instance or "GUI")
+	if window then
+		local ok, shown = pcall(function() return window:IsShown() end)
+		if ok and type(shown) == "boolean" then return tostring(shown) end
 	end
+	return "unknown"
+end
+
+local function on_gui_show(name)
+	if name ~= "UIInventory" or not coop.is_active() then return end
+	local guis = rawget(_G, "_GUIs")
+	local inventory = type(guis) == "table" and guis.UIInventory
+	if not inventory then return end
+	local why, original = collect_blocks(guis)
+	if #why == 0 then return end
+
+	local started = time_global()
+	-- Each Register_UI makes a new entry, even when it reuses the same inventory window.
+	RemoveTimeEvent("coop_menu_watch", "inventory_blocks")
+	CreateTimeEvent("coop_menu_watch", "inventory_blocks", BLOCK_RECHECK_S, function()
+		local current_guis = rawget(_G, "_GUIs")
+		if not coop.is_active() or type(current_guis) ~= "table" or current_guis.UIInventory ~= inventory then return true end
+		local elapsed = (time_global() - started) / 1000
+		if elapsed < BLOCK_RECHECK_S then return false end -- the stock can process the queue early
+
+		local current, sources = collect_blocks(current_guis)
+		local persistent = {}
+		for _, reason in ipairs(current) do
+			local source = sources[reason]
+			if original[reason] == source then
+				if source ~= true then reason = reason .. " (shown=" .. window_visibility(source) .. ")" end
+				persistent[#persistent + 1] = reason
+			end
+		end
+		if #persistent > 0 then
+			log("! inventory clicks still blocked after %.1f s: %s", elapsed, table.concat(persistent, ", "))
+		end
+		return true
+	end)
 end
 
 local function inventory_open()

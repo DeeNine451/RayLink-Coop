@@ -138,25 +138,42 @@ function aim_point()
 	return ok and p or nil
 end
 
--- The object under the crosshair when F7 was pressed (o1 of the stock), and the one before (o2).
-target, previous = nil, nil
-
-function capture_target()
-	local ok, obj = pcall(function() return level.get_target_obj and level.get_target_obj() or nil end)
-	obj = ok and obj or nil
-	local same = false
-	if obj and target then
-		local ok2, eq = pcall(function() return obj:id() == target:id() end)
-		same = ok2 and eq
-	end
-	if not same then previous = target end
-	target = obj
-	return target
-end
-
 function object_id(obj)
 	local ok, id = pcall(function() return obj:id() end)
-	return ok and id or nil
+	return ok and type(id) == "number" and id or nil
+end
+
+function object_by_id(id)
+	if type(id) ~= "number" or not (id >= 0 and id <= 65534 and id == floor(id)) then return nil end
+	local ok, obj = pcall(function() return level.object_by_id(id) end)
+	return ok and obj or nil
+end
+
+-- The object under the crosshair when F7 was pressed (o1 of the stock), and the one before (o2).
+-- An engine wrapper can be freed between frames. Keep only the local ids and resolve them at the point of use.
+local target_id, previous_id
+
+function capture_target()
+	local ok, id = pcall(function()
+		local obj = level.get_target_obj and level.get_target_obj()
+		return obj and object_id(obj)
+	end)
+	id = ok and id or nil
+	if id ~= target_id then previous_id = target_id end
+	target_id = id
+	return id
+end
+
+function get_target_id()
+	return target_id
+end
+
+function get_target()
+	return object_by_id(target_id)
+end
+
+function get_previous()
+	return object_by_id(previous_id)
 end
 
 -- the id of an object in the host's numbering (the request names objects so)
@@ -232,10 +249,12 @@ end
 
 -------------------------------------------------------------------------------
 -- The actions of the window (DEBUG_DESIGN C, v1). id: the button; cmd: the registry id the server knows; build(ctx) -> the
--- arguments or nil, a refusal code. ctx: what the window holds (target, sec, n, at, h, m, f, w, p, on, info).
+-- arguments or nil, a refusal code. ctx: what the window holds (target_id, sec, n, at, h, m, f, w, p, on, info).
 -------------------------------------------------------------------------------
 local function need_target(ctx, extra)
-	local t = ctx and ctx.target and host_id(ctx.target)
+	local obj = ctx and ctx.target
+	if ctx and ctx.target_id ~= nil then obj = object_by_id(ctx.target_id) end
+	local t = host_id(obj)
 	if t == nil then return nil, "no_target" end
 	local args = { t = t }
 	for k, v in pairs(extra or {}) do args[k] = v end
@@ -528,11 +547,11 @@ end
 -- A spawn into my inventory, counted (live 2026-11-08: 10 medkits asked on a map server's level, 20 in the inventory, the
 -- window "give" counted 20): what this machine had and has of the section, with the ids, when the answer comes and a few
 -- seconds later (the world server's copy of a map server's spawn reaches every player after it). Only the log; nothing
--- changes. The id ranges are those of xrCoop/coop_levels_keeper.h (kLeaderIdFirst 0x9000, kLeaderIdsEach 4095, 7 slices).
+-- changes.
 -------------------------------------------------------------------------------
-local LEADER_FIRST, LEADER_EACH, LEADER_SLOTS = 0x9000, 4095, 7
 local SECOND_LOOK_S = 3
 local watches = {} -- spawn_item requests into my inventory waiting for their answer, oldest first
+local open_watches = {} -- per section, including watches waiting for their second look
 
 local function own_ids(sec)
 	local ids = {}
@@ -543,14 +562,6 @@ local function own_ids(sec)
 	end)
 	table.sort(ids)
 	return ids
-end
-
-local function range_of(id)
-	if id >= LEADER_FIRST then
-		local k = floor((id - LEADER_FIRST) / LEADER_EACH) + 1
-		if k <= LEADER_SLOTS then return "map server " .. k end
-	end
-	return "world"
 end
 
 -- "1-3, 7" of sorted ids
@@ -564,24 +575,6 @@ local function ranges(ids)
 	end
 	if i <= n then out[#out + 1] = "..." end
 	return #out > 0 and table.concat(out, ",") or "none"
-end
-
--- the new ids, grouped by the range they are in: "1500 (world), 36870-36871 (map server 1)"
-local function new_ids_text(ids)
-	if #ids == 0 then return "none" end
-	local groups, order = {}, {}
-	for _, id in ipairs(ids) do
-		local r = range_of(id)
-		if not groups[r] then
-			groups[r] = {}
-			order[#order + 1] = r
-		end
-		local g = groups[r]
-		g[#g + 1] = id
-	end
-	local out = {}
-	for _, r in ipairs(order) do out[#out + 1] = ranges(groups[r]) .. " (" .. r .. ")" end
-	return table.concat(out, ", ")
 end
 
 -- Live, build 54 (RL-BWXX-F77V): a silencer that fits a gun the player held never came into his bag (wpn_sil_vihr with
@@ -605,7 +598,7 @@ local function fitting_guns(sec)
 	return "; guns here that take it: " .. table.concat(out, ", ", 1, math.min(#out, 6))
 end
 
-local function watch_line(w, rid, when)
+local function watch_line(w, source, when)
 	local now_ids = own_ids(w.sec)
 	local had = {}
 	for _, id in ipairs(w.before) do had[id] = true end
@@ -616,30 +609,58 @@ local function watch_line(w, rid, when)
 	local delta = #now_ids - #w.before
 	-- The answer can come before the item (a client: the decider's copy is still on its way), so at the answer only more
 	-- than asked is a fault; the second look (`when`) decides a missing one too (stand, build 57: "have 0", then "have 1").
-	local wrong = delta > w.n or (when ~= nil and delta ~= w.n)
-	log("%sspawn_item %s rid %s%s: asked %d, had %d, have %d (%s%d); new ids %s%s", wrong and "! " or "", w.sec,
-		tostring(rid or "-"), when or "", w.n, #w.before, #now_ids, delta >= 0 and "+" or "", delta, new_ids_text(fresh),
-		delta < w.n and fitting_guns(w.sec) or "")
+	local overlap = w.overlap or open_watches[w.sec].count > 1
+	local wrong = not (overlap or w.money) and (delta > w.n or (when ~= nil and delta ~= w.n))
+	local details = (overlap and "; other requests of it overlap" or "") ..
+		(w.money and "; money item: converted on take" or (delta < w.n and fitting_guns(w.sec) or ""))
+	log("%sspawn_item %s %s%s: asked %d, had %d, have %d (%s%d); new ids %s%s", wrong and "! " or "", w.sec,
+		source, when or "", w.n, #w.before, #now_ids, delta >= 0 and "+" or "", delta, ranges(fresh), details)
 end
 
-local function watch_answered(w, rid)
-	watch_line(w, rid, nil)
+local function watch_end(w)
+	if not w or w.closed then return end
+	w.closed = true
+	local section = open_watches[w.sec]
+	section.count = section.count - 1
+	if section.count == 0 then open_watches[w.sec] = nil end
+end
+
+local function watch_answered(w, source)
+	pcall(watch_line, w, source)
 	local te = rawget(_G, "CreateTimeEvent")
-	if type(te) ~= "function" then return end
-	pcall(te, "coop_debug_client", "spawn_count_" .. tostring(w.seq), SECOND_LOOK_S, function()
-		pcall(watch_line, w, rid, ", " .. SECOND_LOOK_S .. " s later")
-		return true
-	end)
+	if type(te) == "function" then
+		local ok, scheduled = pcall(te, "coop_debug_client", "spawn_count_" .. tostring(w.seq), SECOND_LOOK_S, function()
+			if not w.closed then
+				pcall(watch_line, w, source, ", " .. SECOND_LOOK_S .. " s later")
+				watch_end(w)
+			end
+			return true
+		end)
+		if ok and scheduled ~= false then return end
+	end
+	watch_end(w)
 end
 
 local watch_seq = 0
 local function watch_start(args)
 	if args.cmd ~= "spawn_item" or args.at ~= "inv" or type(args.sec) ~= "string" then return nil end
 	watch_seq = watch_seq + 1
-	local w = { sec = args.sec, n = tonumber(args.n) or 1, before = own_ids(args.sec), seq = watch_seq }
+	local section = open_watches[args.sec]
+	local ok, money = pcall(function() return IsItem("money", args.sec) end)
+	local w = { sec = args.sec, n = args.n, before = own_ids(args.sec), seq = watch_seq, overlap = section ~= nil, money = ok and money }
+	if section then
+		section.count = section.count + 1
+		-- Mark the first watch too, in case its second look runs after all the others close.
+		if section.first then
+			section.first.overlap = true
+			section.first = nil
+		end
+	else
+		open_watches[w.sec] = { count = 1, first = w }
+	end
 	log("spawn_item %s x%d asked (inv): %d of it here before: ids %s", w.sec, w.n, #w.before, ranges(w.before))
 	watches[#watches + 1] = w
-	while #watches > 8 do table.remove(watches, 1) end -- notes that never came (the world server waits 60 s at most)
+	if #watches > 8 then watch_end(table.remove(watches, 1)) end -- notes that never came (the world server waits 60 s at most)
 	return w
 end
 
@@ -681,18 +702,20 @@ function run(id, ctx, cb, confirmed)
 		set_line(e, text, kind)
 		-- a map server carries it out ("forwarded"): its count waits for coop.dbg.note
 		if w and not (ok2 and res == "forwarded") then
-			watch_take(w)
-			if ok2 then pcall(watch_answered, w, nil) end
+			local pending = watch_take(w)
+			if pending then
+				if ok2 then watch_answered(pending, "made by the decider") else watch_end(pending) end
+			end
 		end
 		if cb then pcall(cb, ok2, res) end
 	end)
 	if not ok then
-		if w then watch_take(w) end
+		if w then watch_end(watch_take(w)) end
 		set_line(e, error_text(sent), "err")
 		return false, "failed"
 	end
 	if sent == false then
-		if w then watch_take(w) end
+		if w then watch_end(watch_take(w)) end
 		set_line(e, error_text(err), "err")
 		return false, tostring(err)
 	end
@@ -752,19 +775,22 @@ function on_note(payload, from)
 	else
 		add_line(error_text(t.code or t.msg), "err")
 	end
-	-- a spawn into my inventory a map server carried out: counted now. Its line is "<sec> x<n> (inv)" (coop_debug_cmds
-	-- spawn_item): the oldest watch of that section; a refusal names no section and ends the oldest one
-	if t.cmd == "spawn_item" then
-		local msg = tostring(t.msg or "")
-		local pick
-		for i, w in ipairs(watches) do
-			if not good or msg:sub(1, #w.sec + 2) == w.sec .. " x" then
-				pick = i
-				break
-			end
+	if t.cmd ~= "spawn_item" then return end
+	-- A refusal names no section. A successful note names the section, count and destination.
+	if not good then
+		watch_end(table.remove(watches, 1))
+		return
+	end
+	local msg = type(t.msg) == "string" and t.msg or ""
+	local sec, count, suffix = msg:match("^([^%s]+) x(%d+)(.*)$")
+	if not sec or (suffix ~= "" and suffix ~= " (inv)" and not suffix:match("^ %(%d+ uses%) %(inv%)$")) then return end
+	local rid = tonumber(t.rid)
+	if not (rid and rid >= 1 and rid <= 0xffffffff and rid == floor(rid)) then rid = "?" end
+	for i, w in ipairs(watches) do
+		if w.sec == sec and tostring(w.n) == count then
+			watch_answered(table.remove(watches, i), "made by a map server, rid " .. tostring(rid))
+			break
 		end
-		local w = pick and table.remove(watches, pick)
-		if w and good then pcall(watch_answered, w, t.rid) end
 	end
 end
 
@@ -773,6 +799,7 @@ end
 -- corruption (0xC0000374) on the new level's script start. Closed before the order's jump and on both stock level-change callbacks
 -- (a level changer walked with the window open, a story teleport).
 function close_window()
+	target_id, previous_id = nil, nil
 	local ui = rawget(_G, "coop_debug_ui")
 	if ui and type(ui.close) == "function" then pcall(ui.close) end
 end

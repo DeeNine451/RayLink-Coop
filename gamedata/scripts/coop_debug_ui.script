@@ -1831,7 +1831,8 @@ function UICoopDebug:ShowConfirm(id, ctx)
 	self.modal_title:SetText(trf("st_coop_dbg_confirm_title", client().label_of(a)))
 	local what = tr("st_coop_dbg_confirm_" .. id)
 	if id == "release" or id == "inv_clear" then
-		local name = safe(function() return client().target:name() end)
+		local o = client().object_by_id(ctx.target_id)
+		local name = o and safe(function() return o:name() end)
 		what = trf("st_coop_dbg_confirm_" .. id, text_or_none(name))
 	elseif id == "info_give" or id == "info_take" then
 		what = trf("st_coop_dbg_confirm_" .. id, tostring(ctx.info or ""))
@@ -1857,7 +1858,7 @@ end
 function UICoopDebug:Context()
 	local cl = client()
 	local function typed(e) return e and safe(function() return e:GetText() end) or nil end
-	return { target = cl.target, sec = self.spawn_sec, n = self.spawn_n, at = self.spawn_at, h = self.hour, m = 0,
+	return { target_id = cl.get_target_id(), sec = self.spawn_sec, n = self.spawn_n, at = self.spawn_at, h = self.hour, m = 0,
 		f = TIME_FACTORS[self.factor_i], info = typed(self.info_edit), c = self.faction }
 end
 
@@ -1938,13 +1939,14 @@ function UICoopDebug:BindMe()
 end
 
 function UICoopDebug:BindTarget()
-	local o = client().target
-	local has = o ~= nil and safe(function() return o:id() end) ~= nil
+	local cl = client()
+	local o = cl.get_target()
+	local has = o ~= nil
 	if self.t_name then
 		if has then
 			self.t_name:SetText(text_or_none(safe(function() return o:character_name() end) or safe(function() return o:name() end)))
-			self.t_meta:SetText(trf("st_coop_dbg_target_meta", text_or_none(safe(function() return o:id() end)),
-				text_or_none(client().host_id(o)), text_or_none(safe(function() return o:section() end))))
+			self.t_meta:SetText(trf("st_coop_dbg_target_meta", text_or_none(cl.get_target_id()),
+				text_or_none(cl.host_id(o)), text_or_none(safe(function() return o:section() end))))
 		else
 			self.t_name:SetText(tr("st_coop_dbg_no_target"))
 			self.t_meta:SetText(tr("st_coop_dbg_no_target_hint"))
@@ -1961,12 +1963,13 @@ end
 local RELATIONS = { [0] = "st_coop_dbg_rel_friend", [1] = "st_coop_dbg_rel_neutral", [2] = "st_coop_dbg_rel_enemy" }
 
 function UICoopDebug:BindOverview()
-	local o = client().target
+	local cl = client()
+	local o = cl.get_target()
 	local v = self.c_target.vals
-	if o and safe(function() return o:id() end) ~= nil then
-		local id = safe(function() return o:id() end)
+	if o then
+		local id = cl.get_target_id()
 		v.name:SetText(text_or_none(safe(function() return o:character_name() end) or safe(function() return o:name() end)))
-		v.id:SetText(trf("st_coop_dbg_v_ids", text_or_none(id), text_or_none(client().host_id(o))))
+		v.id:SetText(trf("st_coop_dbg_v_ids", text_or_none(id), text_or_none(cl.host_id(o))))
 		v.section:SetText(text_or_none(safe(function() return o:section() end)))
 		v.faction:SetText(text_or_none(safe(function() return o:character_community() end)))
 		v.rank:SetText(text_or_none(safe(function() return o:character_rank() end)))
