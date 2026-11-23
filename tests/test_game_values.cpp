@@ -5,6 +5,8 @@
 
 #include "coop_game_values.h"
 
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -416,4 +418,221 @@ TEST(game_values_world_start_other_mode_changes_nothing)
 	on_world_start(StartMode::Other, p, world);
 	CHECK(p.staged());
 	CHECK_EQ(world, std::string("monolith"));
+}
+
+// Report #5 (builds 55-58): a level change starts the next world from "<save>/single/alife" (CALifeSimulator drops the
+// fourth part, change_level puts the autosave's name in front), so m_new_or_load is "" there. The name change_level gave
+// the line makes that start a load of the save, and the hook is called with ("load", that name).
+TEST(game_values_world_start_after_level_change_is_a_load)
+{
+	const WorldStart slot = world_start("", "coop_auto_6b00c4e3-f16d_1", "coop_auto_6b00c4e3-f16d_1");
+	CHECK(slot.mode == StartMode::Load);
+	CHECK_EQ(slot.save, std::string("coop_auto_6b00c4e3-f16d_1"));
+	CHECK_EQ(std::string(start_mode_name(slot.mode)), std::string("load"));
+
+	// The stock name of a level change outside a session (the first one of a new world: fake_start to its start), as the
+	// next world reads it (IGame_Persistent::params lowers it)
+	const WorldStart stock = world_start("", "player - autosave", "player - autosave");
+	CHECK(stock.mode == StartMode::Load);
+	CHECK_EQ(stock.save, std::string("player - autosave"));
+
+	// No slot took the save: the next level loads from the temporary name, and so does the hook
+	const WorldStart temp = world_start("", "coop_auto_tmp", "coop_auto_tmp");
+	CHECK(temp.mode == StartMode::Load);
+	CHECK_EQ(temp.save, std::string("coop_auto_tmp"));
+}
+
+TEST(game_values_world_start_without_level_change_stays_other)
+{
+	// Empty mode and nothing remembered (a console `start server(x/single/alife)`): left alone, as before
+	const WorldStart none = world_start("", "coop_auto_x_1", "");
+	CHECK(none.mode == StartMode::Other);
+	CHECK_EQ(none.save, std::string("coop_auto_x_1"));
+	CHECK_EQ(std::string(start_mode_name(none.mode)), std::string());
+
+	// A name remembered for another save is not this start's
+	CHECK(world_start("", "coop_auto_x_1", "coop_auto_x_2").mode == StartMode::Other);
+	// Compared exactly: the engine remembers the name the way the next world parses it
+	CHECK(world_start("", "player - autosave", "Player - autosave").mode == StartMode::Other);
+	// An empty remembered name never matches an empty one
+	CHECK(world_start("", "", "").mode == StartMode::Other);
+	CHECK(world_start(nullptr, nullptr, "x").mode == StartMode::Other);
+	CHECK_EQ(world_start(nullptr, nullptr, "x").save, std::string());
+}
+
+TEST(game_values_world_start_engine_word_wins)
+{
+	// The engine's own word wins over a remembered name: a menu load, a quick load (restart_simulator says "load"), a new game
+	const WorldStart load = world_start("load", "s1", "coop_auto_x_1");
+	CHECK(load.mode == StartMode::Load);
+	CHECK_EQ(load.save, std::string("s1"));
+	const WorldStart fresh = world_start("new", "all", "coop_auto_x_1");
+	CHECK(fresh.mode == StartMode::New);
+	CHECK_EQ(fresh.save, std::string("all"));
+	CHECK(world_start("NEW", "all", "").mode == StartMode::Other); // exactly, like alife_simulator.cpp
+}
+
+TEST(game_values_next_load_is_taken_once)
+{
+	NextLoad next;
+	CHECK_EQ(next.take(), std::string()); // nothing remembered
+	next.remember("coop_auto_x_1");
+	next.remember("coop_auto_x_2"); // the last line written is the one the next world starts from
+	CHECK_EQ(next.take(), std::string("coop_auto_x_2"));
+	// Every world start takes it: a later start without the engine's word is not taken for that save's load
+	CHECK_EQ(next.take(), std::string());
+	CHECK(world_start("", "coop_auto_x_2", next.take()).mode == StartMode::Other);
+}
+
+// ---------------------------------------------------------------- report #5: the engine's wiring, read from its source
+// world_start decides only with the save the engine hands it. These lock the places that hand it over (verifier of
+// O3-lateswitch: with any of them dropped every suite stayed green, so a stock merge or a refactor that loses one brings
+// the late switch-on back on every level change of a Coop host and of single player):
+//   - CALifeUpdateManager::change_level and load_game remember the save the next world loads, once its line is final;
+//   - remember_next_load cuts the line with the parse the next world uses (IGame_Persistent::Start);
+//   - before_world_start takes the name at every world start and gives the rule's answer to the hook;
+//   - CALifeSimulator calls before_world_start before the first on_game_start and before the world is loaded.
+namespace
+{
+// An engine file under engine/src/xrGame, as the build reads it; "" when it is not there (the checks then fail).
+std::string engine_source(const char* name)
+{
+	std::string here = __FILE__;
+	const auto slash = here.find_last_of("\\/");
+	here.resize(slash == std::string::npos ? 0 : slash);
+	std::ifstream f(here + "/../engine/src/xrGame/" + name, std::ios::binary);
+	return std::string(std::istreambuf_iterator<char>(f), {});
+}
+
+// The body of the definition that starts with head: from its '{' in column 0 to the next '}' in column 0 (the engine's
+// layout of a function); "" when not found. A constructor's initializer list may stand between them, a ';' may not (that
+// is a declaration).
+std::string function_body(const std::string& src, const std::string& head)
+{
+	for (auto at = src.find(head); at != std::string::npos; at = src.find(head, at + 1))
+	{
+		const auto open = src.find("\n{", at);
+		if (open == std::string::npos)
+			return {};
+		if (src.find(';', at) < open)
+			continue;
+		const auto close = src.find("\n}", open + 2);
+		if (close != std::string::npos)
+			return src.substr(open + 1, close - open + 1);
+	}
+	return {};
+}
+
+// The text between the first '(' at or after `at` and the next ')'; "" when there is none.
+std::string call_argument(const std::string& s, size_t at)
+{
+	const auto open = s.find('(', at);
+	const auto close = open == std::string::npos ? open : s.find(')', open);
+	return close == std::string::npos ? std::string() : s.substr(open + 1, close - open - 1);
+}
+
+// The statement at `at` stands at the top level of a function body (one tab after a line break), outside every branch.
+bool top_level(const std::string& s, size_t at)
+{
+	return at != std::string::npos && at >= 2 && s[at - 1] == '\t' && s[at - 2] == '\n';
+}
+
+constexpr auto npos = std::string::npos;
+} // namespace
+
+TEST(game_values_wiring_level_change_remembers_the_next_load)
+{
+	const std::string s = function_body(engine_source("alife_update_manager.cpp"), "bool CALifeUpdateManager::change_level(");
+	REQUIRE(!s.empty());
+	const auto call = s.find("coop::game::remember_next_load(");
+	REQUIRE(call != npos);
+	CHECK(s.find("coop::game::remember_next_load(", call + 1) == npos); // once
+	CHECK_EQ(call_argument(s, call), std::string("**m_server_command_line"));
+	// After the last write of the line (the autosave's name, then the slot the save went to): the name the next world loads
+	const auto last_write = s.rfind("*m_server_command_line =");
+	CHECK(last_write != npos && last_write < call);
+	// After both saves, at the top level of the body: reached in a session (coop_auto_N, coop_auto_tmp) and outside one
+	// ("<user> - autosave", the world server's name)
+	const auto commit = s.find("coop::autosave::level_change_commit()");
+	const auto stock_save = s.find("save(autoave_name);");
+	CHECK(commit != npos && commit < call);
+	CHECK(stock_save != npos && stock_save < call);
+	CHECK(top_level(s, call));
+	// No way out between the first write of the line and the call
+	CHECK(s.find("return", s.find("*m_server_command_line =")) > call);
+}
+
+TEST(game_values_wiring_load_from_a_running_game_remembers_the_next_load)
+{
+	const std::string s = function_body(engine_source("alife_update_manager.cpp"), "bool CALifeUpdateManager::load_game(");
+	REQUIRE(!s.empty());
+	const auto write = s.find("*m_server_command_line = S1;");
+	const auto call = s.find("coop::game::remember_next_load(");
+	REQUIRE(write != npos);
+	REQUIRE(call != npos);
+	CHECK(s.find("coop::game::remember_next_load(", call + 1) == npos);
+	const std::string arg = call_argument(s, call);
+	CHECK(arg == "S1" || arg == "**m_server_command_line");
+	CHECK(write < call);
+	CHECK(top_level(s, call));
+	// A missing save returns before the line is written, and nothing is remembered for it
+	const auto missing = s.find("return (false);");
+	CHECK(missing != npos && missing < write);
+	CHECK(call < s.rfind("return (true);"));
+}
+
+TEST(game_values_wiring_next_load_is_parsed_like_the_next_world)
+{
+	const std::string s = function_body(engine_source("coop/coop_game_settings.cpp"), "void remember_next_load(");
+	REQUIRE(!s.empty());
+	const auto parsed = s.find("IGame_Persistent::params parsed;");
+	const auto cut = s.find("parsed.parse_cmd_line(");
+	const auto keep = s.find("g_next_load.remember(parsed.m_game_or_spawn)");
+	CHECK(parsed != npos && cut != npos && keep != npos);
+	CHECK(parsed < cut && cut < keep);
+	CHECK(call_argument(s, cut).find("command_line") != npos);
+	CHECK(s.find("g_next_load.remember(", keep + 1) == npos);
+	// The next world cuts the same line with the same function, so "Player - autosave" is remembered as it will read it
+	const std::string start = function_body(engine_source("../xrEngine/IGame_Persistent.cpp"), "void IGame_Persistent::Start(");
+	REQUIRE(!start.empty());
+	CHECK(start.find("m_game_params.parse_cmd_line(op)") != npos);
+}
+
+TEST(game_values_wiring_world_start_takes_the_name_and_calls_the_hook)
+{
+	const std::string s = function_body(engine_source("coop/coop_game_settings.cpp"), "void before_world_start(");
+	REQUIRE(!s.empty());
+	// Taken at every world start, before the first way out: a name never outlives the start it was meant for
+	const auto take = s.find("const std::string remembered = g_next_load.take();");
+	REQUIRE(take != npos);
+	CHECK(take < s.find("return"));
+	CHECK(top_level(s, take));
+	// The rule gets the engine's word, this world's save and the remembered name; the old decision by the word alone is gone
+	const auto rule = s.find("world_start(p.m_new_or_load, p.m_game_or_spawn, remembered)");
+	REQUIRE(rule != npos);
+	CHECK(take < rule);
+	CHECK(s.find("start_mode(p.m_new_or_load)") == npos);
+	// The world's group and the hook follow the rule's answer
+	const auto group = s.find("on_world_start(start.mode, g_pending, g_world_faction)");
+	const auto hook = s.find("call_hook(");
+	CHECK(group != npos && rule < group);
+	REQUIRE(hook != npos);
+	CHECK(s.find("call_hook(", hook + 1) == npos);
+	CHECK(rule < hook);
+	CHECK(s.find("call_hook(start_mode_name(start.mode), start.save.c_str())") == hook);
+}
+
+TEST(game_values_wiring_hook_runs_before_on_game_start_and_the_load)
+{
+	const std::string s = function_body(engine_source("alife_simulator.cpp"), "CALifeSimulator::CALifeSimulator(");
+	REQUIRE(!s.empty());
+	const auto hook = s.find("coop::game::before_world_start();");
+	REQUIRE(hook != npos);
+	CHECK(s.find("coop::game::before_world_start(", hook + 1) == npos);
+	// Before the stock start_game_callback (the first on_game_start of every script) and before the save is loaded (Lua's
+	// load_state then finds the record in force and takes its early return)
+	const auto on_game_start = s.find("functor();");
+	const auto load = s.find("load(p.m_game_or_spawn");
+	CHECK(on_game_start != npos && hook < on_game_start);
+	CHECK(load != npos && hook < load);
 }

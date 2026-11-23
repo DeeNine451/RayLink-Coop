@@ -770,6 +770,38 @@ SendScriptCallback("load_state", { coop_game = rc.clone(L) })
 check(gs.active().rev == 4 and gs.origin() == "card", "late: the card with the higher rev wins too")
 
 -------------------------------------------------------------------------------
+section("a level change: the engine names the save the next world loads (report #5, builds 55-58)")
+-- change_level writes the world to coop_auto_<id>_N (coop_auto_tmp when no slot took it; the stock "<user> - autosave"
+-- outside a session) and the next world starts from "<save>/single/alife" without "load". The engine
+-- (coop_game_settings.cpp before_world_start, xrCoop/coop_game_values.h world_start) calls the hook with ("load", <save>)
+-- there, the name as the next world parses it (lower case). The save's record is in force before any on_game_start, and
+-- the save's own load_state takes the early return: nothing is switched on twice, no late line, no on_option_change.
+do
+	reset_disk()
+	fresh_machine()
+	local LC = make_record({ ["c|coop_bleedout"] = "150" })
+	local real_is_active = coop.is_active
+	coop.is_active = function() return false end -- coop_settings' host tick (also on actor_on_update) stays out of this
+	for _, stem in ipairs({ "coop_auto_6b00c4e3-f16d_1", "player - autosave", "coop_auto_tmp" }) do
+		put_save(stem, LC)
+		LOG = {}
+		GAME.cvar_calls, OPTION_CHANGES = 0, 0
+		gs.before_world_start("load", stem)
+		check(gs.active() and gs.active().id == LC.id and gs.origin() == "save" and GAME.cvar_calls == 1
+			and GAME.cvars.coop_bleedout == "150", stem .. ": the save's record is in force at the world start")
+		SendScriptCallback("load_state", { coop_game = rc.clone(LC), diff_game = FACTORS.g, diff_eco = FACTORS.e })
+		first_update()
+		SendScriptCallback("actor_on_update")
+		local text = table.concat(LOG, "\n")
+		check(GAME.cvar_calls == 1 and OPTION_CHANGES == 0 and gs.origin() == "save",
+			stem .. ": load_state takes the early return, nothing is set twice, no on_option_change")
+		check(not text:find("not read at the world start", 1, true) and not text:find("[coop-game] !", 1, true),
+			stem .. ": no late line, no error line")
+	end
+	coop.is_active = real_is_active
+end
+
+-------------------------------------------------------------------------------
 section("the games of the menu")
 reset_disk()
 fresh_machine()
