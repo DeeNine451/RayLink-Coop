@@ -2,6 +2,10 @@
 // a client's spot, edge pointer and compass stood at the place the target had when the client joined).
 #include "test_util.h"
 
+#include <fstream>
+#include <iterator>
+#include <regex>
+
 #include "coop_task_target.h"
 
 using coop::task_target::due;
@@ -142,4 +146,25 @@ TEST(task_target_unknown_log_rate)
 	CHECK(log_due(0, 5));
 	CHECK(!log_due(1000, 1000 + kUnknownLogMs - 1));
 	CHECK(log_due(1000, 1000 + kUnknownLogMs));
+}
+
+// The native harness cannot construct a CGameTaskManager. Check the engine's diagnostic gate and the counter it protects.
+TEST(task_target_unknown_log_requires_a_local_task_but_always_counts)
+{
+	std::string path = __FILE__;
+	path.resize(path.find_last_of("\\/") + 1);
+	std::ifstream in(path + "../engine/src/xrGame/coop/coop_story.cpp", std::ios::binary);
+	REQUIRE(in.good());
+	const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	const size_t first = src.find("void log_unknown_target(");
+	REQUIRE(first != std::string::npos);
+	const size_t last = src.find("void note_target_rx(", first);
+	REQUIRE(last != std::string::npos);
+	const std::string body = src.substr(first, last - first);
+	CHECK(std::regex_search(body, std::regex(R"(\{\s*\+\+g_target_unknown;)")));
+	CHECK(std::regex_search(body, std::regex(R"(m_map_object_id == local\)[\s\S]+if \(!by\)\s*return;)")));
+	const size_t guard = body.find("if (!by)");
+	const size_t stamp = body.find("g_target_unknown_logged[host_id] = now;");
+	const size_t log = body.find("is unknown here:");
+	CHECK(guard < stamp && stamp < log && log != std::string::npos);
 }
