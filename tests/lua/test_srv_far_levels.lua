@@ -236,7 +236,8 @@ check(Hm.swapped and Hm.swapped[1] == "actor_on_interaction", "the handler in ax
 
 print("== a story reward of a condlist on a map server")
 Hm.env.coop_tasks.give_to_peer = function(peer, money) Hm.paid = { peer, money } end
-Ms.env.xr_logic.pick_section_from_condlist(Ms.actor, Ms.actor, { src = "%=reward_money(500)%" })
+-- the stock's shape: the map server names the reward by its condlist (R32 W7, coop_srv_quests_story)
+Ms.env.xr_logic.pick_section_from_condlist(Ms.actor, Ms.actor, stock_condlist("%=reward_money(500)%"))
 pump()
 check(Ms.rewarded == nil, "its ghost gets nothing")
 check(Hm.rewarded == 1, "the world server's actor gets it")

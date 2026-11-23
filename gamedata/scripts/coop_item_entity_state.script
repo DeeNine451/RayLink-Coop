@@ -1,0 +1,111 @@
+-- R32 W8: keep the ItemProcessor's stock roll when the item only has an ALife entity.
+local api = rawget(_G, "coop")
+local installed = false
+local born, born_frame = {}, nil
+local relocated_copies
+
+local function frame_births()
+	local frame = device().frame
+	if frame ~= born_frame then born, born_frame = {}, frame end
+	return born
+end
+
+local function stage(manager, id)
+	local obj = level.object_by_id(id)
+	if obj and not (type(obj) == "table" and obj.far) then return end
+	local processor = manager.get_item_processor()
+	local uses, cond, ammo = processor.Uses[id], processor.Cond[id], processor.Ammo[id]
+	if uses == nil and cond == nil and ammo == nil then return end
+	local ok, why = api.items.set_initial(id, { uses = uses, condition = cond, ammo = ammo })
+	if ok then
+		processor.Uses[id], processor.Cond[id], processor.Ammo[id], processor.Remove[id] = nil, nil, nil, nil
+	elseif why ~= "not written here" then
+		printf("[coop-item-state] could not stage item %s: %s", tostring(id), tostring(why))
+	end
+end
+
+-- The stock xr_effects.reward_item policy for copies made outside that effect. Explicit Create_Item properties
+-- have already gone through the stock processor, and a section's use suffix is already handled there too.
+function roll_reward(section, entity, properties, requested_section)
+	if type(alife_process_item) ~= "function" or type(entity.id) ~= "number" then return end
+	local sec, uses = section
+	if utils_item and utils_item.get_defined_uses then
+		sec, uses = utils_item.get_defined_uses(requested_section or section)
+		if uses and not requested_section then return end
+	end
+	local cls = IsWeapon and entity.clsid and entity:clsid()
+	if cls and IsWeapon(nil, cls) and cls ~= clsid.wpn_knife_s then
+		if not (properties and (properties.cond or properties.cond_r or properties.cond_cr)) then
+			alife_process_item(sec, entity.id, { cond = math.random(70, 90) / 100 })
+		end
+	elseif IsItem and IsItem("multiuse", sec) and not (properties and properties.uses) then
+		local max_uses = ini_sys and ini_sys:r_float_ex(sec, "max_uses")
+		alife_process_item(sec, entity.id, { uses = uses or math.random(1, max_uses or 1) })
+	end
+end
+
+-- The stock effects that roll what they give: xr_effects.reward_item, and reward_random_item through it. give_actor,
+-- give_letter and give_reward make the item as it is (Dev 58 Lua fix).
+local ROLLING_EFFECTS = { reward_item = true, reward_random_item = true }
+
+function effect_rolls(name)
+	return ROLLING_EFFECTS[name] == true
+end
+
+function roll_group(section, copies, primary, properties, requested_section)
+	if relocated_copies and type(primary.id) == "number" then
+		-- Stock relocation specifies a use count. Full kits retain their default count and stock names
+		-- the partial kit through process_item, so its siblings get that same explicit count.
+		relocated_copies[primary.id] = copies
+		return
+	end
+	-- Outside a stock reward effect (a plain alife_create_item at a task's end) stock rolls nothing: nor does a copy.
+	if not requested_section then return end
+	for _, entity in ipairs(copies) do
+		-- The stock reward effect applies its own roll to the entity it gets back.
+		if entity ~= primary then
+			roll_reward(section, entity, properties, requested_section)
+		end
+	end
+end
+
+function on_game_start()
+	if installed or not (api and api.items and api.items.set_initial) then return end
+	local manager = itms_manager
+	if not (manager and manager.get_item_processor and manager.create_item and manager.process_item) then return end
+	local create, process = manager.create_item, manager.process_item
+	installed = true
+	manager.create_item = function(...)
+		local entity = create(...)
+		local id = entity and entity.id -- ammo batches carry their amounts in create_ammo already
+		if type(id) == "number" and api.is_active() then
+			frame_births()[id] = true
+			stage(manager, id)
+		end
+		return entity
+	end
+	local function process_one(section, id, state)
+		process(section, id, state)
+		if api.is_active() and frame_births()[id] then stage(manager, id) end
+	end
+	manager.process_item = function(section, id, state)
+		process_one(section, id, state)
+		local copies = relocated_copies and relocated_copies[id]
+		if not (copies and state and state.uses ~= nil) then return end
+		for _, entity in ipairs(copies) do
+			if entity.id ~= id then process_one(section, entity.id, state) end
+		end
+	end
+	local relocate = manager.relocate_item_to_actor
+	if type(relocate) == "function" then
+		manager.relocate_item_to_actor = function(...)
+			if not api.is_active() then return relocate(...) end
+			local previous = relocated_copies
+			relocated_copies = {}
+			local ok, result = pcall(relocate, ...)
+			relocated_copies = previous
+			if not ok then error(result, 0) end
+			return result
+		end
+	end
+end

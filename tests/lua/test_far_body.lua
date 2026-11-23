@@ -125,4 +125,50 @@ local seen = 0
 T.party_inventory_walker(function() end)(ACTOR, function() seen = seen + 1 end, nil)
 check(seen == 3, "the walker of tasks_multifetch goes through his inventory too")
 
+print("== Server: give_to_peer rolls a multi-use reward for a world-written body with no game object")
+do
+	local processor = { Uses = {}, Cond = {}, Ammo = {}, Remove = {} }
+	local staged, created
+	itms_manager.get_item_processor = function() return processor end
+	itms_manager.create_item = function(section, to)
+		created = { id = 4000, section = section, parent = to:id() }
+		RECORDS[4000] = created
+		return created
+	end
+	itms_manager.process_item = function(_, id, t) processor.Uses[id] = t.uses end
+	alife_create_item = function(...) return itms_manager.create_item(...) end
+	alife_process_item = function(...) return itms_manager.process_item(...) end
+	device = function() return { frame = 1 } end
+	IsItem = function(kind, sec) return kind == "multiuse" and sec == "bandage" end
+	coop.items = { set_initial = function(id, state)
+		assert(RECORDS[id] == created and level.object_by_id(id) == nil)
+		staged = state
+		return true
+	end }
+	load_script_file("coop_item_entity_state").on_game_start()
+	local random = math.random
+	math.random = function(lo, hi) assert(lo == 1 and hi == 3); return 1 end
+	T.give_to_peer(1, 0, { "bandage" })
+	math.random = random
+	check(created and created.parent == 500, "the reward is created under the player's record")
+	check(staged and staged.uses == 1 and processor.Uses[4000] == nil,
+		"the stock uses roll is staged on that entity before give_to_peer returns")
+	-- Dev 58 Lua fix: a shared copy is rolled only when the stock effect that made the reward rolls it
+	-- (xr_effects.reward_item, reward_random_item through it); give_actor and give_letter make it as it is
+	local draws = 0
+	math.random = function(lo, hi) assert(lo == 1 and hi == 3); draws = draws + 1; return 2 end
+	for _, effect in ipairs({ "give_actor", "give_letter" }) do
+		staged, created = nil, nil
+		T.give_to_peer(1, 0, { "bandage" }, effect)
+		check(created and created.parent == 500 and staged == nil and draws == 0,
+			"a reward shared from " .. effect .. " is made as that stock effect makes it: no roll")
+	end
+	for _, effect in ipairs({ "reward_item", "reward_random_item" }) do
+		staged, created = nil, nil
+		T.give_to_peer(1, 0, { "bandage" }, effect)
+		check(created and staged and staged.uses == 2, "a reward shared from " .. effect .. " gets the stock roll")
+	end
+	math.random = random
+end
+
 print(string.format("%d passed, %d failed", PASSES, FAILS))

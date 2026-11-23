@@ -137,7 +137,8 @@ print("== a story choice on the map affects the world server's player characters
 do
 	Hm.new_obj(501, "coop_player_avatar", vec(20, 0, 20), { _stalker = true })
 	Hm.players[2] = { id = 2, avatar_id = 501, nick = "boris" }
-	Ms.env.xr_logic.pick_section_from_condlist(nil, nil, { src = "%=dec_faction_goodwill_to_actor(dolg:50)%" })
+	-- the stock's shape: the map server names the choice by its condlist (R32 W7, coop_srv_quests_story)
+	Ms.env.xr_logic.pick_section_from_condlist(nil, nil, stock_condlist("%=dec_faction_goodwill_to_actor(dolg:50)%"))
 	pump()
 	local change = Hm.story_goodwill[500]
 	check(change and change.faction == "dolg" and change.amount == 50, "the world server applies the map's story choice to the player")
@@ -153,7 +154,13 @@ do
 	local decode, reads = main.decode, 0
 	main.decode = function(payload) reads = reads + 1; return decode(payload) end
 	local on_share = Hm.handlers["quests.share"]
-	local good = main.encode({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "17" })
+	-- R32 W7: a share names its condlist (owner, section, info); the arguments are checked as before
+	local ID = { owner = "700", section = "3:sr_7:fieldcond1:1", info = "" }
+	local function share(t)
+		for k, v in pairs(ID) do t[k] = v end
+		return t
+	end
+	local good = main.encode(share({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "17" }))
 	on_share(good, BRIDGE + 1)
 	check(reads == 0, "an unregistered map sender does not enter the story decoder")
 	on_share(good .. string.rep(";", 15801), BRIDGE)
@@ -162,16 +169,20 @@ do
 	check(trust.story_share_sender and trust.story_share_sender.failed == 1, "the story sender refusal reaches trust")
 	check(trust.story_share_payload and trust.story_share_payload.failed == 1, "the story size refusal reaches trust")
 	for i = 1, 8 do
-		local packet = { f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "17" }
+		local packet = share({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "17" })
 		packet["p" .. i] = i % 2 == 1 and string.rep("x", 257) or true
 		on_share(main.encode(packet), BRIDGE)
 	end
-	on_share(main.encode({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "1e999" }), BRIDGE)
+	on_share(main.encode(share({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "1e999" })), BRIDGE)
 	trust = Hm.env.coop_trust.status()
 	check(trust.story_share_payload and trust.story_share_payload.failed == 10, "all eight story arguments and numeric range reach trust")
 	check(Hm.story_goodwill[500].amount == 50, "invalid story arguments never change the player's goodwill")
 	on_share(good, BRIDGE)
 	check(Hm.story_goodwill[500].amount == 17, "valid story arguments reach the player")
+	on_share(main.encode({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "5" }), BRIDGE)
+	check(Hm.story_goodwill[500].amount == 17, "a share without its condlist identity is refused (R32 W7)")
+	on_share(main.encode(share({ f = "dec_faction_goodwill_to_actor", p1 = "dolg", p2 = "9" })), BRIDGE)
+	check(Hm.story_goodwill[500].amount == 17, "the same condlist identity again is the same share: not applied twice (R32 W7)")
 	main.decode = decode
 end
 

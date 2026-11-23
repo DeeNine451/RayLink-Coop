@@ -65,7 +65,7 @@
 	  coop_tasks.party_inventory_walker(real) -> an iterate_inventory over every player's character (host, for one call)
 	  coop_tasks.taker_money(task_id) -> the ledger balance of the client who took the task (host; nil: the host took it)
 	  coop_tasks.giving_npc() -> the giver of the client's give request being run (host; nil outside one)
-	  coop_tasks.give_to_peer(peer, money, sections) -> money / items for one player (host)
+	  coop_tasks.give_to_peer(peer, money, sections[, effect]) -> money / items for one player (host)
 	  coop_tasks.news_actor(kind, task_id) -> peer, cancelled: the player whose action caused a task event ("new" |
 	    "complete" | "fail"; 0 = the host, nil = nobody: a script, a timer). The one rule the task lines and any
 	    other report of "who did it" (docs\MESSAGES.md, docs\ABSENT_REWARDS.md) share. Host only.
@@ -2671,7 +2671,7 @@ local FETCH_EFFECTS = { "fetch_reward_and_remove", "remove_fetch_item", "remove_
 -- turned the task in, if he got one.
 local function give_to_group(create, section, t)
 	local rg = reward_group()
-	local res
+	local res, copies = nil, {}
 	for _, m in ipairs(rg.item_targets(ctx.group, ctx.full)) do
 		local owner = rg.holder(m)
 		local se = owner and create(section, owner, t)
@@ -2683,9 +2683,12 @@ local function give_to_group(create, section, t)
 			end
 			g.items[section] = (g.items[section] or 0) + 1
 			ctx.counted[section] = true
+			copies[#copies + 1] = se
 			if res == nil or m.peer == ctx.rcpt then res = se end
 		end
 	end
+	local state = coop_item_entity_state
+	if res and state then state.roll_group(section, copies, res, t, ctx.stock_item) end
 	return res
 end
 
@@ -2966,6 +2969,19 @@ end
 local function patch_rewards()
 	-- a restrictor's condlist gives a task: the effect knows the zone (nearest_taker)
 	local xfx = rawget(_G, "xr_effects") or xr_effects
+	if xfx and type(xfx.reward_item) == "function" then
+		local reward = xfx.reward_item
+		xfx.reward_item = function(actor, npc, p, ...)
+			local group = ctx and ctx.group and ctx
+			if not group then return reward(actor, npc, p, ...) end
+			local previous = group.stock_item
+			group.stock_item = p and p[1]
+			local result = { pcall(reward, actor, npc, p, ...) }
+			group.stock_item = previous
+			if not result[1] then error(result[2], 0) end
+			return unpack(result, 2)
+		end
+	end
 	if xfx and type(xfx.give_task) == "function" then
 		local give = xfx.give_task
 		xfx.give_task = function(actor, obj, p)
@@ -3269,9 +3285,11 @@ local function container_of(h, sec)
 end
 
 -- Spawn without the reward redirect (the item goes exactly where asked).
-local function create_plain(sec, obj)
+local function create_plain(sec, obj, reward)
 	local f = raw_create or rawget(_G, "alife_create_item")
-	return f(sec, obj)
+	local se = f(sec, obj)
+	if se and reward and coop_item_entity_state then coop_item_entity_state.roll_reward(sec, se) end
+	return se
 end
 
 local function count_items(obj, sec) -- items, not uses
@@ -3330,8 +3348,9 @@ function party_inventory_walker(real)
 end
 
 -- Host: money and items for one player (0 = the host's own actor). Items are spawned by the host into
--- that player's character; the player sees the news on its own machine.
-function give_to_peer(peer, money, sections)
+-- that player's character; the player sees the news on its own machine. `effect`: the stock effect that made the reward;
+-- a copy is rolled only when that effect rolls (coop_item_entity_state.effect_rolls), a caller naming none keeps the roll.
+function give_to_peer(peer, money, sections, effect)
 	if not active() or not (coop_mode.decides_world() or coop_mode.leads_here()) then return end
 	peer = tonumber(peer) or 0
 	money = math_floor(tonumber(money) or 0)
@@ -3347,7 +3366,8 @@ function give_to_peer(peer, money, sections)
 		local obj = mine and db.actor or avatar_obj(peer)
 		for _, sec in ipairs(sections) do
 			if type(sec) == "string" and sec ~= "" and obj then
-				create_plain(sec, obj)
+				create_plain(sec, obj, effect == nil or (coop_item_entity_state ~= nil
+					and coop_item_entity_state.effect_rolls(effect)))
 				if mine then
 					news_manager.relocate_item(db.actor, "in", sec, 1)
 				else

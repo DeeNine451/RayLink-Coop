@@ -105,6 +105,8 @@ Hm.my_level, Cm.my_level, Ms.my_level = 1, 2, 2
 world(Hm); world(Cm); world(Ms)
 Hm.env.coop.is_dedicated = function() return true end
 Ms.env.coop.is_map_server = function() return true end
+-- the stock reward of the map server's copy of a condlist: its ghost's, never run in a session (the world pays the share)
+Ms.env.xr_effects.reward_item = function() Ms.stock_rewards = (Ms.stock_rewards or 0) + 1 end
 
 records[500] = { id = 500, parent_id = 65535, m_game_vertex_id = 2, m_level_vertex_id = 5, position = vec(10, 0, 10), online = true,
 	section_name = function() return "coop_player_avatar" end, clsid = function() return 44 end, name = function() return "player" end,
@@ -822,20 +824,35 @@ do
 	local status = Hm.env.coop_trust.status()
 	check(status.story_share_sender and status.story_share_sender.failed == 3, "invalid bridge senders reach coop_trust")
 	check(status.story_share_payload and status.story_share_payload.failed == 1, "invalid reward payloads reach coop_trust")
-	local function says(first)
-		Ms.env.coop_quests_core.send("share", { f = "reward_item", p1 = first }, 0)
+	-- R32 W7 (temp\r30\design\R32-final.md W7.2): a share is numbered by its condlist (owner, section, info), which replaced
+	-- the 3 s window. The same line again is the same share whenever it comes (an honest repeat is a no-op); another line or
+	-- another owner is another reward. The map server's copy of the info comes only with the world's echo, so the line can run
+	-- again (its infos are taken back here to show it).
+	local medkit = stock_condlist("{-r1_medkit} %+r1_medkit =reward_item(medkit)%")
+	local bandage = stock_condlist("{-r1_bandage} %+r1_bandage =reward_item(bandage)%")
+	local logic = Ms.env.xr_logic
+	local function says(owner, list)
+		Ms.infos.r1_medkit, Ms.infos.r1_bandage = nil, nil
+		logic.pick_section_from_condlist(Ms.actor, owner, list)
 	end
-	says("medkit")
-	says("medkit")
+	says(Ms.npc, medkit)
+	says(Ms.npc, medkit)
 	pump()
 	check(runs == 1, "the same reward from the same level twice at once: given once")
-	says("bandage")
+	says(Ms.npc, bandage)
 	pump()
 	check(runs == 2, "another reward is another")
 	NOW = NOW + 5000
-	says("medkit")
+	says(Ms.npc, medkit)
 	pump()
-	check(runs == 3, "the same one later is a new one")
+	check(runs == 2, "the same one later is the same one: an honest repeat pays nothing (W7, no time window)")
+	says(Ms.objects and Ms.objects[701] or Ms.new_obj(703, "stalker_other", vec(14, 0, 10), { _stalker = true }), medkit)
+	pump()
+	check(runs == 3, "the same line of another owner's condlist is another reward")
+	Ms.env.coop_quests_core.send("share", { f = "reward_item", p1 = "medkit" }, 0)
+	pump()
+	check(runs == 3, "a share outside a condlist has no identity: the map server does not send it")
+	check(Ms.stock_rewards == nil, "the map server's ghost was never paid")
 end
 
 print("== the spy with no player on his level: \"the actor\" is the player who took the task, not the ghost")

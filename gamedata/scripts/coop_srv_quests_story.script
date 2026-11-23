@@ -1,8 +1,9 @@
--- Server (srv): the world server receives story rewards reported by its map servers.
+-- Server (srv): map servers identify each story effect at its condlist, and the world pays it once.
 
-local SHARE_AGAIN_MS = 3000
 local MAX_PAYLOAD = 15800 -- coop_quests_core.send
 local MAX_PARAM = 256
+local IDENTITY_FIELDS = { owner = 256, section = 512, info = 2048 }
+local DISPATCH = "coop_story_share_effect"
 local NUMERIC_PARAMS = {
 	reward_money = { 1 }, reward_exact_money = { 1 }, reward_random_money = { 1, 2 },
 	reward_random_money_by_dist = { 2, 3, 4 },
@@ -11,9 +12,22 @@ local NUMERIC_PARAMS = {
 }
 local shares_seen = {}
 
+local function key_part(value)
+	return #value .. ":" .. value
+end
+
+local function share_key(t)
+	for k, limit in pairs(IDENTITY_FIELDS) do
+		local value = t[k]
+		if type(value) ~= "string" or #value > limit or value:find("%c") then return nil end
+	end
+	if t.owner == "" or t.section == "" then return nil end
+	return key_part(t.owner) .. key_part(t.section) .. key_part(t.info)
+end
+
 local function valid_params(t)
 	for key, value in pairs(t) do
-		if key ~= "f" and (not key:match("^p[1-8]$") or type(value) ~= "string"
+		if key ~= "f" and not IDENTITY_FIELDS[key] and (not key:match("^p[1-8]$") or type(value) ~= "string"
 			or #value > MAX_PARAM or value:find("%c")) then return false end
 	end
 	local numeric = NUMERIC_PARAMS[t.f]
@@ -41,34 +55,145 @@ local function on_share(payload, from)
 	local t = coop_quests_core.decode(payload)
 	local story = coop_quests_story
 	local f = type(t.f) == "string" and #t.f <= 80 and story.shared_effect(t.f)
-	local valid = type(f) == "function" and valid_params(t)
+	local key = share_key(t)
+	local valid = key ~= nil and type(f) == "function" and valid_params(t)
 	if not coop_trust.pass("story_share_payload", valid, "invalid story reward from peer %s", tostring(from))
 		or not valid then return end
 
-	-- A map server may run the same reward again while it waits for the world's info echo.
-	local p = story.params_of(t)
-	local key = from .. "|" .. t.f .. "|" .. table.concat(p, "|")
-	local now = time_global()
-	local last = shares_seen[key]
-	shares_seen[key] = now
-	if last and now - last < SHARE_AGAIN_MS then return end
-	for k, at in pairs(shares_seen) do
-		if now - at >= SHARE_AGAIN_MS then shares_seen[k] = nil end
+	if shares_seen[key] then return end
+	-- The world executes here and saves the receipt with its world state. A repeat can come from a new bridge.
+	shares_seen[key] = true
+	story.apply_shared_effect(t.f, f, story.params_of(t))
+end
+
+local function save_state(data)
+	local seen = {}
+	for k in pairs(shares_seen) do seen[k] = true end
+	data.coop_story_done = next(seen) and seen or nil
+end
+
+local function load_state(data)
+	shares_seen = {}
+	if type(data.coop_story_done) == "table" then
+		for k, v in pairs(data.coop_story_done) do
+			if type(k) == "string" and v == true then shares_seen[k] = true end
+		end
 	end
-	story.apply_shared_effect(t.f, f, p)
+end
+
+local function owner_id(obj)
+	local kind = type(obj)
+	if kind ~= "table" and kind ~= "userdata" then return nil end
+	local id = obj.id
+	if type(id) == "function" then id = obj:id() end
+	if type(id) == "number" and id > 0 and id < 65535 then return id end
+end
+
+local function branch_info(branch)
+	local parts = {}
+	for pass = 2, 3 do -- checked and changed info portions, with their signs and scope
+		for _, entry in ipairs(branch[pass] or {}) do
+			if entry[2] == 1 or entry[2] == 2 then
+				parts[#parts + 1] = key_part(tostring(entry[1]))
+					.. pass .. entry[2] .. (entry[3] and "n" or "a")
+			end
+		end
+	end
+	return table.concat(parts)
 end
 
 function on_game_start()
 	coop_mode.when_srv(function()
-		if not coop_mode.decides_world() then return end
-		local main = rawget(_G, "coop_main") or coop_main
-		if not (main and main.add_event_handler) then
-			coop_quests_core.log("story", "! coop_main.add_event_handler not found: share is not handled")
+		local core = coop_quests_core
+		if coop_mode.decides_world() then
+			RegisterScriptCallback("save_state", save_state)
+			RegisterScriptCallback("load_state", load_state)
+			local main = rawget(_G, "coop_main") or coop_main
+			if not (main and main.add_event_handler) then
+				core.log("story", "! coop_main.add_event_handler not found: share is not handled")
+				return
+			end
+			main.add_event_handler("quests.share", function(payload, from)
+				local ok, err = pcall(on_share, payload, from)
+				if not ok then core.report("story", "share", err) end
+			end)
 			return
 		end
-		main.add_event_handler("quests.share", function(payload, from)
-			local ok, err = pcall(on_share, payload, from)
-			if not ok then coop_quests_core.report("story", "share", err) end
-		end)
+		if not coop_mode.leads_here() then return end
+
+		local logic, effects, story = xr_logic, xr_effects, coop_quests_story
+		local parse, pick, send = logic.parse_condlist, logic.pick_section_from_condlist, core.send
+		local sources = setmetatable({}, { __mode = "k" })
+		local variants = setmetatable({}, { __mode = "k" })
+		local prepared = setmetatable({}, { __mode = "k" })
+		local current
+
+		-- The stock parser memoizes by source text. Keep the config location for each use of its result.
+		logic.parse_condlist = function(npc, section, field, ...)
+			local list = parse(npc, section, field, ...)
+			if type(list) ~= "table" or #list == 0 then return list end
+			local source = key_part(tostring(section or "")) .. key_part(tostring(field or ""))
+			local by_source = variants[list]
+			if not by_source then
+				by_source = setmetatable({}, { __mode = "v" })
+				variants[list] = by_source
+			end
+			local copy = by_source[source]
+			if not copy then
+				copy = { unpack(list) }
+				by_source[source], sources[copy] = copy, source
+			end
+			return copy
+		end
+
+		-- Stock still chooses the branch and runs the effects in order. Only shareable effect calls carry their location.
+		logic.pick_section_from_condlist = function(obj, npc, list, ...)
+			if not core.active() or type(list) ~= "table" or #list == 0 then return pick(obj, npc, list, ...) end
+			local copy = prepared[list]
+			if copy == nil then
+				copy = false
+				for i, branch in ipairs(list) do
+					local steps
+					for j, effect in ipairs(branch[3] or {}) do
+						if (effect[2] == 3 or effect[2] == 4) and story.shared_effect(effect[1]) then
+							steps = steps or { unpack(branch[3]) }
+							steps[j] = { DISPATCH, effect[2], {
+								effect = effect, source = sources[list],
+								line = key_part(tostring(branch[1] or "")) .. i .. ":" .. j,
+								info = branch_info(branch),
+							} }
+						end
+					end
+					if steps then
+						copy = copy or { unpack(list) }
+						copy[i] = { branch[1], branch[2], steps }
+					end
+				end
+				prepared[list] = copy
+			end
+			return pick(obj, npc, copy or list, ...)
+		end
+
+		effects[DISPATCH] = function(actor, npc, step)
+			local id = owner_id(npc) or owner_id(actor)
+			local storage = id and db.storage and db.storage[id]
+			local origin = step.source or key_part(tostring(storage and storage.active_section or ""))
+			local previous = current
+			current = { owner = tostring(id or 0), section = origin .. step.line, info = step.info }
+			local ok, err = pcall(effects[step.effect[1]], actor, npc, step.effect[3])
+			current = previous
+			if not ok then error(err, 0) end
+		end
+
+		core.send = function(name, data, target)
+			if name == "share" then
+				if not current then
+					core.report("story", "share", "reward has no condlist identity")
+					return false
+				end
+				data.owner, data.section, data.info = current.owner, current.section, current.info
+			end
+			return send(name, data, target)
+		end
 	end)
 end

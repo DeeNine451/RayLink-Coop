@@ -365,6 +365,7 @@ local function machine(role, self_peer)
 		return mod
 	end
 	modes.live(load("coop_mode"), load)
+	M.load = load
 	M.mod = load("coop_tasks")
 	MACHINES[#MACHINES + 1] = M
 	return M
@@ -1918,6 +1919,106 @@ do
 
 	H.tm.task_info[id], H.engine_tasks[id], C.tm.task_info[id] = nil, nil, nil
 	H.env.coop_quests_offer, ti.section_exist = nil, known
+end
+
+print("== Coop: every group reward is rolled before it leaves the host")
+do
+	local host = machine("host", 0)
+	local env = host.env
+	local guest = host.new_obj(500)
+	local absent = { id = 501 }
+	host.players = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, avatar_id = 500 } }
+	env.coop.members = function() return { { id = 500, peer = 1, in_world = true }, { id = absent.id } } end
+	env.alife_object = function(id) if id == absent.id then return absent end end
+	env.get_console = function()
+		return { get_integer = function(_, name) return name == "coop_share_rewards" and 3 or 0 end }
+	end
+	env.ini_sys = {
+		r_bool_ex = function() return false end,
+		r_float_ex = function(_, section, key) if section == "bandage_pack" and key == "max_uses" then return 3 end end,
+	}
+	local draws, rolls, staged = 0, {}, {}
+	env.math = setmetatable({ random = function(lo, hi)
+		assert(lo == 1 and hi == 3)
+		draws = draws + 1
+		return draws
+	end }, { __index = math })
+	local create = env.alife_create_item
+	local offline_item, offline_id = nil, 7000
+	local processor = { Uses = {}, Cond = {}, Ammo = {}, Remove = {} }
+	env.device = function() return { frame = 1 } end
+	env.itms_manager = {
+		get_item_processor = function() return processor end,
+		create_item = function(sec, owner)
+			if owner == absent then
+				offline_id = offline_id + 1
+				offline_item = { id = offline_id, parent = owner.id, section = sec }
+				return offline_item
+			end
+			local item = create(sec, owner)
+			return item and { id = item:id() }
+		end,
+		process_item = function(_, id, state) processor.Uses[id], rolls[id] = state.uses, state.uses end,
+		-- The stock relocate effect counts the requested amount as uses and sets the last partial kit after create.
+		relocate_item_to_actor = function(actor, _, sec, amount)
+			local se = env.alife_create_item(sec, actor)
+			env.itms_manager.process_item(sec, se.id, { uses = amount })
+		end,
+	}
+	env.coop.items = { set_initial = function(id, state)
+		assert(offline_item and id == offline_item.id)
+		staged[id] = state.uses
+		return true
+	end }
+	env.alife_create_item = function(...) return env.itms_manager.create_item(...) end
+	env.alife_process_item = function(...) return env.itms_manager.process_item(...) end
+	-- The stock reward_item makes one entity and then rolls the uses on the entity returned to it.
+	env.xr_effects.reward_item = function(actor, _, p)
+		local se = env.alife_create_item(p[1], actor)
+		if se then env.alife_process_item(p[1], se.id, { uses = env.math.random(1, 3) }) end
+	end
+	host.load("coop_reward_group")
+	host.load("coop_item_entity_state").on_game_start()
+	host.mod.on_game_start()
+	host.tm.task_info.fetch_1 = { id = "fetch_1" }
+	host.on_complete.fetch_1 = function() env.xr_effects.reward_item(host.actor, nil, { "bandage_pack" }) end
+	env.task_manager.task_callback({ get_id = function() return "fetch_1" end }, env.task.completed)
+	local a, b = host.actor._inv[1], guest._inv[1]
+	check(a and b and a:section() == "bandage_pack" and b:section() == "bandage_pack",
+		"the host and the other group member each get one reward copy")
+	check(a and b and rolls[a:id()] and rolls[b:id()] and rolls[a:id()] ~= rolls[b:id()] and draws == 3,
+		"the stock reward rolls once for each copy, including copies it never gets back")
+	check(offline_item and offline_item.parent == 501 and offline_item.section == "bandage_pack"
+		and staged[offline_item.id] == rolls[offline_item.id] and staged[offline_item.id] ~= nil
+		and processor.Uses[offline_item.id] == nil,
+		"the absent member's copy has its own staged uses before the task callback returns")
+
+	host.tm.task_info.fetch_1 = { id = "fetch_1" }
+	host.on_complete.fetch_1 = function()
+		env.itms_manager.relocate_item_to_actor(host.actor, nil, "bandage_pack", 2)
+	end
+	env.task_manager.task_callback({ get_id = function() return "fetch_1" end }, env.task.completed)
+	a, b = host.actor._inv[2], guest._inv[2]
+	check(a and b and rolls[a:id()] == 2 and rolls[b:id()] == 2 and staged[offline_item.id] == 2 and draws == 3,
+		"an explicitly apportioned stock reward gives the requested uses to every group member")
+
+	-- Dev 58 Lua fix: a plain alife_create_item at a task's end (no stock reward effect around it) is made as stock makes
+	-- that one item, unrolled, and so is every copy
+	host.tm.task_info.fetch_1 = { id = "fetch_1" }
+	host.on_complete.fetch_1 = function() env.alife_create_item("bandage_pack", host.actor) end
+	env.task_manager.task_callback({ get_id = function() return "fetch_1" end }, env.task.completed)
+	a, b = host.actor._inv[3], guest._inv[3]
+	check(a and b and a:section() == "bandage_pack" and b:section() == "bandage_pack" and rolls[a:id()] == nil
+		and rolls[b:id()] == nil and draws == 3, "a plain create at a task's end rolls no copy: the stock path rolls none")
+	-- a story share (coop_quests_story share_reward -> give_to_peer) is rolled only when the stock effect that made it rolls
+	local held = #guest._inv
+	host.mod.give_to_peer(1, 0, { "bandage_pack" }, "give_actor")
+	local given = guest._inv[held + 1]
+	check(given and given:section() == "bandage_pack" and rolls[given:id()] == nil and draws == 3,
+		"a client's copy of a give_actor share is made as stock makes it: no roll")
+	host.mod.give_to_peer(1, 0, { "bandage_pack" }, "reward_item")
+	given = guest._inv[held + 2]
+	check(given and rolls[given:id()] ~= nil and draws == 4, "a client's copy of a reward_item share gets the stock roll")
 end
 
 -- ---------------------------------------------------------------- single player untouched

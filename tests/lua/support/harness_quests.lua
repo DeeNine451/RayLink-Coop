@@ -32,6 +32,51 @@ end
 function VecMT:distance_to_sqr(o) local dx, dy, dz = self.x - o.x, self.y - o.y, self.z - o.z return dx * dx + dy * dy + dz * dz end
 function VecMT:distance_to(o) return math.sqrt(self:distance_to_sqr(o)) end
 
+-- ------------------------------------------------------------------ condlists of the stock's shape
+-- What the stock xr_logic.parse_condlist (Anomaly 1.5, temp\anomaly_unpack\scripts_out\scripts\xr_logic.script :733-812) makes of
+-- a condlist text: { {section, checks, effects}, ... }; an info is {name, 1 (+) | 2 (-), npcx}, a function {name, 3 (=) | 4 (!),
+-- params}. "{-a} %+a =reward_item(medkit)% done, other". The harness's own parse_condlist keeps { src = text } for older tests;
+-- a map server's story reward goes through this shape (coop_srv_quests_story names it by its condlist, R32 W7).
+function stock_condlist(src)
+	local list = {}
+	for fld in src:gmatch("%s*([^,]+)%s*") do
+		local branch = {}
+		local function extract(c, index)
+			for sign, infop in c:gmatch("([=%-%+!~]+)([^=%-%+!~%s]+)") do
+				branch[index] = branch[index] or {}
+				if sign == "+" or sign == "-" then
+					table.insert(branch[index], { infop, sign == "+" and 1 or 2, (infop:find("npcx_")) })
+				elseif sign == "=" or sign == "!" then
+					local name, params = infop:match("^([^%(]+)%((.*)%)$")
+					local t
+					if name then
+						for p in params:gmatch("%s*([^:]+)%s*") do
+							t = t or {}
+							t[#t + 1] = tonumber(p) or p
+						end
+					else
+						name = infop
+					end
+					table.insert(branch[index], { name, sign == "=" and 3 or 4, t })
+				end
+			end
+		end
+		local a, b, c = fld:find("{%s*(.*)%s*}")
+		if c then
+			fld = fld:sub(1, a - 1) .. fld:sub(b + 1)
+			extract(c, 2)
+		end
+		a, b, c = fld:find("%%%s*(.*)%s*%%")
+		if c then
+			fld = fld:sub(1, a - 1) .. fld:sub(b + 1)
+			extract(c, 3)
+		end
+		branch[1] = fld:match("^%s*(.-)%s*$")
+		list[#list + 1] = branch
+	end
+	return list
+end
+
 -- ------------------------------------------------------------------ simple flat codec (coop_main copy)
 local function esc(s) return (tostring(s):gsub("[%%;=]", function(c) return string.format("%%%02X", c:byte()) end)) end
 local function unesc(s) return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)) end
@@ -412,9 +457,44 @@ function machine(role, self_peer)
 	env.task_functor = {}
 
 	-- logic
+	-- A list of the stock's shape (stock_condlist below): the first branch whose checks hold runs its effects in order, as the
+	-- stock pick_section_from_condlist does (an info on the actor, a function of xr_conditions / xr_effects).
+	local function stock_pick(a, b, list)
+		local actor = env.db.actor
+		local function has(name)
+			if actor and actor.has_info then return actor:has_info(name) end
+			return M.infos[name] == true
+		end
+		for i = 1, #list do
+			local branch, met = list[i], true
+			for _, c in ipairs(branch[2] or {}) do
+				local f = (c[2] == 3 or c[2] == 4) and env.xr_conditions[c[1]]
+				if c[2] == 1 then met = has(c[1])
+				elseif c[2] == 2 then met = not has(c[1])
+				elseif c[2] == 3 then met = f and f(a, b, c[3]) and true or false
+				elseif c[2] == 4 then met = not (f and f(a, b, c[3]))
+				end
+				if not met then break end
+			end
+			if met then
+				for _, e in ipairs(branch[3] or {}) do
+					if e[2] == 1 then
+						if actor and actor.give_info_portion then actor:give_info_portion(e[1]) else M.infos[e[1]] = true end
+					elseif e[2] == 2 then
+						if actor and actor.disable_info_portion then actor:disable_info_portion(e[1]) else M.infos[e[1]] = nil end
+					elseif e[2] == 3 or e[2] == 4 then
+						local f = env.xr_effects[e[1]]
+						if f then f(a, b, e[3]) end
+					end
+				end
+				return branch[1] or ""
+			end
+		end
+	end
 	env.xr_logic = {
 		parse_condlist = function(npc, sec, field, src) return { src = src } end,
 		pick_section_from_condlist = function(a, b, cond)
+			if type(cond) == "table" and type(cond[1]) == "table" then return stock_pick(a, b, cond) end
 			-- "%=name(p1:p2)%" effects, run in order
 			for name, args in tostring(cond.src):gmatch("=([%w_]+)%(?([^%)%%]*)%)?") do
 				local p = {}

@@ -177,7 +177,7 @@ local function share_reward(name, p)
 		else
 			local ok, money, items = pcall(rule, p)
 			if ok then
-				ct().give_to_peer(peer, money or 0, items)
+				ct().give_to_peer(peer, money or 0, items, name) -- rolled only when the stock effect `name` rolls
 			else
 				qc.report(TAG, "share " .. name, money)
 			end
