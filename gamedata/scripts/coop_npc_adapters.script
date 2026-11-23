@@ -189,9 +189,14 @@ local function trade_scheme(C, P)
 	-- setup_generic_scheme captures on_trade for NPCs, including loaded saves.
 	return C.wrap(m.mob_trade, "on_trade", "mob_trade.on_trade", function(old)
 		return function(self, ...)
-			-- A remote deal has no host ActorMenu_on_trade_started to seed this
-			-- counter. Preserve existing totals and the stock reaction/UI flags.
-			if P.active() and (coop_mode.decides_world() or coop_mode.leads_here()) and self.st.all_money == nil then self.st.all_money = 0 end
+			if P.active() then
+				-- The decider runs the trader reaction when it applies the deal.
+				if coop_mode.is_player_mirror() then return end
+				-- A remote deal may reach the trader before its trade-start callback.
+				if (coop_mode.decides_world() or coop_mode.leads_here()) and self.st.all_money == nil then
+					self.st.all_money = 0
+				end
+			end
 			return old(self, ...)
 		end
 	end)

@@ -26,7 +26,8 @@
 	- Urgent Orders, Hidden Threat, the ISG storyline of Lost to the Zone start for a player of the faction, not only for
 	  a host of it; a client joins after the stock checks of the first update, so they run again when somebody joins.
 	- Operation Monolith: an item in any player's character starts its stage.
-	- On a client NTA never spawns anything itself (nta_utils.spawn_at_position returns nil there).
+	- Player mirrors skip NTA spawns and simulation queries. The writer of a Flea Market defence squad spawns
+	  its replacement wave, and the world's replay of the death still advances the task counter.
 	- nta_utils.is_axe(killer) reads the killer's hand (the kill tasks pass him, see coop_npc_compat).
 --]]
 
@@ -138,15 +139,14 @@ local function install_helpers(nu)
 	end)
 	C().wrap(nu, "spawn_at_position", "nta_utils.spawn_at_position", function(orig)
 		return function(...)
-			if C().world_client() then return nil end
+			if coop_mode.is_player_mirror() then return nil end
 			return orig(...)
 		end
 	end)
-	-- A precondition picks its target among the simulation's stalkers (tasks_intercept_artifact); a client has no simulation,
-	-- and his task list reads preconditions. Live 2026-11-01: sim_stalkers nil, fatal.
+	-- Player mirrors lack the stalker simulation; their task list still reads the intercept precondition.
 	C().wrap(nu, "find_random_stalker", "nta_utils.find_random_stalker", function(orig)
 		return function(...)
-			if C().world_client() then return nil end
+			if coop_mode.is_player_mirror() then return nil end
 			return orig(...)
 		end
 	end)
@@ -161,6 +161,34 @@ local function install_helpers(nu)
 				return nil
 			end
 			return r
+		end
+	end)
+end
+
+-- Replaying the last member's death calls the squad's stock death effect on
+-- the world too. Keep its task progress, and let the squad writer spawn the wave.
+local function install_hold_the_ground()
+	local task = C().mod("tasks_hold_the_ground")
+	local effects = C().mod("xr_effects")
+	local key = "on_flea_market_defense_squad_death"
+	if not (C().fn(task, "spawn") and C().fn(effects, key)) then return end
+
+	local record_only = false
+	C().wrap(task, "spawn", "tasks_hold_the_ground.spawn", function(orig)
+		return function(...)
+			if not record_only then return orig(...) end
+		end
+	end)
+	C().wrap(effects, key, "xr_effects." .. key, function(orig)
+		return function(actor, squad, ...)
+			if not (C().active() and squad and not coop_mode.writes(squad.id)) then
+				return orig(actor, squad, ...)
+			end
+			local previous = record_only
+			record_only = true
+			local ok, err = pcall(orig, actor, squad, ...)
+			record_only = previous
+			if not ok then error(err, 0) end
 		end
 	end)
 end
@@ -952,6 +980,7 @@ function on_game_start()
 	local nu = C().mod("nta_utils")
 	if nu then
 		start_step("install_helpers", function() install_helpers(nu) end)
+		start_step("hold the ground", install_hold_the_ground)
 		start_step("install_teleports", install_teleports)
 		start_step("install_living_fire", install_living_fire)
 	end

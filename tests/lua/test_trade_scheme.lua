@@ -72,16 +72,32 @@ do
 	check(ok and st.all_money == 100, "a map server also prepares an uninitialized trader accumulator")
 end
 
-for _, role in ipairs({ "single", "client" }) do
-	local M, E, bind = boot(role)
+for _, split in ipairs({ false, true }) do
+	local _, E, bind, reactions = boot("client")
+	E.coop.levels = { split = function() return split end }
+	local mode = split and "server player" or "co-op client"
+	local st = { trading = false, exchanged = false }
+	local no_ui = bind(st)
+	local ok, err = pcall(no_ui, 5, 0)
+	check(ok, mode .. ": a mirror trade with no accumulator must return without an error: " .. tostring(err))
+	check(st.all_money == nil and st.buy_coast == nil and st.sell_coast == nil and not st.trading and not st.exchanged,
+		mode .. ": the mirror's scheme state is untouched")
+	local initialized = { all_money = 120, trading = true, exchanged = false }
+	bind(initialized)(40, 10)
+	check(initialized.all_money == 120 and not initialized.exchanged and reactions() == 0,
+		mode .. ": no trader reaction, even with a previously initialized accumulator")
+end
+
+do
+	local _, _, bind = boot("single")
 	local st = { all_money = 120, trading = true }
 	local deal = bind(st)
-	check(deal(40, 10) == 170 and st.trading == true, role .. ": initialized stock trade is unchanged")
+	check(deal(40, 10) == 170 and st.trading == true, "single player: initialized stock trade is unchanged")
 	local absent = {}
 	local no_ui = bind(absent)
 	local ok, err = pcall(no_ui, 5, 0)
 	check(not ok and tostring(err):find("all_money", 1, true) and absent.all_money == nil,
-		role .. ": the host guard does not change state or swallow a stock error")
+		"single player: the host guard does not change state or swallow a stock error")
 end
 
 do

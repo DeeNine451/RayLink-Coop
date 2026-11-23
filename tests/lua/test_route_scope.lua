@@ -44,7 +44,7 @@ local function gate_scope(d)
 end
 
 -- A fresh Lua world per case (stubs: axr_main, coop + coop.route; the scope API unless `old_exe`; then coop_route.script).
-local function boot(mode, old_exe)
+local function boot(mode, old_exe, before_install)
 	MODE = mode
 	local passes, fails = PASSES or 0, FAILS or 0
 	dofile("tests/lua/support/stubs.lua")
@@ -53,6 +53,7 @@ local function boot(mode, old_exe)
 	coop_native.reset_counts()
 	for _, name in ipairs({ "actor_on_item_use", "npc_on_death_callback" }) do AddScriptCallback(name) end
 	if not old_exe then install_scope_api() end
+	if before_install then before_install() end
 	load_script_file("coop_route")
 	check(coop_route.install() == true, mode .. ": the shim installs")
 end
@@ -143,6 +144,47 @@ for _, mode in ipairs({ "host", "client" }) do
 			.. tostring(RAN.t2) .. ")")
 	else
 		check(RAN.t2 == nil, "client: the host script's timer is skipped, as before")
+	end
+end
+
+print("== route_scope_crafting_timer_entry_points")
+do
+	local script = "zz_item_cooking_keep_crafting_window_open"
+	for _, mode in ipairs({ "host", "client" }) do
+		local module_queue = {}
+		local function create(ev, act, _, handler, ...)
+			module_queue[ev .. ":" .. act] = { f = handler, args = { ... } }
+		end
+		boot(mode, false, function()
+			demonized_time_events = { CreateTimeEvent = create }
+			_G[script] = { CreateTimeEvent = create }
+			zz_item_repair_keep_crafting_window_open = { CreateTimeEvent = create }
+			zz_ui_workshop_keep_crafting_window_open = { CreateTimeEvent = create }
+		end)
+		local refresh = from_script(script, "return function(amount) RAN.craft = (RAN.craft or 0) + amount return true end")
+		local function fire(queue, label)
+			local ev = queue["craft:" .. label]
+			RAN.craft = nil
+			local removed = ev and ev.f(unpack(ev.args))
+			check(removed == true and RAN.craft == (mode == "host" and 7 or nil), mode .. ": " .. label .. " obeys host-only routing")
+		end
+		for _, patch in ipairs({ script, "zz_item_repair_keep_crafting_window_open", "zz_ui_workshop_keep_crafting_window_open" }) do
+			_G[patch].CreateTimeEvent("craft", patch, 0, refresh, 7)
+			fire(module_queue, patch)
+		end
+
+		_G[script].CreateTimeEvent = demonized_time_events.CreateTimeEvent -- the mod's later reassignment
+		_G[script].CreateTimeEvent("craft", "later copy", 0, refresh, 7)
+		fire(module_queue, "later copy")
+
+		-- A late replacement of the global entry point can also use the module's function.
+		_G.CreateTimeEvent = demonized_time_events.CreateTimeEvent
+		coop_route.on_game_start()
+		CreateTimeEvent("craft", "replaced global", 0, refresh, 7)
+		fire(module_queue, "replaced global")
+
+		demonized_time_events, _G[script] = nil, nil
+		zz_item_repair_keep_crafting_window_open, zz_ui_workshop_keep_crafting_window_open = nil, nil
 	end
 end
 

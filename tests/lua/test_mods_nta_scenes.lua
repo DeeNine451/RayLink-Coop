@@ -78,6 +78,24 @@ nta_utils = {
 	actor_on_level = function(name) return level.name() == name end,
 	is_melee = function() return false end,
 }
+if role ~= "none" then
+	dofile("tests/lua/support/mod_source.lua")
+	local utils = GAMMA_DIR .. "/nta_utils.script"
+	assert(mod_chunk(utils, { "function spawn_at_position(" }, "nta_utils", "return true"))
+	nta_utils.find_random_stalker = function() return { id = shooter:id() } end
+end
+local local_squad, remote_squad
+if role == "srv_map" or role == "srv_world" then
+	local_squad = spawn("bandit_defence_squad_novice", vec3(1, 0, 0))
+	remote_squad = spawn("bandit_defence_squad_novice", vec3(1, 0, 0))
+	xr_effects, task_functor = {}, {}
+	a_tab_utils = { rand_with_exclusion = function() return 1 end }
+	function SE_METHODS:create_npc() end
+	function SE_METHODS:squad_members() return function() end end
+	local script = assert(loadfile(GAMMA_DIR .. "/tasks_hold_the_ground.script"))
+	tasks_hold_the_ground = setmetatable({}, { __index = _G })
+	setfenv(script, tasks_hold_the_ground)()
+end
 local sky_state = {}
 local _, heli = spawn("new_tasks_addon_heli_strong_static", vec3(0, 0, 0))
 if role ~= "srv_map" then sky_state.static_heli_id = heli:id() end
@@ -185,7 +203,8 @@ load_script("coop_mode")
 modes.install(coop_mode, role, role == "srv_map" and {
 	where = function(peer) return here[peer] and "here" or "away" end,
 	decider = function(peer) return here[peer] and "this" or "other" end,
-} or nil)
+	writes = function(id) return id == local_squad.id end,
+} or role == "srv_world" and { writes = function(id) return id == local_squad.id end } or nil)
 load_script("coop_mods_core").on_game_start()
 local nta = load_script("coop_mods_nta")
 nta.on_game_start()
@@ -323,6 +342,40 @@ else
 	tasks_mirage.give_mirages_weapon()
 	check(SE[id]:rank() == 20 and SE[id]:character_name() == "Host", "stock rank and name")
 	check(mirage:get_visual_name() == "host.ogf" and choose(mirage) == "wpn_host", "stock appearance, issue and choice")
+end
+
+if role == "hostplay" or role == "srv_map" then
+	local count = #CREATED
+	local id = nta_utils.spawn_at_position("stalker", vec3(1, 0, 0), 1, 8)
+	check(type(id) == "number" and SE[id] and #CREATED == count + 1, role .. ": NTA spawn returns its local object ID")
+	local stalker = nta_utils.find_random_stalker()
+	check(stalker and stalker.id == shooter:id(), role .. ": NTA can query its local stalker simulation")
+
+	if role == "hostplay" then
+		MODE = "client"
+		modes.live(coop_mode, load_script)
+		count = #CREATED
+		check(nta_utils.spawn_at_position("stalker", vec3(1, 0, 0), 1, 8) == nil and #CREATED == count,
+			"co-op player mirror cannot spawn an NTA NPC")
+		check(nta_utils.find_random_stalker() == nil, "co-op player mirror cannot query the stalker simulation")
+	end
+end
+
+if role == "srv_world" or role == "srv_map" then
+	local effect = xr_effects.on_flea_market_defense_squad_death
+	if role == "srv_world" then
+		local count = #CREATED
+		local ok, err = pcall(effect, db.actor, remote_squad)
+		local saved = {}
+		tasks_hold_the_ground.save_state(saved)
+		check(ok and #CREATED == count and saved.hold_the_ground_task_data.killed_squads == 1,
+			"world server: replaying a map-held squad's death counts it without duplicating the wave: " .. tostring(err))
+	end
+	local count = #CREATED
+	local ok, err = pcall(effect, db.actor, local_squad)
+	local wave = CREATED[count + 1]
+	check(ok and #CREATED == count + 1 and wave and wave.sec == "bandit_defence_squad_novice"
+		and SE[wave.id].rush_to_target == true, role .. ": one local squad death spawns one rushing wave: " .. tostring(err))
 end
 
 done("NTA scenes " .. role)

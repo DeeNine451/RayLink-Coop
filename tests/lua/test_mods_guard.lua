@@ -381,6 +381,33 @@ for _, n in ipairs({ "zz_item_cooking_keep_crafting_window_open", "zz_ui_worksho
 		n .. ": its refresh timers are host-only (no re-enabled button from ingredients the host has not removed yet)")
 	check(domain_of("actor_on_update", n) == "owner", n .. ": its other handlers stay owner")
 end
+do
+	local function load_gamma(name, env)
+		setfenv(assert(loadfile(GAMMA_DIR .. "/" .. name .. ".script")), setmetatable(env, { __index = _G }))()
+	end
+	local module = { empty_table = function(t) for k in pairs(t) do t[k] = nil end end }
+	local script = "zz_item_cooking_keep_crafting_window_open"
+	coop_route.install()
+	demonized_time_events, _G[script] = module, {}
+	load_gamma("demonized_time_events", module)
+	coop_route.on_game_start() -- the module may load after the router's initial install
+	local patch = {}
+	load_gamma("zz_time_events_keep_crafting_window_open", patch)
+	patch.on_game_start() -- the actual mod copies the module's event registrar
+	for _, mode in ipairs({ "client", "host" }) do
+		MODE = mode
+		local target = { runs = 0 }
+		local refresh = from_script(script, "return function(self) self.runs = self.runs + 1; return true end")
+		_G[script].CreateTimeEvent("cook", "refresh", 0.1, refresh, target)
+		NOW = NOW + 100
+		module.ProcessEventQueue()
+		module.ProcessEventQueue()
+		check(target.runs == (mode == "host" and 1 or 0), mode .. ": the actual cooking event queue respects the refresh route")
+	end
+	MODE = "client"
+	demonized_time_events, _G[script] = nil, nil
+end
+
 local function window(cls)
 	return setmetatable({ shown = true, IsShown = function(self) return self.shown end }, { __index = cls })
 end

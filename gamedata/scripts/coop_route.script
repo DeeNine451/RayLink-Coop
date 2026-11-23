@@ -13,7 +13,7 @@
 	on_game_start runs. Wrapped:
 		axr_main.callback_set / callback_unset   (RegisterScriptCallback / UnregisterScriptCallback)
 		_G.AddUniqueCall / RemoveUniqueCall      a skipped call returns false: it stays registered
-		_G.CreateTimeEvent                       a skipped event returns true: it is removed
+		_G.CreateTimeEvent and demonized_time_events.CreateTimeEvent: a skipped event returns true, so it is removed
 	Kept as the stock dispatcher has it:
 	- one wrapper per (callback, function), reused when the pair is registered again and found when it is unregistered
 	  (by the function or by the wrapper itself);
@@ -83,7 +83,8 @@ local wrapped = {} -- callback -> { [handler] = wrapper }
 local uc_wrap = setmetatable({}, { __mode = "kv" }) -- AddUniqueCall: function -> wrapper
 local te_wrap = {} -- CreateTimeEvent: kept scope -> { function -> wrapper } (weak): one wrapper per function and scope
 local te_route = setmetatable({}, { __mode = "k" }) -- CreateTimeEvent: function -> { domain, script } of its time_event route
-local uc_add_w, uc_rem_w, te_w -- our current replacements of the three globals
+local te_registrars = setmetatable({}, { __mode = "kv" }) -- registrar or its wrapper -> routed registrar
+local uc_add_w, uc_rem_w -- our current replacements of the unique call globals
 
 local counts = { host = 0, owner = 0, view = 0, none = 0, level = 0 } -- wrappers made, by domain
 local stats = { rewrapped = 0, unrouted = 0, errors = 0 }
@@ -400,8 +401,43 @@ local function wrap_time_event(f)
 	return w
 end
 
--- Wraps each of the three globals unless it is our wrapper already (a later script may have replaced it: wrapping its
--- version is safe, a handler is never wrapped twice).
+local function wrap_time_event_registrar(create)
+	local w = te_registrars[create]
+	if not w then
+		w = function(ev_id, act_id, timer, f, ...)
+			if type(f) == "function" and not wrappers[f] then
+				f = wrap_time_event(f) or f
+			end
+			return create(ev_id, act_id, timer, f, ...)
+		end
+		te_registrars[create], te_registrars[w] = w, w
+	end
+	return w
+end
+
+-- Keep Crafting Window Opened copies the module registrar into its script environments.
+local function wrap_demonized_time_events()
+	local events = rawget(_G, "demonized_time_events")
+	if events == nil and type(getFS) == "function" and getFS():exist("$game_scripts$", "demonized_time_events.script") then
+		events = _G.demonized_time_events
+	end
+	local create = type(events) == "table" and rawget(events, "CreateTimeEvent")
+	if type(create) ~= "function" then return end
+	local routed = wrap_time_event_registrar(create)
+	events.CreateTimeEvent = routed
+	for _, name in ipairs({
+		"zz_item_cooking_keep_crafting_window_open",
+		"zz_item_repair_keep_crafting_window_open",
+		"zz_ui_workshop_keep_crafting_window_open",
+	}) do
+		local patch = rawget(_G, name)
+		if type(patch) == "table" and te_registrars[rawget(patch, "CreateTimeEvent")] == routed then
+			patch.CreateTimeEvent = routed
+		end
+	end
+end
+
+-- Later scripts can replace the globals. Wrap the current versions with the same routing rules.
 local function wrap_globals()
 	local add = rawget(_G, "AddUniqueCall")
 	if type(add) == "function" and add ~= uc_add_w then
@@ -419,15 +455,8 @@ local function wrap_globals()
 		_G.RemoveUniqueCall = uc_rem_w
 	end
 	local cte = rawget(_G, "CreateTimeEvent")
-	if type(cte) == "function" and cte ~= te_w then
-		te_w = function(ev_id, act_id, timer, f, ...)
-			if type(f) == "function" and not wrappers[f] then
-				f = wrap_time_event(f) or f
-			end
-			return cte(ev_id, act_id, timer, f, ...)
-		end
-		_G.CreateTimeEvent = te_w
-	end
+	if type(cte) == "function" then _G.CreateTimeEvent = wrap_time_event_registrar(cte) end
+	wrap_demonized_time_events()
 end
 
 -------------------------------------------------------------------------------

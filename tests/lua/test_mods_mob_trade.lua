@@ -32,6 +32,14 @@ xr_logic = {
 }
 -- Stock contract, with functions registered by value before the adapter installs.
 mob_trade = {
+	mob_trade = {
+		on_trade = function(self, buy, sell)
+			local st = db.storage[self.npc:id()].mob_trade
+			st.all_money = st.all_money + buy + sell
+			st.exchanged = true
+			xr_logic.try_switch_to_another_section(self.npc, st, db.actor)
+		end,
+	},
 	GetTalkingNpc = function() return talking end,
 	ActorMenu_on_trade_started = function()
 		if not talking then return end
@@ -50,6 +58,8 @@ RegisterScriptCallback(OPEN, mob_trade.ActorMenu_on_trade_started)
 RegisterScriptCallback(CLOSE, mob_trade.ActorMenu_on_trade_closed)
 
 load_script("coop_trust")
+load_script("coop_npc_adapters").install(load_script("coop_npc_players"), coop_mods_core.active, {})
+local on_trade = mob_trade.mob_trade.on_trade
 local engine_peer_present = true
 coop.avatar_of = function(id)
 	if id == PEER and engine_peer_present then return peer:id() end
@@ -155,8 +165,13 @@ for _, name in ipairs(modes.names()) do
 		coop.to_host_id = function(id) return id + 1000 end
 		modes.live(coop_mode, load_script)
 		talking = npc
+		state.all_money, state.exchanged = nil, false
+		local previous_reactions = #reactions
 		SendScriptCallback(OPEN)
 		SendScriptCallback(OPEN)
+		local ok, err = pcall(on_trade, { npc = npc, st = state }, 50, 10)
+		check(ok and state.all_money == nil and not state.exchanged and #reactions == previous_reactions,
+			"opening a client trade window then performing a deal leaves the mirror untouched: " .. tostring(err))
 		talking = nil
 		SendScriptCallback(CLOSE)
 		local begin, packet = sent(BEGIN)
