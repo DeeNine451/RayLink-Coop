@@ -154,7 +154,9 @@ const char* entity_name(u16){return "wpn_sil_9mm";}
 Step next_step=Step::Fail;
 Step step_parent(u16,const ParentTarget&){return next_step;}
 namespace join {u16 to_host(u16 n){return n;} u16 to_local(u16 n){return n;}}
-namespace reconcile {constexpr u8 Spawn=1,Parent=4,State=16;}
+namespace reconcile {constexpr u8 Spawn=1,Parent=4,State=16;
+// xrCoop/coop_reconcile.h stalled_ask (R32 WP5 fix round, verify-D finding 2): Spawn only for an id this copy lacks
+inline u8 stalled_ask(bool here){return here ? u8(Parent|State) : u8(Spawn|Parent|State);}}
 struct Writer {explicit Writer(int){} u16 id=0;u8 flags=0;void u16(uint16_t n){id=n;} void u8(uint8_t n){flags=n;}};
 struct Reader {
     int i=0;

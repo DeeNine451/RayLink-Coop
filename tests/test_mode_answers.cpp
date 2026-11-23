@@ -630,6 +630,26 @@ TEST(mode_writer_answers_of_the_real_modes)
 	    "writer::Writer writer_of(const writer::RootFacts& r) const override { return map_writer_of(r); }");
 }
 
+namespace
+{
+// The body of `struct <name>` in a source with its comments blanked ("" when there is none).
+std::string struct_body(const std::string& code, const std::string& name)
+{
+	std::smatch m;
+	if (!std::regex_search(code, m, std::regex(R"(\bstruct\s+)" + name + R"(\s*\{)")))
+		return "";
+	size_t i = size_t(m.position(0) + m.length(0));
+	const size_t start = i;
+	int depth = 1;
+	for (; i < code.size() && depth; ++i)
+		depth += code[i] == '{' ? 1 : (code[i] == '}' ? -1 : 0);
+	return depth ? "" : code.substr(start, i - 1 - start);
+}
+} // namespace
+
+// Review R32 B2-B4: the server's processes answer through the pure seats of xrCoop/srv/coop_writer_seats.h (world_seat, map_seat,
+// world_character_seat; tests/test_writer_answers.cpp runs them row by row) and fill only the tables those ask; the world server's
+// decider_of reads the same character seat as its writer answer, a map server's the same "a player of its session plays him".
 TEST(mode_server_writer_reads_its_tables)
 {
 	const std::string srv = code_of(read_text(engine_src() + "/xrGame/coop/srv/coop_srv_mode.cpp"));
@@ -637,22 +657,53 @@ TEST(mode_server_writer_reads_its_tables)
 	expect_in("world_lead_of", lead, "writer::lead_of(mapserver::host_life_of(level))"); // §8a A4: a stopping server writes
 	expect_in("world_lead_of", lead, "mapserver::bridge_of(level)");
 	CHECK(lead.find("host_ready") == std::string::npos); // §8a A4: never host_ready
-	const std::string world = body_of(srv, R"(writer::Writer\s+world_writer_of)");
-	expect_in("world_writer_of", world, "levels::holder_of(r.root)");
-	expect_in("world_writer_of", world, "mapserver::level_of_bridge(bridge)");
-	expect_in("world_writer_of", world, "seat.map = world_lead_of(r.level);");
-	expect_in("world_writer_of", world,
-	    "return writer::writer_of(r, writer::Process{writer::ProcessKind::World, writer::kNoLevel, kHostPeer}, seat);");
+
+	// who plays a character: a connected player of this session (a parked or retired character's player is none)
+	const std::string played = body_of(srv, R"(PeerId\s+played_by)");
+	expect_in("played_by", played, "if (character == writer::kGhostId) return kInvalidPeer;");
+	expect_in("played_by", played, "join::peer_of_proxy(character)");
+	expect_in("played_by", played, "peer != kInvalidPeer && mgr().session().peer(peer) ? peer : kInvalidPeer");
+
+	const std::string wt = struct_body(srv, "WorldTables");
+	CHECK(!wt.empty());
+	expect_in("WorldTables", wt, "PeerId player_of(u16 character) const { return played_by(character); }");
+	expect_in("WorldTables", wt, "u16 seat_of(PeerId player) const { return levels::level_of_player(player); }");
+	expect_in("WorldTables", wt, "u16 own_map() const { return levels::my_level(); }");
+	expect_in("WorldTables", wt, "writer::MapLead lead_of_map(u16 level) const { return world_lead_of(level); }");
+	expect_in("WorldTables", wt, "PeerId holder_of(u16 root) const { return levels::holder_of(root); }");
+	expect_in("WorldTables", wt, "u16 map_of_bridge(PeerId bridge) const { return mapserver::level_of_bridge(bridge); }");
+	expect_in("world_writer_of", body_of(srv, R"(writer::Writer\s+world_writer_of)"), "return writer::world_answer(r, WorldTables{});");
+
+	const std::string mt = struct_body(srv, "MapTables");
+	CHECK(!mt.empty());
+	expect_in("MapTables", mt, "bool plays_here(u16 character) const { return played_by(character) != kInvalidPeer; }");
+	expect_in("MapTables", mt, "bool authors(u16 root) const { return levels::xfer_authors(root); }");
+	// review R32 B3: srv/coop_levels_xfer.cpp defines it; where it is declared (coop_levels.h, or a local line until that header is
+	// in) is the compiler's to check, not this test's
+	expect_in("MapTables", mt, "bool born(u16 root) const { return levels::xfer_born(root); }");
 	const std::string map = body_of(srv, R"(writer::Writer\s+map_writer_of)");
-	expect_in("map_writer_of", map, "levels::xfer_authors(r.root)");
 	expect_in("map_writer_of", map, "mapserver::server_leads() ? writer::Lead::Leads : writer::Lead::Starting");
-	expect_in("map_writer_of", map, "mgr().session().peer(peer)");
-	expect_in("map_writer_of", map, "return writer::writer_of(r, writer::Process{writer::ProcessKind::Level, mine, kHostPeer}, seat);");
-	for (const char* k : {"Character", "Unit", "Resident", "None"})
-	{
-		expect_in("world_writer_of", world, std::string("case writer::RootKind::") + k + ":");
-		expect_in("map_writer_of", map, std::string("case writer::RootKind::") + k + ":");
-	}
+	expect_in("map_writer_of", map, "return writer::map_answer(r, levels::my_level(), here, MapTables{});");
+
+	// the deciders read the same tables (review R32 B2)
+	const std::string wd = body_of(class_body(srv, "WorldServerMode"), R"(Decider\s+decider_of)");
+	expect_in("WorldServerMode::decider_of", wd, "writer::world_character_seat(character, WorldTables{})");
+	expect_in("WorldServerMode::decider_of", wd, "if (s.player == kInvalidPeer) return Decider::Nobody;");
+	expect_in("WorldServerMode::decider_of", wd, "return s.map != writer::kNoLevel ? Decider::Other : Decider::This;");
+	const std::string md = body_of(class_body(srv, "MapServerMode"), R"(Decider\s+decider_of)");
+	expect_in("MapServerMode::decider_of", md, "if (MapTables{}.plays_here(character)) return Decider::This;");
+}
+
+// Review R32 B1: the Core names a root's kind with writer::kind_of from what it reads of the ALife object; a unit is a squad or a
+// living monster (what the transfers move), so a crow or a phantom is its map's resident.
+TEST(mode_core_root_kind_reads_the_object)
+{
+	const std::string core = code_of(read_text(engine_src() + "/xrGame/coop/coop_writer.cpp"));
+	const std::string facts = body_of(core, R"(writer::RootFacts\s+root_facts_of)");
+	expect_in("root_facts_of", facts, "f.kind = writer::kind_of(writer::KindFacts{f.root == writer::kGhostId, world::is_player_character(r),");
+	expect_in("root_facts_of", facts, "smart_cast<const CSE_ALifeOnlineOfflineGroup*>(r) != nullptr, smart_cast<const CSE_ALifeMonsterAbstract*>(r) != nullptr,");
+	expect_in("root_facts_of", facts, "c != nullptr && c->g_Alive(), f.level != writer::kNoLevel});");
+	CHECK(facts.find("RootKind::Unit") == std::string::npos); // no kind decided beside kind_of
 }
 
 // §8a A7: the new EntityUp kinds have explicit cases on the map server (C4062 is off: a missing case would be silent), and the
