@@ -31,7 +31,9 @@ function SIM:switch_distance() return 150 end
 function SIM:actor() return { id = 0, real = true } end
 function SIM:has_info(id, name) return id == 600 and name == "he_knows" end
 SIM.give_info = function(_, id, name) SIM.given = { id, name } end
-SIM.kill_entity = function(_, se) SIM.killed = se.id end
+SIM.kill_entity = function(_, se) SIM.kill_entity_called = se.id end -- never: it asserts on a body with things (TZ P45)
+-- the world server's binding (coop_srv_script.cpp l_kill_record): a death on the record as a map server's is applied (TZ P45)
+srv = { kill_record = function(id, killer) SIM.killed = id return true end }
 alife = function() return SIM end
 
 local PLAYERS = { { id = 0, is_self = true, avatar_id = 0 }, { id = 1, is_self = false, avatar_id = 500 } }
@@ -287,7 +289,7 @@ for _ = 1, 5 do
 	far._tick()
 end
 check(far.orders_held() == 0, "after the last try it is carried out here")
-check(SIM.killed == 600, "on the record")
+check(SIM.killed == 600 and SIM.kill_entity_called == nil, "on the record, through srv.kill_record, never alife():kill_entity")
 
 print("== \"the actor\" of an order is the player of the scope: on a map server id 0 is a ghost")
 local real_send, sent_order = qc.send, nil

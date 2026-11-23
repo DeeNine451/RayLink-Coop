@@ -73,7 +73,7 @@ local function map_server() return api ~= nil and qc().is_map_server() end
 local stats = { scopes = 0, orders = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
 
 local scope = nil -- the far view that is open
--- (anomalies, inside_zones, alife, CreateTimeEvent): the stock's globals a far view swaps. Set from coop_mode.when_srv (on_game_start):
+-- (anomalies, inside_zones, alife, CreateTimeEvent, hit): the stock's globals a far view swaps. Set from coop_mode.when_srv (on_game_start):
 -- nil in the co-op, where no far view ever opens (usable() is false without it).
 local set_world = nil
 -- the engine's fatal window stays shut while a relayed handler fails on a stand-in (from coop_mode.when_srv, like set_world)
@@ -430,11 +430,37 @@ local function sim_view(s, real_alife)
 	end })
 end
 
+-- TZ P45 (RL-89RT-DQYR #1664): the hit a task makes inside a scope. The engine's hit takes only a game object as its draftsman, and what
+-- level.object_by_id answers here is a stand-in: tasks_recover_item_on_corpse kill_if_online_mutant (h.draftsman = o) failed with
+-- "luabind: the value at stack #3 is a table" at every check of its task, and the task never reached its next stage. Inside a scope a
+-- hit is a table with the engine's fields and defaults (script_hit_inline.h), as a relayed one is (on_hit); a stand-in's hit(h) orders
+-- it on the map server, where DO.hit makes the engine's. The kinds (hit.wound, ...) are the engine's.
+local HIT_FIELDS = { "power", "direction", "draftsman", "impulse", "type", "weapon_id", "bone" }
+local far_hit_methods = { bone = function(h, name) rawset(h, "bone", name) end } -- h:bone(name), as the engine's method
+local far_hit_meta = { __index = far_hit_methods }
+
+local function far_hit_of(stock)
+	if stock == nil then return nil end
+	return setmetatable({}, {
+		__index = function(_, k) return stock[k] end,
+		__call = function(_, from)
+			local h = { power = 100, impulse = 100, type = stock.wound, weapon_id = 0, direction = vector():set(1, 0, 0) }
+			if from ~= nil then
+				for _, k in ipairs(HIT_FIELDS) do
+					local ok, v = pcall(function() return from[k] end)
+					if ok then h[k] = v end
+				end
+			end
+			return setmetatable(h, far_hit_meta)
+		end,
+	})
+end
+
 local function open(lid, peer, what)
 	local gg_name = alife():level_name(lid)
 	local q = qc()
 	local s = { id = lid, name = gg_name, peer = peer, what = what, objects = {}, stores = {}, born = {}, misses = {}, bodies = {}, prev = scope,
-		anomalies = db.anomaly_by_name, sim = _G.alife, view = nil }
+		anomalies = db.anomaly_by_name, sim = _G.alife, hit = rawget(_G, "hit"), view = nil }
 	s.avatar = peer and api.avatar_of and api.avatar_of(peer) or nil
 	for _, c in ipairs(q.bodies()) do
 		local ok, v = pcall(function() return vertex_level(c.obj:game_vertex_id()) end)
@@ -483,7 +509,7 @@ local function open(lid, peer, what)
 			return s.cte(ev, act, timer, f, ...)
 		end
 	end
-	set_world(anomalies, inside_zones, function() return s.sim_view end, cte)
+	set_world(anomalies, inside_zones, function() return s.sim_view end, cte, far_hit_of(s.hit))
 	scope = s
 	q.set_far_view(s.view)
 	stats.scopes = stats.scopes + 1
@@ -492,7 +518,7 @@ end
 
 local function close(s)
 	scope = s.prev
-	set_world(s.anomalies, s.inside_zones, s.sim, s.cte)
+	set_world(s.anomalies, s.inside_zones, s.sim, s.cte, s.hit)
 	qc().set_far_view(scope and scope.view or nil)
 end
 
@@ -549,13 +575,14 @@ end
 function at_home(fn, ...)
 	local s = scope
 	if not s then return fn(...) end
-	local anomalies, inside_zones, sim, cte = db.anomaly_by_name, db.actor_inside_zones, _G.alife, _G.CreateTimeEvent
+	local anomalies, inside_zones, sim, cte, hit_now = db.anomaly_by_name, db.actor_inside_zones, _G.alife, _G.CreateTimeEvent,
+		rawget(_G, "hit")
 	scope = nil
-	set_world(s.anomalies, s.inside_zones, s.sim, s.cte)
+	set_world(s.anomalies, s.inside_zones, s.sim, s.cte, s.hit)
 	qc().set_far_view(nil)
 	local function back(ok, ...)
 		scope = s
-		set_world(anomalies, inside_zones, sim, cte)
+		set_world(anomalies, inside_zones, sim, cte, hit_now)
 		qc().set_far_view(s.view)
 		if not ok then error((...), 0) end
 		return ...
@@ -658,8 +685,15 @@ local DO = {
 -- On the record alone: the object has no body anywhere now.
 local ON_RECORD = {
 	release = function(se) alife():release(se, true) end,
-	kill = function(se)
-		if se.alive and se:alive() then alife():kill_entity(se) end
+	-- TZ P45 (RL-89RT-DQYR #1664): as the world applies a death a map server reports (the engine's srv.kill_record: levels::host_apply_death,
+	-- then the death goes to the players and the map servers). Never alife():kill_entity: it detaches the inventory, which the stock does
+	-- not do for a stalker (detach_all is empty), and its R_ASSERT(children.empty()) stopped the world server on the corpse of a
+	-- recover-item task with the quest item inside. An exe without the binding: the order is reported, nothing changes.
+	kill = function(se, o)
+		local binding = rawget(_G, "srv")
+		local kill = type(binding) == "table" and binding.kill_record or nil
+		if type(kill) ~= "function" then error("no srv.kill_record in this exe: the death is not applied", 0) end
+		kill(se.id, tonumber(o.a))
 	end,
 	info = function(se, o) alife():give_info(se.id, o.a) end,
 	uninfo = function(se, o) alife():disable_info(se.id, o.a) end,
@@ -690,9 +724,17 @@ local function carry_out(q, o, why)
 	printf("[coop] far: order %s on %s carried out here (%s)", o.verb, tostring(o.id), why)
 end
 
+-- The orders of this tick, oldest first: carrying one out runs the stock (on_death and the tasks' relay, the unregister callbacks), which
+-- may give new ones, and a table must not grow while pairs walks it (TZ P45). A new one waits for the next tick.
 local function orders_tick(now)
-	for q, o in pairs(orders) do
-		if not alife_object(o.id) then
+	local due = {}
+	for q in pairs(orders) do due[#due + 1] = q end
+	table.sort(due)
+	for _, q in ipairs(due) do
+		local o = orders[q]
+		if not o then
+			-- carried out or answered meanwhile
+		elseif not alife_object(o.id) then
 			carry_out(q, o, "gone")
 		elseif obj_of(o.id) then
 			carry_out(q, o, "it came home")
@@ -1017,11 +1059,12 @@ function on_game_start()
 			RegisterScriptCallback("actor_on_update", late)
 		end
 
-		set_world = function(anomalies, inside_zones, alife_fn, cte)
+		set_world = function(anomalies, inside_zones, alife_fn, cte, hit_fn)
 			db.anomaly_by_name = anomalies
 			db.actor_inside_zones = inside_zones
 			_G.alife = alife_fn
 			_G.CreateTimeEvent = cte
+			if rawget(_G, "hit") ~= hit_fn then _G.hit = hit_fn end
 		end
 
 		-- A stock handler gives the stand-in to the engine where a game object is wanted (dynamic_news_manager: sender:see(victim)). The

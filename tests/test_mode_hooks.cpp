@@ -232,7 +232,8 @@ TEST(mode_hooks_stock_files_ask_the_mode)
 
 	const std::string server = code_of(read_text(src + kStockHooks[3]));
 	CHECK(has(collapse(body_of(server, R"(IC\s+u16\s+PerformIDgen)")),
-	    "if (ID == 0xffff && coop::mode().takes_own_ids()) ID = coop::mode().own_free_id(); return (m_tID_Generator.tfGetID(ID));"));
+	    "if (ID == 0xffff && coop::mode().takes_own_ids()) { ID = coop::mode().own_free_id(); if (ID == 0xffff) { ID = "
+	    "m_tID_Generator.tfGetID(0xffff); CoopTookStockId(ID); return ID; } } return (m_tID_Generator.tfGetID(ID));"));
 }
 
 // GameObject's hook keeps `!g_dedicated_server` and drops `|| g_coop_headless`: that half is always true only while x_ray.cpp sets
@@ -452,6 +453,12 @@ TEST(mode_hooks_srv_lua_table)
 	const std::regex row(R"rx(\{\s*"(\w+)"\s*,\s*&?(\w+)\s*\})rx");
 	for (std::sregex_iterator it(code.begin(), code.end(), row), end; it != end; ++it)
 		got[(*it)[1].str()] = (*it)[2].str();
+	// The one row that is not a predicate: the world server's srv.kill_record (TZ P45; its body is pinned by
+	// tests/test_issue_p45_kill_record.cpp). Every other row is a predicate of the table above.
+	const auto kill = got.find("kill_record");
+	REQUIRE(kill != got.end());
+	CHECK_EQ(kill->second, std::string("l_kill_record"));
+	got.erase(kill);
 	CHECK_EQ(got.size(), want.size());
 	for (const auto& w : want)
 	{
