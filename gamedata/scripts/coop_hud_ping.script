@@ -44,8 +44,10 @@ local COORD_MAX = 100000
 local LEVEL_NAME_MAX = 64 -- coop_transition.h kMaxLevelName
 local MAX_PLAYER_SLOT = 16 -- coop_protocol.h kMaxPlayers
 local SERIAL_MAX = 0xffffffff
-local SOUND = "interface\\inv_properties"
-local VOLUME = 0.35
+-- TZ Р64 (owner 2026-11-23: «короткий пик» of a device, not a fat one): the DA-2 "Otklik" detector beep, GAMMA's 80 ms
+-- version (stock Anomaly has a longer one under the same name). Mono, ~1.8 kHz, quiet in the file itself.
+local SOUND = "detectors\\da-2_beep1"
+local VOLUME = 0.5
 local WORLD_SLOTS = 12
 local C_PING = { 120, 225, 235 }
 local C_TEXT = { 230, 225, 208 }
