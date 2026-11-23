@@ -1,6 +1,6 @@
 // Anomaly Coop unit tests: TZ R32 W8.4, the initial state of an item that rides its create (coop_initial_rules.h).
-// The wire layout is tested here; the EntitySpawn tail that is to carry it is NOT WIRED yet (initial_state_spawn_tail_is_not_wired_yet
-// trips when the lead wires it: then a test of the wired call replaces it). WP6 fix round, finding 5: uses only for an eatable class.
+// The wire layout is tested here, and the EntitySpawn tail that carries it (initial_state_rides_the_entity_spawn_tail, wired by WP5).
+// WP6 fix round, finding 5: uses only for an eatable class.
 #include "test_util.h"
 
 #include "coop_initial_rules.h"
@@ -263,15 +263,53 @@ void expect_in(const std::string& where, const std::string& body, const std::str
 }
 } // namespace
 
-TEST(initial_state_spawn_tail_is_not_wired_yet)
+// R32 W8.4 (§8a A12, WP5): the EntitySpawn tail carries the item's initial state after the clone's replacement state. The two
+// writers of that layout (write_spawn: the world's spawns and repairs; write_entity: a map server's journal Spawn) put it last, the
+// one reader (client_on_spawn: a client, a map server, the world server taking a map server's spawn) reads it in that order.
+TEST(initial_state_rides_the_entity_spawn_tail)
 {
-	// The design's claim "uses, condition and ammo ride the EntitySpawn tail" is not true in this tree: write_initial and
-	// read_initial have no caller outside coop_initial_state. When the lead wires them (coop_entities.cpp), this trips on purpose:
-	// replace it with a test of the wired call (and keep the "not wired" notes in coop_initial_state.h in step).
+	// the order on the wire, as the three functions write and read it: the clone's varu-sized snapshot (none: 0), then the state
+	initial::State s;
+	s.has_uses = true;
+	s.uses = 3;
+	s.has_cond = true;
+	s.cond = initial::quant(0.5f);
+	Writer w;
+	w.varu(0); // write_clone_initial of an item that is no magazined weapon
+	initial::write(w, s);
+	Reader r(w.data().data(), w.data().size());
+	CHECK_EQ(r.varu(), uint64_t(0));
+	initial::State back;
+	CHECK(initial::read(r, back));
+	CHECK_EQ(r.remaining(), size_t(0));
+	CHECK(back.has_uses && back.uses == 3 && back.has_cond && back.cond == s.cond);
+
+	const std::string src = engine_src();
+	const std::string entities = without_comments(read_text(src + "/xrGame/coop/coop_entities.cpp"));
+	expect_in("write_spawn", body_of(entities, R"(bool\s+write_spawn)"),
+	    "return requests::write_clone_initial(w, e) && items::write_initial(w, e);");
+	expect_in("write_entity", body_of(entities, R"(bool\s+write_entity)"),
+	    "return requests::write_clone_initial(w, e) && items::write_initial(w, e);");
+	const std::string spawn = body_of(entities, R"(void\s+client_on_spawn)");
+	const size_t clone = spawn.find("requests::read_clone_initial(r, id, initial)");
+	const size_t tail = spawn.find("if (!items::read_initial(r, nullptr)) return;");
+	const size_t id = spawn.find("e->ID = alife_rw().server().PerformIDgen(id);");
+	const size_t apply = spawn.find("items::read_initial(state, e);");
+	const size_t registered = spawn.find("alife_rw().register_object(e, true);");
+	CHECK(clone != std::string::npos && tail != std::string::npos && id != std::string::npos && apply != std::string::npos &&
+	    registered != std::string::npos);
+	CHECK(clone < tail); // the clone's snapshot first
+	CHECK(id < apply); // into the new entity under its id (the versions and the staged uses are kept by id)
+	CHECK(apply < registered); // before its object can come online: net_Spawn reads the stock bytes
+	// a repeat: the writer's own state stands, a game object's too; an offline copy takes the writer's state and versions together
+	// (verify-D finding 6, reconcile::repeat_takes_state)
+	CHECK(spawn.find("reconcile::repeat_takes_state(writing::writes(id), game_object_here(id));") != std::string::npos);
+	CHECK(spawn.find("items::read_initial(state, takes ? known : nullptr);") != std::string::npos);
+
+	// and nobody else calls them: the layout has one writer pair and one reader
 	namespace fs = std::filesystem;
-	const std::string root = engine_src();
 	std::vector<std::string> callers;
-	for (const fs::directory_entry& f : fs::recursive_directory_iterator(root))
+	for (const fs::directory_entry& f : fs::recursive_directory_iterator(src))
 	{
 		if (!f.is_regular_file())
 			continue;
@@ -284,13 +322,12 @@ TEST(initial_state_spawn_tail_is_not_wired_yet)
 		const std::string text = read_text(f.path().string());
 		if (text.find("write_initial") == std::string::npos && text.find("read_initial") == std::string::npos)
 			continue; // the cheap look first: thousands of files
-		const std::string code = without_comments(text);
-		if (std::regex_search(code, std::regex(R"(\b(write_initial|read_initial)\s*\()")))
+		if (std::regex_search(without_comments(text), std::regex(R"(\b(write_initial|read_initial)\s*\()")))
 			callers.push_back(name);
 	}
+	CHECK_EQ(callers.size(), size_t(1));
 	for (const std::string& c : callers)
-		t::report_failure(__FILE__, __LINE__, "the spawn tail is wired now (" + c + "): replace this test with one of the wired call");
-	CHECK(callers.empty());
+		CHECK_EQ(c, std::string("coop_entities.cpp"));
 }
 
 TEST(initial_state_uses_only_for_an_eatable_section)

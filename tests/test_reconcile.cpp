@@ -6,6 +6,7 @@
 
 #include "coop_item_tags.h"
 #include "coop_limits.h"
+#include "coop_local_link.h" // R32 W5: the host player's link does not take a digest
 #include "coop_protocol.h"
 #include "coop_reconcile.h"
 #include "coop_rules.h"
@@ -716,7 +717,8 @@ TEST(reconcile_host_answers_a_repair_with_its_world_messages)
 	const std::string src = game_source("coop_entities.cpp");
 	const std::string body = between(src, "void host_on_entity_request(PeerId from, Reader& r)", "bool interpolate(");
 	CHECK(body.find("Msg::EntityDestroy") != npos); // only for an id the host does not have
-	CHECK(body.find("Msg::EntitySpawn") != npos);
+	CHECK(body.find("send_subtree(from, e)") != npos); // R32 W5: the EntitySpawn with what is below it
+	CHECK(between(src, "bool host_send_spawn_to(PeerId to, CSE_ALifeDynamicObject* e)", "\n}\n").find("Msg::EntitySpawn") != npos);
 	CHECK(body.find("write_switch") != npos);
 	CHECK(body.find("events::host_send_parent") != npos);
 	CHECK(body.find("events::host_send_death") != npos);
@@ -812,7 +814,9 @@ TEST(reconcile_a_skipped_spawn_is_tried_again)
 	size_t adds = 0;
 	for (size_t at = body.find("g_id_retry.add"); at != npos; at = body.find("g_id_retry.add", at + 1))
 		++adds;
-	CHECK_EQ(adds, size_t(3)); // deferred initial metadata, a local object, or a reserved generator id
+	// deferred initial metadata, another object's game object still going (R32 W3 Replace), a local object, or a reserved
+	// generator id
+	CHECK_EQ(adds, size_t(4));
 	const std::string staged = between(body, "!requests::stage_clone_initial", "g_id_retry.done");
 	CHECK(staged.find("g_id_retry.add") != npos);
 	CHECK(body.find("g_id_retry.done") != npos);
@@ -827,4 +831,259 @@ TEST(reconcile_a_body_at_rest_is_not_lost_to_a_failed_capture)
 	CHECK(capture != npos);
 	CHECK(still != npos);
 	CHECK(capture < still);
+}
+
+// ---------------------------------------------------------------- R32 W3 receive, W5 repair (temp/r30/design/R32-final.md §1, §6)
+
+// npc-cleanup F5: the same id, another section -> Replace, at once (a Coop client too: Core); the same section is a repeat.
+TEST(reconcile_r32_same_id_another_section_is_replaced_at_its_spawn)
+{
+	CHECK(spawn_of_known(kind_of("wpn_ak74"), kind_of("wpn_ak74"), false) == Known::Repeat); // P6: a repeat is harmless
+	CHECK(spawn_of_known(kind_of("wpn_ak74"), kind_of("medkit"), false) == Known::Replace); // another object under the id now
+	CHECK(spawn_of_known(0, kind_of("stalker"), false) == Known::Repeat); // a player's character here: its section is not the host's
+	CHECK(spawn_of_known(kind_of("actor"), 0, false) == Known::Repeat);
+	// the rule of the roster's rows is the same: another kind is Replace there too
+	CHECK(compare(row(5, xfer::kNoParent, false, true, kind_of("medkit")), row(5, xfer::kNoParent, false, true, kind_of("wpn_ak74"))) ==
+	    Replace);
+}
+
+TEST(reconcile_r32_client_on_spawn_compares_the_section_of_a_known_id)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string body = between(src, "void client_on_spawn(PeerId, Reader& r)", "void client_on_destroy");
+	const size_t section = body.find("spawn.r_stringZ(section);");
+	const size_t known = body.find("ai().alife().objects().object(id, true)");
+	const size_t rule = body.find("reconcile::spawn_of_known(kind_here, reconcile::kind_of(section), writing::writes(id))");
+	const size_t remove = body.find("client_remove(id);");
+	const size_t create = body.find("F_entity_Create(section)");
+	CHECK(section != npos && known != npos && rule != npos && remove != npos && create != npos);
+	CHECK(section < rule); // the section is read before the "already have it" look
+	CHECK(rule < remove);
+	CHECK(remove < create); // replaced: the world's object is made in the same call when its id is free
+	CHECK(body.find("world::is_player_character(known)") != npos); // kind 0: never replaced
+	// the copy's object goes the way an EntityDestroy takes it
+	const std::string destroy = between(src, "void client_on_destroy(PeerId, Reader& r)", "\n}\n");
+	CHECK(destroy.find("client_remove(id);") != npos);
+}
+
+// npc-alife F4: a squad from the wire is whole when every listed id is here.
+TEST(reconcile_r32_a_squad_is_whole_when_every_listed_member_is_here)
+{
+	std::vector<uint16_t> here = {10, 11};
+	const auto is_here = [&here](uint16_t id) { return std::find(here.begin(), here.end(), id) != here.end(); };
+	CHECK(!squad_whole(std::vector<uint16_t>{}, is_here)); // an empty squad has nobody to put in a smart
+	CHECK(!squad_whole(std::vector<uint16_t>{10, 11, 12}, is_here)); // its last member is still on the way
+	here.push_back(12);
+	CHECK(squad_whole(std::vector<uint16_t>{10, 11, 12}, is_here)); // its spawn made it whole
+}
+
+TEST(reconcile_r32_a_squad_made_whole_raises_coop_squad_complete_once)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string whole = between(src, "void squads_made_whole(const CSE_ALifeDynamicObject* e)", "\n}\n");
+	CHECK(whole.find("reconcile::squad_whole(") != npos);
+	CHECK(whole.find("script::queue_callback(\"coop_squad_complete\"") != npos);
+	CHECK(whole.find("!listed->second") != npos); // a squad from the wire: its members are ids, a bound squad is whole already
+	// verify-D finding 4: only where its smart is written (the process that leads the squad's map apart from its world)
+	CHECK(whole.find("if (!squad_complete_here(g))") != npos);
+	const std::string spawn = between(src, "void client_on_spawn(PeerId, Reader& r)", "void client_on_destroy");
+	const size_t registered = spawn.find("alife_rw().register_object(e, true);");
+	const size_t raised = spawn.find("if (mode().level())\n\t\tsquads_made_whole(e);");
+	const size_t repeat = spawn.find("return; // already have it");
+	CHECK(registered != npos && raised != npos && repeat != npos);
+	CHECK(registered < raised); // after it is here
+	CHECK(repeat < raised); // a repeated spawn raises nothing
+}
+
+// W5: the world answers a squad with its members and a holder with its children.
+TEST(reconcile_r32_a_spawn_answer_brings_the_members_and_the_children)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string request = between(src, "void host_on_entity_request(PeerId from, Reader& r)", "bool interpolate(");
+	CHECK(request.find("!send_subtree(from, e)") != npos); // nothing else goes when the spawn could not be written, as before
+	const std::string subtree = between(src, "bool send_subtree(PeerId to, CSE_ALifeDynamicObject* root)", "\n}\n");
+	CHECK(subtree.find("host_send_spawn_to(to, root)") != npos); // the holder first: client_on_spawn needs it
+	const std::string below = between(src, "void send_below(PeerId to, const CSE_ALifeDynamicObject* e, u32 depth)", "\n}\n");
+	CHECK(below.find("squad_members()") != npos);
+	CHECK(below.find("e->children") != npos);
+	CHECK(below.find("depth") != npos); // bounded as root_of
+}
+
+TEST(reconcile_r32_a_listed_member_that_is_missing_is_asked_for)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string body = between(src, "void client_on_squad(", "\n}\n");
+	const size_t missing = body.find("if (!c)");
+	const size_t ask = body.find("g_rc_repairs.push(member_host, reconcile::kAskMissing);");
+	CHECK(missing != npos && ask != npos);
+	CHECK(missing < ask);
+	CHECK(body.find("g_rc_watch.allow(member_host") != npos); // asked again ever less often, as a repair of the roster
+}
+
+// W5.1: every copy of a world repairs towards its writer: a client, and a map server for what its world writes (the Core's client
+// part runs on every live client; mode().reconcile_world() is the mode's own extra).
+TEST(reconcile_r32_a_map_server_repairs_only_what_it_does_not_write)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string frame = between(src, "void reconcile_frame()", "\n}\n");
+	const size_t host = frame.find("host_reconcile();");
+	const size_t client = frame.find("if (mgr().is_live_client())\n\t\tclient_reconcile();");
+	const size_t extra = frame.find("mode().reconcile_world();");
+	CHECK(host != npos && client != npos && extra != npos);
+	CHECK(frame.find("else if (mgr().is_live_client())") == npos); // a map server is a host of its level and a client of its world
+	const std::string roster = between(src, "void client_on_roster(", "\n}\n");
+	const size_t own = roster.find("if (writing::writes(id))");
+	const size_t queued = roster.find("g_rc_repairs.push(a.id, what);");
+	CHECK(own != npos && queued != npos);
+	CHECK(own < queued);
+}
+
+// W5.1: the world's digest reaches its map servers (bridge_takes(EntityHash), WP1): the mode's links, as StoryHash does.
+TEST(reconcile_r32_the_digest_reaches_the_links_too)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string host = between(src, "void host_reconcile()", "\n}\n");
+	const size_t players = host.find("net::host_send(p.id, Msg::EntityHash, w);");
+	const size_t links = host.find("mode().deliver_links(Msg::EntityHash, links, Lane::Reliable);");
+	CHECK(players != npos && links != npos);
+	CHECK(players < links);
+	// Coop: the host player's link does not take it (it is no link message), nothing reaches him
+	CHECK(!link_enabled(Msg::EntityHash));
+}
+
+// ---------------------------------------------------------------- R32 WP5 fix round (the verify-D findings)
+
+// Finding 2: a holder change that did not finish in time (D5) asks for the item and its holder. An EntitySpawn answer is a whole
+// subtree now (a player's character: all he carries), so Spawn is asked only for an id this copy lacks: for what is here it would be a
+// burst of repeats (a client's own character, his whole inventory) and no repair.
+TEST(reconcile_r32_a_stalled_move_asks_spawn_only_for_what_is_missing)
+{
+	CHECK_EQ(stalled_ask(true), uint8_t(Parent | State)); // here: its holder and its state
+	CHECK_EQ(stalled_ask(false), uint8_t(Spawn | Parent | State)); // missing: its spawn first
+	const std::string src = game_source("coop_events.cpp");
+	const std::string body = between(src, "void client_step_parents()", "\n}\n");
+	CHECK(body.find("w.u8(reconcile::stalled_ask(find_entity(id) != nullptr));") != npos);
+	CHECK(body.find("w.u8(reconcile::Spawn | reconcile::Parent | reconcile::State);") == npos);
+}
+
+// Finding 3: a map server compares its world's digest. What is online on its map is its own (the world holds such an object offline:
+// online_here is false there), and an online item's uses are read from its game object only (row_of: state_digest with_uses). Both
+// made every bucket with anything online on the map differ for ever, and the repair of what the world writes backed off to one roster
+// in 320 s. Both ends leave them out: the world's digest to its links and the map server's own rows are mapless.
+TEST(reconcile_r32_mapless_rows_of_a_map_server_match_its_world)
+{
+	Row player; // a player's character: kind 0, online at both ends (row_of)
+	player.id = 40;
+	player.online = true;
+	// the world: a squad the map server holds online there, a free item of the map, a player's character
+	const std::vector<Row> world = {row(10, xfer::kNoParent, false), row(11, xfer::kNoParent, false, true, 9, 0x51), player};
+	const std::vector<Row> map = {row(10, xfer::kNoParent, true), row(11, xfer::kNoParent, true, true, 9, 0x51), player};
+	CHECK(!(hash_bucket(8, world) == hash_bucket(8, map))); // as built: never the same while anything is online there
+	std::vector<Row> world_mapless, map_mapless;
+	for (const Row& r : world)
+		world_mapless.push_back(mapless(r));
+	for (const Row& r : map)
+		map_mapless.push_back(mapless(r));
+	CHECK(hash_bucket(8, world_mapless) == hash_bucket(8, map_mapless));
+	CHECK(diff(world_mapless, map_mapless).empty()); // and its roster asks no switch of what the map server has online
+	CHECK(mapless(player).online); // a player's character stays as row_of makes it
+	// a real difference still shows: a death the world has and the map server has not heard of
+	std::vector<Row> dead = world_mapless;
+	dead[0].alive = false;
+	CHECK(!(hash_bucket(8, dead) == hash_bucket(8, map_mapless)));
+	// the Watch never asks for a bucket that is the same
+	Watch watch;
+	for (uint64_t t = 0; t < 100000; t += kCycleMs)
+		CHECK(!watch.on_hash(8, hash_bucket(8, world_mapless) == hash_bucket(8, map_mapless), t));
+}
+
+TEST(reconcile_r32_the_links_get_the_mapless_digest_and_a_map_server_compares_it)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	// the mapless row: no online flag, an item's state without the uses only its game object shows
+	const std::string mapless_row =
+	    between(src, "reconcile::Row mapless_row(CSE_ALifeDynamicObject* e, const reconcile::Row& here)", "\n}\n");
+	CHECK(mapless_row.find("reconcile::mapless(here)") != npos);
+	CHECK(mapless_row.find("items::state_digest(e, false)") != npos);
+	const std::string collect = between(src,
+	    "void collect_rows(u8 bucket, std::vector<reconcile::Row>& rows, std::vector<reconcile::Row>* mapless = nullptr)", "\n}\n");
+	CHECK(collect.find("mapless->push_back(mapless_row(e, r));") != npos);
+	// the world: its players get today's digest, its links the mapless one
+	const std::string host = between(src, "void host_reconcile()", "\n}\n");
+	CHECK(host.find("collect_rows(bucket, rows, &mapless);") != npos);
+	CHECK(host.find("reconcile::write(w, reconcile::hash_bucket(bucket, rows));") != npos);
+	CHECK(host.find("reconcile::write(links, reconcile::hash_bucket(bucket, mapless));") != npos);
+	// a copy with a map of its own compares the mapless view, its roster too; a mirror compares every fact as before
+	CHECK(between(src, "bool compares_mapless()", "\n").find("return mode().leads_level();") != npos);
+	const std::string hash = between(src, "void client_on_hash(PeerId, Reader& r)", "\n}\n");
+	CHECK(hash.find("const bool own_map = compares_mapless();") != npos);
+	CHECK(hash.find("reconcile::hash_bucket(host.bucket, own_map ? mapless : rows) == host") != npos);
+	const std::string roster = between(src, "void client_on_roster(PeerId, Reader& r)", "\n}\n");
+	const size_t own = roster.find("const bool own_map = compares_mapless();");
+	const size_t host_rows = roster.find("h = reconcile::mapless(h);");
+	const size_t diffed = roster.find("reconcile::diff(host, own_map ? mapless : local)");
+	CHECK(own != npos && host_rows != npos && diffed != npos);
+	CHECK(own < host_rows && host_rows < diffed);
+}
+
+// Finding 4: coop_squad_complete makes the srv Lua put a squad in its smart (a write to the smart). Only the process that writes the
+// smart raises it: the one that leads the squad's map apart from its world (Mode::level(): a map server), for a squad on that map. The
+// world server takes a map server's squads whole from its journal and runs no level logic; a map server hears of squads of every map.
+TEST(reconcile_r32_coop_squad_complete_only_where_the_squads_map_is_led)
+{
+	constexpr uint16_t kMine = 3, kOther = 4;
+	CHECK(squad_complete_here(true, kMine, kMine)); // a map server, a squad of its map
+	CHECK(!squad_complete_here(true, kOther, kMine)); // a squad of another map: that map's server writes its smart
+	CHECK(!squad_complete_here(false, kMine, kMine)); // no level side: the world server, the co-op host and client, a server player
+	CHECK(!squad_complete_here(true, kNoEcho, kNoEcho)); // no level known (no game vertex, a level not up): nobody's map
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string here = between(src, "bool squad_complete_here(const CSE_ALifeOnlineOfflineGroup& g)", "\n}\n");
+	CHECK(here.find("mode().level() != nullptr") != npos);
+	CHECK(here.find("levels::level_of_vertex(g.m_tGraphID)") != npos);
+	CHECK(here.find("levels::my_level()") != npos);
+}
+
+// Finding 5: §8's host_send_subtree(PeerId, CSE_ALifeDynamicObject*) is public (W4.6 calls it), void, outside the anonymous namespace.
+TEST(reconcile_r32_host_send_subtree_has_the_frozen_signature)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const size_t anonymous_end = src.find("bool interpolate(MirrorTrack& t, u64 render_time, MirrorSample& out)");
+	const size_t pub = src.find("\nvoid host_send_subtree(PeerId to, CSE_ALifeDynamicObject* root)\n");
+	CHECK(anonymous_end != npos);
+	CHECK(pub != npos);
+	CHECK(anonymous_end < pub); // after the last function of the anonymous namespace: in coop::entities itself
+	CHECK(src.find("} // namespace", anonymous_end) < pub);
+	CHECK(between(src, "\nvoid host_send_subtree(PeerId to, CSE_ALifeDynamicObject* root)\n", "\n}\n").find("send_subtree(to, root);") !=
+	    npos);
+}
+
+// Finding 6: on a repeated spawn the item's state and the decider's versions travel together. An offline copy takes both into its
+// entity; a game object here keeps its own state, so it takes no versions either (they would claim a write it has not applied, and
+// the decider's push of that write would be dropped as known); the writer keeps its own.
+TEST(reconcile_r32_a_repeat_takes_state_and_versions_only_into_an_offline_copy)
+{
+	CHECK(repeat_takes_state(false, false)); // a copy, offline here: the entity takes the writer's state and versions
+	CHECK(!repeat_takes_state(false, true)); // a copy with a game object: its own state stands, no versions without it
+	CHECK(!repeat_takes_state(true, false)); // the writer's own object
+	CHECK(!repeat_takes_state(true, true));
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string body = between(src, "void client_on_spawn(PeerId, Reader& r)", "void client_on_destroy");
+	CHECK(body.find("reconcile::repeat_takes_state(writing::writes(id), game_object_here(id))") != npos);
+}
+
+// Finding 7: another kind under an id this process writes is the world's word on an object this process released and made again (the
+// echo of its own spawn from before, an answer to an old ask): the writer's object stands, the stale spawn goes nowhere. A copy that
+// does not write the id takes the writer's object (Replace) as before; a mirror writes nothing.
+TEST(reconcile_r32_a_stale_spawn_never_replaces_the_writers_own_object)
+{
+	CHECK(spawn_of_known(kind_of("wpn_ak74"), kind_of("medkit"), true) == Known::Keep);
+	CHECK(spawn_of_known(kind_of("wpn_ak74"), kind_of("wpn_ak74"), true) == Known::Repeat);
+	CHECK(spawn_of_known(0, kind_of("medkit"), true) == Known::Repeat);
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string body = between(src, "void client_on_spawn(PeerId, Reader& r)", "void client_on_destroy");
+	const size_t keep = body.find("case reconcile::Known::Keep:");
+	const size_t remove = body.find("client_remove(id);");
+	CHECK(keep != npos && remove != npos);
+	CHECK(keep < remove);
+	CHECK(between(body, "case reconcile::Known::Keep:", "case reconcile::Known::Replace:").find("return;") != npos);
 }
