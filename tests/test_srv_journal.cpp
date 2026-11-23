@@ -697,7 +697,16 @@ struct World
 			const uint16_t parent = lr.u16();
 			f.id_in_slice = true;
 			f.exists = reg.get(h.id) != nullptr;
-			f.writer = parent != kNo ? writer_of(reg.root(parent)) : w::other(kMk);
+			if (parent != kNo)
+				f.writer = writer_of(reg.root(parent));
+			else
+			{
+				// fix A2: a root-less Spawn on the sender's map is the sender's while it leads that map (here it does)
+				f.rootless = true;
+				f.spawn_level = kMap;
+				f.writer = writer_of(w::RootFacts{w::RootKind::Resident, h.id, kMap});
+				f.sender_leads = f.writer == w::other(kMk);
+			}
 			const acc::Verdict v = acc::accepts(f);
 			if (!v.ok)
 			{
@@ -1197,7 +1206,7 @@ TEST(srv_journal_engine_glue)
 	    std::string_view::npos);
 	// #9: the audit's heal goes through the world's one acceptance
 	CHECK(body_of(code, "void", "host_heal_members").find("host_heal_member(from, wire::LevelEntityHead::Joined") != std::string_view::npos);
-	CHECK(body_of(code, "bool", "host_heal_member").find("host_apply_fact(from, e, why") != std::string_view::npos);
+	CHECK(body_of(code, "bool", "host_heal_member").find("host_apply_heal(from, e, why") != std::string_view::npos); // fix round 2 of A: host_apply_fact's acceptance and apply, a Left goes home
 	CHECK(body_of(code, "void", "host_heal_members").find("coop_join_member(") == std::string_view::npos);
 	// #10: a refused create's repair tells this level's players (no ClientApply) and journals no Destroy (g.quiet)
 	const auto ack = body_of(code, "void", "client_on_journal_ack");

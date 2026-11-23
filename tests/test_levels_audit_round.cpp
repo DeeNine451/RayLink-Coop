@@ -482,7 +482,7 @@ TEST(levels_audit_membership_hooks)
 	CHECK(heal.find("host_heal_member(from, wire::LevelEntityHead::Joined, row.squad, id)") != std::string_view::npos);
 	CHECK(heal.find("host_heal_member(from, wire::LevelEntityHead::Left, row.squad, id)") != std::string_view::npos);
 	CHECK(heal.find("coop_join_member(") == std::string_view::npos);
-	CHECK(code.find("host_apply_fact(from, e, why, g.received.last(u32(from)))") != std::string::npos);
+	CHECK(code.find("host_apply_heal(from, e, why, g.received.last(u32(from)))") != std::string::npos); // host_apply_fact's rule (fix round 2 of A)
 
 	const auto resync = function_body(code, "client_on_resync");
 	CHECK(appears_before(resync, "srv::write_members(w, members)", "srv::write_audit_round(w, round)"));

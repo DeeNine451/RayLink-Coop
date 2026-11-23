@@ -8,6 +8,7 @@
 #include "srv/coop_levels_accept.h"
 
 #include <cstdint>
+#include <string>
 
 namespace w = coop::writer;
 namespace acc = coop::levels::accept;
@@ -302,4 +303,133 @@ TEST(accept_reasons_in_order)
 	// every reason has a name for the log and is a reason the Ack may carry
 	for (uint8_t why = 1; why <= jr::kLastWhy; ++why)
 		CHECK(jr::why_name(why)[0] != '?');
+}
+
+// ---------------------------------------------------------------- R32 fix package A (levels)
+
+namespace
+{
+// A root-less Spawn from map server A (level kA) as host_apply_fact fills it: the world's writer of the residents of the map the
+// object stands on (of A's own map for one at no vertex) and whether A writes its own map's residents now.
+acc::Facts rootless_from_a(uint16_t at, w::MapLead lead_of_a)
+{
+	acc::Facts f = from_a(H::Spawn, w::nobody());
+	f.exists = false;
+	f.id_in_slice = true;
+	f.rootless = true;
+	f.spawn_level = at;
+	const w::Writer of_a = resident(0x9001, kA, lead_of_a);
+	f.sender_leads = of_a == w::other(kBridgeA);
+	f.writer = acc::spawn_on_senders_map(at, kA) ? of_a : resident(0x9001, at, at == kB ? kLedB : kUnled);
+	return f;
+}
+} // namespace
+
+// Fix A2 (W1.2c, §8a A4): a root-less Spawn on the sender's map, or of a unit it bore at no vertex, is the sender's only while it
+// leads its map or stops: a map server still Starting (in session, Ready not said) writes no resident of it yet.
+TEST(accept_fixa_rootless_spawn_needs_the_lead)
+{
+	const w::MapLead starting{w::Lead::Starting, kBridgeA};
+	for (const uint16_t at : {kA, w::kNoLevel})
+	{
+		CHECK(refused_for(acc::accepts(rootless_from_a(at, starting)), jr::NotWriter));
+		CHECK(acc::accepts(rootless_from_a(at, kLedA)).ok);
+		CHECK(acc::accepts(rootless_from_a(at, kStoppingA)).ok);
+		CHECK(refused_for(acc::accepts(rootless_from_a(at, kUnled)), jr::NotWriter)); // its server is Off or Lost here
+	}
+	// another map is never the sender's, whatever it leads
+	CHECK(refused_for(acc::accepts(rootless_from_a(kB, kLedA)), jr::NotWriter));
+	CHECK(refused_for(acc::accepts(rootless_from_a(kU, kLedA)), jr::NotWriter));
+	// a bridge that leads no map makes nothing that stands nowhere: the world writes what stands on no map (host_apply_fact asks
+	// writer_of for a resident of no level), whatever its lead flag says
+	acc::Facts nowhere = rootless_from_a(w::kNoLevel, kLedA);
+	nowhere.sender_level = w::kNoLevel;
+	nowhere.writer = resident(0x9001, w::kNoLevel, kUnled);
+	CHECK(nowhere.sender_leads);
+	CHECK(refused_for(acc::accepts(nowhere), jr::NotWriter));
+	// the rule before the fix: "on its map, so its own" took a Starting server's create
+	acc::Facts before = rootless_from_a(kA, starting);
+	before.rootless = false;
+	before.writer = w::other(kBridgeA);
+	CHECK(acc::accepts(before).ok);
+	CHECK(!acc::accepts(rootless_from_a(kA, starting)).ok);
+}
+
+// Fix A2: the writer the rule names for a root-less Spawn.
+TEST(accept_fixa_rootless_spawn_writer)
+{
+	CHECK(acc::rootless_spawn_writer(rootless_from_a(kA, kLedA)) == w::other(kBridgeA));
+	CHECK(acc::rootless_spawn_writer(rootless_from_a(w::kNoLevel, kStoppingA)) == w::other(kBridgeA));
+	CHECK(acc::rootless_spawn_writer(rootless_from_a(kA, w::MapLead{w::Lead::Starting, kBridgeA})) == w::this_process());
+	CHECK(acc::rootless_spawn_writer(rootless_from_a(kB, kLedA)) == w::other(kBridgeB));
+}
+
+// Fix A5: release_here's decision (srv/coop_levels_alife.cpp): a player's character or the ghost never; an object online elsewhere
+// only as a member of a squad here, at its own vertex or its squad's, after its online mark is cleared; anything else as it is.
+TEST(accept_fixa_release_plan)
+{
+	acc::ReleaseFacts f;
+	f.player = true;
+	f.online = true;
+	f.member = true;
+	f.own_vertex = true;
+	acc::ReleasePlan p = acc::release_plan(f);
+	CHECK(!p.release);
+	CHECK(p.why != nullptr && std::string(p.why) == "a player's character");
+	f.player = false;
+	f.online = false;
+	f.member = false;
+	f.own_vertex = false; // offline here: the stock release, wherever it stands
+	p = acc::release_plan(f);
+	CHECK(p.release && !p.clear_online && !p.take_squad_vertex && p.why == nullptr);
+	f.online = true; // a held unit itself: its holder's Destroy on the transfer lane releases it
+	p = acc::release_plan(f);
+	CHECK(!p.release);
+	CHECK(p.why != nullptr && std::string(p.why) == "online elsewhere, not a member");
+	f.member = true; // a held squad's member at no vertex, its squad at none either
+	p = acc::release_plan(f);
+	CHECK(!p.release);
+	CHECK(p.why != nullptr && std::string(p.why) == "a member at no vertex");
+	f.squad_vertex = true; // ... its squad at one: it is released there
+	p = acc::release_plan(f);
+	CHECK(p.release && p.take_squad_vertex && p.clear_online);
+	f.own_vertex = true; // at its own vertex: that one stays
+	p = acc::release_plan(f);
+	CHECK(p.release && !p.take_squad_vertex && p.clear_online);
+}
+
+// Fix round 2 of package A (verifier findings 2 and 4): what the world does with a Left it accepted (srv/coop_levels_alife.cpp
+// leave_squad). A living bound member of the squad, by the map server's own Left: §8a A17, held by that map server on its own. One a
+// newer word bound in another squad first (that squad's Spawn listed it: a squad made and joined in the frame of the Left): only this
+// squad's list forgets it, nothing of the creature changes. The audit's heal of a member list: today's way home (the map server's
+// Holder never adopted it). Not listed: nothing to do.
+TEST(accept_fixa_leave_plan)
+{
+	acc::LeaveFacts f;
+	CHECK(acc::leave_plan(f) == acc::Leave::NotMember);
+	f.listed = true;
+	f.bound = true;
+	f.living = true;
+	CHECK(acc::leave_plan(f) == acc::Leave::Adopt); // the map server's own Left of a living member: it holds it on its own now
+	// the same frame's new squad bound it first: out of this list only (before the fix: adopted, its m_group_id cleared, the new
+	// squad's binding broken, the creature nobody's)
+	f.bound_elsewhere = true;
+	CHECK(acc::leave_plan(f) == acc::Leave::Unlist);
+	f.living = false;
+	CHECK(acc::leave_plan(f) == acc::Leave::Unlist);
+	f.living = true;
+	f.heal = true;
+	CHECK(acc::leave_plan(f) == acc::Leave::Unlist); // bound elsewhere wins over the heal too: its new squad has it
+	f.bound_elsewhere = false;
+	CHECK(acc::leave_plan(f) == acc::Leave::Home); // the audit's heal: the map server has no hold of it, it goes home here
+	f.heal = false;
+	f.living = false;
+	CHECK(acc::leave_plan(f) == acc::Leave::Home); // a dead member (its body is a resident) or one in a holder: today's way
+	f.living = true;
+	f.bound = false;
+	CHECK(acc::leave_plan(f) == acc::Leave::Home); // an id never bound to its object: coop_leave_member drops the id
+	f.bound_elsewhere = true;
+	CHECK(acc::leave_plan(f) == acc::Leave::Home);
+	f.listed = false;
+	CHECK(acc::leave_plan(f) == acc::Leave::NotMember);
 }
