@@ -453,12 +453,17 @@ TEST(mode_hooks_srv_lua_table)
 	const std::regex row(R"rx(\{\s*"(\w+)"\s*,\s*&?(\w+)\s*\})rx");
 	for (std::sregex_iterator it(code.begin(), code.end(), row), end; it != end; ++it)
 		got[(*it)[1].str()] = (*it)[2].str();
-	// The one row that is not a predicate: the world server's srv.kill_record (TZ P45; its body is pinned by
-	// tests/test_issue_p45_kill_record.cpp). Every other row is a predicate of the table above.
+	// The rows that are not predicates: the world server's srv.kill_record (TZ P45; its body is pinned by
+	// tests/test_issue_p45_kill_record.cpp) and a map server's srv.journal_done (R32 W7, A21 E-1; its body is pinned by
+	// tests/test_srv_ops_done_e1.cpp). Every other row is a predicate of the table above.
 	const auto kill = got.find("kill_record");
 	REQUIRE(kill != got.end());
 	CHECK_EQ(kill->second, std::string("l_kill_record"));
 	got.erase(kill);
+	const auto journal_done = got.find("journal_done");
+	REQUIRE(journal_done != got.end());
+	CHECK_EQ(journal_done->second, std::string("l_journal_done"));
+	got.erase(journal_done);
 	CHECK_EQ(got.size(), want.size());
 	for (const auto& w : want)
 	{
