@@ -542,7 +542,11 @@ check(M.spots["coop_ally_4@520"] ~= nil and M.spots["coop_ally_1@520"] == nil, "
 -- avatar not spawned yet: panel only
 M.players[#M.players].avatar_id = nil
 run(M, 600)
-check(count_spots(M, "@520$") == 0 and P.rows[3].name.e.text == "p1" and P.rows[3].base.e.visible and not P.rows[3].dist.e.visible, "no avatar yet: no marker, panel entry without distance")
+-- TZ P48 (Dev 58): a player whose character is not in this world yet is loading; the panel says so (the transition board's
+-- word, st_coop_transition_row_loading) where the metres stand, never an empty row with empty bars
+check(count_spots(M, "@520$") == 0 and P.rows[3].name.e.text == "p1" and P.rows[3].base.e.visible and P.rows[3].dist.e.visible
+	and P.rows[3].dist.e.text:find("st_coop_transition_row_loading", 1, true) ~= nil, "no avatar yet: no marker, the panel says loading, no metres ("
+	.. tostring(P.rows[3].dist.e.text) .. ")")
 
 -- ================================================================ toggles, HUD, session end
 print("== toggles")

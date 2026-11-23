@@ -18,9 +18,11 @@
 	  polled every frame; nil when nobody waits.
 
 	1. The board (me at the exit, coming along, a guide trip, or the go): top centre under the compass: the small caps head,
-	   the level's name, the count "2 / 3" on the right, the status line, a segment per player (white: ready), a row per
-	   player (a 2 px stripe and the nick in his palette colour, bright when ready, dimmer when not; on the right "here" /
-	   "comes along" / the metres to the exit / "loading . 42 s" / "not waited for" / "at another exit"), and the hint of the
+	   the level's name, the count "2 / 3" on the right, the status line, a segment per player the count counts (white: ready;
+	   TZ P48: not one for a player who is not waited for), a row per player (a 2 px stripe and the nick in his palette colour,
+	   bright when ready, dimmer when not; on the right "here" / "comes along" / the team panel's metres from me to him (TZ P48:
+	   coop_core_hud.distance_text, the same words in the same frame; my own row: my metres to the exit) / "loading . 42 s" /
+	   "not waited for" / "at another exit"), and the hint of the
 	   key under a thin bar that fills while the key is held (1 s): coming along "hold [F] - cancel", a guide trip I have not
 	   answered "hold [F] - agree", agreed "hold [F] - cancel". At the exit there is no key: he withdraws by stepping out.
 	2. The reminder (somebody waits at an exit and I am not there): his nick in his colour, under it "waits for you at the
@@ -263,6 +265,25 @@ local function dist_text(d)
 	return string_format(tr("st_coop_transition_row_dist", "%d m"), math_floor(d + 0.5))
 end
 
+-- TZ P48 (Dev 58, owner 2026-11-22: "wrong readings on the transition or on the players"; on his screenshot the board said 31 and
+-- 82 m, the team panel 29 and 84 m for the same two players). The metres of a row are the team panel's: coop_core_hud.
+-- distance_text, from me to him, from the panel's view of this frame and in its words, so the two windows never give two numbers
+-- for one player (the engine's row metres are to the exit's shapes, as the host sees him). My own row (in the zone before the
+-- board has me ready) has no row on the panel: my metres to the exit, this machine's (me.dist, the reminder line's). Without the
+-- panel's script (an exe or a test without it) the engine's metres.
+local function row_dist(r, t)
+	local me = type(t) == "table" and type(t.me) == "table" and t.me or nil
+	local peer = tonumber(r.peer)
+	if me and peer and peer == tonumber(me.peer) then return dist_text(me.dist) end
+	local H = rawget(_G, "coop_core_hud")
+	if type(H) == "table" and type(H.distance_text) == "function" then
+		local ok, s = pcall(H.distance_text, peer)
+		if ok and type(s) == "string" and s ~= "" then return s end
+		return "..."
+	end
+	return dist_text(r.dist)
+end
+
 -- The map names and gates available to this process.
 local function levels_module()
 	local read = coop_mode.hook("levels.module")
@@ -331,7 +352,7 @@ local function row_state(r, t)
 		return tr("st_coop_transition_row_elsewhere", "at another exit"), "dim"
 	end
 	if guide then return tr("st_coop_transition_row_wait", "no answer yet"), "dim" end
-	return dist_text(r.dist), "dim"
+	return row_dist(r, t), "dim"
 end
 
 -- The rows of the board: { peer, nick, rgb, text, tone, ready }, at most MAX_ROWS.
@@ -652,8 +673,9 @@ function UICoopTransition:FrameBoard(tg, dt, t, m, L)
 	text_place(self.t_status, x0, top + L.status_y, 240 * kx, L.status_h, m)
 	text_set(self.t_status, status_text(bv), 217 * a, C_WHITE)
 	text_show(self.t_status, true)
-	-- a segment per player: white when ready, dim when not
-	local total = math_min(MAX_ROWS, math_max(n, math_floor(tonumber(bv.total) or 0)))
+	-- a segment per player the count counts (bv.total: the group waits for him), white when ready, dim when not. TZ P48: the
+	-- owner's screenshot had "1 / 4" over five segments, the fifth a dead player's whom the group does not wait for
+	local total = math_min(MAX_ROWS, math_max(0, math_floor(tonumber(bv.total) or 0)))
 	for i = 1, MAX_ROWS do
 		local s = self.segs[i]
 		if i <= total then

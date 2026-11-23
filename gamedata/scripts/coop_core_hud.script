@@ -30,7 +30,11 @@
 	For other scripts:
 		coop_core_hud.status_of(peer) -> { h = 0..1, s = state, f = community, i = icon, b = bleed s | nil, at } | nil
 		coop_core_hud.views() -> list of other players { peer, slot, nick, host, state, bleed, hp, avatar, dist, icon,
-			pos = {x, y, z} of his avatar | nil, far = true for one on another map with a record in this world, far_id }
+			pos = {x, y, z} of his avatar | nil, far = true for one on another map with a record in this world, far_id,
+			loading = true while his character is not in this world (TZ P48: no hp, no dist; the panel says "loading") }
+		coop_core_hud.shared_views(tg) -> the list the team panel shows now (made at its refresh, or when PANEL_MS old)
+		coop_core_hud.distance_text(peer) -> the panel's metres from me to him ("29 m"), nil when it shows none (TZ P48: the
+			transition board's rows show exactly this)
 		coop_core_hud.set_party_enabled(bool) / set_spots_enabled(bool)
 		coop_core_hud.set_revive(peer, frac | nil, by_peer)   revive part 2: his red segments fill in the reviver's colour
 --]]
@@ -241,6 +245,9 @@ local function elsewhere_of(peer)
 	return text and text ~= "" and text or nil
 end
 
+-- TZ P48: states the engine knows of a character that is in the world (his body lies or stands here, or he watches)
+local LIFE_KNOWN = { down = true, dead = true, spec = true, respawn = true }
+
 function views(tg)
 	tg = tg or time_global()
 	local A = allies()
@@ -254,6 +261,11 @@ function views(tg)
 			local obj, id = avatar_of(p)
 			local away = coop_mode.where(p.id) == "away"
 			local far_id = not obj and away and far_avatar(p) or nil
+			-- TZ P48: his character is not in this world (he loads it, or chooses a character). The engine keeps a player's
+			-- character out of the world exactly while its player is not in it (coop_alife.cpp switch_vote, W9; coop_join.cpp
+			-- host_on_world_loaded brings it in), the fact the transition board's "loading" is made of (coop_transition.h
+			-- Mark::Loading). No health and no metres then: "loading", the board's word.
+			local loading = not obj and not away and not LIFE_KNOWN[state] or nil
 			local icon = st and st.i ~= "" and st.i or nil
 			if not icon and obj then
 				local ok, ic = pcall(obj.character_icon, obj)
@@ -261,9 +273,9 @@ function views(tg)
 			end
 			local v = {
 				peer = p.id, slot = A.slot(p.id), nick = tostring(p.nick or "?"), host = host_badge(p),
-				state = state, bleed = bleed, hp = fresh and st.h or nil, avatar = id, icon = icon,
+				state = state, bleed = bleed, hp = fresh and not loading and st.h or nil, avatar = id, icon = icon,
 				dist = (obj and actor) and obj:position():distance_to(actor:position()) or nil,
-				elsewhere = away and elsewhere_of(p.id) or nil, far = far_id and true or nil, far_id = far_id,
+				elsewhere = away and elsewhere_of(p.id) or nil, far = far_id and true or nil, far_id = far_id, loading = loading,
 			}
 			if obj then
 				local okp, p = pcall(obj.position, obj)
@@ -275,6 +287,50 @@ function views(tg)
 	end
 	table.sort(list, function(a, b) return a.peer < b.peer end)
 	return list, by_avatar
+end
+
+-- TZ P48 (Dev 58, owner 2026-11-22: "wrong readings on the transition or on the players"): one view of the other players for
+-- every window that shows them. The team panel makes it at its refresh (fresh), the transition board (coop_hud_transition, every
+-- frame) reads that one, so a player has the same metres and the same "loading" in both windows in the same frame: two lists
+-- made apart differ by what a runner covers between them. Without the panel's refresh it is made anew when it is PANEL_MS old.
+local shared = { at = nil, list = nil, by_avatar = nil }
+
+function shared_views(tg, fresh)
+	tg = tg or time_global()
+	local at = shared.at
+	if fresh or not shared.list or not at or tg < at or tg - at >= PANEL_MS then
+		shared.list, shared.by_avatar = views(tg)
+		shared.at = tg
+	end
+	return shared.list, shared.by_avatar
+end
+
+local function loading_text()
+	local ok, s = pcall(function() return game.translate_string("st_coop_transition_row_loading") end)
+	if ok and type(s) == "string" and s ~= "" and s ~= "st_coop_transition_row_loading" then return s end
+	return "loading"
+end
+
+-- What the panel shows right of his nick: the map he is on, "loading", or the metres from me to him; nil when nothing.
+local function place_text(v)
+	if v.elsewhere then return v.elsewhere end
+	if v.loading then return loading_text() end
+	local M = amap()
+	return M and M.format_distance and M.format_distance(v.dist) or nil
+end
+
+-- The metres from me to player `peer` in the panel's words (the panel's view of this frame), nil when the panel has no metres
+-- for him (no character here, on another map, no panel row). The transition board's rows show exactly this.
+function distance_text(peer, tg)
+	peer = tonumber(peer)
+	if not peer then return nil end
+	for _, v in ipairs((shared_views(tg))) do
+		if v.peer == peer then
+			if v.elsewhere or v.loading then return nil end
+			return place_text(v)
+		end
+	end
+	return nil
 end
 
 -- The records of the players on other maps follow what they said of themselves (the world server's move by the map servers' word).
@@ -611,7 +667,7 @@ end
 
 -- Texts and their places (2 Hz): nick, host star, distance, arrow place.
 function UICoopParty:Fill(r, v, tg)
-	local A, M = allies(), amap()
+	local A = allies()
 	local L, m = self.L, self.m
 	local kx = m.kx
 	-- what the row remembers about him
@@ -654,7 +710,7 @@ function UICoopParty:Fill(r, v, tg)
 		put(r.host, x + 4 * kx, L.team_name_y + (L.team_name_h - L.team_star) / 2)
 		x = x + 4 * kx + L.team_star * kx
 	end
-	local dist = v.elsewhere or M.format_distance(v.dist) or ""
+	local dist = place_text(v) or ""
 	local dw = dist ~= "" and self:TextWidth(r, dist) or 0
 	if r._dist ~= dist then
 		r._dist = dist
@@ -694,7 +750,9 @@ function UICoopParty:Animate(r, tg, heading, cam)
 	local ring_frac -- 0..1: the arcs left of the melting ring
 	local timer, timer_c = nil, nil
 	local since = (tg - (r.at or tg)) / 1000
-	if v.state == "down" then
+	if v.loading then
+		nick_a = 0.5 -- TZ P48: not in this world yet: no health to show, "loading" in amber where the metres stand
+	elseif v.state == "down" then
 		row_a = 0.75 + 0.25 * wave
 		local left = v.bleed and math_max(0, v.bleed - since) or nil
 		local total = tr_.down_total
@@ -739,7 +797,7 @@ function UICoopParty:Animate(r, tg, heading, cam)
 	tint(r.strip, argb(255 * row_a * (grey and 0.45 or 1), r.color))
 	text_color(r.name, argb(255 * row_a * nick_a, grey and CLR.eye or CLR.white))
 	text_color(r.name_sh, GetARGB(math_floor(255 * A_SHADOW * row_a * nick_a), 0, 0, 0))
-	text_color(r.dist, argb(A_DIST * row_a, CLR.dist))
+	text_color(r.dist, argb(A_DIST * row_a, v.loading and CLR.amber or CLR.dist))
 	text_color(r.dist_sh, GetARGB(math_floor(A_DIST * A_SHADOW * row_a), 0, 0, 0))
 	if v.host then tint(r.host, argb(230 * row_a, grey and CLR.eye or r.color)) end -- the host's star in his colour
 	-- segments
@@ -819,7 +877,7 @@ function UICoopParty:Refresh(tg)
 	local list = {}
 	self.vis = party_enabled and hud_visible()
 	if self.vis and live() then
-		list = views(tg)
+		list = shared_views(tg, true) -- TZ P48: the list the transition board reads too
 	end
 	local m = metrics()
 	if not self.m or m.W ~= self.m.W or m.H ~= self.m.H or layout() ~= self.L then self:Relayout() end
