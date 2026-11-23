@@ -880,7 +880,7 @@ SECTIONS = keep_sections
 dui.reset_catalogs()
 
 -------------------------------------------------------------------------------
-print("== settings: opacity, blur (only when the renderer has it), density, walking while open")
+print("== settings: opacity, blur (only when the renderer has it), density; no walking while open (TZ P49)")
 reset()
 dui.reset_settings_cache()
 dui.reset_blur_probe()
@@ -909,8 +909,8 @@ click(w, "btn_set_op_60")
 click(w, "btn_set_blur_3")
 check(dui.get_settings().opacity == 60 and w.blur_img.texture == "$user$blur_8" and axr_main.config.data["coop_debug_ui&blur"] == "3",
 	"opacity and blur strength apply at once and are saved")
-click(w, "btn_set_move_0")
-check(dui.get_settings().move == false and axr_main.config.data["coop_debug_ui&move"] == "false", "walking while open: a setting")
+check(w.callbacks["btn_set_move_0#" .. ui_events.BUTTON_CLICKED] == nil and w.callbacks["btn_set_move_1#" .. ui_events.BUTTON_CLICKED] == nil,
+	"no 'walk while open' setting: the window keeps the keys (TZ P49, test_issue_p49_debug_input)")
 click(w, "btn_set_dens_compact")
 w:Update()
 local w2 = dui.window()
@@ -926,7 +926,7 @@ check(w.pop.blur.btns[2].enabled == false and w.pop.blur.note.shown ~= false, "t
 RENDERER = "renderer_r4"
 window = base_window
 dui.reset_blur_probe()
-dui.get_settings().density, dui.get_settings().move, dui.get_settings().opacity, dui.get_settings().blur = "normal", true, 80, 2
+dui.get_settings().density, dui.get_settings().opacity, dui.get_settings().blur = "normal", 80, 2
 
 -------------------------------------------------------------------------------
 print("== the feed: the server's reason in full")

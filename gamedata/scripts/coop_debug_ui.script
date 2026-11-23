@@ -1,9 +1,16 @@
 --[[
 	Anomaly Coop - the co-op debug window (gamedata\scripts\coop_debug_ui.script), docs\DEBUG_DESIGN.md B.8 and D
 
-	F7 in a session, on every machine (coop_debug_client.on_key_release). A glass panel over the game, not a screen: the crosshair
-	and the world stay in sight, the cursor is free, the player may walk (a setting). The panel can be dragged by its title bar and
-	resized by its edges and the corner grip, anywhere on the screen and on any aspect; everything inside lays itself out again.
+	F7 in a session, on every machine (coop_debug_client.on_key_release). A glass panel over the game: the world stays in sight, the
+	cursor is free. The panel can be dragged by its title bar and resized by its edges and the corner grip, anywhere on the screen
+	and on any aspect; everything inside lays itself out again.
+
+	Input (TZ P49): the window takes the keys like a stock script window and gives them back when it closes. Two parts:
+	  - registered with the stock Register_UI while it is shown (_g.script): KEYS_UNLOCK goes false and bind_stalker_ext drops the
+	    level's on_key_press / on_key_release, which the engine calls before any dialog (Level_input.cpp 206 / 600), so no game
+	    or mod bind fires under it; stock hide_hud_all closes it like its own windows (module GUI:Close);
+	  - the player does not walk under it: AllowMovement(false), so CDialogHolder keeps the movement keys (UIDialogHolder.cpp
+	    329-340). There is no setting for walking.
 
 		title    grip, CO-OP DEBUG, the state of the server debug (dot: green on, grey off, amber waiting), the operator's switch,
 		         the settings popover, close
@@ -52,7 +59,7 @@ DENSITY = {
 	large = { row = 34, btn = 30, font = "body", list = "body", icon = 68 },
 }
 
-DEFAULTS = { x = 1000, y = 150, w = 872, h = 640, opacity = 80, blur = 2, density = "normal", move = true, confirm = true,
+DEFAULTS = { x = 1000, y = 150, w = 872, h = 640, opacity = 80, blur = 2, density = "normal", confirm = true,
 	page = "overview", cat_spawn = "all", cat_npc = "all", sort = "name", favs = "" }
 OPACITY_STEPS = { 60, 70, 80, 90, 100 }
 BLUR_TEX = { "$user$blur_2", "$user$blur_4", "$user$blur_8" }
@@ -542,7 +549,7 @@ end
 function UICoopDebug:InitControls()
 	self:SetWndRect(Frect():set(0, 0, 1024, 768))
 	self:Enable(true)
-	pcall(function() self:AllowMovement(self.S.move == true) end)
+	pcall(function() self:AllowMovement(false) end) -- P49: the keys are the window's, the player does not walk under it
 	pcall(function() self:AllowCursor(true) end)
 	self.T = coop_menu_theme_base.load()
 	local cl = self.T.colors
@@ -1716,11 +1723,6 @@ function UICoopDebug:BuildPopover()
 		self.reopen = true -- every size changes: the window is built again after this click
 	end)
 	local onoff = function(id) return { { id = id .. "_1", text = tr("st_coop_dbg_set_on"), v = true }, { id = id .. "_0", text = tr("st_coop_dbg_set_off"), v = false } } end
-	row("st_coop_dbg_set_move", onoff("move"), function() return self.S.move end, function(v)
-		self.S.move = v
-		save_settings()
-		pcall(function() self:AllowMovement(v == true) end)
-	end)
 	row("st_coop_dbg_set_confirm", onoff("confirm"), function() return self.S.confirm end, function(v) self.S.confirm = v; save_settings() end)
 	P.reset = self:Btn(P.root, "btn_set_reset", tr("st_coop_dbg_set_reset"), "ghost", self.OnResetWindow)
 	P.root:Show(false)
@@ -2209,7 +2211,8 @@ function UICoopDebug:OnKeyboard(dik, keyboard_action)
 	end
 	-- F7 belongs to the level: coop_debug_client toggles the window on its release, and the engine calls the level's
 	-- callback before the dialogs (Level_input.cpp), so the release that opened this window comes here right after.
-	-- Only a release whose press this window saw closes it (then the level's toggle finds it shut, under the guard).
+	-- Only a release whose press this window saw closes it (then the level's toggle finds it shut, under the guard). While the
+	-- window is registered the stock gate keeps that callback from the level, so this is the way F7 closes it in the game.
 	local released = keyboard_action == ui_events.WINDOW_KEY_RELEASED
 	if (pressed or released) and is_f7(dik) then
 		if pressed then
@@ -2225,9 +2228,37 @@ function UICoopDebug:OnKeyboard(dik, keyboard_action)
 	return res
 end
 
+-- stock hide_hud_all / CloseAll_UI close a registered window through its Close (_g.script 227-238)
+function UICoopDebug:Close()
+	close()
+end
+
 -------------------------------------------------------------------------------
 -- Module
 -------------------------------------------------------------------------------
+UI_NAME = "UICoopDebug"
+GUI = nil -- the open window, for the stock helpers that close registered windows by <module>.GUI:Close()
+
+-- The stock contract of a script window (_g.script Register_UI / Unregister_UI; ui_debug_launcher, ui_options, ui_workshop, our
+-- chat): while it is registered KEYS_UNLOCK is false, bind_stalker_ext drops the level's key callbacks (torch, night vision,
+-- quick throw, companions, coop's and every mod's binds) and actor_menu.is_hud_free() is false. An exe without the stock _g
+-- (a test) has no Register_UI: nothing is registered then.
+local function registered()
+	local guis = rawget(_G, "_GUIs")
+	return type(guis) == "table" and guis[UI_NAME] ~= nil
+end
+
+local function register_ui()
+	local f = rawget(_G, "Register_UI")
+	if type(f) == "function" then pcall(f, UI_NAME, "coop_debug_ui") end
+end
+
+local function unregister_ui()
+	if not registered() then return end
+	local f = rawget(_G, "Unregister_UI")
+	if type(f) == "function" then pcall(f, UI_NAME) end
+end
+
 function window()
 	return win
 end
@@ -2238,18 +2269,20 @@ function open(page)
 	local ok, err = pcall(function()
 		local w = UICoopDebug(page or get_settings().page)
 		w:ShowDialog(true)
-		win = w
+		win, GUI = w, w
+		register_ui()
 	end)
 	if not ok then
 		log("! the debug window failed: %s", tostring(err))
-		win = nil
+		win, GUI = nil, nil
+		unregister_ui()
 	end
 	return win
 end
 
 function close()
 	local w = win
-	win = nil
+	win, GUI = nil, nil
 	if w then
 		pcall(function()
 			local S, r = w.S, w.rect
@@ -2258,6 +2291,24 @@ function close()
 		end)
 		pcall(function() if w:IsShown() then w:HideDialog() end end)
 	end
+	unregister_ui()
+end
+
+-- The window hidden some other way than close() (the engine hides the top dialog itself, Level_input.cpp 284): its registration
+-- would keep every key bind of the game off. Dropped on the next update; F7 then opens a new window.
+local function actor_on_update()
+	if not registered() then return end
+	local w = win
+	if w and safe(function() return w:IsShown() end) == true then return end
+	win, GUI = nil, nil
+	unregister_ui()
+	log("the window was hidden without close(): its UI registration removed")
+end
+
+-- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop
+function on_game_start()
+	if not rawget(_G, "coop") then return end -- an exe without co-op: nothing of this runs
+	pcall(RegisterScriptCallback, "actor_on_update", actor_on_update)
 end
 
 -- the window built again (a new density), on the same page

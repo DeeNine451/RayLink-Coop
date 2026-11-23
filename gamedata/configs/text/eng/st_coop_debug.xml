@@ -751,9 +751,6 @@
 	<string id="st_coop_dbg_set_dens_large">
 		<text>Large</text>
 	</string>
-	<string id="st_coop_dbg_set_move">
-		<text>Walk while open</text>
-	</string>
 	<string id="st_coop_dbg_set_confirm">
 		<text>Ask first</text>
 	</string>
@@ -767,6 +764,6 @@
 		<text>Reset place and size</text>
 	</string>
 	<string id="st_coop_dbg_help_window">
-		<text>The window: drag it by the title bar, resize it by the edges or the corner; View (top right) sets opacity, blur, density, walking while open and the questions before destructive actions. It is kept on this computer only.</text>
+		<text>The window: drag it by the title bar, resize it by the edges or the corner; View (top right) sets opacity, blur, density and the questions before destructive actions. It is kept on this computer only. While it is open the keys are the window's: the game and its key binds get them back when it closes.</text>
 	</string>
 </string_table>
