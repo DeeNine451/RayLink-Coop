@@ -3,6 +3,9 @@
    runlua.exe -stamp prints the source stamp tools\test_lua.cmd built it from (RUNLUA_STAMP), to spot a stale exe. */
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
@@ -16,12 +19,23 @@ int luaopen_coop_native(lua_State* L);
 int main(int argc, char** argv)
 {
 	int rc = 0, i, check_only = 0;
+#ifdef _WIN32
+	/* A crash ends the run with its code: no modal Windows error box that keeps the process (and run_all) waiting. */
+	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#endif
 	for (i = 1; i < argc; ++i)
 	{
 		lua_State* L;
 		if (!strcmp(argv[i], "-c")) { check_only = 1; continue; }
 		if (!strcmp(argv[i], "-stamp")) { printf("%s\n", RUNLUA_STAMP); continue; }
 		L = luaL_newstate();
+		if (!L)
+		{
+			/* LuaJIT could not get its memory (machine out of commit): say so instead of writing through NULL. */
+			printf("RUNTIME ERROR: out of memory: no Lua state for %s\n", argv[i]);
+			fflush(stdout);
+			return 3;
+		}
 		luaL_openlibs(L);
 		luaopen_coop_native(L);
 		lua_settop(L, 0);

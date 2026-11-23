@@ -6,13 +6,15 @@ rem real scripts from gamedata\scripts by relative path). One row per file: "<n>
 rem The runner temp\lua\runlua.exe is built from tests\lua\runlua.c and tests\lua\native_coop.cpp (the coop_native
 rem module over the engine\src\xrCoop headers it includes) when it is missing or stale; LUA_REBUILD=1 forces a build.
 rem   Stale: the stamp built into the exe (runlua.exe -stamp) differs from the stamp of the sources now, the first 8 hex
-rem   digits of the SHA-1 of runlua.c, native_coop.cpp, every engine\src\xrCoop header native_coop.cpp includes and
-rem   this script.
+rem   digits of the SHA-1 of runlua.c, native_coop.cpp, every engine\src\xrCoop header native_coop.cpp includes,
+rem   this script and the lua51.lib it links (2026-11-23: a runner linked to an old lib kept the LuaJIT GC barrier bug that
+rem   f8470a3c fixed in the engine, and test_credit_events crashed 1 run in 40).
 rem   Parallel runs: a build goes to its own folder temp\lua\b_<random> (own .obj and .exe), then replaces the shared
 rem   exe with one "move /y" (no delete first, so there is no moment without an exe). While another run is using the
 rem   shared exe the move fails: this run says so loudly and runs on its own fresh build; the next run that finds the
 rem   shared exe free replaces it.
-rem   LUA51_LIB   path to the engine's static lua51.lib (default: engine\_build, then engine-ci\_build, Release-AVX)
+rem   LUA51_LIB   path to the engine's static lua51.lib (default: engine-ci\_build, the build of the current engine
+rem               sources, then engine\_build, Release-AVX)
 rem   VCVARS      path to vcvars64.bat
 rem Per-file output: temp\lua\out\<name>.txt (COOP_LUA_OUT=<dir> moves it: tests\lua\run_all.lua reads the variable).
 rem First step: tools\check_layers.py (the layer border, docs/MODES.md section 5); a refusal stops the run with exit 254
@@ -52,6 +54,9 @@ if not defined GAMMA_SCRIPTS if exist "E:\RayLinkGames\GAMMA\game-dev\gamedata\s
 if not exist "%OUT%\out" mkdir "%OUT%\out"
 
 rem --- is the shared runner up to date?
+rem the lib first: it is part of the stamp
+if not defined LUA51_LIB set "LUA51_LIB=%ROOT%\engine-ci\_build\_game\bin_dbg\x64\Release-AVX\lua51.lib"
+if not exist "%LUA51_LIB%" set "LUA51_LIB=%ROOT%\engine\_build\_game\bin_dbg\x64\Release-AVX\lua51.lib"
 set "STAMP="
 call :hash "%ROOT%\tests\lua\runlua.c"
 call :hash "%ROOT%\tests\lua\native_coop.cpp"
@@ -59,6 +64,7 @@ for /f "tokens=2" %%I in ('findstr /b /c:"#include" "%ROOT%\tests\lua\native_coo
 	if exist "%ROOT%\engine\src\xrCoop\%%~I" call :hash "%ROOT%\engine\src\xrCoop\%%~I"
 )
 call :hash "%~f0"
+if exist "%LUA51_LIB%" call :hash "%LUA51_LIB%"
 set "HAVE=none"
 if exist "%OUT%\runlua.exe" for /f "tokens=1" %%S in ('call "%OUT%\runlua.exe" -stamp') do set "HAVE=%%S"
 if defined LUA_REBUILD goto build
@@ -68,8 +74,6 @@ if exist "%OUT%\runlua.exe" echo [test_lua] temp\lua\runlua.exe is stale ^(built
 :build
 rem --- build runlua.exe (the engine's LuaJIT, static lua51.lib) in a private folder
 if not defined VCVARS set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-if not defined LUA51_LIB set "LUA51_LIB=%ROOT%\engine\_build\_game\bin_dbg\x64\Release-AVX\lua51.lib"
-if not exist "%LUA51_LIB%" set "LUA51_LIB=%ROOT%\engine-ci\_build\_game\bin_dbg\x64\Release-AVX\lua51.lib"
 set "WHY="
 if not exist "%VCVARS%" set "WHY=vcvars64.bat not found: %VCVARS% (set VCVARS to override)"
 if not defined WHY if not exist "%LUA51_LIB%" set "WHY=lua51.lib not found (build the engine first or set LUA51_LIB)"
