@@ -15,7 +15,10 @@
 	is an order to the map server of that level.
 
 	An order is held here until the map server answers. When that server is gone, or the object went home, the world server carries it out
-	on its own record; for an object that is no more it is dropped with a line in the log.
+	on its own record; for an object that is no more it is dropped with a line in the log. One order is held per (object, verb,
+	arguments): a task check that asks the same again while it is held adds nothing (P45b); give_money adds up and is never merged; a
+	setting (info/uninfo of a name, health, place, ...) merges with its newest order only, so the map server ends on the last call.
+	A sound object a task gets inside a scope takes a stand-in as no owner (FP45b: the ghost's blow of Mystery of the Swamps).
 
 	The death relay. A death on a map server's level reaches the world through LevelEntity Died, which runs only the server's on_death. The
 	engine calls on_death here (coop_levels_alife.cpp host_apply_death) and this calls the handlers of the domain host of
@@ -30,7 +33,7 @@
 		in_scope()                              the open scope, nil outside
 		object(id)                              a stand-in of id
 		note_fail(task_id)                      what a task that failed in a scope looked for and what it got
-		order(id, verb, a, b, c)                a change to a far object
+		order(id, verb, a, b, c)                a change to a far object; true while it (or the same one before it) is held
 		add_death_listener(callback, f)         a coop script's handler for the relay (coop_* are view: they do not pass by domain); the
 		                                        Core keeps the list (coop_quests_core.add_death_listener)
 		on_death(victim, killer)                the engine
@@ -70,7 +73,7 @@ end
 local function world_server() return api ~= nil and qc().is_host() end
 local function map_server() return api ~= nil and qc().is_map_server() end
 
-local stats = { scopes = 0, orders = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
+local stats = { scopes = 0, orders = 0, repeats = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
 
 local scope = nil -- the far view that is open
 -- (anomalies, inside_zones, alife, CreateTimeEvent, hit): the stock's globals a far view swaps. Set from coop_mode.when_srv (on_game_start):
@@ -232,6 +235,18 @@ function class:active_item()
 	if not sec then return nil end
 	return setmetatable({ item_id = 0, item_section = sec, item_condition = 1, item_owner = self }, item_class)
 end
+-- P45b: the infos the far view's orders gave or took, by object. The world's record does not learn an info a map server gives (no
+-- caller of LevelSide::level_info_up yet), and the stock's guard (tasks_recover_item_on_corpse kill_if_online_mutant: has_info, then
+-- give_info_portion and a hit) gave and hit again at every check once the map server had answered. The last order's word stands, as
+-- the stock's give_info_portion counts at once; the record answers the rest. Forgotten with the record (on_unregister).
+local infos_given = {} -- world server: id -> { info -> true / false }
+function class:has_info(name)
+	local g = infos_given[self[4]]
+	local v = g and g[name]
+	if v ~= nil then return v end
+	return qc().record_method("has_info")(self, name)
+end
+function class:dont_has_info(name) return not self:has_info(name) end
 function class:transfer_item(item, to)
 	alife_release_id(item:id())
 	local cond = item:condition() -- as worn as the one that went (coop_quests_core far_body_class:transfer_item)
@@ -456,6 +471,44 @@ local function far_hit_of(stock)
 	})
 end
 
+-- FP45b: a sound a task plays inside a scope on a stand-in. The engine's sound_object takes only its own game object as the owner
+-- (script_sound_script.cpp: play(game_object[, float[, int]])), and luabind refused the stand-in before the rest of the stock function
+-- ran: tasks_mystery_of_the_swamps.spawn_garbage_ghost, run as the nearest standing player (coop_mods_nta install_mystery, then
+-- coop_mods_core.as_player: db.actor is his stand-in), plays its 2D hit sound on db.actor and never reached its blow, which class:hit
+-- orders on his avatar. Inside a scope a stand-in (the `far` mark of make and coop_quests_core far_body) is no owner: the sound plays
+-- as one of nobody on the world server, which has no listener. The struck player hears that 2D sound no less than in the co-op: the
+-- engine relays no 2D sound of an object (coop_sound.cpp on_script_sound) and coop_world_fx relays one of nobody or of the actor
+-- only, so there the host's own process alone plays it. A 3D sound of a far object is not heard by the players near it (no order
+-- carries a sound). Another table as the owner is luabind's error as before.
+local function engine_owner(obj)
+	if type(obj) == "table" and rawget(obj, "far") == true then return nil end
+	return obj
+end
+
+local function far_sound(real)
+	local function owner_free(name)
+		return function(_, obj, ...)
+			local f = real[name]
+			return f(real, engine_owner(obj), ...)
+		end
+	end
+	local own = { play = owner_free("play"), play_at_pos = owner_free("play_at_pos"), play_no_feedback = owner_free("play_no_feedback") }
+	local w = {}
+	return setmetatable(w, {
+		__index = function(_, k)
+			local m = own[k]
+			if m then return m end
+			local v = real[k]
+			if type(v) ~= "function" then return v end
+			return function(self, ...)
+				if self == w then return v(real, ...) end
+				return v(self, ...)
+			end
+		end,
+		__newindex = function(_, k, v) real[k] = v end,
+	})
+end
+
 local function open(lid, peer, what)
 	local gg_name = alife():level_name(lid)
 	local q = qc()
@@ -618,10 +671,52 @@ end
 -------------------------------------------------------------------------------
 -- Orders
 -------------------------------------------------------------------------------
-local orders = {} -- world server: number -> { id, verb, a, b, c, bridge, sent, sends }
+local orders = {} -- world server: number -> { id, verb, a, b, c, bridge, sent, sends, key, setting }
 local next_order = 0
 local done = {} -- map server: number -> true, the last ones
 local done_list = {}
+
+-- P45b (RL-89RT-DQYR #1664): one held order per (object, verb, arguments). A task check runs again and again while the world's
+-- record has not changed yet: tasks_recover_item_on_corpse kill_if_online(corpse) and kill_if_online_mutant(critter) at every
+-- check, the stock's set_health_ex at every relayed hit of the_living_fire. Each call was a new order with up to MAX_SENDS sends.
+-- A repeat while one is held adds nothing; once it is answered, carried out or dropped, a new one may be made. A sum is never
+-- merged: two payments of the same amount are two.
+-- A setting merges with its newest order only (FP45b): info and uninfo of one name are one setting, a relation and a goodwill one per
+-- the other side, a community goodwill one per community, health, place and the community one each. Given A, B, A while A is held,
+-- the third is a new order: the map server takes them in that order and ends on the last call, as each call was its own order before
+-- P45b (a merge with the held A ended it on B, and the stand-in's has_info said the opposite of the map server's).
+local newest = {} -- world server: setting of a held order -> the number of its newest order
+local SUMS = { money = true }
+local SETTINGS = {
+	info = function(a) return "info", a end,
+	uninfo = function(a) return "info", a end,
+	relation = function(a, b) return "relation", b end,
+	goodwill = function(a, b) return "goodwill", b end,
+	comm_goodwill = function(a) return "comm_goodwill", a end,
+	community = function() return "community" end,
+	health = function() return "health" end,
+	place = function() return "place" end,
+}
+
+local function arg_key(v) return type(v) .. ":" .. tostring(v) end
+local function key_of(id, verb, a, b, c)
+	if SUMS[verb] then return nil end
+	return table.concat({ arg_key(id), tostring(verb), arg_key(a), arg_key(b), arg_key(c) }, "|")
+end
+-- What a repeat merges with: the setting, or for a verb that sets nothing (kill, hit, release, companion) the order itself.
+local function setting_of(key, id, verb, a, b, c)
+	local f = key and SETTINGS[verb]
+	if not f then return key end
+	local name, side = f(a, b, c)
+	return table.concat({ arg_key(id), name, arg_key(side) }, "|")
+end
+
+-- The order is no longer held: answered, carried out or dropped.
+local function forget(q)
+	local o = orders[q]
+	orders[q] = nil
+	if o and o.setting and newest[o.setting] == q then newest[o.setting] = nil end
+end
 
 local function send_order(q, o)
 	o.sent = time_global()
@@ -631,11 +726,24 @@ end
 
 function order(id, verb, a, b, c)
 	if not world_server() then return false end
+	if (verb == "info" or verb == "uninfo") and type(id) == "number" and type(a) == "string" then
+		local g = infos_given[id] or {}
+		infos_given[id] = g
+		g[a] = verb == "info"
+	end
+	local key = key_of(id, verb, a, b, c)
+	local setting = setting_of(key, id, verb, a, b, c)
+	local q = setting and newest[setting]
+	if q and orders[q] and orders[q].key == key then
+		stats.repeats = stats.repeats + 1
+		return true
+	end
 	next_order = next_order + 1
-	local o = { id = id, verb = verb, a = a, b = b, c = c, sends = 0 }
+	local o = { id = id, verb = verb, a = a, b = b, c = c, sends = 0, key = key, setting = setting }
 	stats.orders = stats.orders + 1
 	o.bridge = bridge_of_level(level_of_id(id))
 	orders[next_order] = o
+	if setting then newest[setting] = next_order end
 	if o.bridge then send_order(next_order, o) end
 	return true
 end
@@ -703,7 +811,7 @@ local ON_RECORD = {
 }
 
 local function carry_out(q, o, why)
-	orders[q] = nil
+	forget(q)
 	local se = alife_object(o.id)
 	if not se then
 		stats.dropped = stats.dropped + 1
@@ -788,7 +896,7 @@ local function on_ack(t, from)
 	if not o then return end
 	stats.acks = stats.acks + 1
 	-- not online there yet: the tick asks again, a player near it brings it online; when it never comes the record takes the order
-	if t.r == 1 then orders[q] = nil end
+	if t.r == 1 then forget(q) end
 end
 
 function orders_held()
@@ -892,7 +1000,7 @@ function on_death(victim, killer)
 end
 
 local function on_unregister(se)
-	if se and se.id then heard[se.id] = nil end
+	if se and se.id then heard[se.id], infos_given[se.id] = nil, nil end
 end
 
 local function on_vehicle_death(t, from)
@@ -1031,12 +1139,13 @@ local function tick()
 end
 
 function print_status()
-	qc().log(TAG, "scopes %d | orders %d, answered %d, on records %d, dropped %d, held now %d | deaths relayed %d | hits out %d, in %d | leaks %d",
-		stats.scopes, stats.orders, stats.acks, stats.on_record, stats.dropped, orders_held(), stats.deaths, stats.hits_out, stats.hits_in, stats.leaks)
+	qc().log(TAG, "scopes %d | orders %d, repeats while held %d, answered %d, on records %d, dropped %d, held now %d | deaths relayed %d | hits out %d, in %d | leaks %d",
+		stats.scopes, stats.orders, stats.repeats, stats.acks, stats.on_record, stats.dropped, orders_held(), stats.deaths, stats.hits_out,
+		stats.hits_in, stats.leaks)
 end
 
 function _tick() next_tick = 0; tick() end
-function _orders_clear() orders = {} end
+function _orders_clear() orders, newest = {}, {} end
 function _stats() return stats end
 function _names_of() return names_of end
 
@@ -1128,6 +1237,17 @@ function on_game_start()
 				_G.alife_release_id = function(id, ...)
 					if held_there(alife_object(id)) then return order(id, "release") end
 					return a_release_id(id, ...)
+				end
+			end
+			-- FP45b: a sound object handed out inside a scope takes a stand-in as no owner (far_sound); outside one it is the stock's.
+			-- coop_world_fx's stand-in of xr_sound (TASK_SCRIPTS) asks this module's function at each call, so it gets the same.
+			local xs = q_mod("xr_sound")
+			local get_safe = xs and xs.get_safe_sound_object
+			if type(get_safe) == "function" then
+				xs.get_safe_sound_object = function(...)
+					local snd = get_safe(...)
+					if scope and snd ~= nil then return far_sound(snd) end
+					return snd
 				end
 			end
 			-- `smart.online` of the stock: the rest of this condition reads the actor's place, which a check keeps at the player's
