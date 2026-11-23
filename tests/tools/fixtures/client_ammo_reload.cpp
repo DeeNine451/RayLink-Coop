@@ -260,6 +260,7 @@ void install_upgrades(PIItem item, const UpgradeList& list) { item->upgrades = l
 UpgradeList spawn_upgrade_list(const shared_str&, const UpgradeList& list, bool) { return list; }
 void reject(Reason, PeerId, u16, const char*) { assert(false && "unexpected rejected owner state"); }
 Access host_access(PeerId, u16 proxy, CSE_Abstract* e) { return e->root == proxy ? Access::Owned : Access::Denied; }
+bool late_report_of_gift(PeerId, u16, u16) { return false; } // a giver's late report: tests/tools/test_items_gift_late.py
 // Production kind/count validation is unchanged. This harness focuses on state flow.
 bool host_validate_kind(CSE_Abstract*, const ItemData&, const char*&) { return true; }
 bool host_validate_counts(CSE_Abstract*, PIItem, const ItemData&, const char*&) { return true; }

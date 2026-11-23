@@ -10,7 +10,9 @@ from test_weapon_brief_info import ROOT, definition
 
 @pytest.fixture(scope="module")
 def delivery_runner():
-    work = ROOT / "temp/trade_delivery"
+    # COOP_TEST_OUT=<dir>: the work folder is <dir>/trade_delivery (parallel runs must not share one)
+    out = os.environ.get("COOP_TEST_OUT")
+    work = (Path(out) if out else ROOT / "temp") / "trade_delivery"
     work.mkdir(parents=True, exist_ok=True)
     game = ROOT / "engine/src/xrGame/coop"
     trade = game / "coop_trade.cpp"
@@ -52,6 +54,8 @@ def delivery_runner():
     "gift-success", "gift-rejected-take", "gift-cannot-take", "gift-stale-owner",
     "gift-recipient-full", "gift-destroying-recipient", "gift-drop", "gift-ground-take",
     "gift-host-script", "gift-host-script-refused", "gift-host-script-stale", "gift-host-script-offline",
+    "gift-host-script-self", "gift-host-script-self-moved", "gift-host-script-already", "gift-host-script-dying",
+    "gift-host-script-missing",
 ])
 def test_purchase_is_delivered_or_not_charged(delivery_runner, scenario):
     run = subprocess.run([str(delivery_runner), scenario], capture_output=True, text=True, timeout=10)

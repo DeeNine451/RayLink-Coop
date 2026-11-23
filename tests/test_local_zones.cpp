@@ -7,7 +7,12 @@
 #include "coop_id_lease.h"
 #include "coop_local_zones.h"
 
+#include <cstdlib>
+#include <fstream>
+#include <regex>
 #include <set>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace coop;
@@ -197,4 +202,70 @@ TEST(zones_a_new_world_forgets_them)
 	CHECK(!book.has(a));
 	CHECK(book.retire(pool, a, reserve_ok) == zones::Fate::NotOurs); // a release of a zone of the old world
 	CHECK_EQ(pool.size(), size_t(0));
+}
+
+// ---------------------------------------------------------------- the engine's release of a zone (report #859)
+// local_zone_release (engine/src/xrGame/coop/coop_requests.cpp) cannot be linked into this exe; tests/tools/test_local_zone_release.py
+// runs it over stubs. This guard keeps its wiring in the native suite: a zone of ours released while the world is not ready (the
+// client leaves it: a disconnect, a rejoin, a load; builds 56-57 gave one red line per zone and then the stock release a client's
+// world call cannot make) is taken out of the book and handled here, without a line and without the stock release.
+// COOP_REQUESTS_CPP=<file> reads that copy instead of the tree's (mutation checks).
+namespace
+{
+std::string zones_requests_source()
+{
+	std::string path;
+	if (const char* other = std::getenv("COOP_REQUESTS_CPP"))
+		path = other;
+	else
+	{
+		const std::string here = __FILE__;
+		const size_t slash = here.find_last_of("/\\");
+		path = (slash == std::string::npos ? std::string(".") : here.substr(0, slash) + "/..") +
+		       "/engine/src/xrGame/coop/coop_requests.cpp";
+	}
+	std::ifstream in(path, std::ios::binary);
+	if (!in.good())
+		t::report_failure(__FILE__, __LINE__, "cannot read " + path);
+	std::ostringstream out;
+	out << in.rdbuf();
+	return out.str();
+}
+
+// One top-level function (it closes at the start of a line), comments dropped, white space folded. Empty when absent.
+std::string zones_function_of(const std::string& source, const char* signature)
+{
+	const size_t start = source.find(signature);
+	if (start == std::string::npos)
+		return std::string();
+	const size_t end = source.find("\n}", start);
+	if (end == std::string::npos)
+		return std::string();
+	std::string body = std::regex_replace(source.substr(start, end + 2 - start), std::regex(R"(//[^\n]*)"), "");
+	return std::regex_replace(body, std::regex(R"(\s+)"), " ");
+}
+} // namespace
+
+TEST(zones_a_release_while_the_world_goes_is_retired_quietly)
+{
+	const std::string code = zones_function_of(zones_requests_source(), "bool local_zone_release(");
+	REQUIRE(!code.empty());
+	const size_t has = code.find("if (!g_zones.has(id)) return false;");
+	const size_t going = code.find("if (!lease_world_ready()) {");
+	const size_t red = code.find("is not an offline object of ours here");
+	CHECK(has != std::string::npos);
+	CHECK(going != std::string::npos);
+	CHECK(red != std::string::npos);
+	if (has == std::string::npos || going == std::string::npos || red == std::string::npos)
+		return;
+	CHECK(has < going); // only a zone of ours
+	CHECK(going < red); // before the red line of a ready world
+	const size_t close = code.find('}', going);
+	REQUIRE(close != std::string::npos);
+	const std::string branch = code.substr(going, close - going);
+	CHECK(branch.find("g_zones.cancel(id)") != std::string::npos); // out of the book: its id goes with that world's pool
+	CHECK(branch.find("++g_lc.zones_left") != std::string::npos);
+	CHECK(branch.find("return true;") != std::string::npos); // handled: no stock release
+	CHECK(branch.find("Msg(") == std::string::npos); // no line
+	CHECK(branch.find("release(") == std::string::npos); // nothing released from a world that is going
 }
