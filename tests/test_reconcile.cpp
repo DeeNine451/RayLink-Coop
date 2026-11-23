@@ -959,11 +959,56 @@ TEST(reconcile_r32_the_digest_reaches_the_links_too)
 TEST(reconcile_r32_a_stalled_move_asks_spawn_only_for_what_is_missing)
 {
 	CHECK_EQ(stalled_ask(true), uint8_t(Parent | State)); // here: its holder and its state
-	CHECK_EQ(stalled_ask(false), uint8_t(Spawn | Parent | State)); // missing: its spawn first
+	CHECK_EQ(stalled_ask(false), uint8_t(Spawn | Parent | State | Gone)); // missing: ask for its spawn or destruction
 	const std::string src = game_source("coop_events.cpp");
 	const std::string body = between(src, "void client_step_parents()", "\n}\n");
 	CHECK(body.find("w.u8(reconcile::stalled_ask(find_entity(id) != nullptr));") != npos);
 	CHECK(body.find("w.u8(reconcile::Spawn | reconcile::Parent | reconcile::State);") == npos);
+}
+
+// REP-RECON (#804): either destroy message cancels pending work even if the entity never arrived.
+TEST(reconcile_destroy_forgets_pending_parent_and_death)
+{
+	const std::string entities = game_source("coop_entities.cpp");
+	const std::string destroy = between(entities, "void client_on_destroy(PeerId, Reader& r)", "\n}\n");
+	const size_t forget = destroy.find("events::client_forget(id);");
+	const size_t remove = destroy.find("client_remove(id);");
+	CHECK(forget != npos && remove != npos && forget < remove);
+
+	const std::string events = game_source("coop_events.cpp");
+	const std::string body = between(events, "void client_forget(u16 local_id)\n{", "\n}\n");
+	CHECK(body.find("g_parent_targets.erase(local_id);") != npos);
+	CHECK(body.find("g_death_targets.erase(local_id);") != npos);
+}
+
+TEST(reconcile_local_destroy_forgets_pending_work_before_looking_for_the_object)
+{
+	const std::string src = game_source("coop_events.cpp");
+	const std::string handler = between(src, "void client_on_entity_local(PeerId, Reader& r)", "\n}\n");
+	const std::string destroy = between(handler, "if (op == 1)", "if (op != 0)");
+	const size_t forget = destroy.find("client_forget(id);");
+	const size_t find = destroy.find("find_go(id)");
+	CHECK(forget != npos && find != npos && forget < find);
+}
+
+TEST(reconcile_gone_checks_for_live_non_alife_entities_before_replying_with_destroy)
+{
+	const std::string src = game_source("coop_entities.cpp");
+	const std::string handler = between(src, "void host_on_entity_request(PeerId from, Reader& r)", "\n}\n");
+	const std::string missing = between(handler, "if (!e)", "\n\t}\n");
+	CHECK(missing.find("(what & reconcile::Gone) && !events::find_entity(id)") != npos);
+	CHECK(missing.find("send_destroy();") != npos);
+	const std::string live = between(handler, "what &= reconcile::Spawn", "// R32 W5:");
+	CHECK(live.find("if (what & reconcile::Replace)\n\t\tsend_destroy();") != npos);
+}
+
+TEST(reconcile_parent_timeout_marks_an_error_only_when_the_item_exists)
+{
+	const std::string src = game_source("coop_events.cpp");
+	const std::string handler = between(src, "void client_step_parents()", "\n}\n");
+	const std::string timeout = between(handler, "++g_c.parent_timeouts;", "// RL-UGYE-3WGE:");
+	CHECK(timeout.find("const bool item_here = find_entity(item) != nullptr;") != npos);
+	CHECK(timeout.find("::Msg(\"%s[coop] item %u [%s]: could not move it to %u in time\", item_here ? \"! \" : \"\",") != npos);
 }
 
 // Finding 3: a map server compares its world's digest. What is online on its map is its own (the world holds such an object offline:
