@@ -420,9 +420,12 @@ local function install_skinning(mcm)
 				animate = animate, first = first, target = target, parts = {}, queued = {}, next = 1, create = create,
 			}
 			rawset(_G, "alife_create_item", function(section, owner, ...)
-				-- Nested callbacks (even for the same section) are independent of this Loot call.
-				local caller = debug.getinfo(2, "f")
-				if not (caller and caller.func == orig and owner and owner:id() == op.owner) then
+				-- A give of this window is made by a method running on it: its caller's first local is this `self`. Not
+				-- `orig`: G.A.M.M.A. wraps Loot before us (Immersive Skinning, coop_world_fx_mods), so the caller is the
+				-- stock Loot at the bottom of the chain (TZ P47). Nested callbacks (even for the same section) are
+				-- independent of this Loot call.
+				local _, receiver = debug.getlocal(2, 1)
+				if not (rawequal(receiver, self) and owner and owner:id() == op.owner) then
 					return create(section, owner, ...)
 				end
 				if #op.queued > 0 or needs_lease() then
