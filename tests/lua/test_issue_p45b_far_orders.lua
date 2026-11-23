@@ -227,6 +227,7 @@ local function sound_play(self, method, obj, delay, flags, pos, volume, frequenc
 	PLAYS[#PLAYS + 1] = { path = self.path, owner = obj, delay = delay, flags = flags, pos = pos,
 		volume = volume or self.volume, frequency = frequency }
 end
+function SOUND_MT:length() return 1 end
 function SOUND_MT:play(obj, delay, flags) sound_play(self, "play", obj, delay, flags) end
 function SOUND_MT:play_at_pos(obj, pos, delay, flags) sound_play(self, "play_at_pos", obj, delay, flags, pos) end
 function SOUND_MT:play_no_feedback(obj, flags, delay, pos, volume, frequency)
@@ -241,6 +242,23 @@ xr_sound = { get_safe_sound_object = function(path)
 	SOUNDS[path] = SOUNDS[path] or sound_object(path)
 	return SOUNDS[path]
 end }
+local function stock_sound_script(name)
+	local path = GAMMA_DIR .. BS .. name .. ".script"
+	if have_file(path) then return path end
+	path = "../anomaly-ref/unpacked/scripts/" .. name .. ".script"
+	if have_file(path) then return path end
+	return "temp/stock_scripts/scripts/" .. name .. ".script"
+end
+local ZERO = vec(0, 0, 0)
+local CAPTION_OWNER
+sound_theme = {
+	actor_sound = {}, theme = {}, can_play_sound = {}, VEC_ZERO = ZERO,
+	closecaption = { sound = function(_, _, actor) CAPTION_OWNER = actor return true end },
+}
+assert(mod_chunk(stock_sound_script("sound_theme"),
+	{ "function actor_sound:play(", "function actor_sound:select_next_sound(" },
+	"sound_theme", "return actor_sound.play"))
+assert(mod_chunk(stock_sound_script("xr_sound"), { "function set_sound_play(" }, "xr_sound", "return set_sound_play"))
 local teleport_visuals = {}
 for _, name in ipairs({ "nta_utils", "new_tasks_addon_tasks_utils" }) do
 	local f = assert(mod_chunk(GAMMA_DIR .. BS .. name .. ".script", { "function teleport_visual()" }, name, "return teleport_visual"))
@@ -456,13 +474,27 @@ local function world_server()
 		alive = alive_fn(true) }
 	for _ = 1, 3 do far.object(630):kill() end
 	check(far.orders_held() == 1, "a kill on a record: held once")
+	local kill_dropped, log_from = far._stats().dropped, #LOG
 	RECORDS[630] = nil
 	CLOCK = CLOCK + 4000
 	pcall(far._tick)
 	check(far.orders_held() == 0, "the record is no more: the order is dropped")
+	check(far._stats().dropped == kill_dropped + 1 and LOG[log_from + 1]
+		and LOG[log_from + 1]:find("far: order kill on 630 dropped: the object is no more", 1, true),
+		"a missing kill target still counts as dropped and logs why")
 	far.order(630, "kill")
 	check(far.orders_held() == 1, "after the drop a new one may be made")
 	far._orders_clear()
+
+	print("== srv_world: a held release whose record is gone is done silently")
+	RECORDS[630] = { id = 630, m_game_vertex_id = 20, parent_id = 65535 }
+	check(far.order(630, "release") and far.orders_held() == 1, "the release waits for its map server")
+	local carried, dropped, release_log_from = far._stats().on_record, far._stats().dropped, #LOG
+	RECORDS[630] = nil
+	far._tick()
+	check(far.orders_held() == 0 and far._stats().on_record == carried + 1 and far._stats().dropped == dropped,
+		"the gone release is cleared and counts as carried out")
+	check(#LOG == release_log_from, "the gone release writes no log line: " .. tostring(LOG[release_log_from + 1]))
 
 	print("== every verb of a stand-in: five calls while held, one order; other arguments, another order")
 	local who = far.object(500)
@@ -605,6 +637,31 @@ local function mystery_ghost(qc, far)
 	check(xr_sound.get_safe_sound_object("x") == SOUNDS["x"], "get_safe_sound_object answers the engine's object outside a scope")
 end
 
+local function actor_theme_sound(qc, far)
+	print("== srv_world: the stock PDA actor theme takes no engine owner inside a far scope")
+	local function play()
+		sound_theme.can_play_sound[0] = true
+		sound_theme.theme.pda_tips = setmetatable({ class_id = "actor_sound", sound = { "pda/tips" }, shuffle = "rnd" },
+			{ __index = sound_theme.actor_sound })
+		xr_sound.sound_table = {}
+		return xr_sound.set_sound_play(ACTOR:id(), "pda_tips")
+	end
+	PLAYS = {}
+	local remote = far.object(500)
+	local ok, snd = qc.with_target(620, 1, TASK, coop_mods_core.as_player, remote, play)
+	local p = PLAYS[1]
+	check(ok and #PLAYS == 1 and p.owner == nil and p.pos == ZERO and p.flags == STOCK_SOUND.s2d,
+		"xr_sound.set_sound_play plays at the stock position with no far owner: " .. tostring(snd))
+	check(ok and CAPTION_OWNER == remote and getmetatable(snd) == SOUND_MT,
+		"captions keep the far actor and the theme returns its cached engine sound")
+	PLAYS = {}
+	snd = play()
+	p = PLAYS[1]
+	check(#PLAYS == 1 and p.owner == ACTOR and p.pos == ZERO and p.flags == STOCK_SOUND.s2d
+		and getmetatable(snd) == SOUND_MT and sound_object == STOCK_SOUND,
+		"outside the scope xr_sound returns the engine sound and plays it on the real actor")
+end
+
 local function direct_sounds(qc, far, in_world)
 	print("== direct sound constructors in task helpers, xr_effects and dialogs")
 	level.add_pp_effector = function() end
@@ -744,6 +801,7 @@ local tests = {
 	srv_world = function()
 		local qc, far = world_server()
 		mystery_ghost(qc, far)
+		actor_theme_sound(qc, far)
 		direct_sounds(qc, far, true)
 	end,
 	srv_map = map_server,

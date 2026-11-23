@@ -828,6 +828,10 @@ local function carry_out(q, o, why)
 	forget(q)
 	local se = alife_object(o.id)
 	if not se then
+		if o.verb == "release" then
+			stats.on_record = stats.on_record + 1
+			return
+		end
 		stats.dropped = stats.dropped + 1
 		printf("[coop] far: order %s on %s dropped: the object is no more", o.verb, tostring(o.id))
 		return
@@ -1275,6 +1279,32 @@ function on_game_start()
 					for _, name in ipairs({ "dialogs_lostzone", "xr_effects" }) do
 						local m = q_mod(name)
 						if m and rawget(m, "sound_object") == nil then rawset(m, "sound_object", stand_in) end
+					end
+					-- actor_sound:play uses db.actor for both the engine owner and captions.
+					-- Adapt its constructor during this call and keep the engine object in the theme's cache.
+					local st = q_mod("sound_theme")
+					local actor_sound = st and st.actor_sound
+					local play = actor_sound and actor_sound.play
+					if type(play) == "function" then
+						actor_sound.play = function(theme, ...)
+							if not scope or not db.actor or engine_owner(db.actor) then return play(theme, ...) end
+							local previous = rawget(st, "sound_object")
+							local make = previous or stock_class
+							local real, wrapped
+							rawset(st, "sound_object", setmetatable({}, {
+								__index = make,
+								__call = function(_, ...)
+									real = make(...)
+									wrapped = far_sound(real)
+									return wrapped
+								end,
+							}))
+							local ok, result = pcall(play, theme, ...)
+							rawset(st, "sound_object", previous)
+							if wrapped and theme.snd_obj == wrapped then theme.snd_obj = real end
+							if not ok then error(result, 0) end
+							return result
+						end
 					end
 				end
 			end
