@@ -664,10 +664,24 @@ end
 -------------------------------------------------------------------------------
 -- Fair Fast Travel: a trip without time
 -------------------------------------------------------------------------------
+local cross_map_guard
+
+function set_cross_map_guard(guard)
+	cross_map_guard = guard
+end
+
+function allow_cross_map_travel()
+	return not cross_map_guard or cross_map_guard()
+end
+
 -- game_fast_travel sends on_before_fast_travel(trip) right before it acts; with trip.notime it calls no advance_trip_time. A
 -- player alone on his own machine travels as in single player (the host with nobody else in the session).
 local function before_fast_travel(trip)
 	if type(trip) ~= "table" or not core.live() then return end
+	if trip.maploc == "map" and not allow_cross_map_travel() then
+		trip.ret_value = false
+		return
+	end
 	if not (core.follows_world() or core.others_count() > 0) then return end
 	if group.travel_takes_time() then return end
 	trip.notime = true

@@ -110,7 +110,15 @@ cp.is_flat_surface = function() return flat end
 local lc = load_mod("lc_extra_transitions")
 lc.lc_pool[gate:section()] = { to_pos = "100,0,0", to_gvid = "8", pos = "0,0,0", gvid = "8", spot = "gate",
 	precondition = "gate", on_teleport = "effect" }
-lc.lc_pool[cross:section()] = { to_pos = "200,0,0", to_gvid = "42", pos = "0,0,0", gvid = "8", spot = "gate" }
+lc.lc_pool[cross:section()] = { to_pos = "200,0,0", to_gvid = "42", pos = "0,0,0", gvid = "8", spot = "gate",
+	on_teleport = "effect" }
+local tips = {}
+local stock_translate = game.translate_string
+game.translate_string = function(id)
+	if id == "st_coop_core_go_host_only" then return "Localized group move refusal" end
+	return stock_translate(id)
+end
+news_manager.send_tip = function(_, text) tips[#tips + 1] = text end
 local shown, latest_dialog
 Frect = function() return { set = function(self) return self end } end
 strformat = string.format
@@ -160,6 +168,7 @@ lc.on_game_start()
 start_all()
 coop_economy_group.on_game_start()
 coop_economy_travel.on_game_start()
+load_script("coop_hostplay_travel").on_game_start()
 local file = io.open("gamedata/scripts/coop_mods_travel_compat.script", "r")
 if file then
 	file:close()
@@ -299,6 +308,22 @@ if name == "hostplay" then
 	answer_latest("hostplay")
 	move_phase()
 	check(actor._pos.x == 0, "m31:5 an approval after the wait expired cannot move the owner")
+
+	local requests, effects, before_fades, before_tips = sent_count(request), remote.applied, fades, #tips
+	lc.teleport_actor(actor, cross)
+	check(sent_count(request) == requests, "#444 cross-map refusal happens before an authorization request")
+	check(#tips == before_tips + 1 and tips[#tips] == "Localized group move refusal",
+		"#444 the client sees the translated host-only tip")
+	if sent_count(request) > requests then answer_latest("hostplay") end
+	move_phase()
+	check(changes == 0 and remote.applied == effects and fades == before_fades,
+		"#444 the cross-map refusal prevents movement, transition effects and fade")
+
+	set_role("hostplay")
+	local before_changes, host_tips = changes, #tips
+	lc.teleport_actor(actor, cross)
+	move_phase()
+	check(changes == before_changes + 1 and #tips == host_tips, "#444 the host can still use the cross-map extra transition")
 elseif name == "srv_map" then
 	actor._pos = vec3(50, 0, 0)
 	check(xr_conditions.is_actor_inside_lc(actor, gate), "m31:5 transition detects the player next to it on a map server")
@@ -331,10 +356,12 @@ elseif name == "srv_map" then
 		"m31:4 server travel never applies shared clock or offers")
 
 	actor._pos = vec3(0, 0, 0)
+	local before_effects = remote.applied
 	lc.teleport_actor(actor, cross)
 	answer_latest("srv_map")
 	move_phase()
-	check(changes == 1, "m31:5 server client's cross-map request is issued by the owner after the same delay")
+	check(changes == 1 and remote.applied == before_effects + 1 and #tips == 0,
+		"m31:5 the server player's cross-map trip keeps its effects and issues the move after the same delay")
 	set_role("srv_map")
 	other_here = false
 	local before_effect = remote.applied

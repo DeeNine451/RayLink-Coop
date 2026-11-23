@@ -168,7 +168,10 @@ local function begin(actor, obj)
 	local cfg = config_for(obj)
 	local dest = cfg and destination(cfg)
 	if not (id and dest) then return end
-	local trip = { cfg = cfg, dest = dest, same_map = transitions.is_gvid_on_the_actor_level(dest.gid),
+	local same_map = transitions.is_gvid_on_the_actor_level(dest.gid)
+	-- Authorization can apply transition effects, so ask before sending the request.
+	if not same_map and not coop_economy_travel.allow_cross_map_travel() then return end
+	local trip = { cfg = cfg, dest = dest, same_map = same_map,
 		ticket = math.random(1, MAX_TICKET), actor = db.actor, map = level.name(), expires = time_global() + REQUEST_MS }
 	pending = trip
 	local self = C.self_peer()
@@ -182,6 +185,7 @@ end
 local function move(trip, actor)
 	local dest = trip.dest
 	if not trip.same_map then
+		if not coop_economy_travel.allow_cross_map_travel() then return end
 		-- The engine's level-change path applies the session's cross-map rules.
 		return ChangeLevel(dest.pos, level.vertex_id(dest.pos), dest.gid, dest.dir, false)
 	end
