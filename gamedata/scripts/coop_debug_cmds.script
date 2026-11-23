@@ -624,7 +624,7 @@ cmds.spawn_item = {
 			local me = ctx.pl.object()
 			t = { where[1], where[2], where[3], me:id() }
 		end
-		local last
+		local last, count = nil, 0
 		-- live 2026-11-08 (10 asked, 20 in the client's inventory on a map server's level): the ids made here go to the log
 		-- (coop_debug_server.execute), so a repeat shows which machine made how many
 		ctx.made = {}
@@ -632,11 +632,17 @@ cmds.spawn_item = {
 			local se = alife_create_item(a.sec, { t[1], t[2], t[3], t[4] })
 			if se then
 				last = se
+				count = count + 1
 				if type(se.id) == "number" then ctx.made[#ctx.made + 1] = se.id end
 			end
 		end
 		if not last then return false, "failed" end
-		return true, fmt("%s x%d (%s)", a.sec, a.n, a.at), last.id
+		-- These are new stock items. CEatableItem starts with its configured maximum uses.
+		local max_uses = ini_sys:r_float_ex(a.sec, "max_uses")
+		if max_uses and max_uses > 1 then
+			return true, fmt("%s x%d (%d uses) (%s)", a.sec, count, count * max_uses, a.at), last.id
+		end
+		return true, fmt("%s x%d (%s)", a.sec, count, a.at), last.id
 	end,
 }
 

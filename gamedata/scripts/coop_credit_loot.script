@@ -14,10 +14,6 @@ local function uint(value, max)
 	if n and n >= 0 and n <= max and n % 1 == 0 then return n end
 end
 
-local function leads()
-	return C().active() and coop_mode.leads_here()
-end
-
 local function corpse_ok(npc)
 	return npc and IsStalker(npc) and not npc:alive()
 end
@@ -25,6 +21,50 @@ end
 local function entry(id, name)
 	local current = searches[id]
 	return current and current.name == name and current or nil
+end
+
+-- Another process's word about corpse `id` (Dev 58 Lua fix, gap-mk F8 in Server). The flags only grow: a stale copy never
+-- reopens a settled corpse. On a name mismatch (an id used again) the writer's word wins (`theirs`), else ours stays.
+local function merge_search(id, e, theirs)
+	if not (uint(id, 65534) and type(e) == "table" and type(e.name) == "string") then return end
+	local mine = searches[id]
+	if mine ~= nil and mine.name ~= e.name then
+		if not theirs then return end
+		mine = nil
+	end
+	if mine == nil then
+		mine = { name = e.name }
+		searches[id] = mine
+	end
+	if e.generated == true then mine.generated = true end
+	if e.done == true then mine.done = true end
+	if mine.character == nil and uint(e.character, 65534) then mine.character = e.character end
+end
+
+-- Server: the corpse writer is a map server, whose own save never reaches the world's, and a fresh map server loads the
+-- world's save. Its searches go up to the world server (kept in the world's save, m_data.coop_haru_searches) and come down
+-- to the next map server of the level, which merges them (coop_mode.share_up / share_down; the co-op carries nothing: the
+-- host's save is the save).
+local function share_searches()
+	coop_mode.share_up("coop_haru_searches", function()
+		local mine = {}
+		for id, s in pairs(searches) do
+			if coop_mode.writes(id) then mine[id] = s end
+		end
+		return next(mine) ~= nil and mine or nil
+	end, function(t)
+		if type(t) ~= "table" then return end
+		for id, e in pairs(t) do merge_search(tonumber(id), e, true) end
+	end)
+	coop_mode.share_down("coop_haru_searches", function()
+		return next(searches) ~= nil and searches or nil
+	end, function(t)
+		if type(t) ~= "table" then return end
+		for id, e in pairs(t) do
+			id = tonumber(id)
+			if id and coop_mode.writes(id) then merge_search(id, e, false) end
+		end
+	end)
 end
 
 local function skill_bonus(haru, character)
@@ -126,11 +166,11 @@ local function install_search()
 
 	coop_credit.on_owner(XP, award)
 	C().listen("container_opened", function(peer, id)
-		if not leads() then return end
+		if not C().active() then return end
 		local seat, body_id = uint(peer, 65534), uint(id, 65534)
 		local npc = body_id and body_id > 0 and level.object_by_id(body_id)
 		-- Boxes open through the same callback: they are no corpse search.
-		if not corpse_ok(npc) then return end
+		if not corpse_ok(npc) or not coop_mode.writes(body_id) then return end
 		local local_player = seat and coop_mode.seat_plays(seat) and coop_mode.where(seat) == "here"
 			and coop_mode.decider(seat) == "this" and C().avatar(seat)
 		local character, owner
@@ -142,18 +182,23 @@ local function install_search()
 		confirm(npc, character)
 	end)
 	RegisterScriptCallback("GUI_on_show", function(name)
-		if not (name == "UIInventory" and leads() and coop_mode.actor_is_player()) then return end
+		if not (name == "UIInventory" and C().active() and coop_mode.actor_is_player()) then return end
 		local gui = ui_inventory and ui_inventory.GUI
 		local npc = gui and gui.mode == "loot" and gui.npc_id and level.object_by_id(gui.npc_id)
-		if corpse_ok(npc) then confirm(npc, 0) end
+		if corpse_ok(npc) and coop_mode.writes(npc:id()) then confirm(npc, 0) end
 	end)
 	RegisterScriptCallback("server_entity_on_unregister", function(se) searches[se.id] = nil end)
-	RegisterScriptCallback("load_state", function() searches = {} end)
+	share_searches()
+	RegisterScriptCallback("save_state", function(m) m.coop_haru_searches = searches end)
+	RegisterScriptCallback("load_state", function(m)
+		searches = m and type(m.coop_haru_searches) == "table" and m.coop_haru_searches or {}
+	end)
 
 	C().wrap(death, "create_release_item", "g93.death_manager.create_release_item", function(orig)
 		return function(npc, ...)
-			if not (leads() and corpse_ok(npc)) then return orig(npc, ...) end
+			if not (C().active() and corpse_ok(npc)) then return orig(npc, ...) end
 			local id, name = npc:id(), npc:name()
+			if not coop_mode.writes(id) then return end
 			if se_load_var(id, name, "death_dropped") then return orig(npc, ...) end
 			return remember_generation(npc, id, name, orig(npc, ...))
 		end
@@ -177,7 +222,7 @@ local function install_rank()
 	C().wrap(target, field, "g93.death_manager.validate_drop", function(orig)
 		return function(...)
 			local player = C().identity_obj()
-			if not (player and leads()) then return orig(...) end
+			if not (player and C().active() and coop_mode.writes(player:id())) then return orig(...) end
 			local rank = player:character_rank()
 			local env = getfenv(orig)
 			-- The Economy validator only reads alife():actor():rank(). Scope the

@@ -13,7 +13,7 @@ end
 local distributed = mode == "srv_map" or mode == "srv_world"
 local on_map = mode == "hostplay" or mode == "srv_map"
 local fdda = mode ~= "srv_map"
-local away = {}
+local away, foreign = {}, {}
 coop.is_map_server = function() return mode == "srv_map" end
 coop.is_dedicated = function() return mode == "srv_world" end
 coop.avatar_of = function(peer) return ({ [0] = 0, [1] = 500, [2] = 502 })[peer] end
@@ -134,12 +134,17 @@ modes.install(load_script("coop_mode"), mode, distributed and {
 		if peer == 0 then return "nobody" end
 		return mode == "srv_map" and not away[peer] and "this" or "other"
 	end,
+	writes = function(id) return not foreign[id] end,
 } or nil)
 load_script("coop_mods_core").on_game_start()
 local keep = coop_mods_core.upvalue(haru_skills.scavanger_effect, "always_keep_item")
 keep.story_item = true
 AddScriptCallback("GUI_on_show")
 AddScriptCallback("server_entity_on_unregister")
+-- the tables a map server tells the world server and back (coop_mode.share_up / share_down, carried by the srv layer)
+local SHARES = { up = {}, down = {} }
+coop_mode.share_up = function(n, get, set) SHARES.up[n] = { get = get, set = set } return true end
+coop_mode.share_down = function(n, get, set) SHARES.down[n] = { get = get, set = set } return true end
 if have_file(ROOT .. "scripts/coop_credit_loot.script") then load_script("coop_credit_loot").on_game_start() end
 SendScriptCallback("actor_on_first_update")
 do
@@ -241,6 +246,7 @@ if on_map then
 		opened(wrong_map, 2)
 		check(sent_count(event) == 3 and bonus(wrong_map, "bandage") == 0,
 			"the local searcher can still credit the corpse")
+		away[1] = nil
 	end
 
 	local function drop(who, section)
@@ -255,10 +261,75 @@ if on_map then
 	check(not drop(first, "test_armour"), "m16:1 the MCM veto still applies")
 	chance, eco_mode = 100, 3
 	check(drop(second, "test_armour"), "m16:1 full drops are independent of rank")
+
+	local pending = body(620)
+	local before = sent_count(event)
+	generate(pending, first)
+	local saved = {}
+	SendScriptCallback("save_state", saved)
+	-- A load receives a serialized copy (Coop: the host's save; a map server's restart is checked below).
+	local copy = coop_mods_core.deser(coop_mods_core.ser(saved))
+	SendScriptCallback("load_state", copy)
+	opened(pending, 1)
+	run_time_events(150)
+	check(sent_count(event) == before + 1 and bonus(pending, "bandage") == 1,
+		"F8: a generated corpse awaiting its first search survives save/load")
+	local settled = {}
+	SendScriptCallback("save_state", settled)
+	SendScriptCallback("load_state", coop_mods_core.deser(coop_mods_core.ser(settled)))
+	opened(pending, 1)
+	run_time_events(150)
+	check(sent_count(event) == before + 1 and bonus(pending, "bandage") == 1,
+		"F8: a settled corpse stays settled after save/load")
+	if mode == "srv_map" then
+		-- Dev 58 Lua fix (gap-mk F8, Server): a map server's own save never reaches the world, and a fresh map server loads
+		-- the world's. Its searches go up to the world (share_up) and come down to the next map server (share_down).
+		local up, down = SHARES.up.coop_haru_searches, SHARES.down.coop_haru_searches
+		local waiting = body(622)
+		local outside = body(623)
+		foreign[623] = true
+		local count = sent_count(event)
+		generate(waiting, first)
+		local told = up and coop_mods_core.deser(coop_mods_core.ser(up.get()))
+		check(told and told[622] and told[622].generated == true and told[622].done == nil and told[620] and told[620].done,
+			"map server: its corpses' searches go up to the world, settled or awaiting their first search")
+		SendScriptCallback("load_state", {}) -- it restarts: the world's save had no word of that corpse yet
+		local take = down and down.set
+		if take then
+			take({ [623] = { name = outside:name(), generated = true } })
+			take(told)
+		end
+		opened(waiting, 1)
+		run_time_events(150)
+		check(take and sent_count(event) == count + 1 and bonus(waiting, "bandage") == 1,
+			"map server: after a restart, the world's copy gives the corpse its first search's Haru bonus, once")
+		if take then take(told) end
+		opened(waiting, 1)
+		run_time_events(150)
+		check(sent_count(event) == count + 1 and bonus(waiting, "bandage") == 1,
+			"map server: a stale copy from the world does not reopen a settled corpse")
+		told = up and coop_mods_core.deser(coop_mods_core.ser(up.get())) or {}
+		check(told[622] and told[622].done == true and told[623] == nil,
+			"map server: what goes up is its own corpses' searches only, the settled one marked done")
+	end
 elseif mode == "srv_world" then
 	opened(a, 1)
 	show(a)
 	check(sent_count(event) == 0 and xp() == 0 and #CREATED == 0, "the world keeper performs no object actions")
+	-- Dev 58 Lua fix (gap-mk F8, Server): the world keeps what map servers tell it in its own save and hands it down
+	local up, down = SHARES.up.coop_haru_searches, SHARES.down.coop_haru_searches
+	if up then up.set({ [624] = { name = "corpse624", generated = true } }, 3) end
+	local saved = {}
+	SendScriptCallback("save_state", saved)
+	local kept = saved.coop_haru_searches and saved.coop_haru_searches[624]
+	check(kept and kept.generated == true and kept.done == nil and down and down.get()[624] ~= nil,
+		"world server: a map server's corpse awaiting its first search is kept in the world's save and handed down")
+	if up then
+		up.set({ [624] = { name = "corpse624", generated = true, done = true, character = 500 } }, 3)
+		up.set({ [624] = { name = "corpse624", generated = true } }, 3)
+	end
+	kept = down and down.get()[624]
+	check(kept and kept.done == true and kept.character == 500, "world server: a settled corpse stays settled against an older word")
 else
 	generate(a, actor)
 	show(a)
@@ -267,6 +338,13 @@ else
 	check(xp() == 90 and bonus(a, "bandage") == 1 and sent_count(event) == 0,
 		"single player retains FDDA's original delayed search")
 	check(not death_manager.validate_drop("test_armour"), "single player retains the original rank threshold")
+end
+
+if distributed then
+	local mirrored = body(621)
+	foreign[621] = true
+	generate(mirrored, first)
+	check(not dropped[621], "the Haru wrapper leaves generation to the corpse writer")
 end
 
 done("credit_loot@" .. mode)

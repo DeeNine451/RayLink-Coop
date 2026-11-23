@@ -663,29 +663,48 @@ local function install_sleep()
 end
 
 -------------------------------------------------------------------------------
--- Zone Customization Project: loot rolled by the host
+-- Zone Customization Project: loot rolled by the box or corpse writer
 -------------------------------------------------------------------------------
 local function install_zcp()
 	local smr = C().mod("smr_loot")
 	if not smr then return end
-	local ok, orig_spawn = C().wrap(smr, "try_spawn", "smr_loot.try_spawn", function(orig)
+	local function enabled()
+		local get_config = C().fn(C().mod("smr_amain_mcm"), "get_config")
+		return not get_config or get_config("smr_enabled")
+	end
+	local function writer_roll(orig)
 		return function(box, ...)
-			if C().is_client() then return end -- the host rolls; its loot reaches clients as world items
+			if C().active() then
+				if not (box and type(box.id) == "function" and coop_mode.writes(box:id())) then return end
+				if not enabled() then return end
+			end
 			return orig(box, ...)
 		end
-	end)
-	C().wrap(smr, "try_spawn_mag", "smr_loot.try_spawn_mag", function(orig)
-		return function(box, ...)
-			if C().is_client() then return end
-			return orig(box, ...)
-		end
-	end)
+	end
+	local ok = C().wrap(smr, "try_spawn", "smr_loot.try_spawn", writer_roll)
+	C().wrap(smr, "try_spawn_mag", "smr_loot.try_spawn_mag", writer_roll)
+
+	-- Stock registers this callback from its host-routed first update. Keep its single-player registration
+	-- and run the same roll on the corpse writer in a session, including a map server.
+	local death, holder, index = C().find_local(smr, "npc_on_death_callback")
+	local loot_config = C().fn(C().mod("smr_loot_mcm"), "get_config")
+	if holder and type(death) == "function" and loot_config then
+		debug.setupvalue(holder, index, function(...)
+			if not C().active() then return death(...) end
+		end)
+		RegisterScriptCallback("npc_on_death_callback", function(npc, ...)
+			if C().active() and npc and coop_mode.writes(npc:id()) and enabled() and loot_config("npc_spawn") then
+				return death(npc, ...)
+			end
+		end)
+	end
+
 	if ok then
 		-- A client's container: rolled with that player's character as the actor (magazines for its guns).
 		C().listen("container_opened", function(peer, id)
 			local box = level.object_by_id(id)
 			local who = C().avatar(peer)
-			if box and who then
+			if C().active() and box and who and coop_mode.writes(id) and enabled() then
 				local done, e = C().as_player(who, smr.try_spawn, box)
 				if not done then C().report("zcp", "roll for a client", e) end
 			end

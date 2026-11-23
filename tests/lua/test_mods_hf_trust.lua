@@ -1,8 +1,9 @@
 -- Anomaly Coop test (TZ v2 6.4, round 2, 2026-11-18): Hideout Furniture's lamps on the host. A client's lamp light names the
 -- tool, a refuel names the fuel item; the host checks it is this player's and of the kind the lamp needs (coop_trust
--- "hf_lamp_tool", "hf_refuel_item"), spends what the mod spends (a plain item, the last use: the host removes it; a use of a
--- multi-use item or a step of condition: his machine, whose state it is, and the host checks it went at the next request) and
--- answers mods.hf_item_r. A build 56 request without the id goes through as before (logged: "hf_refuel_item_id"; a lamp's tool is
+-- "hf_lamp_tool", "hf_refuel_item"), spends what the mod spends (a plain item, the last use, the last step: the host removes it,
+-- "took"; a use of a multi-use item or a step of condition: the host spends it itself through the stock setters, "spent": R32
+-- W8.1, the decider's write is the item's new state and reaches his machine; a check that failed in "log": "left", his machine
+-- spends its own copy) and answers mods.hf_item_r. A build 56 request without the id goes through as before (logged: "hf_refuel_item_id"; a lamp's tool is
 -- still looked for among his items). Not shipped. Run: tools\test_lua.cmd mods_hf_trust
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
@@ -41,9 +42,15 @@ function GO:get_remaining_uses() return self._uses or 1 end
 function GO:set_remaining_uses(n) self._uses = n end
 utils_item = {
 	is_degradable = function(o) local i = INI[o:section()]; return i ~= nil and i.use_condition == true and not i.multiuse end,
-	degrade = function() error("the host never degrades a player's item: its condition is his machine's") end,
-	discharge = function() error("the host never discharges a player's item: its uses are his machine's") end,
+	-- R32 W8.1: the host (the item's writer) spends through the stock setters; the engine makes it the item's state
+	degrade = function(o, n) HOST_SPENT[#HOST_SPENT + 1] = o:id(); o._cond = math.max((o._cond or 1) - n, 0.01) end,
+	discharge = function(o)
+		HOST_SPENT[#HOST_SPENT + 1] = o:id()
+		assert(IsItem("multiuse", nil, o) and o:get_remaining_uses() > 1, "the host releases a plain item and the last use itself")
+		o:set_remaining_uses(o:get_remaining_uses() - 1)
+	end,
 }
+HOST_SPENT = {}
 HF_DATA = {}
 hf_obj_manager = {
 	get_data = function(id) return HF_DATA[id] or {} end,
@@ -110,32 +117,29 @@ local r, i, to = last_answer()
 check(r == "took" and i == m1:id() and to == 1, "answered 'took' to the player")
 check(counter("hf_lamp_tool").checked == 1 and counter("hf_lamp_tool").failed == 0, "hf_lamp_tool checked, passed")
 
-print("== a box of matches (5 uses): his machine spends a use, the host checks it went at the next light")
+print("== a box of matches (5 uses): the host spends a use itself (R32 W8.1), nothing is left to his machine")
 off(l1)
 check(HF_DATA[l1:id()].is_on == false and counter("hf_lamp_tool").checked == 1, "off: no tool, no check")
 local bm = held("box_matches", 500, { _uses = 5 })
 light(l1, bm)
 r = last_answer()
-check(HF_DATA[l1:id()].is_on == true and r == "left" and not released(bm:id()), "lit, the use left to his machine")
+check(HF_DATA[l1:id()].is_on == true and r == "spent" and bm._uses == 4 and not released(bm:id()),
+	"lit, the host spent one use (5 -> 4) and answered 'spent'")
 off(l1)
-light(l1, bm) -- his machine never spent it: still 5
-check(counter("hf_lamp_tool").failed == 1 and (trust_line("hf_lamp_tool") or ""):find("not spent", 1, true) ~= nil,
-	"the use left last time was not spent: logged")
-check(HF_DATA[l1:id()].is_on == true and last_answer() == "left", "log mode: lit anyway, his machine told to spend it")
-off(l1)
-bm._uses = 4 -- his machine spent it (his item state reached the host)
 light(l1, bm)
-check(counter("hf_lamp_tool").failed == 1 and HF_DATA[l1:id()].is_on == true, "spent meanwhile: ok")
+check(counter("hf_lamp_tool").failed == 0 and HF_DATA[l1:id()].is_on == true and bm._uses == 3 and last_answer() == "spent",
+	"the next light: the host spends the next use, no check of his machine's report")
 off(l1)
 bm._uses = 1
-light(l1, bm) -- (4 -> 1: lower, the last use)
+light(l1, bm)
 check(released(bm:id()) and last_answer() == "took", "the last use: the host removes the box")
 
-print("== a lighter (condition): a step of its condition is his machine's")
+print("== a lighter (condition): the host spends the mod's step of its condition itself")
 local l2 = lamp("hf_lamp_tools")
 local lt = held("hf_lighter", 500, { _cond = 0.5 })
 light(l2, lt)
-check(HF_DATA[l2:id()].is_on == true and last_answer() == "left" and not released(lt:id()), "lit, the step left to his machine")
+check(HF_DATA[l2:id()].is_on == true and last_answer() == "spent" and math.abs(lt._cond - 0.45) < 1e-9 and not released(lt:id()),
+	"lit, the host degraded it by the mod's step (0.5 -> 0.45)")
 off(l2)
 lt._cond = 0.04 -- spent below one step
 light(l2, lt)
@@ -145,16 +149,16 @@ print("== the wrong tool, another player's matches, an unknown item")
 off(l1)
 local bread = held("bread")
 light(l1, bread)
-check(counter("hf_lamp_tool").failed == 2 and (trust_line("hf_lamp_tool") or ""):find("bread", 1, true) ~= nil, "bread is no tool")
+check(counter("hf_lamp_tool").failed == 1 and (trust_line("hf_lamp_tool") or ""):find("bread", 1, true) ~= nil, "bread is no tool")
 check(HF_DATA[l1:id()].is_on == true and last_answer() == "left" and not released(bread:id()),
 	"log mode: lit as today, the host keeps its hands off, his machine spends its own copy")
 off(l1)
 local foreign = held("matches", 600)
 light(l1, foreign)
-check(counter("hf_lamp_tool").failed == 3 and not released(foreign:id()), "another player's matches: logged, not removed")
+check(counter("hf_lamp_tool").failed == 2 and not released(foreign:id()), "another player's matches: logged, not removed")
 off(l1)
 light(l1, { id = function() return 4321 end })
-check(counter("hf_lamp_tool").failed == 4, "an item the host does not know: logged")
+check(counter("hf_lamp_tool").failed == 3, "an item the host does not know: logged")
 
 print("== refuse mode: nothing lit, nothing spent")
 T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
@@ -170,7 +174,7 @@ check(HF_DATA[l1:id()].is_on == true and released(m2:id()), "an honest light sti
 print("== a lighter at the end of its life: degrade clamps to 0.01, still spent")
 off(l2)
 local le = held("hf_lighter", 500, { _cond = 0.155 })
-light(l2, le) -- 0.155: left to his machine
+light(l2, le) -- 0.155: the host spends a step
 local fails = counter("hf_lamp_tool").failed
 for _, c in ipairs({ 0.105, 0.055 }) do
 	off(l2); le._cond = c; light(l2, le)
@@ -219,7 +223,7 @@ off(l1)
 from_client("hf_lamp", { o = l1:id(), on = true, i = "a match" })
 check(HF_DATA[l1:id()].is_on == false and counter("hf_lamp_tool_id").refused == 11, "refuse: an id that is no number lights nothing")
 light(l1, bm2)
-check(HF_DATA[l1:id()].is_on == true and last_answer() == "left", "refuse: an honest light with the id still goes")
+check(HF_DATA[l1:id()].is_on == true and last_answer() == "spent" and bm2._uses == 1, "refuse: an honest light with the id still goes")
 release_id(bm2:id())
 
 print("== a lamp that needs no tool, a far lamp")
@@ -234,20 +238,19 @@ check(last_answer() == "no" and not released(m4:id()) and not (HF_DATA[far:id()]
 	"a far lamp: refused as before, answered 'no' (nothing spent)")
 
 -------------------------------------------------------------------------------
-print("== refuel with his charcoal (3 uses): refuelled, the use left to his machine, checked at the next refuel")
+print("== refuel with his charcoal (3 uses): refuelled, the host spends the use itself (R32 W8.1)")
 T.reset_for_test({ default = "log" })
 local l4 = lamp()
 local c1 = held("charcoal", 500, { _uses = 3 })
 refuel(l4, c1)
-check(WRAPPERS[l4:id()].fuel == 1.0 and last_answer() == "left" and not released(c1:id()), "refuelled, one use left to him")
+check(WRAPPERS[l4:id()].fuel == 1.0 and last_answer() == "spent" and c1._uses == 2 and not released(c1:id()),
+	"refuelled, the host spent one use (3 -> 2)")
 check(counter("hf_refuel_item").checked == 1 and counter("hf_refuel_item").failed == 0, "hf_refuel_item checked, passed")
 WRAPPERS[l4:id()].fuel = 0.1
-refuel(l4, c1) -- still 3 uses: his machine did not spend it
-check(counter("hf_refuel_item").failed == 1 and (trust_line("hf_refuel_item") or ""):find("not spent", 1, true) ~= nil,
-	"endless fuel from one charcoal: logged")
-check(WRAPPERS[l4:id()].fuel == 1.0, "log mode: refuelled as today")
+refuel(l4, c1)
+check(WRAPPERS[l4:id()].fuel == 1.0 and c1._uses == 1 and counter("hf_refuel_item").failed == 0,
+	"one charcoal, one use a refuel: no endless fuel, nothing to check of his machine")
 WRAPPERS[l4:id()].fuel = 0.1
-c1._uses = 1
 refuel(l4, c1)
 check(WRAPPERS[l4:id()].fuel == 1.0 and released(c1:id()) and last_answer() == "took", "the last use: the host removes it")
 
@@ -255,7 +258,7 @@ print("== refuel with the wrong item, another player's, refuse mode")
 WRAPPERS[l4:id()].fuel = 0.1
 local b2 = held("bread")
 refuel(l4, b2)
-check(counter("hf_refuel_item").failed == 2 and WRAPPERS[l4:id()].fuel == 1.0 and last_answer() == "left"
+check(counter("hf_refuel_item").failed == 1 and WRAPPERS[l4:id()].fuel == 1.0 and last_answer() == "left"
 	and not released(b2:id()), "bread: logged, refuelled as today, his machine spends its own copy")
 T.reset_for_test({ default = "log", hf_refuel_item = "refuse" })
 WRAPPERS[l4:id()].fuel = 0.1
@@ -306,27 +309,15 @@ pl = CREATED[n0 + 1]
 check(pl ~= nil and (HF_DATA[pl.id] or {}).condition == nil, "item not online here: no condition at all (the mod's own rule)")
 
 -------------------------------------------------------------------------------
--- Round 5 (blocker 3 of the round 4 review): the step left to his machine is the mod's own (ui_furniture_light.toggle_light:
--- utils_item.degrade(obj, 0.05) for a degradable tool, utils_item.discharge for the rest: one use). His machine reports his item's
--- state (coop_items WP9): a smaller drop is no step.
+-- Round 5 (blocker 3 of the round 4 review) asked the host to check that his machine spent the mod's own step. R32 W8.1 makes
+-- that check moot: the host is the item's writer and spends the step itself (utils_item.degrade(obj, 0.05) for a degradable tool,
+-- utils_item.discharge for the rest: one use); a report of his machine made on an older version is refused by the engine
+-- (coop_items field versions), so a machine that reports 0.0001 a light changes nothing.
 -------------------------------------------------------------------------------
-print("== R5 B3, the review's probe: a lighter that loses 0.0001 per light instead of the mod's 0.05")
+print("== R32 W8.1: a lighter gives the mod's number of lights, whatever his machine reports")
 do
 	T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
 	local lp = lamp("hf_lamp_tools")
-	local cheat = held("hf_lighter", 500, { _cond = 0.9 })
-	local lit = 0
-	for _ = 1, 100 do
-		off(lp)
-		light(lp, cheat)
-		if HF_DATA[lp:id()].is_on == true then lit = lit + 1 end
-		cheat._cond = cheat._cond - 0.0001 -- what his machine reports for the item
-	end
-	check(lit == 1 and counter("hf_lamp_tool").refused == 99 and not released(cheat:id()),
-		"refuse: one light, then every light refused (lit " .. lit .. ", refused " .. counter("hf_lamp_tool").refused .. ")")
-	check((trust_line("hf_lamp_tool") or ""):find("0.05", 1, true) ~= nil, "the line names the mod's step: " .. tostring(trust_line("hf_lamp_tool")))
-	-- the same lighter, honest: a step of 0.05 a light, as many lights as the mod gives, then the host removes it
-	T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
 	local honest = held("hf_lighter", 500, { _cond = 0.9 })
 	local lights = 0
 	for _ = 1, 40 do
@@ -334,40 +325,49 @@ do
 		off(lp)
 		light(lp, honest)
 		if HF_DATA[lp:id()].is_on == true then lights = lights + 1 end
-		-- his machine's degrade (kept to whole thousandths, as the item state travels in steps of 1/65535 anyway)
-		if last_answer() == "left" then honest._cond = math.floor((honest._cond - 0.05) * 1000 + 0.5) / 1000 end
+		honest._cond = math.floor(honest._cond * 1000 + 0.5) / 1000 -- (the item state travels in steps of 1/65535 anyway)
 	end
 	check(lights == 18 and released(honest:id()) and counter("hf_lamp_tool").failed == 0,
-		"honest: 18 lights from 0.9 by the mod's steps (the last at 0.05 removes it), none refused (" .. lights .. ")")
-	-- log mode: the cheat's lights go on as before, each logged
-	T.reset_for_test({ default = "log" })
-	local cheat2 = held("hf_lighter", 500, { _cond = 0.9 })
-	lit = 0
-	for _ = 1, 10 do
-		off(lp)
-		light(lp, cheat2)
-		if HF_DATA[lp:id()].is_on == true then lit = lit + 1 end
-		cheat2._cond = cheat2._cond - 0.0001
-	end
-	check(lit == 10 and counter("hf_lamp_tool").failed == 9, "log: lit as before, 9 lines")
+		"18 lights from 0.9 by the mod's steps, spent by the host (the last at 0.05 removes it), none refused (" .. lights .. ")")
 end
 
-print("== R5 B3: a multi-use tool goes down by one use a light")
+print("== R32 W8.1: a multi-use tool goes down by one use a light, on the host")
 do
 	T.reset_for_test({ default = "log", hf_lamp_tool = "refuse" })
 	local lq = lamp()
 	local box = held("box_matches", 500, { _uses = 5 })
-	light(lq, box)
-	check(HF_DATA[lq:id()].is_on == true and last_answer() == "left", "a use left to his machine")
+	local before_spent = #HOST_SPENT
+	for _ = 1, 4 do off(lq); light(lq, box) end
+	check(HF_DATA[lq:id()].is_on == true and box._uses == 1 and #HOST_SPENT == before_spent + 4 and last_answer() == "spent",
+		"four lights: four uses spent on the host (5 -> 1)")
 	off(lq)
-	box._uses = 5
 	light(lq, box)
-	check(HF_DATA[lq:id()].is_on == false and counter("hf_lamp_tool").refused == 1, "the use not spent: refused")
-	box._uses = 4
-	light(lq, box)
-	check(HF_DATA[lq:id()].is_on == true and counter("hf_lamp_tool").refused == 1, "one use less: lit")
-	release_id(box:id())
+	check(released(box:id()) and last_answer() == "took" and counter("hf_lamp_tool").refused == 0, "the fifth: the host removes it")
 	T.reset_for_test({ default = "log" })
+end
+
+print("== a request over the rate limit is answered 'no' (never silence: the player's item is not left waiting)")
+do
+	T.reset_for_test({ default = "log" })
+	local lr = lamp()
+	local boxes = {}
+	for k = 1, 10 do boxes[k] = held("box_matches", 500, { _uses = 5 }) end
+	SENT = {}
+	for k = 1, 10 do from_client("hf_lamp", { o = lr:id(), on = k % 2 == 1, i = boxes[k]:id() }) end
+	local answered = {}
+	for _, m in ipairs(SENT) do
+		if m.name == "mods.hf_item_r" then
+			local t = coop_main.decode(m.payload)
+			answered[t.i] = t.r
+		end
+	end
+	local all, limited = true, 0
+	for k = 1, 10 do
+		local a = answered[boxes[k]:id()]
+		if k % 2 == 1 and a == nil then all = false end
+		if a == "no" then limited = limited + 1 end
+	end
+	check(all and limited >= 4, "every light with an item has an answer; the limited ones 'no' (" .. limited .. ")")
 end
 
 print("== a network text never becomes a format")

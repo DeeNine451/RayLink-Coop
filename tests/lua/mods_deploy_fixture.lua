@@ -59,6 +59,10 @@ if server then
 	coop.is_client = function() return true end
 	coop.is_map_server = function() return true end
 	coop.levels = { split = function() return true end }
+	-- R32 W1: the engine's writer rule (coop.writes = Mode::writer_of over the root): this map server writes what stands on its
+	-- level, the world server what no map server leads; NOT_WRITTEN names objects another process writes
+	NOT_WRITTEN = {}
+	coop.writes = function(id) return not NOT_WRITTEN[id] end
 end
 start_all()
 SendScriptCallback("actor_on_first_update")
@@ -95,6 +99,11 @@ end
 NOW = NOW + 30000
 local on_map = pack(500)
 run_time_events(100)
+SENT, CREATED, SPOTS = {}, {}, {}
+local foreign = pack(500)
+NOT_WRITTEN[foreign:id()] = true
+from_world("stash_make", { i = foreign:id(), t = "n" })
+check(created("inv_backpack") == nil and SE[foreign:id()] ~= nil, "a backpack another process writes: no box here, the item stays (R32 W1)")
 SENT, CREATED, SPOTS = {}, {}, {}
 from_world("stash_make", { i = on_map:id(), t = "n" })
 local made = created("inv_backpack")

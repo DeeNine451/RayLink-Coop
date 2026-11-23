@@ -52,6 +52,11 @@ local function eligible(se)
 	return section ~= ROTTEN and meat.meats[section]
 end
 
+local function writes_meat(se)
+	local parent = se.parent_id
+	return coop_mode.writes(in_range(parent, 0, 65534) and parent or se.id)
+end
+
 local function holder_here(se, peer)
 	if not (se and peer ~= nil and coop_mode.decider(peer) == "this") then return nil end
 	local who = C().avatar(peer)
@@ -162,7 +167,7 @@ end
 local function inspect_request(t, from, who)
 	local id = X().wire_id(t.i)
 	local se = id and alife_object(id)
-	if not (ready() and eligible(se) and who and holder_here(se, from)
+	if not (ready() and eligible(se) and writes_meat(se) and who and holder_here(se, from)
 		and se.parent_id == who:id() and C().holder_peer(id) == from) then return nil, "inventory" end
 	local riders = rider_table()
 	local data = from == C().self_peer() and meat.expiration_table[id]
@@ -215,30 +220,31 @@ local function receive_done(t)
 	end, WAIT_MS)
 end
 
-local function expire_player(se, peer, authority)
+local function expire_player(se, peer, writes)
 	if jobs[se.id] then return end
 	if peer == C().self_peer() and coop_mode.actor_is_player() then
 		ask_spoil(se.id) -- also takes the direct decider path for the playing host
-	elseif authority and not X().reserved(se.id) then
+	elseif writes and not X().reserved(se.id) then
 		local holder = holder_here(se, peer)
 		if holder then begin_swap(se, peer, holder) end
 	end
 end
 
-local function tick_clocks(clocks, now, stamp_now, authority, skip)
+local function tick_clocks(clocks, now, stamp_now, mirror, skip)
 	for id, data in pairs(clocks) do
 		local se = in_range(id, 1, 65534) and not (skip and skip[id]) and alife_object(id)
 		if eligible(se) and not jobs[id] and not mirror_watches[id] then
 			local peer = C().holder_peer(id)
-			if authority or peer == C().self_peer() then
+			local writes = writes_meat(se)
+			if writes or (mirror and peer == C().self_peer()) then
 				local frozen = meat.get_meat_is_frozen(se)
 				local duration = not frozen and remaining(data, now)
 				if duration and duration <= 0 then
 					if peer ~= nil then
-						expire_player(se, peer, authority)
-					elseif authority then
+						expire_player(se, peer, writes)
+					elseif writes then
 						meat.expire_food(se)
-						clocks[id] = nil
+						clear_clock(id)
 					end
 				elseif frozen or duration then
 					if duration then data.duration = duration end
@@ -251,15 +257,14 @@ end
 
 local function tick_expiry()
 	if not ready() then return end
-	local authority = coop_mode.leads_here()
-	if not (authority or coop_mode.is_player_mirror()) then return end
+	local mirror = coop_mode.is_player_mirror()
 	local now = game.get_game_time()
 	local y, m, d, h, min, s, ms = now:get(0, 0, 0, 0, 0, 0, 0)
 	local stamp_now = { Y = y, M = m, D = d, h = h, m = min, s = s, ms = ms }
-	local riders = authority and rider_table()
-	tick_clocks(meat.expiration_table, now, stamp_now, authority)
+	local riders = not mirror and rider_table()
+	tick_clocks(meat.expiration_table, now, stamp_now, mirror)
 	if riders and riders ~= meat.expiration_table then
-		tick_clocks(riders, now, stamp_now, true, meat.expiration_table)
+		tick_clocks(riders, now, stamp_now, false, meat.expiration_table)
 	end
 end
 
@@ -281,8 +286,11 @@ local function install_meat()
 			if not C().active() then return orig(se, ...) end
 			if not (ready() and eligible(se)) then return end
 			local peer = C().holder_peer(se.id)
-			if peer ~= nil then return expire_player(se, peer, coop_mode.leads_here()) end
-			if coop_mode.leads_here() then return orig(se, ...) end
+			local writes = writes_meat(se)
+			if peer ~= nil and (writes or (coop_mode.is_player_mirror() and peer == C().self_peer())) then
+				return expire_player(se, peer, writes)
+			end
+			if peer == nil and writes then return orig(se, ...) end
 		end
 	end)
 	serve_meat()
@@ -313,10 +321,10 @@ local function install_boxes()
 	installed_boxes = C().wrap(mod, "physic_object_on_use_callback", PBA .. ".physic_object_on_use_callback", function(orig)
 		return function(box, ...)
 			if not C().active() then return orig(box, ...) end
-			if not coop_mode.leads_here() then return end
+			local id, name = box:id(), box:name()
+			if not coop_mode.writes(id) then return end
 			local boxes = C().find_local(mod, "boxes")
 			if not boxes then return end
-			local id, name = box:id(), box:name()
 			local queued = pending[boxes]
 			if not queued then queued = {}; pending[boxes] = queued end
 			if queued[id] then return end
@@ -331,7 +339,7 @@ local function install_boxes()
 				schedule(group, tostring(id) .. ":" .. sequence, delay, function(...)
 					queued[id] = nil
 					local current = level.object_by_id(id)
-					if boxes[id] or not (coop_mode.leads_here() and current and current:name() == name
+					if boxes[id] or not (coop_mode.writes(id) and current and current:name() == name
 						and C().find_local(mod, "boxes") == boxes) then return true end
 					local ok, complete = pcall(callback, ...)
 					if ok and complete then boxes[id] = true end

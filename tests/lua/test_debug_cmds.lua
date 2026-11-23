@@ -2,6 +2,8 @@
 -- console and the F7 window. Every v1 command of the design has a class, an executor and an argument schema; the schema refuses
 -- what the stock would not take. Run: tools\test_lua.cmd debug_cmds
 dofile("tests/lua/support/harness_npc.lua")
+local modes = dofile("tests/lua/support/modes.lua")
+local name = modes.names()[1]
 
 local M = machine("host", 0, { [0] = 0 })
 M.env.ini_sys = make_ini({
@@ -238,6 +240,35 @@ do
 	check(r.script_anims == nil and r.active == nil, "a method that throws or an empty hand leaves its field out")
 	check(r.invulnerable == nil and r.health == nil and not has(r.msg, "invulnerable") and not has(r.msg, "health"),
 		"no invulnerable() and no health: left out of the line: " .. tostring(r.msg))
+end
+
+do
+	modes.install(load_script(M, "coop_mode"), name)
+	local made = 0
+	M.env.ini_sys.r_float_ex = function(_, sec, field)
+		if sec == "medkit" and field == "max_uses" then return 2 end
+	end
+	M.env.alife_create_item = function(sec)
+		made = made + 1
+		if sec == "medkit" and made == 6 then return nil end
+		return { id = 800 + made }
+	end
+	local player = {
+		id = function() return 500 end,
+		position = function() return {} end,
+		level_vertex_id = function() return 1 end,
+		game_vertex_id = function() return 2 end,
+	}
+	local ctx = { a = { sec = "medkit", n = 5, at = "inv" }, pl = { object = function() return player end } }
+	local run = R.get("spawn_item").run
+	local ok, msg = run(ctx)
+	check(ok and #ctx.made == 5 and msg:find("x5 (10 uses)", 1, true), "debug give counts five objects and ten uses")
+	ctx.a.n = 3
+	ok, msg = run(ctx)
+	check(ok and #ctx.made == 2 and msg:find("x2 (4 uses)", 1, true), "debug give counts only successful creates")
+	ctx.a.sec, ctx.a.n = "wpn_ak74", 1
+	ok, msg = run(ctx)
+	check(ok and msg == "wpn_ak74 x1 (inv)", "ordinary debug spawns retain their object count and location")
 end
 
 print(string.format("%d passed, %d failed", PASSES, FAILS))

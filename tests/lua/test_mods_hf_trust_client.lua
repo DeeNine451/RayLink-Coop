@@ -1,7 +1,9 @@
 -- Anomaly Coop test (TZ v2 6.4, round 2, 2026-11-18): Hideout Furniture's lamps on a client. A light names the tool and a refuel
--- the fuel item; nothing is spent before the host answers (mods.hf_item_r): "took" = the host removed it, "left" = spend it here
--- as the mod does, "no" = refused, nothing spent. No answer in 15 s (a host of build 56): spent here as build 56 did. A second
--- request with an item that waits for its answer sends nothing. Not shipped. Run: tools\test_lua.cmd mods_hf_trust_client
+-- the fuel item; nothing is spent before the host answers (mods.hf_item_r): "took" = the host removed it, "spent" = the host
+-- spent a use or a step itself (R32 W8.1: the decider's write, its new state reaches this machine), "left" = spend it here as the
+-- mod does (only a check that failed in "log": the host could not see the item), "no" = refused, nothing spent. No answer is no
+-- answer: the request is held, nothing is spent here on a timer (R32 W7; the build 56 fallback is gone). A second request with an
+-- item that waits for its answer sends nothing. Not shipped. Run: tools\test_lua.cmd mods_hf_trust_client
 MODE = "client"
 dofile("tests/lua/support/stubs_mods.lua")
 print("== Hideout Furniture lamps: tools and fuel (client)")
@@ -120,16 +122,26 @@ SENT = {}
 light(l1)
 check(sent_count("mods.hf_lamp") == 1, "after a refusal the tool may be asked again")
 
-print("== no answer in 15 s (a host of build 56): spent here, as build 56 did")
+print("== 'spent': the host spent the use itself (R32 W8.1): nothing spent here")
+from_host("hf_item_r", { i = bm:id(), r = "spent" })
+check(bm._uses == 4 and #SPENT == 1, "'spent': nothing spent here (the host's write brings the new count)")
+SENT = {}
+light(l1)
+check(sent_count("mods.hf_lamp") == 1 and sent("mods.hf_lamp").i == bm:id(), "answered: the box may be named again")
+
+print("== no answer: the request is held, nothing is spent on a timer (R32 W7)")
 NOW = NOW + 5000
 SendScriptCallback("actor_on_update")
-check(bm._uses == 4, "5 s: still waiting")
-NOW = NOW + 11000
+NOW = NOW + 60000
 SendScriptCallback("actor_on_update")
-check(bm._uses == 3, "15 s: spent here")
-from_host("hf_item_r", { i = bm:id(), r = "left" })
-check(bm._uses == 3, "a late answer spends nothing twice")
+check(bm._uses == 4 and #SPENT == 1, "a minute without an answer: nothing spent here (no build 56 fallback)")
+SENT = {}
+light(l1)
+check(sent("mods.hf_lamp") == nil, "the box still waits for its answer: a second light sends nothing")
+from_host("hf_item_r", { i = bm:id(), r = "spent" })
+check(bm._uses == 4 and #SPENT == 1, "the late answer is applied: the host spent it, nothing spent here")
 from_host("hf_item_r", { i = bm:id(), r = "left" }) -- (an answer nobody waits for)
+check(bm._uses == 4, "an answer nobody waits for spends nothing")
 SENT = {}
 HUD = nil
 release_id(bm:id())
@@ -191,9 +203,20 @@ from_host("hf_item_r", { i = c1:id(), r = "no" })
 check(c1._uses == 2 and WRAPPERS[l3:id()].fuel == 0.2, "'no': nothing spent, no fuel")
 SENT = {}
 refuel(l3)
-NOW = NOW + 16000
+NOW = NOW + 60000
 SendScriptCallback("actor_on_update")
-check(c1._uses == 1 and WRAPPERS[l3:id()].fuel == 1.0, "no answer in 15 s: spent here and full, as build 56 did")
+check(c1._uses == 2 and WRAPPERS[l3:id()].fuel == 0.2, "no answer: nothing spent here, no fuel (the request is held)")
+from_host("hf_item_r", { i = c1:id(), r = "spent" })
+check(c1._uses == 2 and WRAPPERS[l3:id()].fuel == 1.0, "'spent': the host spent the use, the lamp is full, nothing spent here")
+c1._uses = 1 -- the host's write arrives
+SENT = {}
+refuel(l3)
+local rq5 = sent("mods.hf_refuel")
+check(rq5 and rq5.i == c1:id(), "the charcoal may be named again")
+from_host("hf_item_r", { i = c1:id(), r = "took" })
+release_id(c1:id())
+SendScriptCallback("actor_on_update")
+c1 = own("charcoal", { _uses = 1 })
 local others = 0
 for _ in pairs(SE) do others = others + 1 end
 check(others > 0, "(the world is still here)")

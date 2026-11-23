@@ -50,7 +50,12 @@ perk_based_artefacts_mcm = { op = { gr = { { id = "treasure_chance", def = 0 } }
 local base_create = alife_create_item
 function alife_create_item(sec, parent, ...)
 	-- The addon uses server parents, whereas the harness's helper takes an online parent.
-	local item = base_create(sec, type(parent.id) == "number" and OBJ[parent.id] or parent, ...)
+	local item
+	if type(parent.id) == "number" and not OBJ[parent.id] then
+		item = alife_create(sec, parent.position, parent.m_level_vertex_id, parent.m_game_vertex_id, parent.id)
+	else
+		item = base_create(sec, type(parent.id) == "number" and OBJ[parent.id] or parent, ...)
+	end
 	function item:name() return sec .. "_" .. item.id end
 	return item
 end
@@ -68,7 +73,8 @@ AddScriptCallback("physic_object_on_use_callback")
 local meat = load_addon("meat_spoiling")
 local pba = load_addon("zz_treasure_manager_pba_less_artys")
 local function box_at(id)
-	local _, obj = spawn("box", nil, nil, { id = id, kind = "box" })
+	local se, obj = spawn("box", nil, nil, { id = id, kind = "box" })
+	se._kind = "box" -- meat_spoiling checks the server parent; PBA checks the online box.
 	function obj:name() return "treasure_" .. id end
 	obj.iterate_inventory_box = obj.iterate_inventory
 	return obj
@@ -120,7 +126,8 @@ local box_open = pba.physic_object_on_use_callback
 meat.on_game_start()
 pba.on_game_start()
 if adapter then adapter.on_game_start() end
-local mode_set = modes.install(coop_mode, name)
+local foreign = {}
+local mode_set = modes.install(coop_mode, name, { writes = function(id) return not foreign[id] end })
 if name == "srv_map" then
 	SELF = 257
 	coop.is_host = function() return false end
@@ -204,6 +211,7 @@ if name == "hostplay" or name == "srv_map" then
 		local other_map = true
 		modes.install(coop_mode, name, {
 			decider = function(peer) return peer == 2 and other_map and "other" or mode_set.decider(peer) end,
+			writes = mode_set.writes,
 		})
 		raw_meat(16, 501)
 		meat.tick_expiration()
@@ -241,6 +249,39 @@ if name == "hostplay" or name == "srv_map" then
 	check(SE[46] == nil and box_marks()[45], "an old box timer cannot displace a new load's cleanup of the same box")
 end
 
+if name ~= "none" then
+	local own, other = box_at(70), box_at(71)
+	foreign[71] = name ~= "hostplay"
+	-- The world server has only ALife records for these boxes.
+	if name == "srv_world" then OBJ[70], OBJ[71] = nil, nil end
+	raw_meat(72, own:id())
+	raw_meat(73, other:id())
+	if name == "srv_world" then OBJ[72], OBJ[73] = nil, nil end
+	local riders = { [72] = expiry(0), [73] = expiry(0) }
+	alife_storage_manager.get_state().expiration_table = riders
+	tick(10001)
+	check(SE[72] == nil and replacements(70) == 1 and meat.expiration_table[72] == nil,
+		"probe_meat_foreign_box: the writer ticks its own box, including the world on an unled level")
+	check(foreign[71] and SE[73] ~= nil and replacements(71) == 0 and meat.expiration_table[73].duration == 0
+		or not foreign[71] and SE[73] == nil and replacements(71) == 1,
+		"probe_meat_foreign_box: only the box writer changes the meat and clock")
+	check(riders[72] == nil and (riders[73] ~= nil) == foreign[71],
+		"the writer clears a spent rider clock and keeps another writer's rider")
+
+	if name == "srv_world" then OBJ[70], OBJ[71] = own, other end
+
+	spawn("af_junk", nil, other:id(), { id = 74 })
+	box_open(other)
+	run_time_events()
+	check((SE[74] ~= nil) == foreign[71], "PBA schedules cleanup only for its own box")
+
+	spawn("af_junk", nil, own:id(), { id = 75 })
+	box_open(own)
+	foreign[70] = name ~= "hostplay"
+	run_time_events()
+	check((SE[75] ~= nil) == foreign[70], "PBA rechecks the box writer at the delayed callback")
+end
+
 if name == "hostplay" or name == "srv_map" then
 	-- m32:3: the original first-update callback can be registered before the adapter startup or called by value.
 	MODE, SELF, live = "client", 1, false
@@ -251,6 +292,7 @@ if name == "hostplay" or name == "srv_map" then
 		decides_world = function() return false end,
 		is_player_mirror = function() return true end,
 		decider = function() return "other" end,
+		writes = function() return false end,
 	})
 	local old_create, old_release, old_requests = #CREATED, #RELEASED, sent_count("mods.xchg")
 	raw_meat(20, 0)
@@ -279,7 +321,7 @@ elseif name == "srv_world" then
 	request(30, 1, 1)
 	tick(100)
 	local _, relay = sent("mods.xchg")
-	check(SE[30] ~= nil and #CREATED == 0 and #RELEASED == 0,
+	check(SE[30] ~= nil and replacements(500) == 0,
 		"the world server leaves spoilage to the holder's map server")
 	check(relay and relay.target == mode_set.bridge, "the world server relays the request to the map server")
 else

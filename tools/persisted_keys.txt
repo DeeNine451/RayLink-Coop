@@ -30,8 +30,10 @@ mdata coop_arena
 mdata coop_arena_gear
 mdata coop_bounty
 mdata coop_game
+mdata coop_haru_searches
 mdata coop_loot_claims
 mdata coop_mods_pdata
+mdata coop_ops_done
 mdata coop_npc_last_leaders
 mdata coop_npc_leaders
 mdata coop_npc_mines
@@ -39,6 +41,7 @@ mdata coop_npc_peace_crime
 mdata coop_quest_spawns
 mdata coop_reward_group
 mdata coop_scorcher
+mdata coop_story_done
 mdata coop_sync
 mdata coop_task_fx
 mdata coop_task_fx_done
