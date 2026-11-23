@@ -1,0 +1,157 @@
+-- Core, R32 W7. The deciding process saves terminal answers and publishes them through the mode.
+-- A retry is identified by the character's world object id and a sequence, never by its peer slot.
+local api = rawget(_G, "coop")
+local LIMIT, MAX_SEQ = 4096, 4294967295
+local BASE_TIME, SLOTS = 1735689600, 16 -- 2025-01-01 UTC, sequence slots per second
+local rows, index, retired, head = {}, {}, {}, 1
+local next_seq, started = 0, false
+local state_sections = {}
+
+local function whole(n, lo, hi)
+	return type(n) == "number" and n >= lo and n <= hi and n % 1 == 0
+end
+
+local function key(op)
+	if type(op) ~= "table" or not whole(op.origin, 0, 65534) or not whole(op.seq, 1, MAX_SEQ) then return end
+	return op.origin .. ":" .. string.format("%.0f", op.seq)
+end
+
+function origin(peer)
+	if not api or not whole(peer, 0, MAX_SEQ) then return end
+	local id = api.avatar_of(peer)
+	if whole(id, 0, 65534) then
+		id = api.to_host_id(id)
+		if whole(id, 0, 65534) then return id end
+	end
+end
+
+-- A wire may carry the origin explicitly. Confirm it with the transport's character.
+function identify(peer, seq, claimed)
+	local id = origin(peer)
+	if id == nil or (claimed ~= nil and claimed ~= id) or not whole(seq, 1, MAX_SEQ) then return end
+	return { origin = id, seq = seq }
+end
+
+function new_sequence()
+	local seconds = os.time() - BASE_TIME
+	local slot = math.floor(time_global() % 1000 * SLOTS / 1000)
+	next_seq = math.max(next_seq + 1, seconds * SLOTS + slot)
+	if next_seq <= MAX_SEQ then return next_seq end
+end
+
+function wire_sequence(wire)
+	if type(wire) ~= "string" or #wire > 40 then return end
+	local seq = tonumber(wire:match("^%d+:%d+:(%d+)$"))
+	if whole(seq, 1, MAX_SEQ) then return seq end
+end
+
+-- nil, true means the exact answer aged out by count and the operation must not run again.
+function get(op)
+	local k = key(op)
+	if not k then return end
+	local row = index[k]
+	if row then return row.answer end
+	return nil, op.seq <= (retired[op.origin] or 0)
+end
+
+local function copy(t)
+	local result = {}
+	for k, v in pairs(t) do result[k] = v end
+	return result
+end
+
+-- Restore is also usable when the mode supplies the world's recorded answer to a replacement decider.
+function restore(op, answer)
+	local k = key(op)
+	if not k or type(answer) ~= "table" then return end
+	local known, too_old = get(op)
+	if known or too_old then return known, false end
+	local old = rows[head]
+	if old then
+		index[key(old.op)] = nil
+		local origin, seq = old.op.origin, old.op.seq
+		retired[origin] = math.max(retired[origin] or 0, seq)
+	end
+	local row = { op = { origin = op.origin, seq = op.seq }, answer = copy(answer) }
+	rows[head], index[k] = row, row
+	head = head % LIMIT + 1
+	return row.answer, true
+end
+
+function record(op, answer)
+	local saved, fresh = restore(op, answer)
+	if fresh then coop_mode.op_done(op, saved) end
+	return saved
+end
+
+local listeners = {}
+
+-- listen(name, f): f(op, answer) hears each record the mode hands this ledger from another process (heard below), once.
+function listen(name, f)
+	if type(name) == "string" and type(f) == "function" then listeners[name] = f end
+end
+
+-- A record the mode hands over (Server: the world applying a map server's Done entry, a starting map server reading the
+-- world's records): restored as restore() does; a new one is told to the listeners. A save's records are no news.
+function heard(op, answer)
+	local saved, fresh = restore(op, answer)
+	if fresh then
+		for name, f in pairs(listeners) do
+			local ok, e = pcall(f, { origin = op.origin, seq = op.seq }, saved)
+			if not ok then printf("! [coop_ops_done] listener %s failed: %s", name, tostring(e)) end
+		end
+	end
+	return saved, fresh
+end
+
+local function copy_state(t)
+	local result = {}
+	for k, v in pairs(t) do result[k] = type(v) == "table" and copy_state(v) or v end
+	return result
+end
+
+-- Save the live parts of a multi-step operation with its terminal answers.
+function bind_state(name, save, load)
+	state_sections[name] = { save = save, load = load }
+end
+
+local function save_state(m_data)
+	local ordered = {}
+	for i = 0, LIMIT - 1 do
+		local row = rows[(head + i - 1) % LIMIT + 1]
+		if row then ordered[#ordered + 1] = { op = copy(row.op), answer = copy(row.answer) } end
+	end
+	local state = {}
+	for name, section in pairs(state_sections) do state[name] = copy_state(section.save()) end
+	m_data.coop_ops_done = { rows = ordered, retired = copy(retired), seq = next_seq, state = state }
+end
+
+local function load_state(m_data)
+	rows, index, retired, head = {}, {}, {}, 1
+	local saved = type(m_data.coop_ops_done) == "table" and m_data.coop_ops_done or {}
+	local state = type(saved.state) == "table" and saved.state or {}
+	for name, section in pairs(state_sections) do
+		local data = state[name]
+		section.load(type(data) == "table" and copy_state(data) or {})
+	end
+	if whole(saved.seq, 0, MAX_SEQ) then next_seq = math.max(next_seq, saved.seq) end
+	-- Restore retained rows even if some were accepted out of sequence before the cutoff.
+	if type(saved.rows) == "table" then
+		for i = math.max(1, #saved.rows - LIMIT + 1), #saved.rows do
+			local row = saved.rows[i]
+			if type(row) == "table" then restore(row.op, row.answer) end
+		end
+	end
+	if type(saved.retired) == "table" then
+		for id, seq in pairs(saved.retired) do
+			if whole(id, 0, 65534) and whole(seq, 1, MAX_SEQ) then retired[id] = seq end
+		end
+	end
+end
+
+function on_game_start()
+	if not api or started then return end
+	started = true
+	RegisterScriptCallback("save_state", save_state)
+	RegisterScriptCallback("load_state", load_state)
+end

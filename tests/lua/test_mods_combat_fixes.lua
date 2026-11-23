@@ -260,6 +260,11 @@ for _, name in ipairs(modes.names()) do
 		check(req~=nil,"m04: help requests authoritative npc.heal")
 		check(stats==before_stats and heal_calls==before_heals,"m04: no speculative statistic or heal")
 		if req then
+			NOW = NOW + 31000
+			SendScriptCallback("actor_on_update")
+			local retry = sent("mods.combat_heal")
+			check(retry and retry.q == coop_main.decode(req.payload).q and sent_count("mods.combat_heal") >= 2,
+				"m04: unanswered request is sent again with the same number")
 			receive(req,name)
 			local _,ack=sent("mods.combat_heal_r")
 			check(heal_calls==before_heals+1 and medkit._uses==1,"m04: one confirmed dose unlocks npc.heal")
@@ -275,7 +280,7 @@ for _, name in ipairs(modes.names()) do
 				coop_main.on_event(ack.name,ack.payload,0) coop_main.on_event(ack.name,ack.payload,0)
 			end
 			check(stats==before_stats+1,"m04: confirmed statistic once")
-			check(mirrored_item._uses==1,"m04: owner also sees exactly one dose spent")
+			check(mirrored_item._uses==2,"m04: the receipt does not write item uses on the mirror")
 			SE[medkit:id()].parent_id=remote:id() OBJ[medkit:id()]=medkit
 		end
 		local p=local_psy.actor_psy_health
@@ -370,8 +375,11 @@ for _, name in ipairs(modes.names()) do
 		if failedreq then receive(failedreq,name) end
 		fail_spend=false
 		check(heal_calls==hs,"m04: unconfirmed medkit spend never heals")
+		local _, failed_ack = sent("mods.combat_heal_r")
+		enter(name,true)
+		if failed_ack then coop_main.on_event(failed_ack.name,failed_ack.payload,0) end
 		-- A wound-manager exception after a confirmed spend must refund the dose, never report success.
-		enter(name,true) NOW=NOW+11000
+		NOW=NOW+11000
 		ui_hud_dotmarks.help_wounded_stalker(npc:id(),{},true)
 		local _,broken=sent("mods.combat_heal")
 		local function total(who)
@@ -387,7 +395,9 @@ for _, name in ipairs(modes.names()) do
 		check(total(remote)==before_doses and answer and answer.ok==false,"m04: failed npc.heal refunds confirmed dose")
 		-- A real spawn returns a CSE first. The NPC inventory attaches on a later frame.
 		local token=npc:object("medkit_script") if token then release_id(token:id()) end
+		local _, broken_ack = sent("mods.combat_heal_r")
 		enter(name,true) NOW=NOW+11000
+		if broken_ack then coop_main.on_event(broken_ack.name,broken_ack.payload,0) end
 		delayed_token=true
 		ui_hud_dotmarks.help_wounded_stalker(npc:id(),{},true)
 		local _,delayed=sent("mods.combat_heal")
@@ -399,6 +409,27 @@ for _, name in ipairs(modes.names()) do
 		NOW=NOW+50 SendScriptCallback("actor_on_update") delayed_token=false
 		answer=sent("mods.combat_heal_r")
 		check(total(remote)==before_doses-1 and answer and answer.ok==true,"m04: delayed NPC item completes one debit and heal")
+		local _, first_reply = sent("mods.combat_heal_r")
+		local _, second_npc = spawn("stalker", vec3(2, 0, 0), nil, { kind = "stalker" })
+		db.storage[second_npc:id()] = { wounded = { wound_manager = { can_use_medkit = false } } }
+		local spare = med(remote, 3)
+		local used_before = total(remote)
+		local later = coop_main.decode(delayed.payload)
+		later.q, later.n = later.q + 1, second_npc:id()
+		NOW = NOW + 2000
+		receive({ name = delayed.name, payload = coop_main.encode(later) }, name)
+		local after_second = total(remote)
+		local replies_before = sent_count("mods.combat_heal_r")
+		NOW = NOW + 2000
+		receive(delayed, name)
+		local old_reply = sent("mods.combat_heal_r")
+		check(after_second == used_before - 1 and total(remote) == after_second and old_reply.ok
+			and sent_count("mods.combat_heal_r") == replies_before + 1
+			and old_reply.q == coop_main.decode(first_reply.payload).q,
+			"m04: a retry of the first receipt after a second heal is answered without spending")
+		release_id(spare:id())
+		db.storage[second_npc:id()] = nil
+		release_id(second_npc:id())
 		enter(name,true)
 		bind_anomaly_field.pAno_p_hit_distance=40 bind_anomaly_field.pAno_e_hit_distance=50
 		hits={} pulse(vec3(35,60,0))
@@ -428,7 +459,7 @@ for _, name in ipairs(modes.names()) do
 			end
 			coop.levels,coop.is_dedicated=old_levels,old_dedicated
 		end
-		-- Peer slots are recycled. A new Lua state starts its own operation counter at 1.
+		-- A different request remains admissible even if the transport slot was reused.
 		enter(name=="hostplay" and "hostplay" or "srv_map")
 		local roster=coop.players
 		coop.players=function() return {} end
@@ -446,7 +477,7 @@ for _, name in ipairs(modes.names()) do
 		local receipt=sent("mods.combat_heal_r")
 		check(last_dose._uses==0 and heal_calls==before_restart+1 and receipt.ok==true,
 			"m04: recycled transport slot can spend its new client's first operation")
-		check(receipt.i==last_dose:id() and receipt.u==0,"m04: final dose is covered while destruction propagates")
+		check(receipt.i==nil and receipt.u==nil,"m04: the receipt carries no item state")
 		local another_medkit=med(remote,1)
 		db.storage[remote:id()]={wounded={wound_manager={can_use_medkit=false}}}
 		restart.q,restart.n=2,remote:id()

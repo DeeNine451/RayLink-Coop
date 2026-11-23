@@ -50,12 +50,12 @@ local table_sort = table.sort
 local MAX_ID = 65534
 local MAX_UNITS = 65535
 local RATE_MS, RATE_MAX = 2000, 4 -- the authority: requests per giver
-local SEEN_MS = 120000 -- the authority remembers handled request ids this long
+local RETRY_MS = 2000
+local MAX_SEQ = 4294967295
 local RADIUS_SLACK = 1.5 -- m: the authority sees the players a moment later than the giver did
-local PENDING_MS = 600000 -- the giver forgets a request nobody answered (logged, nothing given back)
 local WHY = { bad = true, rate = true, gone = true, far = true, box = true, count = true, spawn = true }
 
-local stats = { windows = 0, given = 0, parts = 0, parts_ok = 0, parts_back = 0, made = 0, refused = 0, lost = 0 }
+local stats = { windows = 0, given = 0, parts = 0, parts_ok = 0, parts_back = 0, made = 0, refused = 0, retries = 0 }
 
 -------------------------------------------------------------------------------
 -- Items and units (the giver)
@@ -70,6 +70,18 @@ end
 local function count_name(name, n)
 	if n and n > 1 then return core.fmt("st_coop_eco_item_count", "%s x%d", name, n) end
 	return name
+end
+
+local function uses_of(obj)
+	local ok, n = pcall(function()
+		if IsItem("multiuse", obj:section()) then return obj:get_remaining_uses() end
+	end)
+	return ok and core.int(n, 0, 255) or nil
+end
+
+local function with_uses(name, uses)
+	if uses == nil then return name end
+	return name .. " " .. core.fmt("st_coop_eco_give_uses", "(%d uses)", uses)
 end
 
 local function is_ammo_sec(sec)
@@ -140,7 +152,11 @@ local function measure(ids)
 		m.kind = "items"
 		for _, id in ipairs(ids) do
 			local o = mine(id)
-			if o and o:section() == sec then m.objs[#m.objs + 1] = o end
+			if o and o:section() == sec then
+				m.objs[#m.objs + 1] = o
+				local uses = uses_of(o)
+				if uses then m.uses = (m.uses or 0) + uses end
+			end
 		end
 		m.max, m.first = #m.objs, 1
 	end
@@ -178,20 +194,8 @@ end
 -------------------------------------------------------------------------------
 -- The giver's requests and the answers
 -------------------------------------------------------------------------------
-local pending = {} -- q -> { sec, n, box, nick, at }
+local pending = {} -- q -> { sec, n, box, nick, req, next_at }
 local npending = 0
-local next_q = nil
-
-local function new_q()
-	if not next_q then
-		-- unique across restarts of the giver's game within one session of the host (the host remembers handled ids)
-		local ok, t = pcall(function() return os.time() end)
-		next_q = ((ok and type(t) == "number") and (t % 100000) or 0) * 1000 + (time_global() % 1000) + 1
-	end
-	next_q = next_q + 1
-	if next_q > 2000000000 then next_q = 1 end
-	return next_q
-end
 
 function pending_count() return npending end
 
@@ -244,6 +248,10 @@ local function answered(q, ok, why)
 		stats.parts_ok = stats.parts_ok + 1
 		return
 	end
+	if why == "retired" then
+		core.log("! give: operation %s is outside the retained answer history", tostring(q))
+		return -- its effect may already be in the receiver's inventory
+	end
 	give_back(p)
 	core.log("give: %d of %s to %s refused (%s), given back", p.n, tostring(p.sec), tostring(p.nick), tostring(why))
 	core.tip(core.fmt("st_coop_eco_part_refused", "%s x%d did not reach %s: %s. The rounds are back.", item_name(p.sec), p.n,
@@ -252,62 +260,43 @@ end
 
 local function on_answer(t, from)
 	if from ~= 0 or from == core.self_id() or type(t) ~= "table" then return end
-	local q = core.int(t.q, 1, 2000000000)
+	local q = core.int(t.q, 1, MAX_SEQ)
 	if not q then return end
-	answered(q, t.o == 1, type(t.w) == "string" and WHY[t.w] and t.w or "bad")
+	answered(q, t.o == 1, type(t.w) == "string" and (WHY[t.w] or t.w == "retired") and t.w or "bad")
 end
 
-local authority -- below
+local decide_part -- below
+
+local function send_part(p)
+	if coop_mode.leads_here() then
+		local answer = decide_part(p.req, core.self_id())
+		if answer then answered(answer.q, answer.o == 1, answer.w) end
+	else
+		core.send("give_part", p.req, 0)
+	end
+end
 
 -- Takes n rounds out of box obj (this actor's) for the player of slot s and asks the authority.
 local function split(obj, n, s)
 	local have = rounds(obj)
 	if not (have and n >= 1 and n < have) then return false end
-	local q = new_q()
+	local q, origin = coop_ops_done.new_sequence(), coop_ops_done.origin(core.self_id())
+	if q == nil or origin == nil then return false end
+	local req = { a = origin, q = q, i = core.host_id(obj:id()), n = n, k = have - n, p = s.peer }
+	local p = { sec = obj:section(), n = n, box = obj:id(), nick = s.nick, req = req, next_at = core.now() + RETRY_MS }
 	obj:ammo_set_count(have - n)
-	pending[q] = { sec = obj:section(), n = n, box = obj:id(), nick = s.nick, at = core.now() }
+	pending[q] = p
 	npending = npending + 1
 	stats.parts = stats.parts + 1
-	local req = { q = q, i = core.host_id(obj:id()), n = n, k = have - n, p = s.peer }
-	if core.owns_world() then
-		local ok, why = authority(req, core.self_id())
-		answered(q, ok == true, why)
-	elseif not core.send("give_part", req, 0) then
-		answered(q, false, "bad")
-	end
+	send_part(p)
 	return true
-end
-
-local function forget_old(t)
-	for q, p in pairs(pending) do
-		if t - p.at > PENDING_MS then
-			pending[q] = nil
-			npending = npending - 1
-			stats.lost = stats.lost + 1
-			core.log("! give: no answer to %d of %s for %s: nothing given back", p.n, tostring(p.sec), tostring(p.nick))
-		end
-	end
 end
 
 -------------------------------------------------------------------------------
 -- The authority (host, map server): economy.give_part
 -------------------------------------------------------------------------------
 local rate = {} -- giver peer -> { at, n }
-local seen = {} -- giver peer -> { [q] = at }
-
-local function remember(from, q, t)
-	local s = seen[from]
-	if not s then
-		s = {}
-		seen[from] = s
-	end
-	for k, at in pairs(s) do
-		if t - at > SEEN_MS then s[k] = nil end
-	end
-	if s[q] then return false end
-	s[q] = t
-	return true
-end
+local giving = {} -- in-progress requests, keyed by character and sequence
 
 local function over_rate(from, t)
 	local r = rate[from]
@@ -342,7 +331,7 @@ local function tell_receiver(to, id, n, giver)
 end
 
 -- true, or false and why. Makes the box of the receiver on "true".
-function authority(t, from)
+local function authority(t, from)
 	local now = core.now()
 	if over_rate(from, now) then return false, "rate" end
 	local n, k = core.int(t.n, 1, MAX_UNITS), core.int(t.k, 1, MAX_UNITS)
@@ -356,7 +345,7 @@ function authority(t, from)
 	if not (gpos and rpos and core.dist(gpos, rpos) <= radius) then return false, "far" end
 	local se = alife_object(id)
 	local sec = se and se:section_name()
-	if not (sec and se.parent_id == giver and is_ammo_sec(sec)) then return false, "box" end
+	if not (sec and se.parent_id == giver and is_ammo_sec(sec) and coop_mode.writes(id) and coop_mode.writes(receiver)) then return false, "box" end
 	local size = box_size(level.object_by_id(id), sec)
 	if not size or n + k > size then return false, "count" end
 	local ok, made = pcall(function()
@@ -374,19 +363,34 @@ function authority(t, from)
 	return true
 end
 
-local function on_part(t, from)
-	if not (core.in_session() and (coop_mode.decides_world() or coop_mode.leads_here())) then return end
-	if type(from) ~= "number" or from <= 0 or from == core.self_id() or type(t) ~= "table" then return end
-	if not core.player(from) then return end -- not a player of the session: nobody to answer
-	local q = core.int(t.q, 1, 2000000000)
-	if not q or not remember(from, q, core.now()) then return end
+function decide_part(t, from)
+	local q = core.int(t.q, 1, MAX_SEQ)
+	local op = coop_ops_done.identify(from, q, t.a)
+	if not op or not coop_mode.writes(core.local_id(op.origin)) then return end
+	local saved, retired = coop_ops_done.get(op)
+	if saved and saved.q == q and type(saved.o) == "number" then return saved end
+	if saved or retired then return { q = q, o = 0, w = "retired" } end
+	local key = op.origin .. ":" .. op.seq
+	if giving[key] then return end
+	giving[key] = true
 	local ok, res, why = pcall(authority, t, from)
 	if not ok then
 		core.log("! give_part: %s", tostring(res))
 		res, why = false, "bad"
 	end
 	if res ~= true then stats.refused = stats.refused + 1 end
-	core.send("give_ans", { q = q, o = res == true and 1 or 0, w = res == true and nil or why }, from)
+	local answer = { q = q, o = res == true and 1 or 0, w = res ~= true and why or nil }
+	coop_ops_done.record(op, answer)
+	giving[key] = nil
+	return answer
+end
+
+local function on_part(t, from)
+	if not (core.in_session() and coop_mode.leads_here()) then return end
+	if type(from) ~= "number" or from <= 0 or from == core.self_id() or type(t) ~= "table" then return end
+	if not core.player(from) then return end
+	local answer = decide_part(t, from)
+	if answer then core.send("give_ans", answer, from) end
 end
 
 -------------------------------------------------------------------------------
@@ -432,12 +436,14 @@ function give(ids, s, n)
 	n = core.int(n, 1, MAX_UNITS) or 1
 	if n > m.max then n = m.max end
 	-- live 2026-11-08 ("I give 2, 4 are given"; the window counted 20 of 10 spawned): the ids moved and what the cell held
-	local moved, cell = {}, {}
+	local moved, cell, uses = {}, {}, nil
 	for _, o in ipairs(m.kind == "items" and m.objs or {}) do cell[#cell + 1] = o:id() end
 	for _, b in ipairs(m.boxes) do cell[#cell + 1] = b.id end
 	if m.kind == "items" then
 		for i = 1, n do
 			moved[#moved + 1] = m.objs[i]:id()
+			local item_uses = uses_of(m.objs[i])
+			if item_uses then uses = (uses or 0) + item_uses end
 			transfer(m.objs[i], who, s, 1)
 		end
 	else
@@ -452,7 +458,7 @@ function give(ids, s, n)
 	end
 	core.log("give: %d %s of %s to %s (peer %s): moved %s; the cell held %d: %s", n, m.kind == "items" and "item(s)" or "round(s)",
 		tostring(m.sec), tostring(s.nick), tostring(s.peer), core.ids_text(moved), #cell, core.ids_text(cell))
-	core.tip(core.fmt("st_coop_eco_item_given", "%s given to %s.", count_name(item_name(m.sec), n), s.nick))
+	core.tip(core.fmt("st_coop_eco_item_given", "%s given to %s.", with_uses(count_name(item_name(m.sec), n), uses), s.nick))
 	return n
 end
 
@@ -530,6 +536,7 @@ end
 
 function UICoopGive:Setup(ids, slot, m)
 	self.ids, self.slot, self.max = ids, slot, m.max
+	self.measure = m
 	self:SetIcon(m.sec)
 	self.name:SetText(item_name(m.sec))
 	self.whom:SetText(core.fmt("st_coop_eco_give_whom", "To: %s", slot.nick))
@@ -543,7 +550,14 @@ function UICoopGive:SetAmount(v)
 	if not n then return end
 	self.amount = n
 	self.track:SetFValue(n)
-	self.num:SetText(tostring(n) .. " / " .. tostring(self.max))
+	local m = self.measure
+	if m and m.uses ~= nil then
+		local uses = 0
+		for i = 1, n do uses = uses + (uses_of(m.objs[i]) or 0) end
+		self.num:SetText(with_uses("x" .. n, uses) .. " / " .. with_uses("x" .. self.max, m.uses))
+	else
+		self.num:SetText(tostring(n) .. " / " .. tostring(self.max))
+	end
 end
 
 function UICoopGive:Update()
@@ -624,12 +638,20 @@ end
 -- Status, start
 -------------------------------------------------------------------------------
 local function actor_on_update()
-	if npending > 0 then forget_old(core.now()) end
+	if npending == 0 or not (core.live() and coop_mode.actor_is_player()) then return end
+	local now, origin = core.now(), coop_ops_done.origin(core.self_id())
+	for _, p in pairs(pending) do
+		if now >= p.next_at and p.req.a == origin then
+			p.next_at = now + RETRY_MS
+			stats.retries = stats.retries + 1
+			send_part(p)
+		end
+	end
 end
 
 function print_status()
-	core.log("give: windows %d, whole %d, splits %d (yes %d, back %d, unanswered %d, waiting %d) | host: made %d, refused %d",
-		stats.windows, stats.given, stats.parts, stats.parts_ok, stats.parts_back, stats.lost, npending, stats.made,
+	core.log("give: windows %d, whole %d, splits %d (yes %d, back %d, retries %d, waiting %d) | host: made %d, refused %d",
+		stats.windows, stats.given, stats.parts, stats.parts_ok, stats.parts_back, stats.retries, npending, stats.made,
 		stats.refused)
 end
 
@@ -639,7 +661,9 @@ function on_game_start()
 	if not core.engine() or hooked then return end
 	hooked = true
 	local ok, err = pcall(function()
-		core.on_level("give_part", on_part) -- what the giver asks stands on his level
+		coop_mode.on_level_request("economy.give_part", function(payload, from)
+			return on_part(coop_main.decode(payload), from)
+		end)
 		core.on("give_ans", on_answer)
 		RegisterScriptCallback("actor_on_update", actor_on_update)
 		RegisterScriptCallback("on_before_level_changing", close_window)

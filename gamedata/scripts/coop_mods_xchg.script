@@ -8,19 +8,12 @@
 	(coop_mods_core.on "host" / "player", docs\MODES.md section 4).
 
 	Player side (any process with a player of its own, the co-op host's included):
-		ask(kind, t, cb) -> op | nil     sends mods.xchg { k = kind, o = op, ...t } to the decider of his level and keeps
-		                                 the op pending; nil outside a session, on a server's ghost, when it cannot be sent.
-		                                 op = "<own peer>:<world epoch>:<counter>". cb(ok, r, why) runs exactly once: on
-		                                 the answer, or cb(false, nil, "timeout") when none came in time. Fields k and o
-		                                 of t are the envelope's; t.key names what the op is about (busy below).
-		                                 On the co-op host's own player (this process leads its map and its actor is a
-		                                 player) the same dispatcher runs directly with from = own peer. The cb runs
-		                                 before ask returns unless the exchange is waiting for removals.
-		busy(kind, key) -> bool          an op of that kind and key is pending (key nil: any op of the kind): the
-		                                 adapter refuses a repeated click or key press with it
-		set_timeout(kind, ms)            the player's wait for that kind (default 10 s, 1..120 s)
-		                                 For kinds with after_gone, set this on the player's side to allow time for
-		                                 the decider's 10 s plus delivery in both directions (e.g. 15000).
+		ask(kind, t, cb) -> op | nil     holds and resends { k = kind, o = op, a = origin, ...t } until answered.
+		                                 cb(ok, r, why) runs once. The wire label includes the peer and world epoch;
+		                                 replay identity is the authenticated character and sequence.
+		busy(kind, key) -> bool          a request for that key still waits (key nil: any request of this kind).
+		set_timeout(kind, ms)            sets the retry interval (default 10 s, 1..120 s).
+
 	Decider side (the co-op host; in the server mode the map server of the requester's map, the world server relays):
 		serve(kind, spec) -> bool        spec = { check(t, from, who) -> ok, why       the client's word (coop_trust)
 		                                          reserve(t, from, who) -> token | nil, why
@@ -31,15 +24,11 @@
 		                                 here (coop_mods_core.avatar), nil when it is not here. token.ids: item ids
 		                                 reserved while the op runs. A reservation conflict or a failed commit rolls
 		                                 back and answers false. token.spent: local ids of items commit removes.
-		                                 Without spec.after_gone, commit supplies the immediate answer and spent
-		                                 items stay reserved until gone or 10 s passed, as before.
-		                                 With spec.after_gone, commit starts the removals. The dispatcher holds all
-		                                 reservations and waits up to 10 s after commit for every spent id to be
-		                                 absent as both a server object and a game object. Malformed spent ids or a
-		                                 spent list exceeding the 64-id reservation cap rolls back before commit
-		                                 ("spent_ids"). Once all are confirmed gone, after_gone runs once with a
-		                                 fresh who and supplies the final answer. An empty spent list runs it inline.
-		                                 On expiry the reply is false, "gone_timeout" and the callback is skipped.
+		                                 Spent items stay reserved until gone. With spec.after_gone, all reservations
+		                                 wait for all spent ids to disappear before the callback supplies the answer.
+		                                 A commit may register a cleanup using after_gone on a spent id. Its successful
+		                                 cleanup can settle a failed removal while the input still exists.
+		                                 If reserve returns nil, "pending", the requester can retry the same op.
 		                                 An error resolving who or running the callback answers false, "error".
 		                                 The dispatcher releases all reservations on completion.
 		                                 Rollback does not run after a successful commit. Results: a number, string,
@@ -72,12 +61,9 @@ local math_floor, string_sub = math.floor, string.sub
 
 local VERB, ANSWER = "xchg", "xchg_r"
 local DEFAULT_WAIT_MS = 10000
-local DEDUPE_MS = 300000 -- an answer is kept 5 minutes for a repeated op
-local HOLD_MS = 10000    -- a spent item stays reserved until it is gone, at most this long
 local GONE_MS = 10000
 local MADE_POLL_MS = 100
-local SWEEP_MS = 10000
-local OP_MAX, KIND_MAX, WHY_MAX, TEXT_MAX, R_MAX, IDS_MAX = 40, 32, 64, 1000, 32, 64
+local KIND_MAX, WHY_MAX, TEXT_MAX, R_MAX, IDS_MAX = 32, 64, 1000, 32, 64
 
 stats = { asked = 0, answered = 0, timeouts = 0, late = 0, served = 0, repeats = 0, refused = 0, conflicts = 0,
 	rolled_back = 0, errors = 0, dropped = 0, gone = 0, made = 0, watch_timeouts = 0 }
@@ -128,6 +114,7 @@ end
 -- Completion helpers
 -------------------------------------------------------------------------------
 local watches = {} -- { gone = id | made = section, parent, fn, deadline, known, next_at }
+local committing -- connects an adapter's own removal cleanup to its pending exchange
 
 local function gone_here(id, require_lookup)
 	local ok1, se = pcall(alife_object, id)
@@ -153,7 +140,8 @@ end
 function after_gone(id, fn, timeout_ms)
 	if not valid_id(id) or type(fn) ~= "function" then return false end
 	local ms = tonumber(timeout_ms) or GONE_MS
-	watches[#watches + 1] = { gone = id, fn = fn, deadline = time_global() + ms }
+	local cleanup = committing and committing.spent[id] and committing or nil
+	watches[#watches + 1] = { gone = id, fn = fn, deadline = time_global() + ms, cleanup = cleanup }
 	return true
 end
 
@@ -182,6 +170,7 @@ end
 local function finish(w, ...)
 	local ok, e = pcall(w.fn, ...)
 	if not ok then C().report("xchg", w.gone and "after_gone" or "after_made", e) end
+	return ok
 end
 
 local function watch_tick(now)
@@ -189,7 +178,7 @@ local function watch_tick(now)
 	local keep, due = {}, {}
 	for _, w in ipairs(watches) do
 		if w.gone then
-			if gone_here(w.gone) then
+			if gone_here(w.gone, w.cleanup ~= nil) then
 				stats.gone = stats.gone + 1
 				due[#due + 1] = { w, true }
 			elseif now >= w.deadline then
@@ -216,17 +205,26 @@ local function watch_tick(now)
 		end
 	end
 	watches = keep
-	for _, d in ipairs(due) do finish(d[1], d[2]) end
+	for _, d in ipairs(due) do
+		local w, value = d[1], d[2]
+		-- A rollback watcher registered by commit can end the transaction only if
+		-- its source still exists in ALife, where that adapter's cleanup runs.
+		local rolled_back = false
+		if w.cleanup and value == false then
+			local ok, se = pcall(alife_object, w.gone)
+			rolled_back = ok and se ~= nil
+		end
+		if finish(w, value) and rolled_back then w.cleanup.cancelled = true end
+	end
 end
 
 -------------------------------------------------------------------------------
 -- Decider side
 -------------------------------------------------------------------------------
 local served = {} -- kind -> spec
-local exchanges = {} -- "<from>|<op>" -> {} while running, { at, ans } after completion
+local running = {} -- character and sequence -> true while running
 local awaiting_gone = {}
 local held = {}   -- item id -> { op, key }
-local next_sweep = 0
 
 function serve(kind, spec)
 	if not valid_kind(kind) or type(spec) ~= "table" or type(spec.commit) ~= "function" then return false end
@@ -321,16 +319,13 @@ local function all_gone(spent)
 	return true
 end
 
-local function deferred_tick(now)
+local function deferred_tick()
 	if not awaiting_gone[1] then return end
 	local queued = awaiting_gone
 	awaiting_gone = {}
 	for _, job in ipairs(queued) do
-		if now >= job.deadline then
-			stats.watch_timeouts = stats.watch_timeouts + 1
-			job.finish(false)
-		elseif all_gone(job.spent) then
-			job.finish(true)
+		if job.cancelled or all_gone(job.spent) then
+			job.finish(not job.cancelled)
 		else
 			awaiting_gone[#awaiting_gone + 1] = job
 		end
@@ -341,6 +336,7 @@ end
 local function run(spec, kind, t, from, op, key, complete)
 	local found, who = call(C().avatar, "avatar", from)
 	if not found then return answer(op, false, "error") end
+	if not who then return { o = op, pending = true } end
 	local good, ok, why = true, true, nil
 	if spec.check then
 		good, ok, why = call(spec.check, "check", t, from, who)
@@ -354,6 +350,9 @@ local function run(spec, kind, t, from, op, key, complete)
 	if spec.reserve then
 		good, token, rwhy = call(spec.reserve, "reserve", t, from, who)
 		if not good then return answer(op, false, "error") end
+		if token == nil and rwhy == "pending" then
+			return { o = op, ok = false, why = rwhy, pending = true }
+		end
 		if token == nil or token == false then
 			stats.refused = stats.refused + 1
 			return answer(op, false, word(rwhy, "reserved"))
@@ -373,40 +372,40 @@ local function run(spec, kind, t, from, op, key, complete)
 		end
 	end
 	for id in pairs(all) do held[id] = { op = op, key = key } end
-	local r
+	local job = spec.after_gone and { spent = spent } or nil
+	local r, outer = nil, committing
+	committing = job
 	good, ok, r = call(spec.commit, "commit", t, from, who, token)
+	committing = outer
 	if not good or ok ~= true then
 		rollback(spec, t, from, who, token)
 		for id in pairs(all) do free(id, key) end
 		return answer(op, false, good and word(r, "failed") or "error")
 	end
-	if spec.after_gone then
+	if job then
 		local function finish_spent(removed)
-			local ans
-			if removed then
-				local called, accepted, result = call(function()
-					return spec.after_gone(t, from, C().avatar(from), token, r)
-				end, "after_gone")
-				if called and accepted == true then
-					stats.served = stats.served + 1
-					ans = answer(op, true, nil, result)
-				else
-					ans = answer(op, false, called and word(result, "failed") or "error")
-				end
-			else
-				ans = answer(op, false, "gone_timeout")
+			if not removed then
+				for id in pairs(all) do free(id, key) end
+				return answer(op, false, "gone_timeout")
 			end
+			local called, accepted, result = call(function()
+				return spec.after_gone(t, from, C().avatar(from), token, r)
+			end, "after_gone")
 			for id in pairs(all) do free(id, key) end
-			return ans
+			if not (called and accepted == true) then
+				return answer(op, false, called and word(result, "failed") or "error")
+			end
+			stats.served = stats.served + 1
+			return answer(op, true, nil, result)
 		end
 		if next(spent) == nil then return finish_spent(true) end
-		awaiting_gone[#awaiting_gone + 1] = { spent = spent, deadline = time_global() + HOLD_MS,
-			finish = function(removed) complete(finish_spent(removed)) end }
+		job.finish = function(removed) complete(finish_spent(removed)) end
+		awaiting_gone[#awaiting_gone + 1] = job
 		return
 	end
 	for id in pairs(all) do
 		if spent[id] then
-			after_gone(id, function() free(id, key) end, HOLD_MS)
+			awaiting_gone[#awaiting_gone + 1] = { spent = { [id] = true }, finish = function() free(id, key) end }
 		else
 			free(id, key)
 		end
@@ -415,39 +414,34 @@ local function run(spec, kind, t, from, op, key, complete)
 	return answer(op, true, nil, r)
 end
 
-local function sweep(now)
-	if now < next_sweep then return end
-	next_sweep = now + SWEEP_MS
-	for k, exchange in pairs(exchanges) do
-		if exchange.at and now - exchange.at > DEDUPE_MS then exchanges[k] = nil end
-	end
-end
-
 -- One request t from `from`; reply(answer) delivers it. The same function for a request from the wire and for the
 -- co-op host's own player.
 local function dispatch(t, from, reply)
 	if type(t) ~= "table" or type(from) ~= "number" then return end
 	local op, kind = t.o, t.k
-	local op_ok = type(op) == "string" and #op <= OP_MAX and op:match("^%d+:%d+:%d+$") ~= nil
-	if not trust_guard("xchg_op", op_ok, "player #%s: an exchange without a valid operation id", tostring(from)) then
+	local seq = coop_ops_done.wire_sequence(op)
+	if not trust_guard("xchg_op", seq ~= nil, "player #%s: an exchange without a valid operation id", tostring(from)) then
 		stats.dropped = stats.dropped + 1
 		return
 	end
-	local now = time_global()
-	sweep(now)
-	local key = tostring(from) .. "|" .. op
-	local exchange = exchanges[key]
-	if exchange then
-		if not exchange.ans then return reply({ o = op, ok = false, why = "busy", pending = true }) end
-		if now - exchange.at <= DEDUPE_MS then
-			stats.repeats = stats.repeats + 1
-			return reply(exchange.ans)
-		end
+	local number = coop_ops_done.identify(from, seq, t.a)
+	if not number or not coop_mode.writes(C().lid(number.origin)) then return end
+	local saved, retired = coop_ops_done.get(number)
+	if saved then
+		stats.repeats = stats.repeats + 1
+		if saved.o == op and saved.exchange == true then return reply(saved) end
+		return reply(answer(op, false, "operation"))
 	end
-	exchange = {}
-	exchanges[key] = exchange
+	if retired then return reply(answer(op, false, "retired")) end
+	local key = number.origin .. ":" .. number.seq
+	if running[key] then return reply({ o = op, ok = false, why = "busy", pending = true }) end
+	running[key] = true
 	local function complete(ans)
-		exchange.at, exchange.ans = time_global(), ans
+		if not ans.pending then
+			ans.exchange = true
+			coop_ops_done.record(number, ans)
+		end
+		running[key] = nil
 		return reply(ans)
 	end
 	local spec = valid_kind(kind) and served[kind] or nil
@@ -468,19 +462,8 @@ end
 -------------------------------------------------------------------------------
 -- Player side
 -------------------------------------------------------------------------------
-local pending = {} -- op -> { kind, key, started, deadline, cb }
-local waits = {}   -- kind -> ms
-local seq = 0
-local base = nil
-
-local function counter()
-	if not base then
-		local ok, t = pcall(function() return os.time() end)
-		base = (ok and type(t) == "number") and (t % 100000) * 10000 or 0 -- a restarted Lua state starts elsewhere
-	end
-	seq = seq + 1
-	return base + seq
-end
+local pending = {} -- op -> { kind, key, msg, interval, next_at, cb }
+local waits = {}   -- kind -> retry interval in ms
 
 local function epoch()
 	if not (api and api.world_epoch) then return 0 end
@@ -554,33 +537,35 @@ function ask(kind, t, cb)
 		if k ~= "k" and k ~= "o" then msg[k] = v end
 	end
 	local me = C().self_peer()
-	local op = tostring(me) .. ":" .. tostring(epoch()) .. ":" .. tostring(counter())
-	msg.k, msg.o = kind, op
-	local now = time_global()
-	pending[op] = { kind = kind, key = t and t.key, started = now, deadline = now + (waits[kind] or DEFAULT_WAIT_MS),
+	local origin, seq = coop_ops_done.origin(me), coop_ops_done.new_sequence()
+	if origin == nil or seq == nil then return nil end
+	local op = string.format("%.0f:%.0f:%.0f", me, epoch(), seq)
+	msg.k, msg.o, msg.a = kind, op, origin
+	if #coop_main.encode(msg) > 15000 then return nil end
+	local now, interval = time_global(), waits[kind] or DEFAULT_WAIT_MS
+	pending[op] = { kind = kind, key = t and t.key, msg = msg, interval = interval, next_at = now + interval,
 		cb = type(cb) == "function" and cb or nil }
 	stats.asked = stats.asked + 1
 	if coop_mode.leads_here() then
 		-- the co-op host's own player: this process decides for him, the same dispatcher, no wire
 		dispatch(msg, me, on_answer)
-		return op
-	end
-	if not C().to_host(VERB, msg) then
-		pending[op] = nil
-		return nil
+	else
+		C().to_host(VERB, msg)
 	end
 	return op
 end
 
 local function pending_tick(now)
-	if next(pending) == nil then return end
-	local late = {}
-	for op, p in pairs(pending) do
-		if now >= p.deadline then late[#late + 1] = op end
-	end
-	for _, op in ipairs(late) do
-		stats.timeouts = stats.timeouts + 1
-		settle(op, false, nil, "timeout")
+	if not next(pending) or not (C().active() and coop_mode.actor_is_player()) then return end
+	local peer = C().self_peer()
+	local origin = coop_ops_done.origin(peer)
+	for _, p in pairs(pending) do
+		if now >= p.next_at and p.msg.a == origin then
+			p.next_at = now + p.interval
+			stats.timeouts = stats.timeouts + 1
+			if coop_mode.leads_here() then dispatch(p.msg, peer, on_answer)
+			else C().to_host(VERB, p.msg) end
+		end
 	end
 end
 
@@ -589,21 +574,20 @@ end
 -------------------------------------------------------------------------------
 local function actor_on_update()
 	local now = time_global()
-	deferred_tick(now) -- settle the co-op host's direct exchange before its player deadline
-	pending_tick(now)
 	watch_tick(now)
+	deferred_tick()
+	pending_tick(now)
 end
 
 local function status()
-	local p, h, d, w = 0, 0, 0, 0
+	local p, h, w = 0, 0, 0
 	for _ in pairs(pending) do p = p + 1 end
 	for _ in pairs(held) do h = h + 1 end
-	for _, exchange in pairs(exchanges) do if exchange.ans then d = d + 1 end end
 	w = #watches + #awaiting_gone
-	return string.format("asked %d (answered %d, timeouts %d, late %d, pending %d) | served %d, repeats answered from the "
-		.. "cache %d, refused %d, reservation conflicts %d, rolled back %d, dropped %d, errors %d | reserved %d, answers kept %d, "
+	return string.format("asked %d (answered %d, retries %d, late %d, pending %d) | served %d, repeats answered from the "
+		.. "cache %d, refused %d, reservation conflicts %d, rolled back %d, dropped %d, errors %d | reserved %d, "
 		.. "watches %d (gone %d, made %d, timed out %d)", stats.asked, stats.answered, stats.timeouts, stats.late, p,
-		stats.served, stats.repeats, stats.refused, stats.conflicts, stats.rolled_back, stats.dropped, stats.errors, h, d, w,
+		stats.served, stats.repeats, stats.refused, stats.conflicts, stats.rolled_back, stats.dropped, stats.errors, h, w,
 		stats.gone, stats.made, stats.watch_timeouts)
 end
 

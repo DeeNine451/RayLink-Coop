@@ -31,6 +31,15 @@ coop.money_grant = function(peer, n)
 	BOOK[peer] = math.max(0, BOOK[peer] + n)
 	return true
 end
+-- coop.money_grant_to(character, n) -> added | nil, why: the keeper's grant to a character whether a player plays him or not
+CHAR_PEER, GRANTS_TO = { [500] = 1, [501] = 2, [502] = 2, [503] = 3 }, {}
+coop.money_grant_to = function(character, n)
+	local peer = CHAR_PEER[character]
+	if not (peer and type(BOOK[peer]) == "number" and type(n) == "number" and n >= 1) then return nil, "no character" end
+	GRANTS_TO[#GRANTS_TO + 1] = { ch = character, n = n }
+	BOOK[peer] = BOOK[peer] + n
+	return n
+end
 
 make_actor(vec3(0, 0, 0))
 local GO = getmetatable(db.actor)
@@ -386,16 +395,18 @@ elseif name == "hostplay" then
 	check(x.ok == false and x.why == "take" and not gone(g5) and BOOK[1] == 50000 and has(CAMO, 500) == 3,
 		"co-op host: the old gun cannot be removed: the made upgrade is removed again, the price goes back")
 
-	-- a hold without a gun step goes back after 60 s; a gun step after that is refused
+	-- A late gun step can still complete a paid hold.
 	hold_req("1:7:40", 1)
 	check(BOOK[1] == 0, "co-op host: a hold ...")
 	tick(30000)
 	tick(31000)
 	tick(1100)
-	check(BOOK[1] == 50000, "co-op host: ... with no gun step is given back after 60 s")
-	x = apply({ o = "1:7:41", h = "1:7:40", g = "coonan", w = g5:id(), n = 600 }, 1)
-	check(x.ok == false and x.why == "late" and not gone(g5) and BOOK[1] == 50000,
-		"co-op host: a gun step after that is refused (late), the price not given twice")
+	check(BOOK[1] == 0, "co-op host: an unanswered hold stays paid")
+	local late_gun = gun(500)
+	x = apply({ o = "1:7:41", h = "1:7:40", g = "coonan", w = late_gun:id(), n = 600 }, 1)
+	check(x.ok == true and gone(late_gun) and BOOK[1] == 0,
+		"co-op host: a late gun step completes without an extra debit")
+	BOOK[1] = 50000
 	x = apply({ o = "1:7:42", h = "1:7:999", g = "coonan", w = g5:id(), n = 600 }, 1)
 	check(x.ok == false and x.why == "unpaid" and not gone(g5) and BOOK[1] == 50000,
 		"co-op host: a gun step without a hold is refused")
@@ -448,7 +459,11 @@ elseif name == "hostplay" then
 	check(x.why == "unpaid" and not gone(g5), "co-op host: a player's nim_held is not taken: no hold of his own making")
 	tick(61000)
 	tick(1100)
-	check(BOOK[1] == 1000000, "co-op host: the open holds went back after 60 s")
+	check(BOOK[1] == 850000, "co-op host: open holds do not expire")
+	for i = 61, 63 do
+		apply({ o = "1:7:" .. (i + 10), h = "1:7:" .. i, g = "coonan", w = 65535, n = 600 }, 1)
+	end
+	check(BOOK[1] == 1000000, "co-op host: definitive refusals refund each open hold")
 	release_id(g5:id())
 	for _, o in ipairs({ deagle, worn2 }) do release_id(o:id()) end
 
@@ -480,6 +495,62 @@ elseif name == "hostplay" then
 	check(x.ok == true and gone(own) and has(CAMO, 500) == camos + 1 and BOOK[1] == 0,
 		"co-op host: ... and so does his own next real hold")
 	coop.avatar_of = avatar_of
+
+	-- Dev 58 Lua fix (a hold with no terminal word): the client's machine stops between his hold's answer and his gun step.
+	-- His pending upgrade lived in its memory only, so that gun step never comes. Once no player of the session plays his
+	-- character, each such hold goes back to his character, its slot is free again and the map step never applies it.
+	local function without(peer) return function(p) if p == peer then return nil end return avatar_of(p) end end
+	BOOK[1] = 150000
+	hold_req("1:7:1800", 1)
+	hold_req("1:7:1801", 1)
+	hold_req("1:7:1802", 1)
+	tick(2100)
+	check(BOOK[1] == 0, "co-op host: three holds of a client whose gun steps never come stay paid while he plays")
+	local to = #GRANTS_TO
+	coop.avatar_of = without(1)
+	tick(2100)
+	coop.avatar_of = avatar_of
+	check(BOOK[1] == 150000 and #GRANTS_TO == to + 3 and GRANTS_TO[to + 1].ch == 500 and GRANTS_TO[to + 1].n == 50000,
+		"co-op host: he left before his gun steps: each hold goes back to his character")
+	tick(2100)
+	check(BOOK[1] == 150000 and #GRANTS_TO == to + 3, "co-op host: ... once")
+	a = hold_req("1:7:1803", 1)
+	check(a.ok == true and BOOK[1] == 100000, "co-op host: ... and his slots are free: his next upgrade is held, not refused busy")
+	local stale = gun(500)
+	x = apply({ o = "1:7:1804", h = "1:7:1800", g = "coonan", w = stale:id(), n = 600 }, 1)
+	check(x.ok == false and x.why == "unpaid" and not gone(stale) and BOOK[1] == 100000,
+		"co-op host: a hold given back is never applied afterwards")
+	x = apply({ o = "1:7:1805", h = "1:7:1803", g = "coonan", w = stale:id(), n = 600 }, 1)
+	check(x.ok == true and gone(stale) and BOOK[1] == 100000, "co-op host: his new hold applies as usual")
+	-- the host saves with an open hold of the client; that save is loaded with nobody playing his character
+	hold_req("1:7:1810", 1)
+	coop_ops_done.on_game_start() -- its save_state and load_state, as axr_main starts every script in the game
+	local saved = {}
+	SendScriptCallback("save_state", saved)
+	local in_save = type(saved.coop_ops_done) == "table" and saved.coop_ops_done.state.nimble.holds["500|1:7:1810"] ~= nil
+	SendScriptCallback("load_state", {})
+	tick(2100)
+	check(in_save and BOOK[1] == 50000, "co-op host: the open hold is in the save (a load without it gives nothing back)")
+	coop.avatar_of = without(1)
+	SendScriptCallback("load_state", coop_mods_core.deser(coop_mods_core.ser(saved)))
+	tick(2100)
+	coop.avatar_of = avatar_of
+	check(BOOK[1] == 100000, "co-op host: a saved open hold of a client who is not in the loaded session goes back to him")
+	-- his character cannot take money while he is away: the hold stays closed and goes back once he plays again
+	hold_req("1:7:1820", 1)
+	CHAR_PEER[500] = nil
+	coop.avatar_of = without(1)
+	tick(2100)
+	coop.avatar_of = avatar_of
+	CHAR_PEER[500] = 1
+	check(BOOK[1] == 50000, "co-op host: a hold his absent character cannot take back stays held ...")
+	tick(2100)
+	check(BOOK[1] == 100000, "co-op host: ... and goes back to him as soon as he plays again")
+	local late = gun(500)
+	x = apply({ o = "1:7:1821", h = "1:7:1820", g = "coonan", w = late:id(), n = 600 }, 1)
+	check(x.ok == false and x.why == "unpaid" and not gone(late) and BOOK[1] == 100000,
+		"co-op host: ... and is never applied: it was closed when he left")
+	release_id(late:id())
 
 	---------------------------------------------------------------------------
 	-- the co-op host's own player (peer 0): both steps here, nothing on the wire
@@ -561,24 +632,29 @@ elseif name == "hostplay" then
 	check(sent_count("mods.xchg") == xs, "client: an answer from a peer other than the host is not taken")
 	HUD = nil
 	tick(10500)
-	check(type(HUD) == "string" and HUD:find("no longer available") ~= nil, "client: no answer in 10 s is told")
+	check(HUD == nil and sent("mods.nim_hold").o == req.o, "client: an unanswered hold is retried")
 	ev("nim_hold_r", { o = req.o, ok = true, m = 50000 }, 0)
-	check(sent_count("mods.xchg") == xs, "client: a late answer starts nothing (the host gives the hold back by itself)")
+	check(sent_count("mods.xchg") == xs + 1, "client: a late hold answer starts its original gun step")
 	as_host()
 
 -------------------------------------------------------------------------------
 elseif name == "srv_world" then
 	coop.is_dedicated = function() return true end
+	local avatar_of = coop.avatar_of
+	coop.avatar_of = function(peer)
+		if peer == 2 or peer == 3 then return 500 + peer end
+		return avatar_of(peer)
+	end
 	BOOK[1] = 50000
 	local a, target = hold_req("1:7:1", 1)
 	local held, htarget = last("mods.nim_held")
 	check(a.ok == true and a.m == 50000 and target == 1 and BOOK[1] == 0,
 		"world server: the hold takes the price from his balance and is answered to him")
-	check(held.p == 1 and held.h == "1:7:1" and held.g == "coonan" and held.m == 50000 and htarget == -1,
+	check(held.p == 1 and held.h == "1:7:1" and held.g == "coonan" and held.m == 50000 and htarget == BRIDGE,
 		"world server: it leads no map: the hold goes to the map servers")
 	local grants = #GRANTS
 	a = hold_req("1:7:1", 1)
-	check(a.ok == true and #GRANTS == grants and sent_count("mods.nim_held") == 1, "world server: a repeated hold: its answer, no second charge")
+	check(a.ok == true and #GRANTS == grants and sent_count("mods.nim_held") == 2, "world server: a repeated hold reannounces it without a second charge")
 	ev("nim_done", { p = 1, h = "1:7:1", c = 1 }, BRIDGE)
 	ev("nim_done", { p = 1, h = "1:7:1", c = 0 }, BRIDGE)
 	check(BOOK[1] == 0, "world server: a committed hold is spent; a refund after the commit gives nothing back")
@@ -600,9 +676,18 @@ elseif name == "srv_world" then
 	check(BOOK[1] == 0, "world server: ... is kept 60 s ...")
 	tick(31000)
 	tick(1100)
-	check(BOOK[1] == 50000, "world server: ... then given back")
+	check(BOOK[1] == 0, "world server: the hold stays paid after a long stall")
 	ev("nim_done", { p = 1, h = "1:7:3", c = 1 }, BRIDGE)
-	check(BOOK[1] == 0, "world server: a commit after the refund takes the price again (the upgrade was made)")
+	check(BOOK[1] == 0 and last("mods.nim_done_r").h == "1:7:3", "world server: a late commit is acknowledged without a debit")
+
+	BOOK[1] = 50000
+	hold_req("1:7:201", 1)
+	BRIDGE_OF[1] = BRIDGE2
+	ev("nim_done", { p = 1, a = 500, h = "1:7:201", c = 0 }, BRIDGE)
+	local ack, bridge = last("mods.nim_done_r")
+	check(BOOK[1] == 50000 and ack.h == "1:7:201" and bridge == BRIDGE,
+		"world server: the authorized old map can settle an in-flight result after a move")
+	BRIDGE_OF[1] = BRIDGE
 
 	-- not enough money; a hold from a seat that plays nobody; malformed results
 	BOOK[1] = 10
@@ -660,7 +745,7 @@ elseif name == "srv_world" then
 	ev("nim_done", { p = 1, h = "1:7:9", c = 0 }, 0x105)
 	check(counter("nimble_done_level").failed == 1 and counter("nimble_done_level").guard == true
 		and counter("nimble_done_sender").failed == 1, "world server: the two refusals are counted as guards")
-	-- a player on no map server's map: nobody settles his hold, the keeper gives it back in 60 s
+	-- A player can wait for a map server to start.
 	BOOK[3] = 50000
 	hold_req("3:7:1", 3)
 	ev("nim_done", { p = 3, h = "3:7:1", c = 1 }, BRIDGE)
@@ -668,7 +753,50 @@ elseif name == "srv_world" then
 	tick(30000)
 	tick(31000)
 	tick(1100)
-	check(BOOK[3] == 50000, "world server: ... is settled by nobody and given back after 60 s")
+	check(BOOK[3] == 0, "world server: the hold is still paid while the map is missing")
+	BRIDGE_OF[3] = BRIDGE
+	tick(2100)
+	ev("nim_done", { p = 3, h = "3:7:1", c = 0 }, BRIDGE)
+	check(BOOK[3] == 50000, "world server: once the map can decide, it can refund the hold")
+	BRIDGE_OF[3] = nil
+
+	-- Dev 58 Lua fix (a hold with no terminal word): the player's machine stops before his gun step. Once no player of the
+	-- session plays his character the hold goes back to his character and is announced no more; a commit his map server
+	-- sends after that takes the price again.
+	local srv_avatar = coop.avatar_of
+	local function without(peer) return function(p) if p == peer then return nil end return srv_avatar(p) end end
+	BOOK[2] = 50000
+	hold_req("2:7:500", 2)
+	tick(2100)
+	check(BOOK[2] == 0 and last("mods.nim_held").h == "2:7:500",
+		"world server: a hold whose gun step never comes stays paid and announced while he plays")
+	local to = #GRANTS_TO
+	coop.avatar_of = without(2)
+	tick(2100)
+	local held_after = sent_count("mods.nim_held")
+	tick(2100)
+	tick(2100)
+	coop.avatar_of = srv_avatar
+	check(BOOK[2] == 50000 and #GRANTS_TO == to + 1 and GRANTS_TO[to + 1].ch == 502 and GRANTS_TO[to + 1].n == 50000,
+		"world server: he left before his gun step: the hold goes back to his character")
+	check(sent_count("mods.nim_held") == held_after, "world server: ... and is announced to no map server any more")
+	ev("nim_done", { p = 2, h = "2:7:500", c = 1 }, BRIDGE2)
+	check(BOOK[2] == 0 and last("mods.nim_done_r").h == "2:7:500",
+		"world server: a commit his map server sends after the refund takes the price again")
+	ev("nim_done", { p = 2, h = "2:7:500", c = 1 }, BRIDGE2)
+	check(BOOK[2] == 0, "world server: ... once")
+	-- the map server stops before its commit is acknowledged; the commit reached the world with its effect, in the Done entry
+	-- of the gun step (coop_ops_done.heard, raised through the srv layer's coop_op_done)
+	BOOK[1] = 50000
+	hold_req("1:7:510", 1)
+	coop_ops_done.heard({ origin = 500, seq = 511 }, { o = "1:7:511", ok = true, exchange = true, ["r.s"] = CAMO,
+		["r.m"] = 50000, ["r.nh"] = "1:7:510" })
+	coop.avatar_of = without(1)
+	tick(2100)
+	coop.avatar_of = srv_avatar
+	check(BOOK[1] == 0, "world server: a commit carried by the gun step's Done entry spends the hold: nothing goes back when he leaves")
+	ev("nim_done", { p = 1, h = "1:7:510", c = 1 }, BRIDGE)
+	check(BOOK[1] == 0, "world server: ... and the map server's own late commit takes nothing more")
 
 	-- the gun step is not decided here: it goes to the map server of his map
 	local g = gun(500)
@@ -711,18 +839,14 @@ elseif name == "srv_world" then
 	local xs = sent_count("mods.xchg")
 	HUD = nil
 	tick(10500)
-	check(type(HUD) == "string" and HUD:find("no longer available") ~= nil and sent_count("mods.xchg") == xs,
-		"server player: no answer to the hold in 10 s is told, no gun step")
+	check(HUD == nil and sent_count("mods.xchg") == xs and sent("mods.nim_hold").o == req.o,
+		"server player: unanswered hold is retried with its original number")
 	ev("nim_hold_r", { o = req.o, ok = true, m = 100000 }, 0)
-	check(sent_count("mods.xchg") == xs, "server player: a late hold answer starts nothing (the world server gives it back in 60 s)")
-	-- the gun step's answer is lost
-	press("pkm")
-	req = sent("mods.nim_hold")
-	ev("nim_hold_r", { o = req.o, ok = true, m = 100000 }, 0)
-	check(sent_count("mods.xchg") == xs + 1, "server player: the gun step goes ...")
-	HUD = nil
+	local late_apply = sent("mods.xchg")
+	check(sent_count("mods.xchg") == xs + 1 and late_apply.h == req.o, "server player: late hold answer starts the gun step")
 	tick(10500)
-	check(type(HUD) == "string" and HUD:find("no longer available") ~= nil, "server player: ... no answer in 10 s is told")
+	check(HUD == nil and sent("mods.xchg").o == late_apply.o and sent_count("mods.xchg") > xs + 1,
+		"server player: unanswered gun step keeps the same operation number")
 	MODE, SELF = "host", 0
 	modes.install(coop_mode, "srv_world", OVERRIDES)
 
@@ -762,19 +886,35 @@ elseif name == "srv_map" then
 	check(x.ok == true and xt == 1 and x["r.s"] == CAMO and gone(g1) and has(CAMO, 500) == 1,
 		"map server: the upgrade is made in his character, the old gun removed, answered to him")
 	check(d.p == 1 and d.h == "1:7:1" and d.c == 1 and dt == 0, "map server: the commit goes to the world server")
+	check(x["r.nh"] == "1:7:1",
+		"map server: the gun step's answer names its hold, so the Done entry that goes up with the effect carries the commit")
+	local before_retry = dones()
+	tick(2000)
+	check(dones() > before_retry and last("mods.nim_done").h == d.h, "map server: unacknowledged nim_done is retried")
+	ev("nim_done_r", d, 0)
+	before_retry = dones()
+	tick(2000)
+	check(dones() == before_retry, "map server: acknowledgement settles the report")
 	local nd = dones()
 	local g2 = gun(500)
 	x = apply({ o = "1:7:3", h = "1:7:1", g = "coonan", w = g2:id(), n = 600 }, 1)
 	check(x.why == "unpaid" and not gone(g2) and dones() == nd, "map server: a used hold is refused and reports nothing")
 
-	-- no hold here: refused and reported, and a hold that comes later is never applied
-	x = apply({ o = "1:7:4", h = "1:7:5", g = "coonan", w = g2:id(), n = 600 }, 1)
-	d = last("mods.nim_done")
-	check(x.why == "unpaid" and d.h == "1:7:5" and d.c == 0 and dones() == nd + 1 and not gone(g2),
-		"map server: a gun step without a hold is refused, the refund goes to the world server")
+	-- A gun step may outrun the keeper's authorization. Keep its original number.
+	local delayed_gun = gun(500)
+	local request = { o = "1:7:4", h = "1:7:5", g = "coonan", w = delayed_gun:id(), n = 600 }
+	x = apply(request, 1)
+	check(x.pending == true and dones() == nd and not gone(delayed_gun),
+		"map server: a gun step waits without a refund before its hold arrives")
 	held(1, "1:7:5")
-	x = apply({ o = "1:7:6", h = "1:7:5", g = "coonan", w = g2:id(), n = 600 }, 1)
-	check(x.why == "unpaid" and dones() == nd + 1 and not gone(g2), "map server: ... the hold that came later is not applied")
+	x = apply(request, 1)
+	check(x.ok == true and gone(delayed_gun) and dones() == nd + 1,
+		"map server: the original gun step completes after the hold arrives")
+	for id, se in pairs(SE) do
+		if se:section_name() == CAMO and se.parent_id == 500 and id ~= 0 then
+			if has(CAMO, 500) > 1 then release_id(id) end
+		end
+	end
 
 	-- not his gun; the map step fails; a stale hold; a wrong price: refused, refund reported
 	local other = gun(0)
@@ -792,10 +932,10 @@ elseif name == "srv_map" then
 		"map server: the upgrade cannot be made: nothing changes, refund reported")
 	held(1, "1:7:11")
 	tick(21000)
-	x = apply({ o = "1:7:12", h = "1:7:11", g = "coonan", w = g2:id(), n = 600 }, 1)
+	x = apply({ o = "1:7:12", h = "1:7:11", g = "coonan", w = other:id(), n = 600 }, 1)
 	d = last("mods.nim_done")
-	check(x.why == "late" and d.h == "1:7:11" and d.c == 0 and not gone(g2),
-		"map server: a hold older than 20 s is refused (the world server's 60 s are far), refund reported")
+	check(x.why == "weapon" and d.h == "1:7:11" and d.c == 0 and not gone(g2),
+		"map server: an old hold still reaches the normal gun checks")
 	held(1, "1:7:13", "coonan", 1)
 	x = apply({ o = "1:7:14", h = "1:7:13", g = "coonan", w = g2:id(), n = 600 }, 1)
 	d = last("mods.nim_done")
@@ -807,7 +947,7 @@ elseif name == "srv_map" then
 	-- a hold from anyone but the world server, or with bad fields, is not taken
 	held(1, "1:7:17", "coonan", 50000, 3)
 	x = apply({ o = "1:7:18", h = "1:7:17", g = "coonan", w = g2:id(), n = 600 }, 1)
-	check(x.why == "unpaid" and not gone(g2), "map server: a hold that did not come from the world server is not taken")
+	check(x.pending and not gone(g2), "map server: an announcement from another sender grants no hold")
 	held(1, "1:7:19", "coonan", -5)
 	held(1, "x;y", "coonan")
 	check(counter("nimble_held_shape").failed == 2, "map server: a hold with bad fields is dropped")
@@ -832,84 +972,22 @@ elseif name == "srv_map" then
 	for _, id in ipairs(later) do release_id(id) end
 	tick()
 
-	-- B-REV F6: player 1's gun steps naming holds that do not exist (600 at 5 a second: within the xchg limit, within the
-	-- 5 minutes they are kept) close only his own ops; the hold the world server announced for player 2 still applies.
-	-- rv_FIX-NIMBLE B2: his marks are never evicted; a step beyond his 8 marks gets no mark and no refund report
-	NOW = NOW + 301000 -- the marks of his steps above expire (KEEP_MS)
-	tick(1100)
+	-- Invalid authorization probes must not crowd out another player.
 	local avatar_of = coop.avatar_of
 	coop.avatar_of = function(peer) if peer == 2 then return 501 end return avatar_of(peer) end
-	local _, avatar2 = spawn("coop_player_avatar", vec3(20, 0, 0), nil, { id = 501 })
-	avatar2._kind = "stalker"
-	local full = counter("nimble_known_full").failed
+	spawn("coop_player_avatar", vec3(20, 0, 0), nil, { id = 501 })
 	nd = dones()
 	for i = 1, 600 do
-		NOW = NOW + 200
 		ev("xchg", { k = "nimble", o = "1:7:" .. (1000 + i), h = "1:9:" .. i, g = "coonan", w = 1, n = 600, _peer = 1 }, 0)
 	end
-	d = last("mods.nim_done")
-	check(dones() == nd + 8 and d.p == 1 and d.h == "1:9:8" and d.c == 0,
-		"map server: 600 gun steps without a hold are refused; only his first 8 (his marks) report a refund")
+	check(dones() == nd and last("mods.xchg_r").pending == true, "map server: missing holds never send a refund")
 	held(2, "2:7:1")
 	local p2 = gun(501)
 	x = apply({ o = "2:7:2", h = "2:7:1", g = "coonan", w = p2:id(), n = 600 }, 2)
 	d = last("mods.nim_done")
-	check(x.ok == true and gone(p2) and has(CAMO, 501) == 1 and d.p == 2 and d.h == "2:7:1" and d.c == 1
-		and counter("nimble_known_full").failed == full,
-		"map server: after another player's 600 gun steps without a hold, player 2's hold still applies")
-	local own = gun(500)
-	held(1, "1:7:1700")
-	x = apply({ o = "1:7:1701", h = "1:7:1700", g = "coonan", w = own:id(), n = 600 }, 1)
-	check(x.ok == true and gone(own) and has(CAMO, 500) == 3, "map server: ... and so does his own next real hold")
-	-- his marked steps without a hold stay closed: a hold of one of them that comes later is not applied
-	local late = gun(500)
-	held(1, "1:9:8")
-	x = apply({ o = "1:7:1702", h = "1:9:8", g = "coonan", w = late:id(), n = 600 }, 1)
-	check(x.why == "unpaid" and not gone(late), "map server: a hold that comes after his gun step without it is still not applied")
-	-- rv_FIX-NIMBLE B2: a step beyond his marks reported no refund; a hold for it that comes later is applied and paid once
-	nd = dones()
-	held(1, "1:9:600")
-	x = apply({ o = "1:7:1703", h = "1:9:600", g = "coonan", w = late:id(), n = 600 }, 1)
-	d = last("mods.nim_done")
-	check(x.ok == true and gone(late) and d.p == 1 and d.h == "1:9:600" and d.c == 1 and dones() == nd + 1,
-		"rv_FIX-NIMBLE B2: a hold for his step beyond his marks (no refund reported) is applied, its commit reported once")
-	local again = gun(500)
-	x = apply({ o = "1:7:1704", h = "1:9:600", g = "coonan", w = again:id(), n = 600 }, 1)
-	check(x.why == "unpaid" and not gone(again) and dones() == nd + 1, "rv_FIX-NIMBLE B2: ... and only once")
+	check(x.ok == true and gone(p2) and has(CAMO, 501) == 1 and d.p == 2 and d.c == 1,
+		"map server: other players can still apply their authorized holds")
 	coop.avatar_of = avatar_of
-
-	-- rv_FIX-NIMBLE B2 (probe R1): his gun step names his hold before the hold reaches this map server: refused, its refund
-	-- reported, the op closed in his marks. His further steps without a hold never evict that mark: the hold that comes
-	-- later (its money already given back by the world server) is never applied, so the upgrade is never free.
-	NOW = NOW + 301000
-	tick(1100)
-	local g9 = gun(500)
-	nd = dones()
-	x = apply({ o = "1:7:2000", h = "1:7:1999", g = "coonan", w = g9:id(), n = 600 }, 1)
-	d = last("mods.nim_done")
-	check(x.why == "unpaid" and d.h == "1:7:1999" and d.c == 0 and dones() == nd + 1,
-		"rv_FIX-NIMBLE B2 R1: a step before its hold is refused, the refund of that hold reported")
-	for i = 1, 12 do apply({ o = "1:7:" .. (2000 + i), h = "1:8:" .. i, g = "coonan", w = g9:id(), n = 600 }, 1) end
-	check(dones() == nd + 8, "rv_FIX-NIMBLE B2 R1: of 12 more steps without a hold, only the 7 his marks take report a refund")
-	held(1, "1:7:1999")
-	x = apply({ o = "1:7:2030", h = "1:7:1999", g = "coonan", w = g9:id(), n = 600 }, 1)
-	check(x.why == "unpaid" and not gone(g9),
-		"rv_FIX-NIMBLE B2 R1: a hold whose refund this map server reported is never applied, after 12 more steps of his")
-	-- probe R1c: the same burst in one frame (one time stamp, 1 + n steps)
-	for _, n in ipairs({ 8, 12, 19 }) do
-		local base = 5000 + n * 100
-		local H = "1:7:" .. base
-		NOW = NOW + 301000
-		tick(1100)
-		local function step(o, h) ev("xchg", { k = "nimble", o = o, h = h, g = "coonan", w = 1, n = 600, _peer = 1 }, 0) end
-		step("1:7:" .. (base + 1), H)
-		for i = 1, n do step("1:7:" .. (base + 1 + i), "1:8:" .. (base + i)) end
-		held(1, H)
-		local g3 = gun(500)
-		local x3 = apply({ o = "1:7:" .. (base + 50), h = H, g = "coonan", w = g3:id(), n = 600 }, 1)
-		check(x3.why == "unpaid" and not gone(g3),
-			"rv_FIX-NIMBLE B2 R1c: one frame, 1 + " .. n .. " steps: the hold whose refund was reported is never applied")
-	end
 end
 
 done("mods_xchg_nimble@" .. name)

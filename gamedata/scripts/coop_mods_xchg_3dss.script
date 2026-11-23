@@ -36,12 +36,46 @@ local function thermal_helpers()
 	local action = C().upvalue(functor, "remove_battery")
 	local label = C().upvalue(functor, "battery_remove_name")
 	local read = C().upvalue(action, "removable_charge")
-	local loose = C().upvalue(action, "set_loose_charge")
+	local loose, loose_holder, loose_index = C().upvalue(action, "set_loose_charge")
+	local loose_read, read_holder, read_index = C().upvalue(read, "loose_charge")
 	local slot = C().upvalue(action, "set_slot_entry")
 	local refresh = C().upvalue(action, "refresh_shader_if_needed")
 	local entry = C().upvalue(mod.on_canted_removed, "get_slot_entry")
-	if not (label and read and loose and slot and entry) then return nil end
-	return { mod = mod, label = label, action = action, read = read, loose = loose, slot = slot, entry = entry,
+	local read_state = C().upvalue(loose, "read_state")
+	local write_state = C().upvalue(loose, "write_state")
+	local object_section = C().upvalue(loose, "object_section")
+	if not (label and read and loose and loose_read and slot and entry and read_state and write_state and object_section) then return nil end
+	local function read_condition(obj)
+		if not C().active() then return loose_read(obj) end
+		local installed = entry(obj, "loose")
+		-- A fresh scope may have ordinary item condition even though it has never held a battery.
+		if not (installed and installed.section == obj:section()) then return 0 end
+		return obj:condition()
+	end
+	local function write_condition(item, section, value)
+		if not C().active() then return loose(item, section, value) end
+		if not item then return false end
+		value = math.max(0, math.min(1, tonumber(value) or 0))
+		local obj = type(item.set_condition) == "function" and item or level.object_by_id(item.id)
+		if obj then
+			obj:set_condition(value)
+			if math.abs(obj:condition() - value) > 0.00001 then return false end
+		elseif coop_mode.is_player_mirror() then
+			-- A native detach can produce a lease placeholder before the local item
+			-- exists. Use the stock ItemProcessor for its owner's deferred condition.
+			if not (db.actor and item.parent_id == db.actor:id() and alife_process_item) then return false end
+			alife_process_item(section or object_section(item), item.id, { cond = value })
+		elseif not (api.items and api.items.set_initial and api.items.set_initial(item.id, { condition = value })) then
+			return false
+		end
+		local state = read_state(item)
+		state.loose = { section = section or object_section(item) }
+		write_state(item, state)
+		return true
+	end
+	debug.setupvalue(read_holder, read_index, read_condition)
+	debug.setupvalue(loose_holder, loose_index, write_condition)
+	return { mod = mod, label = label, action = action, read = read, loose = write_condition, slot = slot, entry = entry,
 		refresh = refresh }
 end
 
@@ -53,7 +87,7 @@ local function battery_source(t, from, who)
 	local id = X().wire_id(t.src)
 	if id == nil or t.key ~= t.src then return nil, "bad source id" end
 	local obj = level.object_by_id(id)
-	if not (obj and who and C().root_of(id) == who:id() and C().holder_peer(id) == from) then
+	if not (obj and who and C().root_of(id) == who:id() and C().holder_peer(id) == from and coop_mode.writes(id)) then
 		return nil, "source not owned"
 	end
 	return obj
@@ -78,9 +112,21 @@ local function serve_battery()
 			local obj = token.obj
 			local value, slot, section = battery.read(obj)
 			if not value then return false, "no charge" end
-			if not C().give(from, battery_section(), value) then return false, "battery creation failed" end
-			if slot then battery.slot(obj, slot, section, 0) else battery.loose(obj, section, 0) end
+			token.value, token.slot, token.section = value, slot, section
+			if slot then
+				battery.slot(obj, slot, section, 0)
+				local current = battery.entry(obj, slot)
+				if not current or current.charge ~= 0 then return false, "charge" end
+			elseif not battery.loose(obj, section, 0) then
+				return false, "charge"
+			end
+			if not C().give(from, battery_section(), value) then return false, "create" end
 			return true, { slot = slot or "loose", section = section }
+		end,
+		rollback = function(_, _, _, token)
+			if token.value == nil then return end
+			if token.slot then battery.slot(token.obj, token.slot, token.section, token.value)
+			else battery.loose(token.obj, token.section, token.value) end
 		end,
 	})
 end
@@ -104,12 +150,6 @@ local function battery_action(orig, obj, ...)
 		if slot == "loose" or slot == "main" or slot == "canted" then
 			local entry = battery.entry(source, slot)
 			if entry and entry.section == result.section then
-				-- The owner's drain can run before the replicated se value arrives.
-				-- Apply the acknowledged debit to that copy directly as well.
-				if coop_mode.is_player_mirror() then
-					if slot == "loose" then battery.loose(source, entry.section, 0)
-					else battery.slot(source, slot, entry.section, 0) end
-				end
 				if slot ~= "loose" and battery.refresh then battery.refresh(source, slot, 0, true) end
 			end
 		end
@@ -213,7 +253,7 @@ local function scope_guard(canted, orig)
 		if not own(weapon) or X().busy(BATT, C().hid(id)) then return end
 		local mirror = coop_mode.is_player_mirror()
 		if mirror and (not api.lease_ids or not api.lease_waiting or api.lease_ids() < 1 or api.lease_waiting(id)) then return end
-		local p = { id = id, owner = db.actor:id(), section = section, canted = canted, remove = orig,
+		local p = { id = id, owner = db.actor:id(), section = section, charge = entry.charge, canted = canted, remove = orig,
 			mirror = mirror, args = pack(...) }
 		scopes[id] = p
 		if mirror then
@@ -221,7 +261,7 @@ local function scope_guard(canted, orig)
 				if scopes[id] == p and made == p.target then complete_scope(p) end
 			end)
 		end
-		local ok, se = pcall(alife_create_item, section, db.actor, { cond = 0 })
+		local ok, se = pcall(alife_create_item, section, db.actor, { cond = p.charge })
 		if not ok then report("canted create", se) end
 		p.target = ok and se and se.id
 		if not p.target then scopes[id] = nil return end

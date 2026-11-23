@@ -43,9 +43,11 @@ local function gun(owner)
 	return obj
 end
 local function charge(obj, slot, value)
+	if slot == "loose" then obj:set_condition(value) end
 	se_save_var(obj:id(), nil, thermal_key, { version = 2, [slot] = { section = scope_section, charge = value } })
 end
 local function get_charge(obj, slot)
+	if slot == "loose" then return obj:condition() end
 	local record = state(obj, thermal_key)
 	return record and record[slot] and record[slot].charge
 end
@@ -130,8 +132,21 @@ local function request(source, seq, peer)
 end
 
 if name == "hostplay" or name == "srv_map" then
+	local fresh = item(500, scope_section)
+	fresh:set_condition(1)
+	local gifts = #CREATED
+	request(fresh:id(), 991, 1)
+	check(#CREATED == gifts and sent("mods.xchg_r").ok == false,
+		name .. " uninitialized stock scope has no extractable battery")
 	local own, foreign = item(500, scope_section), item(0, scope_section)
-	charge(own, "loose", 0.34)
+	charge(own, "loose", 0.91) -- a saved row can be behind the authoritative item
+	own:set_condition(0.34)
+	local denied = item(500, scope_section)
+	charge(denied, "loose", 0.5)
+	denied.set_condition = function() end
+	request(denied:id(), 992, 1)
+	check(#CREATED == gifts and sent("mods.xchg_r").ok == false and close(denied:condition(), 0.5),
+		name .. " no output when the writer's debit cannot be applied")
 	charge(foreign, "loose", 0.77)
 	local before = #CREATED
 	local a = request(own:id(), 1)
@@ -191,8 +206,22 @@ if name == "hostplay" or name == "srv_map" then
 		name .. " m02:1 a client sends one exchange and waits for authority")
 	coop_main.on_event("mods.xchg_r", coop_main.encode({ o = req.o, ok = true,
 		["r.slot"] = "loose", ["r.section"] = scope_section }), 0)
-	check(get_charge(local_scope, "loose") == 0 and local_scope:condition() == 0,
-		name .. " m02:1 confirmed debit clears the player's charge copy")
+	check(close(get_charge(local_scope, "loose"), 0.61) and close(local_scope:condition(), 0.61),
+		name .. " m02:1 acknowledgement leaves the player's charge to replication")
+
+	local provisional = gun(0)
+	charge(provisional, "canted", 0.42)
+	local offline = spawn(scope_section, vec3(0, 0, 0), 0, { offline = true })
+	local queued_charge
+	local process_item = alife_process_item
+	alife_process_item = function(section, id, fields)
+		if section == scope_section and id == offline.id then queued_charge = fields.cond end
+	end
+	z_3dss_thermal_battery.on_canted_removed(provisional, offline, scope_section)
+	alife_process_item = process_item
+	check(close(queued_charge, 0.42), name .. " native mirror detach preserves charge while its replacement is offline")
+	release_id(offline.id)
+	release_id(provisional:id())
 
 	local w = gun(0)
 	charge(w, "canted", 0.23)

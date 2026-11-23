@@ -2,16 +2,16 @@
 -- G7-4, Dev 57. Object actions use the level request door; personal hits stay with the player.
 -- Co-op: the playing host has the NPC and the inventory. Server: the level request door passes the
 -- player's request to his map; no object lookup is done on the world server. Both call npc.heal's body.
--- mods.combat_heal {q=operation,n=NPC host id}; mods.combat_heal_r {q,n,ok,i?,u?} to the requester only.
--- i/u confirm the consumed item and its remaining uses in host numbering.
--- No saved state. Operation guards and bullet retention are session-local.
+-- mods.combat_heal {a=origin,q=sequence,n=NPC host id}; mods.combat_heal_r {q,n,ok}.
+-- WP6 replicates the item's uses, and the receipt records the statistic once.
 
 local function C() return coop_mods_core end
 local function log(fmt, ...) C().log("combat", fmt, ...) end
 local installed, rebind, started = {}, {}, false
-local pending, served = {}, {}
+local pending = {}
 local healing = {} -- [local NPC id] = transaction waiting for its medkit_script to attach
-local seq, next_install = 0, 0
+local next_install = 0
+local RETRY_MS = 2000
 local HEAL, REPLY = "combat_heal", "combat_heal_r"
 local MEDICAL = { "medkit", "medkit_army", "medkit_scientic", "stimpack", "stimpack_army", "stimpack_scientic" }
 local animation_npc, in_animation
@@ -41,16 +41,6 @@ local function credited(t)
 	if not (p and p.q == t.q) then return end
 	pending[t.n] = nil -- consume BEFORE calling a third-party callback
 	if t.ok ~= true then return end
-	-- The native inventory sync treats the player as the owner of uses. Reconcile its copy
-	-- with the map authority receipt so the old owner state cannot restore a spent dose.
-	if coop_mode.is_player_mirror() and integer(t.i, 1, 65534) and integer(t.u, 0, 254) then
-		local id = C().lid(t.i)
-		local item = id and level.object_by_id(id)
-		local owner = item and item:parent()
-		if owner and owner:id() == db.actor:id() and item:get_remaining_uses() > t.u then
-			item:set_remaining_uses(t.u)
-		end
-	end
 	game_statistics.increment_npc_statistic(db.actor, "wounded_helped")
 end
 
@@ -66,7 +56,8 @@ local function finish_heal(tx, success)
 		if not ok then log("! wounded help cleanup failed: %s", tostring(err)) end
 	end
 	tx.answer.ok = success
-	return reply(tx.from, tx.answer)
+	coop_ops_done.record(tx.op, tx.answer)
+	if coop_ops_done.origin(tx.from) == tx.op.origin then return reply(tx.from, tx.answer) end
 end
 
 local function complete_heal(tx, item)
@@ -83,7 +74,6 @@ local function complete_heal(tx, item)
 	local spent = item:get_remaining_uses() == uses - 1
 	local success = spent and tx.wm.can_use_medkit == true
 	if success then
-		tx.answer.i, tx.answer.u = C().hid(item_id), uses - 1
 		if uses == 1 then
 			local released, release_err = pcall(alife_release_id, item_id)
 			if not released then log("! empty medkit cleanup failed: %s", tostring(release_err)) end
@@ -95,21 +85,27 @@ local function complete_heal(tx, item)
 end
 
 local function heal(t, from)
-	local valid = type(t) == "table" and integer(t.q, 1, 2147483647) and integer(t.n, 1, 65534)
+	local valid = type(t) == "table" and integer(t.q, 1, 4294967295) and integer(t.n, 1, 65534)
 	if not check("shape", valid) or not valid then return end
 	-- There is no level to act on when the world server has no bridge for this player yet.
 	if not coop_mode.leads_here() then return end
-	local last = served[from]
-	if last and t.q <= last.q then
-		if t.q == last.q and t.n == last.n and last.ok ~= nil then reply(from, last) end
-		return -- one-shot guard: always on, including log mode
+	local op = coop_ops_done.identify(from, t.q, t.a)
+	if not op or not coop_mode.writes(C().lid(op.origin)) then return end
+	local saved, retired = coop_ops_done.get(op)
+	if saved and saved.q == t.q and saved.n == t.n and type(saved.ok) == "boolean" then return reply(from, saved) end
+	local answer = { q = t.q, n = t.n, ok = false }
+	if saved or retired then return reply(from, answer) end
+	for _, tx in pairs(healing) do
+		if tx.op.origin == op.origin and tx.op.seq == op.seq then return end
 	end
-	local answer = { q = t.q, n = t.n }
-	served[from] = answer -- reserve before any callback or inventory change
-	local function refuse() answer.ok = false return reply(from, answer) end
+	local function refuse()
+		coop_ops_done.record(op, answer)
+		return reply(from, answer)
+	end
 	local target = C().lid(t.n)
 	local who, npc = C().avatar(from), target and level.object_by_id(target)
-	local exists = who and npc and npc:alive() and IsStalker(npc) and not C().is_player(target)
+	if not who then return end -- the player's body has not arrived here yet
+	local exists = npc and npc:alive() and IsStalker(npc) and not C().is_player(target) and coop_mode.writes(target)
 	if not check("objects", exists) or not exists then return refuse() end
 	if not check("near", who:position():distance_to_sqr(npc:position()) <= 100) then return refuse() end
 	local storage = db.storage[target]
@@ -118,7 +114,7 @@ local function heal(t, from)
 	if not check("wounded", wounded) or not wounded then return refuse() end
 	if healing[target] or wm.can_use_medkit == true then return refuse() end
 	local item = dose(who)
-	if not check("dose", item ~= nil) or not item then return refuse() end
+	if not check("dose", item ~= nil) or not item or not coop_mode.writes(item:id()) then return refuse() end
 	local meet = C().mod("coop_npc_meet")
 	local npc_heal = meet and C().find_local(meet, "host_on_heal")
 	if type(npc_heal) ~= "function" then
@@ -126,7 +122,7 @@ local function heal(t, from)
 		return refuse()
 	end
 	local tx = { from = from, target = target, who = who:id(), item = item:id(),
-		answer = answer, wm = wm, npc_heal = npc_heal, expires = time_global() + 5000 }
+		answer = answer, op = op, wm = wm, npc_heal = npc_heal }
 	healing[target] = tx
 	if npc:object("medkit_script") then return complete_heal(tx, item) end
 	local ok, created = pcall(alife_create_item, "medkit_script", npc)
@@ -137,15 +133,16 @@ local function heal(t, from)
 	-- A returned server entity is not yet in the NPC inventory. Wait without debiting anyone.
 end
 
-local function advance_heal(tx, now)
+local function advance_heal(tx)
 	local npc = level.object_by_id(tx.target)
 	local storage = db.storage[tx.target]
 	local wm = storage and storage.wounded and storage.wounded.wound_manager
 	local who = C().avatar(tx.from)
 	local item = level.object_by_id(tx.item)
 	local owner = item and item:parent()
-	if now >= tx.expires or not (npc and npc:alive() and wm == tx.wm and xr_wounded.is_wounded(npc)
-		and who and who:id() == tx.who and owner and owner:id() == tx.who and item:get_remaining_uses() > 0)
+	if not (npc and npc:alive() and wm == tx.wm and xr_wounded.is_wounded(npc)
+		and who and who:id() == tx.who and owner and owner:id() == tx.who and item:get_remaining_uses() > 0
+		and coop_mode.writes(tx.target) and coop_mode.writes(tx.item) and alife_object(tx.created))
 		or wm.can_use_medkit == true then
 		return finish_heal(tx, false)
 	end
@@ -156,16 +153,17 @@ local function request_help(npc)
 	if not (npc and coop_mode.actor_is_player()) then return end
 	local id = C().hid(npc:id())
 	if not integer(id, 1, 65534) then return end
-	local now, p = time_global(), pending[id]
-	if p and now - p.at < 10000 then return true end
-	seq = seq + 1
-	pending[id] = { q = seq, at = now }
-	local t = { q = seq, n = id }
-	if coop_mode.leads_here() then
-		heal(t, C().self_peer())
-	elseif not C().to_host(HEAL, t) then
-		pending[id] = nil
-	end
+	local peer = C().self_peer()
+	local origin = coop_ops_done.origin(peer)
+	if origin == nil then return end
+	local p = pending[id]
+	if p and p.request.a == origin then return true end
+	local seq = coop_ops_done.new_sequence()
+	if seq == nil then return end
+	local t = { a = origin, q = seq, n = id }
+	pending[id] = { q = seq, request = t, next_at = time_global() + RETRY_MS }
+	if coop_mode.leads_here() then heal(t, peer)
+	else C().to_host(HEAL, t) end
 	return true
 end
 
@@ -375,23 +373,27 @@ local function update()
 	local now = time_global()
 	if coop_mode.leads_here() then
 		for _, tx in pairs(healing) do
-			local ok, err = pcall(advance_heal, tx, now)
+			local ok, err = pcall(advance_heal, tx)
 			if not ok then
 				log("! wounded help update failed: %s", tostring(err))
 				finish_heal(tx, false)
 			end
 		end
 	end
+	if next(pending) and C().active() and coop_mode.actor_is_player() then
+		local peer = C().self_peer()
+		local origin = coop_ops_done.origin(peer)
+		for _, p in pairs(pending) do
+			if now >= p.next_at and p.request.a == origin then
+				p.next_at = now + RETRY_MS
+				if coop_mode.leads_here() then heal(p.request, peer)
+				else C().to_host(HEAL, p.request) end
+			end
+		end
+	end
 	if now < next_install then return end
 	next_install = now + 1000
 	install()
-	-- A connected peer keeps its sequence guard. A disconnected peer's transport slot can be reused.
-	if next(served) then
-		local present = { [C().self_peer()] = C().active() }
-		for _, player in ipairs(C().players()) do present[player.id] = true end
-		for peer in pairs(served) do if not present[peer] then served[peer] = nil end end
-	end
-	for id, p in pairs(pending) do if now - p.at > 30000 then pending[id] = nil end end
 end
 
 function on_game_start()

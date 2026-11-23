@@ -38,7 +38,7 @@ actor.item_in_slot = function() return nil end
 actor.take_item = function(_, obj) SE[obj:id()].parent_id = 0 end
 EDDListType = { iActorBag = 1, iActorSlot = 2 }
 AC_ID = 0
-object_binder = {}
+object_binder = { update = function() end }
 class = function(name)
 	local env = getfenv(2)
 	return function() env[name] = {} end
@@ -251,7 +251,10 @@ if mode == "hostplay" or mode == "srv_map" then
 	local reply, target = answer()
 	check(reply.ok == true and target == 1 and creates == 1 and #RELEASED == released + 1 and SE[batt_id] == nil
 		and dev:condition() == 0.9 and CREATED[#CREATED].cond == 0.3, mode .. ": swap commits once and returns the extracted charge")
-	check(stored(dev_id) == 0.9, mode .. ": the swap writes the new charge into item_device's unlocalized dev_condition")
+	check(stored(dev_id) == nil, mode .. ": R32 setter has no exchange-side charge copy")
+	D.dev_condition[dev_id] = 0.3
+	D.device_binder.update({ object = dev }, 0)
+	check(dev:condition() == 0.9, mode .. ": stock binder cannot restore stale charge over the engine's item state")
 
 	local d2, b2 = item("detector_simple", 500, 0.4), item("batteries_dead", 500, 0.8)
 	fail_create = true
@@ -264,7 +267,7 @@ if mode == "hostplay" or mode == "srv_map" then
 	local output = CREATED[#CREATED] or {}
 	check(answer().why == "release" and d2:condition() == 0.4 and SE[b2:id()] and output.id and SE[output.id] == nil,
 		mode .. ": failed release restores the charge and removes the output")
-	check(stored(d2:id()) == 0.4, mode .. ": the rollback restores the charge in item_device's unlocalized dev_condition")
+	check(stored(d2:id()) == nil, mode .. ": charge rollback uses the setter only")
 	fail_release = false
 
 	local other = item("detector_simple", 0, 0.4)
@@ -329,10 +332,11 @@ if mode == "hostplay" or mode == "srv_map" then
 	if wire_request then
 		coop_main.on_event("mods.xchg_r", coop_main.encode({ o = wire_request.o, ok = true, ["r.charge"] = 0.9 }), 0)
 	end
-	check(d1:condition() == 0.9 and d2:condition() == 0.4 and fx == sound_before + 1,
-		mode .. ": client applies the confirmed charge and plays the effect once")
-	check(stored(d1:id()) == 0.9 and stored(d2:id()) == nil,
-		mode .. ": client writes the confirmed charge into item_device's unlocalized dev_condition")
+	check(d1:condition() == 0.3 and d2:condition() == 0.4 and fx == sound_before + 1,
+		mode .. ": receipt plays the effect once without setting a mirror's charge")
+	check(stored(d1:id()) == nil and stored(d2:id()) == nil,
+		mode .. ": receipt does not shadow the item's condition")
+	d1:set_condition(0.9) -- simulate WP6's authoritative baseline reaching the owner
 
 	local first, second = item("meat"), item("hide")
 	local a = pickup(first)

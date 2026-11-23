@@ -229,6 +229,27 @@ local function level_request(name, payload, from)
 	return "here", payload, from, false
 end
 
+-- R32 W7 (§5 Done = 17 {u32 origin, u32 op, str answer}): a map server's answer of a numbered op goes up with its effect, a
+-- Done entry of its level journal (the engine's srv.journal_done(origin, seq, answer) -> bool, WP4). true: the world keeps it
+-- and hands it to the next map server of the level. false: not recorded up (no binding in this exe, it refused, or this
+-- process is the world server, whose ledger is its own save, or a player's machine): coop_ops_done keeps it here.
+local function op_done(op, answer)
+	if not map_server() or type(op) ~= "table" or type(answer) ~= "table" then return false end
+	local s = rawget(_G, "srv")
+	local journal = type(s) == "table" and s.journal_done or nil
+	if type(journal) ~= "function" then return false end
+	return call(journal, op.origin, op.seq, coop_main.encode(answer)) == true
+end
+
+-- R32 W7: coop_op_done(origin, seq, answer), raised by the engine when the world applies a map server's Done entry, and on a
+-- starting map server for each record of its level the world hands it: the ledger takes the record, so a retry of that op
+-- gets the recorded answer and runs nothing. A record already there keeps its first answer. A new record is told to the
+-- ledger's listeners (coop_ops_done.heard; Nimble's keeper takes a commit from it).
+local function op_done_heard(origin, seq, text)
+	if type(text) ~= "string" then return end
+	coop_ops_done.heard({ origin = tonumber(origin), seq = tonumber(seq) }, coop_main.decode(text))
+end
+
 LAYER = {
 	name = "srv",
 	applies = applies,
@@ -253,8 +274,8 @@ LAYER = {
 	end,
 	-- R32 W10 (WP13 fills it from the world's presence): nil until then
 	presence = function() return nil end,
-	-- R32 W7 (WP4 puts it in the level journal as a Done entry): not recorded until then
-	op_done = function() return false end,
+	-- R32 W7: a map server's Done entry (op_done above)
+	op_done = op_done,
 }
 
 local function started()
@@ -262,5 +283,11 @@ local function started()
 end
 
 function on_game_start()
-	coop_mode.when_srv(started, LAYER)
+	coop_mode.when_srv(function()
+		started()
+		-- raised by the engine (srv/coop_levels_xfer.cpp, journal Done; R32 W7); declared here, its only subscriber
+		local add = rawget(_G, "AddScriptCallback")
+		if type(add) == "function" then add("coop_op_done") end
+		RegisterScriptCallback("coop_op_done", op_done_heard)
+	end, LAYER)
 end

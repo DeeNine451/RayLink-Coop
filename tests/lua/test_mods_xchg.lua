@@ -28,6 +28,7 @@ if not (loaded and type(X) == "table") then
 	done("mods_xchg@" .. name)
 	return
 end
+load_script("coop_ops_done").on_game_start()
 local started, why_not = pcall(X.on_game_start)
 check(started, "on_game_start does not throw (" .. tostring(why_not) .. ")")
 local mode_set = modes.install(coop_mode, name)
@@ -115,6 +116,18 @@ if name == "hostplay" or name == "srv_map" then
 	check(answers() == 2 and a.o == "1:7:1" and a.ok == true and target == 1 and N.commit == 1 and N.check == 1
 		and N.reserve == 1, who .. ": a repeated op gets the stored answer, check and commit do not run again")
 
+	-- The same request can arrive long after a stall or after reloading the decider's save.
+	local saved = {}
+	SendScriptCallback("save_state", saved)
+	NOW = NOW + 360000
+	if name == "hostplay" then
+		SendScriptCallback("load_state", {})
+		SendScriptCallback("load_state", saved)
+	end
+	request({ k = "demo", o = "1:7:1", i = it:id() }, 1)
+	a = last_answer()
+	check(a.ok and a.r == it:id() and N.commit == 1, who .. ": an old numbered repeat replays the original answer")
+
 	-- an item the op spends stays reserved until it is gone: a second op on it is refused
 	local x = item(500)
 	request({ k = "demo", o = "1:7:2", i = x:id(), spend = true }, 1)
@@ -131,7 +144,10 @@ if name == "hostplay" or name == "srv_map" then
 	request({ k = "demo", o = "1:7:30", i = y:id(), spend = true }, 1)
 	check(X.reserved(y:id()) == "1:7:30", who .. ": a spent item that stays")
 	tick(10500)
-	check(X.reserved(y:id()) == nil, who .. ": ... is free again after the hold (10 s)")
+	check(X.reserved(y:id()) == "1:7:30", who .. ": stays reserved while removal is pending")
+	release_id(y:id())
+	tick()
+	check(X.reserved(y:id()) == nil, who .. ": reservation ends after confirmed removal")
 
 	-- Opt-in exchanges keep the reply pending and reserve both spent and unspent inputs until completion.
 	local commits_after, awards, deferred_rollbacks = 0, 0, 0
@@ -203,16 +219,14 @@ if name == "hostplay" or name == "srv_map" then
 	check(answers() == before and X.reserved(stuck) == expiring.o and awards == 1,
 		who .. ": waits the full ten seconds if the object is still present")
 	tick(1)
-	a = last_answer()
-	check(answers() == before + 1 and a.o == expiring.o and a.ok == false and a.why == "gone_timeout"
-		and a.pending == nil and awards == 1 and X.reserved(stuck) == nil and X.reserved(keep) == nil
-		and deferred_rollbacks == 1, who .. ": expiry answers without awarding and releases the reservations")
+	check(answers() == before and X.reserved(stuck) == expiring.o,
+		who .. ": an elapsed interval does not abandon a committed exchange")
 	release_id(stuck)
 	tick()
 	request(expiring, 1)
 	a = last_answer()
-	check(answers() == before + 2 and a.why == "gone_timeout" and awards == 1 and commits_after == 2,
-		who .. ": a late disappearance or retry cannot turn the cached timeout into an award")
+	check(answers() == before + 2 and a.ok == true and awards == 2 and commits_after == 2,
+		who .. ": a late disappearance completes once; the retry gets its answer")
 
 	local gone = item(500):id()
 	request({ k = "deferred", o = "1:7:34", i = gone, fail_award = true }, 1)
@@ -223,7 +237,7 @@ if name == "hostplay" or name == "srv_map" then
 		and deferred_rollbacks == 1, who .. ": a refusal from the follow-up is terminal after a successful commit")
 	request({ k = "deferred", o = "1:7:35", i = keep, refuse = true }, 1)
 	a = last_answer()
-	check(a.o == "1:7:35" and a.why == "no" and awards == 1 and deferred_rollbacks == 2 and X.reserved(keep) == nil,
+	check(a.o == "1:7:35" and a.why == "no" and awards == 2 and deferred_rollbacks == 2 and X.reserved(keep) == nil,
 		who .. ": failed commit rolls back without waiting or awarding")
 	request({ k = "deferred", o = "1:7:36", i = keep, overflow = true }, 1)
 	a = last_answer()
@@ -231,7 +245,7 @@ if name == "hostplay" or name == "srv_map" then
 		who .. ": refuses an exchange whose spent list cannot all be reserved")
 	request({ k = "deferred", o = "1:7:37", keep = keep }, 1)
 	a = last_answer()
-	check(a.o == "1:7:37" and a.ok == true and a["r.award"] == 11 and awards == 2 and X.reserved(keep) == nil,
+	check(a.o == "1:7:37" and a.ok == true and a["r.award"] == 11 and awards == 3 and X.reserved(keep) == nil,
 		who .. ": the follow-up can finish immediately when there are no spent ids")
 
 	local unseen = item(500):id()
@@ -242,11 +256,11 @@ if name == "hostplay" or name == "srv_map" then
 	before = answers()
 	tick()
 	alife_object = lookup
-	check(answers() == before and awards == 2, who .. ": a lookup error cannot confirm disappearance")
+	check(answers() == before and awards == 3, who .. ": a lookup error cannot confirm disappearance")
 	tick(10000)
 	a = last_answer()
-	check(a.o == "1:7:38" and a.why == "gone_timeout" and awards == 2,
-		who .. ": a disappearance first confirmed after the deadline cannot award")
+	check(a.o == "1:7:38" and a.ok and awards == 4,
+		who .. ": a late reliable lookup confirms the removal and awards once")
 
 	local avatar_error = item(500):id()
 	local failed_body = { k = "deferred", o = "1:7:39", i = avatar_error }
@@ -257,10 +271,10 @@ if name == "hostplay" or name == "srv_map" then
 	local updated = pcall(tick)
 	coop_mods_core.avatar = find_avatar
 	a = last_answer()
-	check(updated and a.o == failed_body.o and a.ok == false and a.why == "error" and awards == 2
+	check(updated and a.o == failed_body.o and a.ok == false and a.why == "error" and awards == 4
 		and X.reserved(avatar_error) == nil, who .. ": an avatar lookup error at completion finalizes the failure")
 	request(failed_body, 1)
-	check(last_answer().why == "error" and awards == 2, who .. ": a retry cannot revive the failed follow-up")
+	check(last_answer().why == "error" and awards == 4, who .. ": a retry cannot revive the failed follow-up")
 
 	-- a commit that fails or raises: rolled back, answered ok = false, nothing stays reserved
 	commits, rollbacks = N.commit, N.rollback
@@ -371,8 +385,10 @@ if name == "hostplay" or name == "srv_map" then
 			and sent_count("mods.xchg") == xchg_before, "co-op host: its own deferred request finishes once and stays off the wire")
 		X.ask("deferred", { i = own:id() }, function(ok, r, reason) deferred_cb[#deferred_cb + 1] = { ok, r, reason } end)
 		tick(10000)
-		check(#deferred_cb == 2 and deferred_cb[2][1] == false and deferred_cb[2][3] == "gone_timeout",
-			"co-op host: the decider's expiry settles its own request at ten seconds")
+		check(#deferred_cb == 1, "co-op host: a pending removal survives a long stall")
+		release_id(own:id())
+		tick()
+		check(#deferred_cb == 2 and deferred_cb[2][1] == true, "co-op host: removal settles its own request")
 
 		-----------------------------------------------------------------------
 		-- the co-op client's side
@@ -420,33 +436,37 @@ if name == "hostplay" or name == "srv_map" then
 		check(#remote_cb == 0 and X.busy("deferred", remote), "client: a retry's busy response leaves the original op pending")
 		as_host()
 		tick(10000)
+		release_id(remote)
+		tick()
 		_, ans = sent("mods.xchg_r")
 		as_client()
 		deliver(ans, 0)
 		deliver(ans, 0)
-		check(#remote_cb == 1 and remote_cb[1][1] == false and remote_cb[1][3] == "gone_timeout"
-			and not X.busy("deferred", remote), "client: receives the decider timeout once with a longer player timeout")
+		check(#remote_cb == 1 and remote_cb[1][1] == true
+			and not X.busy("deferred", remote), "client: receives one final answer after a delayed removal")
 		-- an answer from a peer other than the host is not taken
 		local cg2 = {}
 		local cop2 = X.ask("demo", { key = "z" }, function(ok, r, why) cg2[#cg2 + 1] = why end)
 		coop_main.on_event("mods.xchg_r", coop_main.encode({ o = cop2, ok = true }), 3)
 		check(#cg2 == 0 and X.busy("demo", "z"), "client: an answer from another peer is ignored")
-		-- no answer: a timeout (default 10 s) calls cb(false, nil, "timeout") once and clears the op
+		local retry_before = sent_count("mods.xchg")
 		tick(9000)
-		check(#cg2 == 0, "client: no timeout before 10 s")
+		check(#cg2 == 0, "client: no timeout before retry")
 		tick(1500)
-		check(#cg2 == 1 and cg2[1] == "timeout" and not X.busy("demo", "z"), "client: the timeout calls cb once and clears the op")
-		coop_main.on_event("mods.xchg_r", coop_main.encode({ o = cop2, ok = true }), 0)
+		local retry = sent("mods.xchg")
+		check(#cg2 == 0 and X.busy("demo", "z") and retry.o == cop2 and sent_count("mods.xchg") > retry_before,
+			"client: unanswered exchange is resent with its original operation number")
+		coop_main.on_event("mods.xchg_r", coop_main.encode({ o = cop2, ok = false, why = "late_reply" }), 0)
 		tick()
-		check(#cg2 == 1, "client: a late answer after the timeout is ignored")
-		-- a timeout per kind
+		check(#cg2 == 1 and cg2[1] == "late_reply" and not X.busy("demo", "z"), "client: accepts a late terminal answer")
+		-- a retry interval per kind
 		X.set_timeout("slow", 3000)
 		local cg3 = {}
 		X.ask("slow", { key = 1 }, function(ok, r, why) cg3[#cg3 + 1] = { ok, why } end)
 		tick(2000)
 		check(#cg3 == 0 and X.busy("slow", 1), "client: a kind's own timeout is waited")
 		tick(1500)
-		check(#cg3 == 1 and cg3[1][1] == false and cg3[1][2] == "timeout", "client: ... and ends at 3 s")
+		check(#cg3 == 0 and X.busy("slow", 1) and sent("mods.xchg").k == "slow", "client: its kind's retry keeps it pending")
 		-- a refusal and a table result come back as they were answered
 		as_host()
 		X.serve("pair", { commit = function(t) return true, { a = 1, b = "two", c = true } end })

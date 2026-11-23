@@ -7,6 +7,7 @@
 -- Not shipped.
 dofile("tests/lua/support/harness_economy.lua")
 local modes = dofile("tests/lua/support/modes.lua")
+local mode = modes.names()[1]
 
 local NAMES = { ammo_9x19_fmj = "9x19 FMJ", ammo_545x39_bp = "5.45 BP", bandage = "Bandage", medkit = "Medkit",
 	vodka = "Vodka", cigarettes = "Cigarettes" }
@@ -110,6 +111,11 @@ local function stubs(W)
 	W.ui_inventory = { UIInventory = inv }
 	W.GetCursorPosition = function() return { x = 0, y = 0 } end
 	W.ui_item = { get_sec_name = function(sec) return NAMES[sec] end }
+	local is_item = W.IsItem
+	W.IsItem = function(kind, sec)
+		if kind == "multiuse" then return sec == "cigarettes" and 5 or nil end
+		return is_item(kind, sec)
+	end
 	W.TIP_LOG = {}
 	W.news_manager = { send_tip = function(actor, text)
 		W.TIPS[#W.TIPS + 1] = text
@@ -179,8 +185,8 @@ local function setup(nclients)
 	host_alife(WORLDS[0])
 	for _, W in pairs(WORLDS) do
 		modes.live(load_script(W, "coop_mode"), function(name) return load_script(W, name) end)
-		for _, n in ipairs({ "coop_economy_core", "coop_economy_money", "coop_economy_give" }) do load_script(W, n) end
-		for _, n in ipairs({ "coop_economy_core", "coop_economy_money", "coop_economy_give" }) do
+		for _, n in ipairs({ "coop_ops_done", "coop_economy_core", "coop_economy_money", "coop_economy_give" }) do load_script(W, n) end
+		for _, n in ipairs({ "coop_ops_done", "coop_economy_core", "coop_economy_money", "coop_economy_give" }) do
 			if W[n].on_game_start then W[n].on_game_start() end
 		end
 	end
@@ -192,6 +198,7 @@ local function put(id, section, owner, count)
 	for _, W in pairs(WORLDS) do
 		local o = add_item(W, id, section, avatar_in(W, owner))
 		o.ammo = count or (BOX[section] and BOX[section]) or 0
+		function o:get_remaining_uses() return section == "cigarettes" and self.uses or 0 end
 		function o:ammo_get_count() return self.ammo end
 		function o:ammo_box_size() return BOX[self._section] or 1 end
 	end
@@ -496,9 +503,14 @@ do
 	-- multi-use items: whole items only
 	put(780, "cigarettes", 1) put(781, "cigarettes", 1)
 	A.OBJ[780].uses, A.OBJ[781].uses = 2, 3
+	for _, id in ipairs({ 780, 781 }) do
+		A.OBJ[id].get_remaining_uses = function(obj) return obj.uses end
+	end
 	A.STACK[780] = { 781 }
 	menu(A, 780, 2)
-	check(track(A).hi == 2 and number(A) == "1 / 2", "two multi-use items: 1..2 items, not portions")
+	check(track(A).hi == 2 and number(A) == "x1 (2 uses) / x2 (5 uses)", "multi-use items: number shows objects and uses")
+	slide(A, 2)
+	check(number(A) == "x2 (5 uses) / x2 (5 uses)", "uses follow the selected objects")
 	key(A, DIK.DIK_ESCAPE)
 end
 
@@ -605,7 +617,7 @@ do
 	ask({ q = 30, i = 810, n = 5, k = 40, p = 2 })
 	local n30 = 0
 	for _, e in ipairs(events(H, "give_ans")) do if e.t.q == 30 then n30 = n30 + 1 end end
-	check(#H.MADE == 1 and n30 == 1, "a repeated q: one box, one answer")
+	check(#H.MADE == 1 and n30 == 2, "a repeated q: one box, the original answer sent again")
 	-- from a peer that is not a player, from the host to itself
 	H.coop_main.on_event("economy.give_part", CM_ENCODE({ q = 31, i = 810, n = 5, k = 40, p = 2 }), 7)
 	H.coop_main.on_event("economy.give_part", CM_ENCODE({ q = 32, i = 810, n = 5, k = 40, p = 2 }), 0)
@@ -648,9 +660,13 @@ do
 	check(A.HANDLER_ERRORS == nil and A.OBJ[820].ammo == 30, "nothing changes, no error")
 	-- no answer at all: the rounds are not given back on a timer (a late yes would double them)
 	give_amount(A, 820, 2, 10)
+	local dropped = events(A, "give_part")
+	local dropped_q = dropped[#dropped].t.q
 	QUEUE = {}
-	wait(A, 120000)
-	check(A.OBJ[820].ammo == 20, "no answer: nothing comes back by itself")
+	wait(A, 610000)
+	local retry = events(A, "give_part")
+	check(A.OBJ[820].ammo == 20 and A.coop_economy_give.pending_count() == 1
+		and #retry > #dropped and retry[#retry].t.q == dropped_q, "unanswered give is retried with the same number")
 end
 
 -------------------------------------------------------------------------------
@@ -804,6 +820,52 @@ do
 	check(not ui:find("cancel", 1, true) and not ui:find("half", 1, true), "no cancel, no quick buttons")
 	local scr = readfile(ROOT .. "scripts/coop_economy_give.script")
 	check(not scr:find("[\128-\255]") and select(2, scr:gsub("\r\n", "")) == select(2, scr:gsub("\n", "")), "coop_economy_give.script: ASCII, CRLF")
+end
+
+section("R32 numbered give and mode routing")
+do
+	local H = setup(2)
+	put(950, "ammo_9x19_fmj", 1, 30)
+	local reports = 0
+	local overrides = { op_done = function(op, answer)
+		check(op.origin == 501 and op.seq == 950 and answer.o == 1, "numbered give reports its original result")
+		reports = reports + 1
+		return true
+	end }
+	local bridge = 0x101
+	if mode == "srv_world" then
+		BRIDGES[bridge] = { players = { 1, 2 } }
+		overrides.level_request = function(_, payload, from)
+			local t = CM_DECODE(payload)
+			t._peer = from
+			return "pass", bridge, CM_ENCODE(t)
+		end
+	elseif mode == "srv_map" then
+		overrides.level_request = function(_, payload, from)
+			if from ~= 0 then return "drop" end
+			local t = CM_DECODE(payload)
+			local peer = t._peer
+			t._peer = nil
+			return "here", CM_ENCODE(t), peer, true
+		end
+	end
+	modes.install(H.coop_mode, mode, overrides)
+	local req = { a = 501, q = 950, i = 950, n = 5, k = 25, p = 2 }
+	if mode == "srv_map" then req._peer = 1 end
+	local sender = mode == "srv_map" and 0 or 1
+	H.coop_main.on_event("economy.give_part", CM_ENCODE(req), sender)
+	H.NOW = H.NOW + 300000
+	H.coop_main.on_event("economy.give_part", CM_ENCODE(req), sender)
+	if mode == "srv_world" then
+		local forwarded = events(H, "give_part")
+		check(#H.MADE == 0 and #forwarded == 2 and forwarded[2].t.q == req.q
+			and forwarded[2].t._peer == 1 and forwarded[2].target == bridge,
+			"Server world relays the original operation without creating an item")
+	elseif mode == "hostplay" or mode == "srv_map" then
+		local replies = events(H, "give_ans")
+		check(#H.MADE == 1 and #replies == 2 and replies[1].t.q == req.q
+			and replies[2].t.o == 1 and reports == 1, mode .. ": a repeated op replays the result and creates once")
+	end
 end
 
 print(string.format("\n%d passed, %d failed", CHECKS - FAILS, FAILS))

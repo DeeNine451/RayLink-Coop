@@ -9,7 +9,7 @@ local BATTERY_OP = "fdda_battery"
 local SKIN_WAIT_MS = 10000
 local CHARGE_TOLERANCE = 0.02
 local NO_PARENT = 65535
-local device_mod, condition_holder, condition_slot
+local device_mod
 local battery_pending = {}
 
 local function C() return coop_mods_core end
@@ -30,21 +30,6 @@ local function same_charge(observed, current)
 	return charge(observed) and charge(current) and math.abs(observed - current) <= CHARGE_TOLERANCE
 end
 
--- item_device's [id] = condition table, read anew on every call (its load_state replaces it): a file local of
--- item_device.script, or a module field where our configs\unlocalizers\unlocalizer_coop_economy.ltx has the engine
--- (script_storage.cpp) turn the local into one before the script compiles (as coop_economy_world reads it).
-local function set_charge(obj, value)
-	obj:set_condition(value)
-	local conditions
-	if condition_holder then
-		local _
-		_, conditions = debug.getupvalue(condition_holder, condition_slot)
-	elseif type(device_mod) == "table" then
-		conditions = rawget(device_mod, "dev_condition")
-	end
-	if type(conditions) == "table" then conditions[obj:id()] = obj:condition() end
-end
-
 -- Both the trust check and the reservation use only objects the requester currently owns.
 local function battery_inputs(t, who)
 	local device_id = X().wire_id(t.d)
@@ -57,7 +42,8 @@ local function battery_inputs(t, who)
 	local section = m and m.device_battery
 	if not (section and ini_sys:section_exist(section)) then return nil, "device" end
 	local owner = who and who:id()
-	if not (owner and owned(device_id, owner) and (not battery_id or owned(battery_id, owner))) then
+	if not (owner and owned(device_id, owner) and coop_mode.writes(device_id)
+		and (not battery_id or (owned(battery_id, owner) and coop_mode.writes(battery_id)))) then
 		return nil, "owner"
 	end
 	local device = level.object_by_id(device_id)
@@ -106,7 +92,7 @@ end
 local function commit_battery(_, _, who, token)
 	if token.returns_battery and not create_battery(who, token) then return false, "create" end
 	token.changed = true
-	set_charge(token.device, token.new_charge)
+	token.device:set_condition(token.new_charge)
 	if math.abs(token.new_charge - token.device:condition()) > 0.00001 then return false, "condition" end
 	if token.battery_id then
 		local input = alife_object(token.battery_id)
@@ -115,12 +101,12 @@ local function commit_battery(_, _, who, token)
 		-- The local server processes GE_DESTROY synchronously. The online copy can survive until the next frame.
 		if alife_object(token.battery_id) then return false, "release" end
 	end
-	return true, { charge = token.new_charge }
+	return true
 end
 
 local function rollback_battery(_, _, _, token)
 	if token.changed then
-		local ok, err = pcall(set_charge, token.device, token.original)
+		local ok, err = pcall(function() token.device:set_condition(token.original) end)
 		if not ok then report("restore device charge", err) end
 	end
 	if token.output then
@@ -162,7 +148,7 @@ local function request_battery(device, battery)
 		if battery_pending[id] == entry then battery_pending[id] = nil end
 		if input and battery_pending[input] == entry then battery_pending[input] = nil end
 	end
-	local function accept(ok, result, why)
+	local function accept(ok, _, why)
 		if battery_pending[id] ~= entry then return end
 		clear()
 		if not ok then
@@ -177,13 +163,31 @@ local function request_battery(device, battery)
 		local current = level.object_by_id(id)
 		local parent = current and current:parent()
 		if not (parent and db.actor and parent:id() == db.actor:id() and current:name() == name) then return end
-		if coop_mode.is_player_mirror() and type(result) == "table" and charge(result.charge) then
-			set_charge(current, result.charge)
-		end
 		actor_effects.play_item_fx(device_mod.device_battery)
 		utils_obj.play_sound("interface\\inv_batt")
 	end
 	if not x.ask(BATTERY_OP, request, accept) then clear() end
+end
+
+-- The binder's first update used to restore its Lua save row over the received item.
+local function install_device_restore()
+	local mod = C().mod("item_device")
+	local binder = mod and mod.device_binder
+	local update = C().fn(binder, "update")
+	local _, holder, slot = C().upvalue(update, "dev_condition")
+	C().wrap(binder, "update", "item_device.device_binder.update", function(orig)
+		return function(self, ...)
+			if C().active() and not self.first_update then
+				local conditions = rawget(mod, "dev_condition")
+				if holder then
+					local _
+					_, conditions = debug.getupvalue(holder, slot)
+				end
+				if type(conditions) == "table" then conditions[self.object:id()] = nil end
+			end
+			return orig(self, ...)
+		end
+	end)
 end
 
 local function install_device_hooks(mcm)
@@ -193,8 +197,6 @@ local function install_device_hooks(mcm)
 	local drag = C().find_local(m, "on_item_drag_dropped")
 	if type(drag) ~= "function" then return end
 	device_mod = m
-	local _
-	_, condition_holder, condition_slot = C().find_local(m, "dev_condition")
 	C().wrap(m, "func_battery", "item_device.func_battery", function(orig)
 		return function(obj, ...)
 			if not C().active() then return orig(obj, ...) end
@@ -484,6 +486,7 @@ end
 function on_game_start()
 	if not api then return end
 	step("battery exchange", install_battery)
+	step("device condition restore", install_device_restore)
 	step("actor update", RegisterScriptCallback, "actor_on_update", actor_on_update)
 	step("object destroyed", RegisterScriptCallback, "game_object_on_net_destroy", on_net_destroy)
 end
