@@ -23,8 +23,8 @@ local kinds = {
 	melee_hit = { "melee_hit", { alive = true } }, hit_taken = { "hit_taken", { type = 5 } },
 	monster_loot = { "monster_loot" }, task_rank = { "task_rank" },
 	corpse_search = { "corpse_search", nil, true },
-	-- Core gives typed stalker deaths reputation. A tally can only back rank and total kills.
-	kill_stalker = { "kill", nil, true },
+	-- A stalker tally backs rank and kill counters. Reputation needs a verified fight fact.
+	kill_stalker = { "kill", { kind = "stalker", tally = true }, true },
 	kill_monster = { "kill", { kind = "monster" }, true },
 	kill = { "kill", nil, true },
 }
@@ -112,7 +112,7 @@ function on_game_start()
 
 		for _, rank in ipairs(ranks_seen) do
 			kinds["corpse_search_" .. rank] = { "corpse_search", { rank = rank }, true }
-			kinds["kill_stalker_" .. rank] = { "kill", { rank = rank }, true }
+			kinds["kill_stalker_" .. rank] = { "kill", { kind = "stalker", tally = true, rank = rank }, true }
 			kinds["kill_" .. rank] = { "kill", { rank = rank }, true }
 		end
 		if coop_mode.decides_world() then
@@ -153,9 +153,8 @@ function on_game_start()
 								generation = generation + 1
 								-- A renewed assignment on the map that already holds his body goes there at once; a new
 								-- map hears it when it asks for him (claimed).
-								local prev = old or closing[c]
-								local held = prev ~= nil and prev.bridge == bridge and prev.claimed == true
-								live[c] = { bridge = bridge, peer = player.id, g = generation, q = 0, fq = 0, dirty = held, claimed = held }
+								local claimed = old ~= nil and old.bridge == bridge and old.claimed == true
+								live[c] = { bridge = bridge, peer = player.id, g = generation, q = 0, fq = 0, dirty = claimed, claimed = claimed }
 							end
 						end
 					end
@@ -202,7 +201,13 @@ function on_game_start()
 					if big then C.send_big("prg_pd_fix_big", big, peer) end
 				end
 			end
-			-- A held report is checked once more, now that its map flushed (or the time is up): the
+			local function awaits_tally(character, peer, report)
+				for _, reason in ipairs(P.preview(character, peer, "skills_levels", report)) do
+					if reason:sub(-8) == ": budget" then return true end
+				end
+				return false
+			end
+			-- A held report is audited after its map flushes (or the time is up): the
 			-- record keeps what passes, and only a part that still fails goes back as a correction.
 			local function release(c)
 				local h = held[c]
@@ -236,7 +241,11 @@ function on_game_start()
 				-- Stop-and-wait keeps the receive window to one batch. Repeat its ACK after loss.
 				if request or q == route.q then
 					send_skills(c, route)
-					if request then release(c) end -- the map has nothing more to flush
+					local h = held[c]
+					if request and h and h.maps[route] then
+						h.maps[route] = nil -- this map has nothing more to flush
+						if not next(h.maps) then release(c) end
+					end
 					return
 				end
 				if not required("progress_tally_sequence", q == route.q + 1, from) then return end
@@ -247,7 +256,15 @@ function on_game_start()
 				route.q = q
 				send_skills(c, route)
 				if routes[c] and routes[c] ~= route then routes[c].dirty = true end -- the current map hears it too
-				release(c)
+				local h = held[c]
+				if h then
+					if not awaits_tally(c, h.peer, h.report) then
+						release(c)
+					elseif h.maps[route] then
+						-- The first batch may have been in flight with more observations queued behind it.
+						send_skills(c, route, true)
+					end
+				end
 			end
 			-- Native keeper entry, never a ScriptEvent. The engine must corroborate the fight
 			-- and assign a stable, increasing fact ID within this world before calling it.
@@ -293,30 +310,32 @@ function on_game_start()
 				if api.progress then api.progress.on_verified_fight = verified_fight end
 			end)
 			step("hold disputed reports", function()
-				-- A Haru report that fails its check may only be ahead of its map's tally: the
-				-- correction waits for a flush of that map (or HOLD); the store keeps the checked
-				-- value meanwhile. Other keys and reports that pass go on at once.
 				C.wrap(P, "filter", "srv_progress.filter", function(orig)
 					return function(character, peer, clean, previous)
-						local report = type(clean) == "table" and type(clean.skills_levels) == "table"
-							and C.deser(C.ser(clean.skills_levels)) or nil
-						local out, fixes = orig(character, peer, clean, previous)
-						if not (report and C.active() and type(fixes) == "table") then return out, fixes end
-						local others, disputed = {}, false
-						for _, fix in ipairs(fixes) do
-							if fix.k == "skills_levels" then disputed = true else others[#others + 1] = fix end
+						local report = type(clean) == "table" and clean.skills_levels
+						if report == nil or not C.active() then return orig(character, peer, clean, previous) end
+						local pending = held[character]
+						held[character] = nil -- a newer skills report supersedes an older one
+						if type(report) ~= "table" or not awaits_tally(character, peer, report) then
+							return orig(character, peer, clean, previous)
 						end
-						if not disputed then return out, fixes end
 						refresh()
 						local route, old = routes[character], closing[character]
-						-- a map that has not asked for him has observed nothing of him: nothing to flush there
-						if route and not route.claimed then route = nil end
-						if old and not old.claimed then old = nil end
-						if not (route or old) then return out, fixes end -- no map to ask: as before
-						held[character] = { peer = peer, report = report, due = time_global() + HOLD }
-						if route then send_skills(character, route, true) end
-						if old then send_skills(character, old, true) end
-						return out, others
+						local maps = {}
+						if route and route.claimed then maps[route] = true end
+						-- Ask the previous map for its final batch, unless the bridge now serves a new assignment.
+						if old and old.claimed and (not route or old.bridge ~= route.bridge) then maps[old] = true end
+						if not next(maps) then return orig(character, peer, clean, previous) end
+						held[character] = { peer = peer, report = report, maps = maps,
+							due = pending and pending.due or time_global() + HOLD }
+						-- Other keys use their own windows. The store keeps the skills report while we wait.
+						clean.skills_levels = nil
+						local out, fixes = orig(character, peer, clean, previous)
+						out.skills_levels = report
+						for map in pairs(maps) do
+							if not (pending and pending.maps[map]) then send_skills(character, map, true) end
+						end
+						return out, fixes
 					end
 				end)
 			end)

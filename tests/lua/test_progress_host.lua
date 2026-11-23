@@ -137,25 +137,55 @@ check(record and record.d.skills_levels.survival.experience == 200 and P.skill_o
 	and select(2, P.skill_of(PROXY, "survival")) and not log_has("progress check failed"),
 	"honest walking, combat and corpse search pass through pdata")
 
-local inflated = skills({ endurance = 10000, survival = 10000, scavenging = 10000 })
+local inflated = skills({ endurance = 10000, strength = 97, survival = 200, scavenging = 40 })
+local function progress_lines()
+	local n = 0
+	for _, line in ipairs(LOG) do
+		if line:find("[coop-trust]", 1, true) and line:find("progress_skills", 1, true) then n = n + 1 end
+	end
+	return n
+end
 T.reset_for_test({ default = "log" })
 record = report({ skills_levels = inflated }, "inflated-log")
 check(record and record.d.skills_levels.endurance.experience == 10000
 	and log_has("would be refused") and sent_count("mods.pd_fix") == 0,
 	"log audits inflated skills and preserves the report")
-local save = alife_storage_manager.get_state()
+check(progress_lines() == 1, "one over-budget change produces one trust line in log mode")
+record = report({ skills_levels = inflated }, "inflated-again")
+local function repeated_audits(n)
+	return coop_mods_pdata.status():find("repeated progress audits " .. n, 1, true) ~= nil
+end
+check(progress_lines() == 1 and repeated_audits(1),
+	"repeating the same over-budget report counts one repeated audit without a second trust line")
 check(record and record.progress_checked and record.progress_checked.records.skills_levels.endurance.experience == 50,
-	"the keeper saves the confirmed snapshot beside the raw report")
+	"the keeper saves the confirmed progress baseline alongside the log-only report")
+
+local clean = skills({ endurance = 51, strength = 97, survival = 200, scavenging = 40 })
+record = report({ skills_levels = clean }, "clean-log")
+check(progress_lines() == 1 and repeated_audits(0)
+	and record.progress_checked.records.skills_levels.endurance.experience == 51,
+	"a clean report changes the baseline and resets the repeat count")
+record = report({ skills_levels = inflated }, "inflated-after-clean")
+check(progress_lines() == 2 and repeated_audits(0),
+	"the same over-budget report is logged again against the new baseline")
+
+local increased = skills({ endurance = 20000, strength = 97, survival = 200, scavenging = 40 })
+record = report({ skills_levels = increased }, "inflated-more")
+check(progress_lines() == 3, "a larger over-budget report writes another trust line")
+record = report({ skills_levels = inflated }, "inflated-below-logged-max")
+check(progress_lines() == 3 and repeated_audits(1),
+	"a smaller over-budget value stays quiet against the same baseline")
+local save = alife_storage_manager.get_state()
 P.clear()
 alife_storage_manager.CALifeStorageManager_load(save)
 check(select(2, P.skill_of(PROXY, "endurance")), "world reload restores the confirmed snapshot")
 
 T.reset_for_test({ default = "refuse" })
-record = report({ skills_levels = inflated }, "inflated-refuse")
+record = report({ skills_levels = increased }, "inflated-refuse")
 local fix, wire = sent("mods.pd_fix")
 check(record and record.d.skills_levels.endurance.experience < 10000
-	and record.d.skills_levels.endurance.experience >= 50,
-	"refuse clamps against the confirmed record, even after a log-only report")
+	and record.d.skills_levels.endurance.experience >= 51,
+	"refuse clamps against the last clean record after the log-only reports and reload")
 local corrected = fix and C.deser(fix.v)
 check(fix and fix.k == "skills_levels" and wire.target == 1 and corrected
 	and corrected.endurance.experience == record.d.skills_levels.endurance.experience,
@@ -187,10 +217,10 @@ check(record and record.d.milpda.faction_data.unrelated == 42
 MODE, SELF = "client", 1
 modes.install(coop_mode, "hostplay", { is_player_mirror = function() return true end })
 coop_mods_pdata.apply_loaded({})
-haru_skills.skills_levels = inflated
+haru_skills.skills_levels = increased
 coop_mods_pdata.report_now()
 if wire then deliver(wire, 2) end
-check(haru_skills.skills_levels.endurance.experience == 10000, "pd_fix ignores other senders")
+check(haru_skills.skills_levels.endurance.experience == 20000, "pd_fix ignores other senders")
 if wire then deliver(wire, 0) end
 local saved = STASH.coop_mods_pdata and C.deser(STASH.coop_mods_pdata:match("^[^|]*|(.*)$"))
 check(corrected and saved and haru_skills.skills_levels.endurance.experience == corrected.endurance.experience

@@ -9,7 +9,7 @@
 -- Persist snapshot(character) alongside raw pdata in the keeper's save. Restore
 -- only that keeper-owned snapshot after clear() on load, before handling reports.
 -- Raw pdata (including legacy saves without a snapshot) never seeds the budget
--- or skill_of. Observation windows are not persisted.
+-- or skill_of. The snapshot carries the observations each window has yet to spend.
 
 constants = { step_length = 0.7, jump_seconds = 1.5, slack = 0.25,
 	skill_allowance = 25, rank_allowance = 25, rank_per_minute = 100,
@@ -24,6 +24,8 @@ local ledger = {}
 local SKILLS = { "endurance", "strength", "survival", "scavenging" }
 local RECORD_KEYS = { skills_levels = true, game_statistics = true, ish_kill_tracker = true,
 	milpda = true, experience_framework_savedata = true }
+local WINDOW_KEYS = { "@rank" }
+for key in pairs(RECORD_KEYS) do WINDOW_KEYS[#WINDOW_KEYS + 1] = key end
 local SEARCH = { novice = 25, trainee = 30, experienced = 34, professional = 40,
 	veteran = 45, expert = 50, master = 65, legend = 100 }
 local KILL_RANK = { novice = 10, trainee = 25, experienced = 40, professional = 60,
@@ -80,10 +82,14 @@ end
 local function identity(v)
 	return (type(v) == "string" and #v > 0 and #v <= 128 and not v:find("[%c]")) or integer(v, constants.max_number)
 end
-local function book(character)
+local function book(character, quiet)
 	if not identity(character) then return nil end
-	if not ledger[character] then ledger[character] = { totals = {}, windows = {}, records = {}, born = now() } end
-	return ledger[character]
+	local b = ledger[character]
+	if not b then
+		b = { totals = {}, windows = {}, records = {}, log_audits = {}, born = now() }
+		if not quiet then ledger[character] = b end
+	end
+	return b
 end
 local function add(b, k, v)
 	if nonnegative(v) then b.totals[k] = math.min(constants.max_number, (b.totals[k] or 0) + v) end
@@ -156,8 +162,8 @@ function note(character, kind, amount, meta)
 		end
 		if victim == "monster" then points = REWARDS.killed_monsters[1] / 16 end
 		add(b, "rank", amount * points)
-		-- Positive enemy reputation; friendly/neutral penalties are bounded by engine rules.
-		if victim == "stalker" then add(b, "reputation", amount * 10) end
+		-- A tally carries counts and rank. Reputation from a map needs a verified fight fact.
+		if victim == "stalker" and meta.tally ~= true then add(b, "reputation", amount * 10) end
 	elseif kind == "task_rank" then
 		add(b, "rank", amount)
 		if nonnegative(meta.reputation) then add(b, "reputation", meta.reputation) end
@@ -198,11 +204,30 @@ function clamp(previous, reported, budget)
 	return number(reported, -constants.max_number, constants.max_number) and math.max(old, math.min(reported, old + (nonnegative(budget) and budget or 0))) or old
 end
 
-local function audit(c, ok, reason)
+local function repeat_audit(c, reason, value)
+	local audits = c.log_audits[c.key]
+	if not audits then
+		audits = { values = {}, repeated = 0 }
+		c.log_audits[c.key] = audits
+	end
+	local previous = audits.values[reason]
+	local numeric = type(value) == "number"
+	if previous ~= nil and (not numeric or (previous ~= false and value <= previous)) then
+		audits.repeated = audits.repeated + 1
+		return true
+	end
+	audits.values[reason] = numeric and value or false
+	return false
+end
+
+local function audit(c, ok, reason, value)
 	if not ok then c.reasons[#c.reasons + 1] = reason end
-	-- Only fixed format/text reaches the console. Neither payload strings nor key
-	-- names enter this line; peer is supplied by the transport, not the report.
-	if not coop_trust.pass(c.name, ok, "progress check failed: %s", reason) then c.refused = true end
+	if not c.quiet then
+		-- The shared trust logger rate-limits warnings. Route a duplicate through
+		-- its silent path in log mode, keeping the actual verdict and reason above.
+		local repeated = not ok and c.log_audits and repeat_audit(c, reason, value)
+		if not coop_trust.pass(c.name, ok or repeated, "progress check failed: %s", reason) then c.refused = true end
+	end
 	return ok
 end
 local function shape(value, depth, seen, size, signed)
@@ -236,6 +261,18 @@ local function known_skill(name)
 	end
 	return false
 end
+-- Validate keeper snapshots before using their skill records as baselines.
+local function skills_record_ok(record)
+	for _, name in ipairs(SKILLS) do
+		local s = record[name]
+		if type(s) ~= "table" or not integer(s.current_level, 1000)
+			or not nonnegative(s.experience) then return false end
+	end
+	for name in pairs(record) do
+		if not known_skill(name) then return false end
+	end
+	return true
+end
 local function skills_check(c, b, previous, reported)
 	local out = {}
 	for _, name in ipairs(SKILLS) do
@@ -243,22 +280,23 @@ local function skills_check(c, b, previous, reported)
 		local rules_ok = audit(c, base ~= nil and multiplier(name) ~= nil, name .. ": rules unavailable")
 		local old = previous[name]
 		local r = type(reported[name]) == "table" and reported[name] or {}
-		if not rules_ok then out[name] = old and copy(old) or nil
+		if not rules_ok then
+			out[name] = old and copy(old) or nil
 		else
 			local xp = old and old.experience or 0
 			local old_level = old and math.min(old.current_level, maximum) or 0
 			while old_level > 0 and xp <= requirement(base, old_level - 1) do old_level = old_level - 1 end
-			local level = integer(r.current_level, maximum) and r.current_level or 0
-			audit(c, integer(r.current_level, maximum), name .. ": level bounds")
-			audit(c, nonnegative(r.experience), name .. ": experience bounds")
+			local level_ok = audit(c, integer(r.current_level, maximum), name .. ": level bounds", r.current_level)
+			audit(c, nonnegative(r.experience), name .. ": experience bounds", r.experience)
+			local level = level_ok and r.current_level or 0
 			audit(c, r.max_level == maximum and r.base_requirement == base, name .. ": definition")
 			audit(c, r.requirement == requirement(base, level) and r.prev_requirement == (level == 0 and 0 or requirement(base, level - 1)), name .. ": requirement")
 			-- Haru uses cumulative XP, strict >, and may process only one level per
 			-- 1182ms update. An upper XP threshold would reject honest pending levels.
-			audit(c, nonnegative(r.experience) and (level == 0 or r.experience > requirement(base, level - 1)), name .. ": level experience")
-			audit(c, nonnegative(r.experience) and r.experience >= xp and level >= old_level, name .. ": decreased")
+			audit(c, nonnegative(r.experience) and (level == 0 or r.experience > requirement(base, level - 1)), name .. ": level experience", r.experience)
+			audit(c, nonnegative(r.experience) and r.experience >= xp and level >= old_level, name .. ": decreased", r.experience)
 			local budget = skill_budget(b, "skills_levels", name)
-			audit(c, nonnegative(r.experience) and r.experience <= xp + budget, name .. ": budget")
+			audit(c, nonnegative(r.experience) and r.experience <= xp + budget, name .. ": budget", r.experience)
 			local accepted_xp = nonnegative(r.experience) and clamp(xp, r.experience, budget) or xp
 			local allowed_level = 0
 			while allowed_level < maximum and accepted_xp > requirement(base, allowed_level) do allowed_level = allowed_level + 1 end
@@ -294,7 +332,7 @@ local function stats_check(c, b, previous, reported)
 				if v == true and not old[k] then added = added + 1 end
 				if valid and (old[k] or added <= cap) then out[sub][k] = old[k] == true or v end
 			end
-			audit(c, added <= cap, sub .. ": budget")
+			audit(c, added <= cap, sub .. ": budget", added)
 		end
 	end
 	local old, r = table_or_empty(previous.actor_statistics), reported.actor_statistics == nil and {} or reported.actor_statistics
@@ -307,15 +345,15 @@ local function stats_check(c, b, previous, reported)
 			local known = audit(c, REWARDS[name] ~= nil and budget ~= nil, "counter: unknown")
 			local before = nonnegative(old[name]) and old[name] or 0
 			local label = known and name or "counter"
-			local valid = audit(c, integer(v, constants.max_number), label .. ": bounds")
-			audit(c, nonnegative(v) and v >= before, label .. ": decreased")
-			audit(c, nonnegative(v) and budget ~= nil and v <= before + budget, label .. ": budget")
+			local valid = audit(c, integer(v, constants.max_number), label .. ": bounds", v)
+			audit(c, nonnegative(v) and v >= before, label .. ": decreased", v)
+			audit(c, nonnegative(v) and budget ~= nil and v <= before + budget, label .. ": budget", v)
 			if known then out.actor_statistics[name] = valid and math.floor(clamp(before, v, budget)) or math.floor(before) end
 			if name == "killed_stalkers_e" or name == "killed_stalkers_f" or name == "killed_stalkers_n" then
 				stalkers = stalkers + (nonnegative(v) and math.max(0, v - before) or 0)
 			end
 		end
-		if not audit(c, stalkers <= delta(b, "game_statistics", "kills_stalker") + 1, "stalker categories: budget") then
+		if not audit(c, stalkers <= delta(b, "game_statistics", "kills_stalker") + 1, "stalker categories: budget", stalkers) then
 			for _, name in ipairs({ "killed_stalkers_e", "killed_stalkers_f", "killed_stalkers_n" }) do
 				out.actor_statistics[name] = old[name] or 0
 			end
@@ -329,7 +367,7 @@ local function stats_check(c, b, previous, reported)
 		for name, v in pairs(misc) do
 			local known = audit(c, name == "actual_rank" or name == "actual_rept", "miscellaneous unknown")
 			local lo, hi = name == "actual_rept" and -4000 or 0, name == "actual_rept" and 4000 or constants.max_number
-			local valid = audit(c, number(v, lo, hi), "miscellaneous bounds")
+			local valid = audit(c, number(v, lo, hi), "miscellaneous bounds", v)
 			if known then
 				local before = out.actor_miscellaneous[name]
 				out.actor_miscellaneous[name] = valid and v or (number(before, lo, hi) and before or 0)
@@ -388,25 +426,28 @@ local function tracker_check(c, b, old, report, markers)
 		elseif type(v) == "table" then out[k] = tracker_check(c, b, table_or_empty(old[k]), v)
 		elseif type(v) == "number" then
 			local before = nonnegative(old[k]) and old[k] or 0
-			audit(c, integer(v, constants.max_number) and v >= before, "kills: decreased or bounds")
+			audit(c, integer(v, constants.max_number) and v >= before, "kills: decreased or bounds", v)
 			local budget = delta(b, c.key, "kills")
-			audit(c, v <= before + budget, "kills: budget")
+			audit(c, v <= before + budget, "kills: budget", v)
 			out[k] = math.floor(clamp(before, v, budget))
 		else audit(c, false, "tracker: counter type") end
 	end
 	return out
 end
 
--- Accepted value, stable reason strings (empty for a plausible report). The
--- fourth argument is reserved for callers with the original pdata signature.
-function check(character, peer, key, _previous, reported)
+local function evaluate(character, peer, key, reported, quiet)
 	local c = { name = key == "skills_levels" and "progress_skills" or "progress_stats",
-		key = key, reasons = {}, refused = false }
-	local b = book(character)
-	local valid_identity = audit(c, b ~= nil and integer(peer, 65535), "progress identity")
+		key = key, reasons = {}, refused = false, quiet = quiet }
+	local b = book(character, quiet)
+	local known_key = RECORD_KEYS[key] == true
+	local identity_ok = b ~= nil and integer(peer, 65535)
+	if not quiet and identity_ok and known_key and coop_trust.mode_of and coop_trust.mode_of(c.name) == "log" then
+		c.log_audits = b.log_audits
+	end
+	local valid_identity = audit(c, identity_ok, "progress identity")
 	local signed = key == "game_statistics"
 	local safe = audit(c, shape(reported, 0, {}, {0}, signed), "progress shape bounds")
-	local known = audit(c, RECORD_KEYS[key] == true, "progress unknown key")
+	local known = audit(c, known_key, "progress unknown key")
 	local out
 	if valid_identity and known then
 		local old = b.records[key] or {}
@@ -417,20 +458,32 @@ function check(character, peer, key, _previous, reported)
 			elseif key == "ish_kill_tracker" then out = tracker_check(c, b, old, reported, true)
 			else
 				out = copy(reported) -- optional mod: bounds only, no invented XP formula
-				if reported.XP ~= nil and not audit(c, nonnegative(reported.XP), "framework XP bounds") then out.XP = old.XP end
+				if reported.XP ~= nil and not audit(c, nonnegative(reported.XP), "framework XP bounds", reported.XP) then out.XP = old.XP end
 			end
 		else
 			out = copy(old)
 		end
 	end
 	if not c.refused then
-		if #c.reasons == 0 then
+		if not quiet and #c.reasons == 0 then
 			commit(b, key)
 			b.records[key] = copy(reported)
+			b.log_audits[key] = nil
 		end
 		return reported, c.reasons
 	end
 	return out, c.reasons
+end
+
+-- Accepted value and stable reason strings. The fourth argument is kept for pdata callers.
+function check(character, peer, key, _previous, reported)
+	return evaluate(character, peer, key, reported, false)
+end
+
+-- Run the same rules without auditing or changing the ledger.
+function preview(character, peer, key, reported)
+	local _, reasons = evaluate(character, peer, key, reported, true)
+	return reasons
 end
 
 function skill_of(character, skill)
@@ -443,30 +496,65 @@ end
 
 function snapshot(character)
 	local b = ledger[character]
-	if b then return { records = copy(b.records) } end
+	if not b then return end
+	local unspent = {}
+	for _, key in ipairs(WINDOW_KEYS) do
+		local observations = {}
+		for event in pairs(b.totals) do
+			local amount = delta(b, key, event)
+			if amount > 0 then observations[event] = amount end
+		end
+		unspent[key] = observations
+	end
+	return { records = copy(b.records), unspent = unspent }
 end
 
--- Accept only the envelope from the keeper's own save or an authenticated
--- keeper copy. Loading a world calls clear() first; a mirror may refresh its
--- records without resetting its own observations.
+-- Accept the envelope from the keeper's own save or an authenticated keeper
+-- copy. Old saves carry only records.
 function restore(character, saved)
 	if not identity(character) or type(saved) ~= "table" or type(saved.records) ~= "table" then return false end
 	for key, record in pairs(saved.records) do
 		if not RECORD_KEYS[key] or type(record) ~= "table"
-			or not shape(record, 0, {}, {0}, key == "game_statistics") then return false end
-		if key == "skills_levels" then
-			for _, name in ipairs(SKILLS) do
-				local s = record[name]
-				if type(s) ~= "table" or not integer(s.current_level, 1000)
-					or not nonnegative(s.experience) then return false end
-			end
-			for name in pairs(record) do
-				if not known_skill(name) then return false end
+			or not shape(record, 0, {}, {0}, key == "game_statistics")
+			or (key == "skills_levels" and not skills_record_ok(record)) then return false end
+	end
+	local unspent = saved.unspent
+	if unspent ~= nil then
+		if type(unspent) ~= "table" or not shape(unspent, 0, {}, {0}, false) then return false end
+		local totals, windows = {}, {}
+		for key, observations in pairs(unspent) do
+			if (key ~= "@rank" and not RECORD_KEYS[key]) or type(observations) ~= "table" then return false end
+			for event, amount in pairs(observations) do
+				if type(event) ~= "string" or not nonnegative(amount) then return false end
+				totals[event] = math.max(totals[event] or 0, amount)
 			end
 		end
+		-- Rebuild a common total and offset each window so only its own balance is restored.
+		local at = now()
+		for _, key in ipairs(WINDOW_KEYS) do
+			local observations = unspent[key] or {}
+			local spent = {}
+			for event, total in pairs(totals) do
+				spent[event] = total - (observations[event] or 0)
+			end
+			windows[key] = { at = at, totals = spent }
+		end
+		local b = book(character)
+		b.totals, b.windows = totals, windows
 	end
-	book(character).records = copy(saved.records)
+	local b = book(character)
+	b.records = copy(saved.records)
+	b.log_audits = {}
 	return true
+end
+
+-- Number of repeated warnings suppressed against the current checked baselines.
+function repeated_log_audits()
+	local count = 0
+	for _, b in pairs(ledger) do
+		for _, audits in pairs(b.log_audits) do count = count + audits.repeated end
+	end
+	return count
 end
 
 -- Session owner calls clear() on world replacement; clear(character) on deletion.

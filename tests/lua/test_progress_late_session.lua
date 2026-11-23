@@ -6,6 +6,23 @@ local mode = modes.names()[1]
 MODE = "host"
 dofile("tests/lua/support/stubs_mods.lua")
 
+local skill_names = { "endurance", "strength", "survival", "scavenging" }
+haru_skills = { options = {}, skills_ini = {
+	collect_section = function() return { base_requirement = 100, max_level = 10 } end,
+} }
+for _, name in ipairs(skill_names) do haru_skills.options["exp_multiplier_" .. name] = 1 end
+haru_skills.options.exp_multiplier_endurance = 3
+local function report_steps(token, xp)
+	local skills = {}
+	for _, name in ipairs(skill_names) do
+		skills[name] = { experience = name == "endurance" and xp or 0, current_level = 0,
+			base_requirement = 100, max_level = 10, requirement = 100, prev_requirement = 0 }
+	end
+	local payload = coop_main.encode({ k = token, i = 1, n = 1,
+		d = assert(coop_mods_core.ser({ skills_levels = skills })) })
+	deliver({ name = "mods.pd", payload = payload }, 1)
+end
+
 local drops = 0
 death_manager = { create_release_item = function(npc, marker)
 	drops = drops + 1
@@ -67,6 +84,9 @@ SendScriptCallback("actor_on_update") -- the first update after hosting starts
 if mode == "hostplay" then
 	check(#restored == 1 and restored[1].character == PROXY and restored[1].saved == SAVED,
 		"the keeper restores the save's records once the co-op host starts its session")
+	coop_trust.reset_for_test({ default = "log" })
+	coop_mods_pdata.register("skills_levels", {})
+	report_steps("before-save", 0)
 else
 	check(#restored == 0, "only the process that decides the world restores the keeper's records")
 end
@@ -95,4 +115,16 @@ SendScriptCallback("actor_on_update")
 SendScriptCallback("actor_on_first_update")
 check(death_manager.create_release_item == wrapper and axr_main.count("npc_on_before_hit") == hits + 1,
 	"the observers install once")
+if mode == "hostplay" then
+	local saved = alife_storage_manager.get_state()
+	SendScriptCallback("save_state", saved)
+	saved = assert(C.deser(assert(C.ser(saved))))
+	alife_storage_manager.CALifeStorageManager_load(saved)
+	report_steps("after-load", 60) -- 14 m = 20 steps, at 3 XP per step
+	local trust = coop_trust.status().progress_skills
+	local record = alife_storage_manager.get_state().coop_mods_pdata[tostring(PROXY)]
+	check(trust and trust.failed == 0 and not log_has("[coop-trust]")
+		and record.progress_checked.records.skills_levels.endurance.experience == 60,
+		"the first report after loading uses steps the host observed before saving")
+end
 done("progress late session " .. mode)

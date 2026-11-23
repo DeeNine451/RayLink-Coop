@@ -403,13 +403,17 @@ local function host_store(s, from)
 	C().to_peer(from, "pd_ack", { t = tok })
 end
 
--- Records of characters that no longer exist (deleted players) are dropped when the host saves.
+-- Refresh progress at save time: observations may have arrived since the last pdata report.
 local function host_save_state(m)
 	if not (C().is_world_server() and type(m) == "table" and type(m[STORE]) == "table") then return end
-	for k in pairs(m[STORE]) do
+	for k, record in pairs(m[STORE]) do
 		local id = tonumber(k)
 		local se = id and id < 65535 and alife_object(id)
-		if not (se and se:section_name() == AVATAR_SECTION) then m[STORE][k] = nil end
+		if not (se and se:section_name() == AVATAR_SECTION) then
+			m[STORE][k] = nil
+		elseif type(record) == "table" then
+			record.progress_checked = coop_progress_check.snapshot(id) or record.progress_checked
+		end
 	end
 end
 
@@ -435,8 +439,9 @@ local function install_load_hook()
 end
 
 function status()
-	return string.format("%d key(s) [%s] | client: restored %d, reports %d, acks %d, kept for a load %d, token %s | host: stored %d, refused %d",
-		#order, table.concat(order, " "), st.applied, st.sent, st.acks, st.keeps, tostring(st.token), st.stored, st.refused)
+	return string.format("%d key(s) [%s] | client: restored %d, reports %d, acks %d, kept for a load %d, token %s | host: stored %d, refused %d, repeated progress audits %d",
+		#order, table.concat(order, " "), st.applied, st.sent, st.acks, st.keeps, tostring(st.token), st.stored, st.refused,
+		coop_progress_check.repeated_log_audits())
 end
 
 -- on_game_start must not throw: axr_main runs every script's on_game_start in one unprotected loop, and an

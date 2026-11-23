@@ -96,6 +96,13 @@ if mode == "hostplay" or mode == "none" then
 end
 
 if mode == "srv_world" then
+	local function trust_lines()
+		local n = 0
+		for _, line in ipairs(LOG) do
+			if line:find("[coop-trust]", 1, true) then n = n + 1 end
+		end
+		return n
+	end
 	check(reservations[SKILLS], "reserve checked skills at the native relay before the session")
 	active = true
 	tick()
@@ -156,6 +163,13 @@ if mode == "srv_world" then
 	check(refused_pushes == 0 and select(2, P.rank_budget(CHARACTER)) == rep,
 		"a fight tally cannot fall back to the Lua reputation ledger")
 	coop.progress.budget = budget
+	local kill_stats = { actor_statistics = { killed_stalkers = 3, killed_stalkers_e = 3 } }
+	tally(UNRELATED, OTHER, 1, { kill_stalker_veteran = 3 })
+	local lines_before_kills = trust_lines()
+	local accepted_kills, kill_reasons = P.check(OTHER, 2, "game_statistics", nil, kill_stats)
+	check(accepted_kills == kill_stats and #kill_reasons == 0 and trust_lines() == lines_before_kills
+		and select(2, P.rank_budget(OTHER)) == rep,
+		"three veteran stalkers cover the total and enemy counters without reputation credit or trust lines")
 	tally(A, CHARACTER, 2, { kill = 1, kill_stalker = 10, kill_stalker_master = 1, kill_novice = 1 })
 	check(P.rank_budget(CHARACTER) > after_a and select(2, P.rank_budget(CHARACTER)) == rep,
 		"plain and ranked kill tallies retain rank without granting reputation")
@@ -257,10 +271,6 @@ if mode == "srv_world" then
 		"two maps contribute to the same character's real keeper record")
 	check(wire and wire.target == B and checked.c == CHARACTER and C.deser(checked.s).scavenging == 1,
 		"accepting pdata pushes the checked skill level to the current map")
-	local sends = sent_count(SKILLS)
-	pdata("inflated", 90000, 10)
-	check(sent_count(SKILLS) == sends and P.skill_of(CHARACTER, "scavenging") == 1,
-		"a log-only, unverified record does not replace checked levels")
 	bridge = A
 	tick()
 	event(TALLY, { c = CHARACTER, e = epoch }, A)
@@ -310,13 +320,17 @@ if mode == "srv_world" then
 	T.reset_for_test({ default = "refuse" })
 	tick()
 	event(TALLY, { c = OTHER, e = epoch }, UNRELATED) -- the map of OTHER holds his body
-	local function pdata_of(peer, key, xp, level)
-		event("mods.pd", { k = key, i = 1, n = 1, d = assert(C.ser({ skills_levels = skill_record(xp, level) })) }, peer)
+	local function pdata_of(peer, key, xp, level, survival, endurance)
+		local skills = skill_record(xp, level)
+		skills.survival.experience = survival or 0
+		skills.endurance.experience = endurance or 0
+		event("mods.pd", { k = key, i = 1, n = 1, d = assert(C.ser({ skills_levels = skills })) }, peer)
 	end
 	local fixes0 = sent_count("mods.pd_fix")
+	local refuse_lines = trust_lines()
 	pdata_of(2, "order-1", 130, 1)
 	local ask = grant(OTHER, UNRELATED)
-	check(sent_count("mods.pd_fix") == fixes0 and ask and ask.f == 1,
+	check(sent_count("mods.pd_fix") == fixes0 and ask and ask.f == 1 and trust_lines() == refuse_lines,
 		"a disputed report holds its correction and asks the player's map to flush now")
 	tally(UNRELATED, OTHER, 1, { corpse_search_master = 2 })
 	local kept = alife_storage_manager.get_state().coop_mods_pdata[tostring(OTHER)]
@@ -347,13 +361,79 @@ if mode == "srv_world" then
 	tick()
 	event(TALLY, { c = CHARACTER, e = epoch }, A)
 	local renewed_before = grant(CHARACTER, A)
-	bridge = nil -- a moment without his map's bridge, the body stays there
+	local sent_before_return, lines_before_return = sent_count(SKILLS), trust_lines()
+	bridge = nil -- the player left and the map dropped his row
 	tick()
 	bridge = A
-	tick()
+	tick(1000)
+	check(sent_count(SKILLS) == sent_before_return and trust_lines() == lines_before_return,
+		"returning before ROW_TIMEOUT sends no checked skills until the map claims the rejoined player")
+	event(TALLY, { c = CHARACTER, e = epoch }, A)
 	local renewed = grant(CHARACTER, A)
-	check(renewed_before and renewed and renewed.g > renewed_before.g and renewed.q == 0,
-		"the map that already holds him hears a renewed assignment at once")
+	check(renewed_before and renewed and renewed.g > renewed_before.g and renewed.q == 0
+		and C.deser(renewed.s).scavenging == 1 and trust_lines() == lines_before_return,
+		"the map's request gets the new assignment and checked skills without a trust line")
+
+	T.reset_for_test({ default = "log" })
+	haru_skills.options.exp_multiplier_survival = 2
+	local log_lines = trust_lines()
+	pdata_of(2, "survival-before-tally", 130, 1, 100 * haru_skills.options.exp_multiplier_survival)
+	local waiting = alife_storage_manager.get_state().coop_mods_pdata[tostring(OTHER)]
+	check(grant(OTHER, UNRELATED).f == 1 and trust_lines() == log_lines
+		and T.status().progress_skills == nil
+		and waiting.d.skills_levels.survival.experience == 200
+		and waiting.progress_checked.records.skills_levels.survival.experience == 0,
+		"log mode holds the survival check quietly and stores the reported experience while waiting")
+	tally(UNRELATED, OTHER, 2, { hit_taken = 0.5 })
+	check(trust_lines() == log_lines and waiting.progress_checked.records.skills_levels.survival.experience == 200,
+		"the damage tally releases the held survival report without a trust line")
+
+	pdata_of(2, "survival-no-tally", 130, 1, 400)
+	tick(4999)
+	check(trust_lines() == log_lines, "a missing tally leaves the log-mode report quiet before HOLD")
+	tick(1)
+	tick(1)
+	local expired = alife_storage_manager.get_state().coop_mods_pdata[tostring(OTHER)]
+	check(trust_lines() == log_lines + 1 and trust_failures("progress_skills") == 1
+		and expired.d.skills_levels.survival.experience == 400
+		and expired.progress_checked.records.skills_levels.survival.experience == 200,
+		"with no tally the timeout logs the survival excess and keeps the confirmed baseline")
+	pdata_of(2, "survival-repeat-without-tally", 130, 1, 400)
+	tick(5000)
+	tick(1)
+	check(trust_lines() == log_lines + 1
+		and coop_mods_pdata.status():find("repeated progress audits 1", 1, true),
+		"a repeated over-budget report times out quietly against the same world baseline")
+	pdata_of(2, "survival-clean", 130, 1, 210)
+	check(coop_mods_pdata.status():find("repeated progress audits 0", 1, true),
+		"a clean report immediately resets the world repeat count")
+
+	local leaving = grant(CHARACTER, A)
+	local lines_before_move = trust_lines()
+	bridge = B
+	tick()
+	event(TALLY, { c = CHARACTER, e = epoch }, B)
+	pdata_of(1, "survival-after-move", 270, 1, 200)
+	event(TALLY, { c = CHARACTER, e = epoch }, B) -- the new map has no damage to report
+	check(grant(CHARACTER, A).f == 1 and trust_lines() == lines_before_move,
+		"an empty flush from the new map still waits for observations from the map just left")
+	tally(A, CHARACTER, 1, { hit_taken = 0.5 }, leaving)
+	local moved = alife_storage_manager.get_state().coop_mods_pdata[tostring(CHARACTER)]
+	check(trust_lines() == lines_before_move and moved.progress_checked.records.skills_levels.survival.experience == 200,
+		"the old map's final tally backs the survival gain reported just after a map change")
+
+	spawn("coop_player_avatar", vec3(0, 0, 0), nil, { id = CHARACTER })
+	tally(B, CHARACTER, 1, { step_m = 70 })
+	local checkpoint = alife_storage_manager.get_state()
+	SendScriptCallback("save_state", checkpoint)
+	checkpoint = assert(C.deser(assert(C.ser(checkpoint))))
+	alife_storage_manager.CALifeStorageManager_load(checkpoint)
+	epoch = epoch + 1
+	tick()
+	pdata_of(1, "walk-before-save", 270, 1, 200, 100)
+	local loaded = alife_storage_manager.get_state().coop_mods_pdata[tostring(CHARACTER)]
+	check(trust_lines() == lines_before_move and loaded.progress_checked.records.skills_levels.endurance.experience == 100,
+		"the keeper restores unspent map observations while the map has yet to claim the new assignment")
 else
 	local function skills(e, g, q, value, from)
 		event(SKILLS, { c = CHARACTER, e = e, g = g, q = q, s = assert(C.ser({ scavenging = value })) }, from or 0)
