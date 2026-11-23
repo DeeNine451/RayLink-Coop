@@ -19,6 +19,15 @@
 --]]
 
 local installed = false
+local DETAIL_DEFAULT = "end" -- Tab is already bound in G.A.M.M.A.
+local DETAIL_KEYS = {
+	{ "end", "st_coop_key_end", "DIK_END" },
+	{ "home", "st_coop_key_home", "DIK_HOME" },
+	{ "page_up", "st_coop_key_page_up", "DIK_PRIOR" },
+	{ "page_down", "st_coop_key_page_down", "DIK_NEXT" },
+	{ "insert", "st_coop_key_insert", "DIK_INSERT" },
+	{ "delete", "st_coop_key_delete", "DIK_DELETE" },
+}
 
 -- Check box bound to an integer console variable (coop_nametags*: CCC_Integer 0..1). R5 I1: without bool_to_num the
 -- stock ui_options.On_Accept sends "on"/"off", which CCC_Integer reads as 0, so the box could never switch it on.
@@ -57,6 +66,8 @@ function build_page()
 						{ "200", "st_coop_hud_fov_200" },
 					} },
 				{ id = "ping_note", type = "desc", text = "st_coop_hud_ping_note", clr = { 255, 200, 200, 200 } },
+				{ id = "hud_parallax_strength", type = "track", val = 2, min = 0, max = 200, step = 10, def = 100 },
+				{ id = "hud_detail_key", type = "list", val = 0, def = DETAIL_DEFAULT, no_str = true, content = DETAIL_KEYS },
 				flag("netgraph", false), -- coop_hud_netgraph: strings st_coop_netgraph.xml
 			}, },
 			-- the host's rules (the old group coop_session) are a game's settings now: see the header
@@ -108,13 +119,29 @@ end
 
 function actor_voice_enabled() return player_flag("actor_voice") end
 
-local function player_value(id, def)
+local function player_value(id, def, kind)
 	local am = rawget(_G, "axr_main")
 	local cfg = am and am.config
 	if not cfg then return def end
-	local ok, v = pcall(function() return cfg:r_value("options", "coop/coop_player/" .. id, 0, def) end)
+	local ok, v = pcall(function() return cfg:r_value("options", "coop/coop_player/" .. id, kind or 0, def) end)
 	if ok and v ~= nil then return v end
 	return def
+end
+
+function hud_parallax_strength()
+	local value = tonumber(player_value("hud_parallax_strength", 100, 2))
+	if not value or value ~= value then return 100 end
+	return math.min(200, math.max(0, value))
+end
+
+function hud_detail_key()
+	local keys = rawget(_G, "DIK_keys")
+	if not keys then return nil end
+	local value = player_value("hud_detail_key", DETAIL_DEFAULT)
+	for _, entry in ipairs(DETAIL_KEYS) do
+		if entry[1] == value then return keys[entry[3]] end
+	end
+	return keys.DIK_END
 end
 
 function apply_player_flags()

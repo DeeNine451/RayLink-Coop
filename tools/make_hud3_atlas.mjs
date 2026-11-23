@@ -65,23 +65,24 @@ async function render(a) {
   corner('coop_h3_bracket_bl', false, true);
   corner('coop_h3_bracket_br', true, true);
   sprite('coop_h3_bracket_l', 8, 48, (g) => { g.lineWidth = 2; g.beginPath(); g.moveTo(7, 1); g.lineTo(1, 1); g.lineTo(1, 47); g.lineTo(7, 47); g.stroke(); });
-  // pulse frames: an ECG trace 128x16 scrolled by 1/8 per frame (the panel's dying line)
-  const ecg = (t) => { // one beat over [0,1): flat, small P, sharp QRS, T
-    const p = (t % 1 + 1) % 1;
-    if (p < 0.10) return 0;
-    if (p < 0.16) return -1.5 * Math.sin((p - 0.10) / 0.06 * Math.PI);
-    if (p < 0.22) return 0;
-    if (p < 0.25) return 3 * (p - 0.22) / 0.03;
-    if (p < 0.29) return 3 - 13 * (p - 0.25) / 0.04;
-    if (p < 0.33) return -10 + 12 * (p - 0.29) / 0.04;
-    if (p < 0.45) return 2 - 2 * (p - 0.33) / 0.12;
-    if (p < 0.60) return -2.5 * Math.sin((p - 0.45) / 0.15 * Math.PI);
+  // pulse frames for the team panel's dying row (coop_core_hud.script UICoopParty:Beat, V.pulse_w/h/base): ONE heart beat in a
+  // 23x21 cell, its baseline 15 px from the top; frame k draws the beat from the left up to (k+1)/8 of the width.
+  const beat = (p) => { // p in [0,1] -> y offset in px from the baseline (negative = up)
+    if (p < 0.18) return 0;
+    if (p < 0.30) return -2 * Math.sin((p - 0.18) / 0.12 * Math.PI);
+    if (p < 0.38) return 0;
+    if (p < 0.43) return 3 * (p - 0.38) / 0.05;
+    if (p < 0.50) return 3 - 17 * (p - 0.43) / 0.07;
+    if (p < 0.57) return -14 + 16 * (p - 0.50) / 0.07;
+    if (p < 0.62) return 2 - 2 * (p - 0.57) / 0.05;
+    if (p < 0.82) return -3 * Math.sin((p - 0.62) / 0.20 * Math.PI);
     return 0;
   };
   for (let f = 0; f < 8; f++) {
-    sprite('coop_h3_pulse_' + f, 128, 16, (g) => {
+    sprite('coop_h3_pulse_' + f, 23, 21, (g) => {
+      const upto = 23 * (f + 1) / 8;
       g.lineWidth = 1.5; g.lineJoin = 'round'; g.beginPath();
-      for (let px = 0; px <= 128; px++) { const v = ecg(px / 64 + f / 8); const yy = 9 + v * 0.6; if (px === 0) g.moveTo(px, yy); else g.lineTo(px, yy); }
+      for (let px = 0; px <= upto + 0.001; px += 0.5) { const yy = 15 + beat(px / 23); if (px === 0) g.moveTo(px, yy); else g.lineTo(px, yy); }
       g.stroke();
     });
   }

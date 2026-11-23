@@ -161,7 +161,7 @@ for _, with_mcm in ipairs({ false, true }) do
 		check(#vw.scrolls[tab].children == #want, tab .. ": every row is in the tab's scroll view")
 	end
 	local n_world = #vw.rows.world
-	check(n_world == (with_mcm and 18 or 15), "world: " .. n_world .. " rows" .. (with_mcm and " (the 3 of the dynamic anomalies addon among them)" or ""))
+	check(n_world == (with_mcm and 20 or 15), "world: " .. n_world .. " rows" .. (with_mcm and " (five MCM items)" or ""))
 end
 check(#expected("death") == 13 and #expected("party") == 19 and #expected("saves") == 2, "13 / 19 / 2 rows in death / party / saves")
 
@@ -295,7 +295,7 @@ local asked = {}
 local vm = build({ has_mcm = function(item) asked[#asked + 1] = item.key; return item.key ~= "m|drx_da/disable_new_anomalies" end })
 check(vm:row("m|drx_da/anomaly_amount_modifier") and vm:row("m|drx_da/artefacts_spawn_chance") and vm:row("m|drx_da/disable_new_anomalies") == nil,
 	"has_mcm decides per item")
-check(#asked == 3, "and is asked once per item of an addon, not for the others (" .. #asked .. ")")
+check(#asked == 5, "and is asked once per item of an addon, not for the others (" .. #asked .. ")")
 check(vm:row("m|drx_da/anomaly_amount_modifier").list.text == "st_coop_game_anomaly_amount_modifier_1", "the addon's default is shown")
 ui_mcm = { check_opt_table = function(path) return path == "drx_da/anomaly_amount_modifier" end }
 local vd = build({ no_has_mcm = true })
@@ -313,6 +313,30 @@ vd = build({ no_has_mcm = true })
 check(vd:row("m|drx_da/anomaly_amount_modifier") == nil, "no ui_mcm: hidden")
 local has_in_values = build({ has_mcm = function() return false end, values = { ["m|drx_da/anomaly_amount_modifier"] = "2" } })
 check(has_in_values:row("m|drx_da/anomaly_amount_modifier") == nil, "a stored value does not show an item whose addon is not here")
+
+do
+	local stalker = "m|SMR/smr_amain/stalker_pop_factor"
+	local monster = "m|SMR/smr_amain/monster_pop_factor"
+	local stock_stalker = "o|alife/general/alife_stalker_pop"
+	local stock_mutant = "o|alife/general/alife_mutant_pop"
+	local vanilla = build()
+	check(vanilla:row(stock_stalker) and vanilla:row(stock_mutant) and not vanilla:row(stalker) and not vanilla:row(monster),
+		"without ZCP the World tab shows only the two stock population options")
+
+	smr_mutants_mcm = {}
+	local partial = build()
+	check(not partial:row(stock_stalker) and partial:row(stock_mutant), "each stock row uses its GAMMA script precondition")
+	smr_stalkers_mcm = {}
+	local vz, dz = build({ has_mcm = function(it) return it.needs_mcm == "SMR" end, values = { [stalker] = "0.70" } })
+	check(not vz:row(stock_stalker) and not vz:row(stock_mutant), "with ZCP the World tab hides both stock population options")
+	local row = vz:row(stalker)
+	check(row and row.list.text == "0.7" and vz:row(monster).list.text == "0.5",
+		"ZCP shows the machine value or the MCM default as a multiplier")
+	pick(vz, dz, stalker, index_of(row.item, 1))
+	local collected = vz:collect()
+	check(collected[stalker] == "1" and collected[monster] == "0.5", "the World tab puts both ZCP multipliers into the new record")
+	smr_mutants_mcm, smr_stalkers_mcm = nil, nil
+end
 
 -- ------------------------------------------------------------------------------------------------ pages, notes
 print("== text pages and notes")
@@ -375,7 +399,7 @@ print("== the wide layout gives the same nodes")
 MISSING_PATHS = {}
 local vw16 = build({ layout = "ui_coop_newgame_16.xml", has_mcm = function() return true end,
 	pages = { other = function() return "x" end }, notes = { saves = "st_coop_newgame_saves_note" } })
-check(vw16 and #vw16.rows.world == 18, "the view builds over ui_coop_newgame_16.xml")
+check(vw16 and #vw16.rows.world == 20, "the view builds over ui_coop_newgame_16.xml")
 check(#MISSING_PATHS == 0, "every node is in the 16:9 layout too (" .. table.concat(MISSING_PATHS, ", ") .. ")")
 
 print("== a translator that fails")

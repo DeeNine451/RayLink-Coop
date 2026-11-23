@@ -271,7 +271,10 @@ ui_options = { UIOptions = UIO }
 MCM_SET = {}
 ui_mcm = {
 	UI_MCM = MCMC,
-	get = function(id) return CFG:r_value("mcm", id, 0) end,
+	get = function(id)
+		local val_type = id:find("^SMR/smr_amain/") and 2 or 0
+		return CFG:r_value("mcm", id, val_type)
+	end,
 	set = function(id, v) MCM_SET[#MCM_SET + 1] = id; CFG:w_value("mcm", id, v); CFG:save() end,
 }
 local function new_dlg(cls)
@@ -925,8 +928,8 @@ check(dlg.reg["gameplay/general/max_tasks/1"].enabled == false and dlg.reg["game
 check(dlg.reg["gameplay/general/player_name/1"].enabled == true, "a player option stays editable")
 local dm = new_dlg(MCMC)
 dm:Reset_opt(MCMPAGE, "drx_da")
-check(DRAWN.items[1] == "desc:st_coop_opt_game_note" and dm.reg["drx_da/anomaly_amount_modifier/1"].enabled == false,
-	"a listed MCM option is locked for the host (the MCM window too)")
+check(DRAWN.items[1] == "anomaly_amount_modifier" and dm.reg["drx_da/anomaly_amount_modifier/1"].enabled == true,
+	"an editable MCM catalog option has no lock for the playing host")
 check(dm.reg["drx_da/debug_mode/1"].enabled == true, "a [mcm_player] key of the same addon stays open")
 local dm2 = new_dlg(MCMC)
 dm2:Reset_opt({ gr = { { id = "opt", type = "check" }, { id = "other_thing", type = "check" } } }, "unknown_mod")
@@ -942,12 +945,71 @@ check(menu.cached and menu.cached[2] == 100, "a player option is cached")
 MCM_SET = {}
 ui_mcm.set("drx_da/anomaly_amount_modifier", 5)
 ui_mcm.set("unknown_mod/opt", 5)
-check(#MCM_SET == 1 and MCM_SET[1] == "unknown_mod/opt", "ui_mcm.set: refused for a listed option, passed for an unlisted one")
+check(#MCM_SET == 1 and MCM_SET[1] == "unknown_mod/opt", "ui_mcm.set: refuses an invalid catalog value and passes an unlisted key")
 -- the same page for a client: everything the host owns (the mode flag is refreshed by the settings' update tick)
 local function tick_settings()
 	NOW = NOW + 1000
 	SendScriptCallback("actor_on_update")
 end
+
+do
+	section("playing_host_edits_the_running_record")
+	local group = "SMR/smr_amain"
+	local stalker, monster = group .. "/stalker_pop_factor", group .. "/monster_pop_factor"
+	gs.put("m", stalker, 0.7)
+	gs.put("m", monster, 0.7)
+	local pop = { gr = { { id = "stalker_pop_factor", type = "track" }, { id = "monster_pop_factor", type = "track" } } }
+	local m = new_dlg(MCMC)
+	m:Reset_opt(pop, group)
+	check(m._Track[stalker].ctrl.enabled and m.reg[stalker .. "/1"].enabled, "the host can use the ZCP slider")
+	local rev = gs.active().rev
+	local callbacks = OPTION_CHANGES
+	local saves = CFG.saves
+	m:CacheValue(group, "stalker_pop_factor", 1, pop.gr[1])
+	check(gs.value("m", stalker) == "1" and ui_mcm.get(stalker) == 1 and m.cached and m.cached[2] == nil,
+		"the host's MCM slider goes into the record and the read returns 1.0")
+	check(gs.active().rev == rev + 1 and OPTION_CHANGES == callbacks + 1,
+		"the host's MCM change increments rev and sends on_option_change")
+	local card = card_of(gs.active().id)
+	check(card and card.rev == rev + 1 and card.values["m|" .. stalker] == "1", "the card gets the new revision and value")
+	local saved = {}
+	gs.save_state(saved)
+	check(saved.coop_game and saved.coop_game.values["m|" .. stalker] == "1", "the next save includes the change")
+	ui_mcm.set(monster, 1.05)
+	ui_mcm.set(monster, 1.05)
+	ui_mcm.set(monster, 3.05)
+	check(gs.value("m", monster) == "1.05" and gs.active().rev == rev + 2 and OPTION_CHANGES == callbacks + 2,
+		"ui_mcm.set uses the record and accepts a valid MCM step, without revising for a duplicate or an invalid value")
+	check(MACHINE.mcm[stalker] == nil and MACHINE.mcm[monster] == nil and CFG.saves == saves,
+		"the running game's edits leave the machine's MCM file alone")
+
+	local frequency = "alife/event/emission_frequency"
+	local o = new_dlg()
+	o:CacheValue("alife/event", "emission_frequency", 24)
+	check(gs.value("o", frequency) == "24" and MACHINE.options[frequency] == "24" and gs.active().rev == rev + 3
+		and OPTION_CHANGES == callbacks + 3 and o.cached and o.cached[2] == nil,
+		"the host's stock Options edit uses the same record path")
+
+	SENT = {}
+	tick_settings()
+	local delta = {}
+	for _, e in ipairs(SENT) do
+		if e.name == "coop_set" and e.target == -1 then
+			for k, v in pairs(coop_main.decode(e.payload)) do delta[k] = v end
+		end
+	end
+	check(delta._t == "delta" and delta["m|" .. stalker] == "1" and delta["m|" .. monster] == "1.05",
+		"the client gets both multipliers in the host's settings delta")
+
+	modes.install(coop_mode, "none")
+	ui_mcm.set(stalker, 2)
+	check(gs.value("m", stalker) == "1", "a loaded record outside a session still refuses the MCM edit")
+	modes.install(coop_mode, "srv_world")
+	ui_mcm.set(stalker, 2)
+	check(gs.value("m", stalker) == "1", "a deciding process without a playing actor still uses the operator path")
+	modes.live(coop_mode, load_script_file)
+end
+
 MODE = "client"
 tick_settings()
 local dc = new_dlg()
@@ -956,6 +1018,19 @@ check(DRAWN.items[1] == "desc:st_coop_opt_locked_note", "client: the old note, '
 local dcm = new_dlg(MCMC)
 dcm:Reset_opt({ presets = { "p3" }, gr = { { id = "opt", type = "check" } } }, "unknown_mod")
 check(dcm.reg["unknown_mod/opt/1"].enabled == false, "client: an unknown MCM option is locked, as ever")
+do
+	local group = "SMR/smr_amain"
+	local path = group .. "/stalker_pop_factor"
+	local before, rev, callbacks = gs.value("m", path), gs.active().rev, OPTION_CHANGES
+	local m = new_dlg(MCMC)
+	m:Reset_opt({ gr = { { id = "stalker_pop_factor", type = "track" } } }, group)
+	check(not m._Track[path].ctrl.enabled, "the client's ZCP slider is locked")
+	m:CacheValue(group, "stalker_pop_factor", 2)
+	ui_mcm.set(path, 2)
+	check(gs.set_local_option("m", path, 2) == false and m.cached and m.cached[2] == nil
+		and gs.value("m", path) == before and gs.active().rev == rev
+		and OPTION_CHANGES == callbacks and MACHINE.mcm[path] == nil, "the client cannot edit the ZCP value")
+end
 MODE = "host"
 tick_settings()
 -- the main menu of a host: values of the machine, a note, nothing locked

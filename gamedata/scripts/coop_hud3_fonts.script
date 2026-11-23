@@ -1,0 +1,23 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+local families = { nick = "ui_font_hud3_nick", small = "ui_font_hud3_small", head = "ui_font_hud3_head" }
+local registered = {}
+local attempted = false
+
+function font(role)
+	local name = families[role]
+	if not name then return nil end
+	local register, get = rawget(_G, "RegisterFont"), rawget(_G, "GetFontByName")
+	if type(register) ~= "function" or type(get) ~= "function" then return nil end
+
+	if not attempted then
+		attempted = true
+		for _, family in pairs(families) do
+			-- The engine chooses _h720/_h1080/_h1440 from the real screen height on registration and device reset.
+			local ok, made = pcall(register, family, "ui\\" .. family)
+			registered[family] = ok and made == true
+		end
+	end
+	if not registered[name] then return nil end
+	local ok, result = pcall(get, name)
+	return ok and result or nil
+end

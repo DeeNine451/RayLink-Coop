@@ -8,21 +8,24 @@
 	   ("core.status", about once a second, more often on a change). Proxies are not harmed on the other machines,
 	   so their engine health tells nothing; this is the only source of a teammate's health. The engine's
 	   survival state (coop.life_of, W5 C1) wins over the reported state when it exists.
-	2. Team panel on the HUD (HUD v2, variant B - the owner's pick 2026-10-23): one row per other player, bottom left
-	   above the own HUD, the block growing upwards (host on top), sorted by peer id. Every size: coop_hud_layout team_*
-	   (one line per value in [coop_hud_layout] of mod_system_coop.ltx), px at 768 high, never stretched. F5-SEAT-2: a row for
-	   every other player of the session (the co-op 7, a server 15); more than 7 rows close up to one row's height (row_pitch).
-	   A row: a 2 px bar in his colour; nick in white with a 1 px shadow, host star, distance and an arrow to him turned
-	   relative to the camera (every frame); under the nick his health in 4 segments of 25 % (white, red under 30 %, the
-	   empty part white at ~0.18). No state words - icon, colour and motion:
-	   - down: the segments are the bleed-out timer (red, melting right to left), a cross in a ring that melts with
-	     it and "0:42" right of them, the row breathes at 1 Hz; while somebody revives him (part 2, set_revive) the
-	     red fills in the reviver's colour; back on his feet: the bar flashes white;
-	   - dead / returning: grey segments and a skull; the engine's respawn countdown (coop.respawn_left, not in the
-	     engine yet) fills them back in white with "0:21";
-	   - healed: the gain flashes white for 0.4 s; resting / sleeping (coop.rest): "z", the segments breathe 0.5..0.8
-	     over 3 s; spectating (hardcore): eye, grey; status stopped coming: amber "!", the nick dimmed (W8);
-	   - F3 T13: a sage tent for 10 s after his checkpoint changed.
+	2. Team panel on the HUD ("Visor", TZ 6.13 / R61: the owner's v1 frame; HUD v2 variant B before): one row per other
+	   player, top left (coop_hud_layout team_x / team_top), sorted by peer id (host on top), rows straight under each other
+	   58 px apart at 1080 (no stair), the whole panel one root moved by coop_hud_depth.offset("near") (rows never move
+	   against each other). F5-SEAT-2: a row for every other player of the session (the co-op 7, a server 15); more than 7
+	   rows close up (row_pitch). Own sizes: the constants V (px at 1080). Full brightness always. A row: a "[" in his
+	   colour (coop_h3_bracket_l), nick white (coop_hud3_fonts "nick") with a 1 px shadow, host star, the metres ("small",
+	   tabular digits) ending at 222 px and an arrow to him turned relative to the camera (every frame); under the nick his
+	   health in 4 segments of 25 % (white, red under 30 %, the empty part white at 0.18). No state words - badge and colour;
+	   only a dying row moves (the owner 2026-11-23):
+	   - down: the segments are the bleed-out timer (red, melting), "0:42" in red and the ally_down badge at 1 Hz, and the
+	     heart beats over the segments at an uneven rhythm (coop_h3_pulse_0..7 frames on a 2.6 s sweep);
+	   - being revived (set_revive): the red fills in the reviver's colour, ally_revive, the timer steady, no beats;
+	   - dead / returning: grey segments and bracket, ally_dead; the engine's respawn countdown (coop.respawn_left) fills
+	     them back in white with "0:21"; spectating (hardcore): ally_spectator; status stopped coming: ally_offline, the
+	     nick dimmed (W8); resting / sleeping (coop.rest): the sleep badge; F3 T13: the camp badge for 10 s after his
+	     checkpoint changed.
+	   The Visor atlas (ui_coop_hud3) or font missing: the HUD v2 textures (a plain bar for the bracket, no beats) and the
+	   xml's font.
 	   Hidden with the main HUD (inventory, PDA, scope) at once and outside a session.
 	3. Minimap / PDA markers of other players: coop_allies_map (arrow in the player's colour turning with his
 	   heading, edge pointer, "needs help" overlay, grey marker when dead), updated 5 times a second.
@@ -385,21 +388,88 @@ local function argb(a, rgb)
 	return GetARGB(math_max(0, math_min(255, math_floor(a + 0.5))), rgb[1], rgb[2], rgb[3])
 end
 
-local CLR = {
-	white = { 244, 245, 246 }, -- #F4F5F6
-	dist = { 200, 200, 200 },
-	amber = { 232, 163, 58 }, -- "no signal" (W8)
-	grey = { 120, 120, 120 }, -- segments of a dead / spectating player
-	eye = { 175, 175, 175 },
-	camp = { 146, 190, 154 }, -- sage #92BE9A, as the camp marker of the compass
+-- "Visor" panel (TZ 6.13, R61, the owner's v1 frame; the owner 2026-11-23: only a dying row moves). Sizes: px at 1080 high
+-- (E:\coop-hud-design\vizor\hud_v2.js row()), units = px * U down and px * U * kx across. Own numbers, not coop_hud_layout:
+-- that table gives only where the panel stands (team_x, team_top / team_bottom).
+local U = 768 / 1080
+local V = {
+	pitch = 58, -- row to row, straight down (no stair)
+	pitch_compact = 46, -- more than ROWS_FULL rows (a server's 8..15): one row's own height (the bracket) and a gap
+	brk_w = 8, brk_h = 42, brk_line = 2, -- the "[" in his colour; brk_line: a plain bar while the Visor atlas is missing
+	nick_x = 14, nick_y = 1, nick_h = 18, nick_max = 130,
+	star_gap = 5, star = 12, star_y = 4,
+	dist_r = 222, dist_y = 2, dist_h = 16, dist_gap = 8, -- the metres end at 222 px
+	arrow_cx = 236, arrow_cy = 10, arrow = 14,
+	seg_x = 14, seg_y = 33, seg_w = 38, seg_gap = 4, seg_h = 3, -- 4 x 38 px, 4 apart: 164 px
+	pulse_w = 23, pulse_h = 21, pulse_base = 15, lane = 0.5, -- a beat frame: its baseline 15 px from the top, 0.5 px over the segments
+	head_w = 2, -- the white cursor running ahead of the beats
+	timer_x = 190, timer_y = 26, timer_h = 16,
+	icon_cx = 240, icon_cy = 31, icon = 16,
+	right = 248, -- the row's right edge (bounds)
 }
-local A_FILL, A_DIST, A_SHADOW = 230, 200, 0.75
+local SWEEP_MS = 2600 -- the dying heart's beats run over the segments in 2.6 s
+local PULSES = 8 -- beat statics per row (an uneven beat every 0.32..1.27 s, each fades over one sweep)
+local PULSE_FRAMES = 8 -- coop_h3_pulse_0..7: the beat drawn from 1/8 to whole
+local EMPTY_A = 0.18 -- the empty part of the segments
+
+local CLR = {
+	white = { 244, 245, 246 }, -- segments
+	nick = { 247, 244, 236 }, -- #F7F4EC
+	ink = { 241, 236, 223 }, -- #F1ECDF: the metres, the arrow
+	dim = { 168, 163, 152 }, -- #A8A398: the nick of a dead / spectating / silent player
+	dim_text = { 185, 180, 168 }, -- #B9B4A8: his returning timer, the spectator's eye
+	brk_dim = { 142, 138, 128 }, -- #8E8A80: bracket and badge of a dead / spectating / silent player
+	amber = { 224, 164, 60 }, -- #E0A43C: no signal (W8), "loading"
+	grey = { 120, 120, 120 }, -- segments of a dead / spectating player
+	camp = { 146, 190, 154 }, -- sage #92BE9A: sleeping, a new checkpoint
+}
+local A_SHADOW = 0.75
 local LOW_HP = 0.3
-local FLASH_MS = 400 -- health gained, a revive done: the segments flash white
-local BREATH_MS = 3000 -- a sleeping player's segments breathe 0.5 <-> 0.8
-local SEGS, ARCS = 4, 8 -- 4 segments of 25 %, the melting ring of a downed player in 8 arcs of 45 deg
+local SEGS = 4 -- 4 segments of 25 %
 local GREYED = { dead = true, spec = true, respawn = true }
 local RESTING = { resting = true, sleeping = true }
+
+-- The Visor atlas (ui_coop_hud3, made by the lead) and its id -> the HUD v2 id while it is missing (nil: the static is skipped).
+local H3_FILES = { { "$game_textures$", "ui\\coop\\ui_coop_hud3.dds" } } -- the file coop_hud_compass looks for too
+local TEX_OLD = {
+	bracket_l = "coop_hud_white", host_star = "coop_hud_star", needle = "coop_hud_arrow",
+	ally_down = "coop_hud_cross", ally_revive = "coop_hud_cross", ally_dead = "coop_hud_skull",
+	ally_spectator = "coop_hud_eye", ally_offline = "coop_hud_warn", sleep = "coop_hud_z", camp = "coop_hud_tent",
+}
+local h3_present -- nil: not looked yet
+
+-- Is the Visor atlas there (looked once per Lua state)? set_atlas3(bool | nil) tells it (tests), nil looks again.
+function atlas3()
+	if h3_present == nil then
+		local ok, yes = pcall(function()
+			local fs = rawget(_G, "getFS")()
+			for _, f in ipairs(H3_FILES) do
+				local found = fs:exist(f[1], f[2])
+				if found == nil or found == false then return false end
+			end
+			return true
+		end)
+		h3_present = ok and yes == true
+	end
+	return h3_present
+end
+
+function set_atlas3(on)
+	h3_present = on
+end
+
+local function tex3(name)
+	if atlas3() then return "coop_h3_" .. name end
+	return TEX_OLD[name]
+end
+
+-- The Visor font of a role ("nick" | "small"), nil: keep the xml's font.
+local function font3(role)
+	local F = rawget(_G, "coop_hud3_fonts")
+	if not (F and type(F.font) == "function") then return nil end
+	local ok, f = pcall(F.font, role)
+	return ok and f or nil
+end
 
 local function compass()
 	return rawget(_G, "coop_hud_compass")
@@ -490,11 +560,24 @@ local function text_color(t, c)
 end
 
 local function set_tex(t, tex)
-	if t.tex ~= tex then
+	if tex and t.tex ~= tex then
 		t.tex = tex
 		t.e:InitTexture(tex)
 		t.e:SetStretchTexture(true)
 	end
+end
+
+local function ux(m, v) return v * U * m.kx end
+local function uy(v) return v * U end
+
+local function set_font(w, f)
+	if f then pcall(function() w:SetFont(f) end) end
+end
+
+-- Park-Miller: the dying heart's uneven rhythm, per row (no math.random: other scripts share it)
+local function rnd(r)
+	r.rng = (r.rng * 16807) % 2147483647
+	return r.rng / 2147483647
 end
 
 class "UICoopParty" (CUIScriptWnd)
@@ -504,8 +587,8 @@ function UICoopParty:__init() super()
 	self.next_at = 0
 	self.rows = {}
 	self.cards = self.rows -- the panel's entries (older name, kept for status lines and tests)
-	self.shown = {} -- rows in use since the last refresh: { row, view, at }
-	self.track = {} -- peer -> what the row remembers between refreshes (health before, flash, the down / respawn totals)
+	self.shown = {} -- rows in use since the last refresh
+	self.track = {} -- peer -> what the row remembers between refreshes (the down / respawn totals)
 	self.width_cache = {}
 	self:InitControls()
 end
@@ -517,46 +600,49 @@ function UICoopParty:InitControls()
 	local xml = CScriptXmlInit()
 	xml:ParseFile(XML_FILE)
 	self.xml = xml
+	-- R61: one root for the whole panel; the depth spring moves only it, the rows never move against each other
+	self.root = el(xml:InitStatic("team_row", self))
 	self:AddRows(allies().others_max())
 	self:Relayout()
 end
 
--- F5-SEAT-2: rows up to `want` (the session's other players); a row made later is laid out at once.
+-- F5-SEAT-2: rows up to `want` (the session's other players); a row made later is laid out at once. Every static of a row is
+-- made here (a pool): nothing is created in a frame.
 function UICoopParty:AddRows(want)
 	local xml = self.xml
+	local root = self.root.e
 	for i = #self.rows + 1, want do
 		local r = {}
-		r.base = el(xml:InitStatic("team_row", self))
+		r.base = el(xml:InitStatic("team_row", root))
 		local b = r.base.e
-		r.strip = el(xml:InitStatic("team_row:bar", b))
+		r.strip = el(xml:InitStatic("team_row:bracket", b)) -- the "[" in his colour (older name: strip)
 		r.segs = {}
 		for k = 1, SEGS do
 			r.segs[k] = {
 				bg = el(xml:InitStatic("team_row:bar", b)),
 				fill = el(xml:InitStatic("team_row:bar", b)),
 				over = el(xml:InitStatic("team_row:bar", b)), -- revive / respawn fill over the base fill
-				flash = el(xml:InitStatic("team_row:bar", b)),
 			}
 		end
+		r.pulses = {}
+		for k = 1, PULSES do r.pulses[k] = el(xml:InitStatic("team_row:pulse", b)) end
+		r.head = el(xml:InitStatic("team_row:bar", b))
 		r.name_sh = el(xml:InitTextWnd("team_row:label", b))
 		r.name = el(xml:InitTextWnd("team_row:label", b))
 		r.host = el(xml:InitStatic("team_row:icon", b))
 		r.dist_sh = el(xml:InitTextWnd("team_row:label", b))
 		r.dist = el(xml:InitTextWnd("team_row:label", b))
 		r.arrow = el(xml:InitStatic("team_row:arrow", b))
-		r.arcs = {}
-		for k = 1, ARCS do r.arcs[k] = el(xml:InitStatic("team_row:arc", b)) end
 		r.icon = el(xml:InitStatic("team_row:icon", b))
 		r.timer_sh = el(xml:InitTextWnd("team_row:label", b))
 		r.timer = el(xml:InitTextWnd("team_row:label", b))
-		r.measure = xml:InitTextWnd("team_row:label", b)
+		r.measure = xml:InitTextWnd("team_row:label", b) -- widths in the nick font
+		r.measure_s = xml:InitTextWnd("team_row:label", b) -- widths in the small font
 		r.measure:Show(false)
-		set_tex(r.host, "coop_hud_star")
-		for k = 1, ARCS do
-			set_tex(r.arcs[k], "coop_hud_arc8")
-			pcall(function() r.arcs[k].e:EnableHeading(true) end)
-			r.arcs[k].e:SetHeading(-math.rad((k - 1) * 360 / ARCS))
-		end
+		r.measure_s:Show(false)
+		for _, p in ipairs(r.pulses) do p.e:Show(false) end
+		r.head.e:Show(false)
+		r.beats = {}
 		pcall(function() r.arrow.e:EnableHeading(true) end)
 		pcall(function() r.name.e:SetEllipsis(true) end)
 		pcall(function() r.name_sh.e:SetEllipsis(true) end)
@@ -566,82 +652,88 @@ function UICoopParty:AddRows(want)
 	end
 end
 
--- Sizes of everything that does not depend on the texts (layout table team_*: units down, px * kx across).
+-- Sizes of everything that does not depend on the texts; the atlas and the fonts are looked up here.
 function UICoopParty:Relayout()
 	self.m, self.L = metrics(), layout()
 	self.width_cache = {}
+	self.h3 = atlas3()
+	self.fonts = { nick = font3("nick"), small = font3("small") }
+	self.fonts_wait = rawget(_G, "coop_hud3_fonts") == nil -- the fonts module may come later: look again at a refresh
 	for _, r in ipairs(self.rows) do self:LayoutRow(r) end
 end
 
-function UICoopParty:LayoutRow(r)
-	local m, L = self.m, self.L
-	local kx = m.kx
-	for _, t in pairs(r) do
-		if type(t) == "table" and t.e then t.x, t.y, t.w, t.h = nil, nil, nil, nil end
-	end
-	put(r.base, 0, 0, 1, 1)
-	put(r.strip, 0, 0, L.team_strip_w * kx, L.team_strip_h)
-	local sx = L.team_seg_x * kx
-	for k = 1, SEGS do
-		local s = r.segs[k]
-		for _, t in pairs(s) do t.x, t.y, t.w, t.h = nil, nil, nil, nil end
-		local x = sx + (k - 1) * (L.team_seg_w + L.team_seg_gap) * kx
-		put(s.bg, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
-		put(s.fill, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
-		put(s.over, x, L.team_seg_y, L.team_seg_w * kx, L.team_seg_h)
-		put(s.flash, x, L.team_seg_y - m.py, L.team_seg_w * kx, L.team_seg_h + 2 * m.py)
-		tint(s.bg, argb(255 * L.team_seg_empty_alpha, CLR.white))
-	end
-	r.seg_end = sx + (SEGS * L.team_seg_w + (SEGS - 1) * L.team_seg_gap) * kx
-	local icx = r.seg_end + L.team_status_gap * kx
-	local icy = L.team_seg_y + L.team_seg_h / 2
-	r.icon_cx, r.icon_cy = icx, icy
-	put(r.icon, icx - L.team_status * kx / 2, icy - L.team_status / 2, L.team_status * kx, L.team_status)
-	for k = 1, ARCS do
-		-- turned (heading): the box stays square in units, the engine squeezes it across
-		put(r.arcs[k], icx - L.team_status / 2, icy - L.team_status / 2, L.team_status, L.team_status)
-	end
-	put(r.arrow, 0, 0, L.team_arrow, L.team_arrow)
-	put(r.host, 0, 0, L.team_star * kx, L.team_star)
-	r._nick, r._dist, r._timer = nil, nil, nil
+local function forget(t)
+	t.x, t.y, t.w, t.h = nil, nil, nil, nil
 end
 
--- Width (units) of a text, measured once per text.
-function UICoopParty:TextWidth(r, text)
-	local w = self.width_cache[text]
+function UICoopParty:LayoutRow(r)
+	local m = self.m
+	for _, t in pairs(r) do
+		if type(t) == "table" and t.e then forget(t) end
+	end
+	for _, s in ipairs(r.segs) do for _, t in pairs(s) do forget(t) end end
+	for _, t in ipairs(r.pulses) do forget(t) end
+	put(r.base, 0, 0, 1, 1)
+	local brk = tex3("bracket_l")
+	set_tex(r.strip, brk)
+	show(r.strip, brk ~= nil)
+	put(r.strip, 0, 0, ux(m, self.h3 and V.brk_w or V.brk_line), uy(V.brk_h))
+	local sw = ux(m, V.seg_w)
+	for k = 1, SEGS do
+		local s = r.segs[k]
+		local x = ux(m, V.seg_x + (k - 1) * (V.seg_w + V.seg_gap))
+		put(s.bg, x, uy(V.seg_y), sw, uy(V.seg_h))
+		put(s.fill, x, uy(V.seg_y), sw, uy(V.seg_h))
+		put(s.over, x, uy(V.seg_y), sw, uy(V.seg_h))
+		tint(s.bg, argb(255 * EMPTY_A, CLR.white))
+	end
+	r.seg_x0 = ux(m, V.seg_x)
+	r.seg_span = ux(m, SEGS * V.seg_w + (SEGS - 1) * V.seg_gap)
+	put(r.head, r.seg_x0, uy(V.seg_y - 1.5), ux(m, V.head_w), uy(V.seg_h + 3))
+	put(r.icon, ux(m, V.icon_cx - V.icon / 2), uy(V.icon_cy - V.icon / 2), ux(m, V.icon), uy(V.icon))
+	-- turned (heading): the box stays square in units, the engine squeezes it across
+	put(r.arrow, 0, 0, uy(V.arrow), uy(V.arrow))
+	put(r.host, 0, uy(V.star_y), ux(m, V.star), uy(V.star))
+	local star, needle = tex3("host_star"), tex3("needle")
+	if star then set_tex(r.host, star) end
+	if needle then set_tex(r.arrow, needle) end
+	local F = self.fonts
+	for _, t in ipairs({ r.name.e, r.name_sh.e, r.measure }) do set_font(t, F.nick) end
+	for _, t in ipairs({ r.dist.e, r.dist_sh.e, r.timer.e, r.timer_sh.e, r.measure_s }) do set_font(t, F.small) end
+	r.beating = nil
+	r._nick, r._nick_sh, r._dist, r._timer = nil, nil, nil, nil
+end
+
+-- Width (units) of a text in the nick font (small: the small font), measured once per text.
+function UICoopParty:TextWidth(r, text, small)
+	local key = (small and "s|" or "n|") .. text
+	local w = self.width_cache[key]
 	if w then return w end
-	r.measure:SetText(text)
-	local ok = pcall(function() r.measure:AdjustWidthToText() end)
-	w = ok and r.measure:GetWidth() or (#text * 6 * self.m.kx)
-	self.width_cache[text] = w
+	local ms = small and r.measure_s or r.measure
+	ms:SetText(text)
+	local ok = pcall(function() ms:AdjustWidthToText() end)
+	w = ok and ms:GetWidth() or (#text * 6 * self.m.kx)
+	self.width_cache[key] = w
 	return w
 end
 
--- F5-SEAT-2: the compact pitch, for more than ROWS_FULL rows (a server's 8..15 other players): one row's own height, from
--- the highest of its parts (the nick box starts team_name_y above the row) to the lowest (the strip, the segments), so the
--- rows close up without touching. HUD v2 sizes only: every part keeps its size; never more than team_row. At the shipped
--- values: 25.5 instead of 36 (the nick box from -2, the state icon and "0:42" down to 23.5), 15 rows from 20 to 399 (7 rows
--- at team_row: 20 to 258).
+-- F5-SEAT-2: the compact pitch, for more than ROWS_FULL rows (a server's 8..15 other players): one row's own height (the
+-- bracket, 42 px) and a gap. 15 rows from team_top end well above the own HUD.
 function compact_pitch(L)
-	local icon_cy = L.team_seg_y + L.team_seg_h / 2 -- the state icon, its ring and the timer are centred here (LayoutRow)
-	local icon_half = math_max(L.team_status, L.team_timer_h) / 2
-	local top = math_min(0, L.team_name_y, L.team_dist_y, L.team_arrow_y - L.team_arrow / 2, icon_cy - icon_half)
-	local bottom = math_max(L.team_strip_h, L.team_seg_y + L.team_seg_h, L.team_name_y + L.team_name_h,
-		L.team_dist_y + L.team_dist_h, L.team_arrow_y + L.team_arrow / 2, icon_cy + icon_half)
-	return math_min(L.team_row, bottom - top)
+	return V.pitch_compact * U
 end
 
--- From one row to the next: team_row for up to ROWS_FULL rows, else the compact pitch.
+-- From one row to the next, straight down (R61: no stair): 58 px at 1080 for up to ROWS_FULL rows, else the compact pitch.
 function row_pitch(L, n)
 	if n > ROWS_FULL then return compact_pitch(L) end
-	return L.team_row
+	return V.pitch * U
 end
 
 -- Top of row i of n, the host on top: down from team_top, or (team_top < 0) hanging from team_bottom upwards.
 local function row_top(L, i, n)
 	local pitch = row_pitch(L, n)
 	if L.team_top >= 0 then return L.team_top + (i - 1) * pitch end
-	return L.team_bottom - L.team_strip_h - (n - i) * pitch
+	return L.team_bottom - uy(V.brk_h) - (n - i) * pitch
 end
 
 function UICoopParty:Place(r, i, n)
@@ -655,7 +747,7 @@ function UICoopParty:Bounds(n)
 	if n == 0 then return nil end
 	local L, m = self.L, self.m
 	local l = L.team_x * m.kx
-	return { l = l, r = l + 200 * m.kx, t = row_top(L, 1, n), b = row_top(L, n, n) + L.team_strip_h }
+	return { l = l, r = l + ux(m, V.right), t = row_top(L, 1, n), b = row_top(L, n, n) + uy(V.brk_h) }
 end
 
 local function set_text(t, text, field_owner, field)
@@ -668,9 +760,7 @@ end
 -- Texts and their places (2 Hz): nick, host star, distance, arrow place.
 function UICoopParty:Fill(r, v, tg)
 	local A = allies()
-	local L, m = self.L, self.m
-	local kx = m.kx
-	-- what the row remembers about him
+	local m = self.m
 	local tr_ = self.track[v.peer]
 	if not tr_ then
 		tr_ = {}
@@ -679,51 +769,47 @@ function UICoopParty:Fill(r, v, tg)
 	if v.state == "down" then
 		if tr_.state ~= "down" then tr_.down_total = nil end
 		if v.bleed then tr_.down_total = math_max(tr_.down_total or 0, v.bleed) end
-	elseif tr_.state == "down" and v.state == "alive" then
-		tr_.flash_from, tr_.flash_to, tr_.flash_at = 0, 1, tg -- back on his feet: the whole bar flashes
 	end
 	local left = (v.state == "dead" or v.state == "respawn") and respawn_left(v.avatar) or nil
 	if left then
 		if not GREYED[tr_.state] then tr_.resp_total = nil end
 		tr_.resp_total = math_max(tr_.resp_total or 0, left)
 	end
-	if v.state == "alive" and v.hp and tr_.hp and v.hp > tr_.hp + 0.01 then
-		tr_.flash_from, tr_.flash_to, tr_.flash_at = tr_.hp, v.hp, tg -- healed: the gain flashes
-	end
-	tr_.state, tr_.hp = v.state, v.hp or tr_.hp
+	tr_.state = v.state
 	r.view, r.at, r.track, r.left = v, tg, tr_, left
-	-- F3 T14: lying down for the shared sleep -> "z"; F3 T13: his checkpoint changed < 10 s ago -> a tent for 10 s
+	-- F3 T14: lying down for the shared sleep; F3 T13: his checkpoint changed < 10 s ago
 	r.rest = v.state == "alive" and RESTING[rest_state(v.avatar) or ""] or false
 	r.camp = v.state == "alive" and A.checkpoint_mark(v.avatar) ~= nil
-	-- strip in his colour
 	r.color = { A.color(v.peer) }
-	-- nick (white, shadow), host star, distance, arrow
-	local nx = L.team_name_x * kx
-	local nw = math_min(self:TextWidth(r, v.nick), L.team_name_max * kx)
+	-- nick (white, shadow), host star
+	local nx, ny, nh = ux(m, V.nick_x), uy(V.nick_y), uy(V.nick_h)
+	local nw = math_min(self:TextWidth(r, v.nick), ux(m, V.nick_max))
 	set_text(r.name, v.nick, r, "_nick")
-	r.name_sh.e:SetText(v.nick)
-	put(r.name, nx, L.team_name_y, nw, L.team_name_h)
-	put(r.name_sh, nx + m.px, L.team_name_y + m.py, nw, L.team_name_h)
+	set_text(r.name_sh, v.nick, r, "_nick_sh")
+	put(r.name, nx, ny, nw, nh)
+	put(r.name_sh, nx + m.px, ny + m.py, nw, nh)
 	local x = nx + nw
-	show(r.host, v.host)
+	show(r.host, v.host and r.host.tex ~= nil)
 	if v.host then
-		put(r.host, x + 4 * kx, L.team_name_y + (L.team_name_h - L.team_star) / 2)
-		x = x + 4 * kx + L.team_star * kx
+		put(r.host, x + ux(m, V.star_gap), uy(V.star_y))
+		x = x + ux(m, V.star_gap + V.star)
 	end
+	-- the metres end at 222 px (tabular digits), never over the nick; a long text (a map, "loading") pushes the arrow on
 	local dist = place_text(v) or ""
-	local dw = dist ~= "" and self:TextWidth(r, dist) or 0
+	local dw = dist ~= "" and self:TextWidth(r, dist, true) or 0
 	if r._dist ~= dist then
 		r._dist = dist
 		r.dist.e:SetText(dist)
 		r.dist_sh.e:SetText(dist)
 	end
-	local dx = x + L.team_dist_gap * kx
-	put(r.dist, dx, L.team_dist_y, dw, L.team_dist_h)
-	put(r.dist_sh, dx + m.px, L.team_dist_y + m.py, dw, L.team_dist_h)
+	local dx = math_max(ux(m, V.dist_r) - dw, x + ux(m, V.dist_gap))
+	local dy, dh = uy(V.dist_y), uy(V.dist_h)
+	put(r.dist, dx, dy, dw, dh)
+	put(r.dist_sh, dx + m.px, dy + m.py, dw, dh)
 	show(r.dist, dist ~= "")
 	show(r.dist_sh, dist ~= "")
-	r.arrow_cx = dx + dw + 4 * kx + L.team_arrow * kx / 2
-	put(r.arrow, r.arrow_cx - L.team_arrow / 2, L.team_arrow_y - L.team_arrow / 2)
+	local acx = math_max(ux(m, V.arrow_cx), dx + dw + ux(m, V.arrow / 2 + 2))
+	put(r.arrow, acx - uy(V.arrow) / 2, uy(V.arrow_cy - V.arrow / 2))
 	r.pos = v.pos
 end
 
@@ -732,145 +818,192 @@ local function seg_share(frac, k)
 	return math_max(0, math_min(1, frac * SEGS - (k - 1)))
 end
 
--- Everything that moves (every frame): segments, the state icon, the melting ring, the timer, pulses, the arrow.
+-- The dying heart (the owner 2026-11-23: "only that he is dying, no other animation"): beats at an uneven rhythm where a
+-- 2.6 s sweep stands on the segments, each a coop_h3_pulse_* frame drawn in as the sweep passes and fading over one sweep;
+-- a white cursor runs ahead. No Visor atlas: no beats (the statics stay hidden).
+function UICoopParty:Beat(r, tg, on)
+	local ps = r.pulses
+	if not (on and self.h3) then
+		if r.beating ~= false then
+			r.beating = false
+			for _, p in ipairs(ps) do show(p, false) end
+			show(r.head, false)
+		end
+		return
+	end
+	local m = self.m
+	local span, x0 = r.seg_span, r.seg_x0
+	if not r.beating then
+		r.beating = true
+		r.beats, r.beat_i = {}, 0
+		r.next_beat = tg
+		r.rng = ((r.view and r.view.peer or 0) + 1) * 7919 + 17
+	end
+	if tg - r.next_beat > SWEEP_MS then r.next_beat = tg end -- a long pause (menu): no burst of old beats
+	local pw = ux(m, V.pulse_w)
+	while r.next_beat <= tg do
+		local at = r.next_beat
+		local per, amp = 320 + rnd(r) * 950, 0.35 + rnd(r) * 0.75
+		r.next_beat = at + per
+		local bx = ((at % SWEEP_MS) / SWEEP_MS) * span
+		if bx + pw * 0.6 <= span then
+			local i = r.beat_i % PULSES + 1
+			r.beat_i = i
+			r.beats[i] = { at = at, x = bx, a = amp }
+			put(ps[i], x0 + bx, uy(V.seg_y - V.lane - V.pulse_base * amp), pw, uy(V.pulse_h * amp))
+		end
+	end
+	local red = { allies().state_color("down") }
+	for i = 1, PULSES do
+		local b, p = r.beats[i], ps[i]
+		local age = b and (tg - b.at) or SWEEP_MS
+		if age < 0 or age > SWEEP_MS * 0.97 then
+			show(p, false)
+		else
+			local drawn = age * span / SWEEP_MS
+			local frame = math_min(PULSE_FRAMES - 1, math_floor(drawn / pw * PULSE_FRAMES))
+			set_tex(p, "coop_h3_pulse_" .. frame)
+			tint(p, argb(255 * (1 - age / SWEEP_MS) ^ 1.25, red))
+			show(p, true)
+		end
+	end
+	local head = ((tg % SWEEP_MS) / SWEEP_MS) * span
+	put(r.head, x0 + head - ux(m, V.head_w) / 2, r.head.y)
+	tint(r.head, argb(230, CLR.white))
+	show(r.head, true)
+end
+
+-- Everything that changes between refreshes (every frame): segments, the state badge, the timer, the beats, the arrow.
+-- Full brightness always (R61); only a dying row moves (the owner 2026-11-23).
 function UICoopParty:Animate(r, tg, heading, cam)
 	local v, tr_ = r.view, r.track
 	local A, M = allies(), amap()
-	local L, m = self.L, self.m
-	local kx = m.kx
-	local seg_w = L.team_seg_w * kx
-	local wave = 0.5 + 0.5 * math.sin(tg * 2 * math.pi / 1000)
-	local row_a = 1 -- the whole row (a downed player's row breathes at 1 Hz)
-	local nick_a = 1
-	local fill_frac, fill_c, fill_a = 0, CLR.white, A_FILL
+	local m = self.m
+	local seg_w = ux(m, V.seg_w)
+	local nick_c, nick_a, brk_c = CLR.nick, 1, r.color
+	local fill_frac, fill_c = 0, CLR.white
 	local over_frac, over_c = 0, nil
-	local seg_mul = 1
-	local grey = false
-	local icon, icon_c = nil, nil
-	local ring_frac -- 0..1: the arcs left of the melting ring
-	local timer, timer_c = nil, nil
+	local icon, icon_c, icon_a = nil, nil, 1
+	local timer, timer_c, timer_a = nil, nil, 1
+	local dying = false
 	local since = (tg - (r.at or tg)) / 1000
 	if v.loading then
 		nick_a = 0.5 -- TZ P48: not in this world yet: no health to show, "loading" in amber where the metres stand
 	elseif v.state == "down" then
-		row_a = 0.75 + 0.25 * wave
 		local left = v.bleed and math_max(0, v.bleed - since) or nil
 		local total = tr_.down_total
-		fill_frac = (left and total and total > 0) and math_min(1, left / total) or 1
+		fill_frac = (left and total and total > 0) and math_min(1, left / total) or 1 -- the segments melt as his timer
 		fill_c = { A.state_color("down") }
-		ring_frac = fill_frac
-		icon, icon_c = "coop_hud_cross", fill_c
 		if left then timer, timer_c = M.format_time(math.ceil(left)), fill_c end
 		local rv = reviving[v.peer]
 		if rv then
 			over_frac = rv.frac * fill_frac
 			over_c = rv.by and { A.color(rv.by) } or CLR.white
+			icon, icon_c = "ally_revive", r.color
+		else
+			dying = true
+			icon, icon_c = "ally_down", r.color
+			local p = 0.7 + 0.3 * (0.5 + 0.5 * math.sin(tg * 2 * math.pi / 1000)) -- the timer and the badge at 1 Hz
+			icon_a, timer_a = p, p
 		end
 	elseif GREYED[v.state] then
-		grey = true
 		fill_frac, fill_c = 1, CLR.grey
+		nick_c, brk_c = CLR.dim, CLR.brk_dim
 		if v.state == "spec" then
-			icon, icon_c = "coop_hud_eye", CLR.eye
+			icon, icon_c = "ally_spectator", CLR.dim_text
 		else
-			icon, icon_c = "coop_hud_skull", CLR.eye
+			icon, icon_c = "ally_dead", CLR.brk_dim
 			local left = r.left and math_max(0, r.left - since) or nil
 			if left and tr_.resp_total and tr_.resp_total > 0 then
 				over_frac, over_c = 1 - left / tr_.resp_total, CLR.white -- coming back: white fills the grey bar
-				timer, timer_c = M.format_time(math.ceil(left)), CLR.white
+				timer, timer_c = M.format_time(math.ceil(left)), CLR.dim_text
 			end
 		end
 	elseif v.state == "unknown" then
-		icon, icon_c = "coop_hud_warn", CLR.amber
-		nick_a = 0.5
+		icon, icon_c = "ally_offline", CLR.amber
+		nick_c, nick_a, brk_c = CLR.dim, 0.5, CLR.brk_dim
 		fill_frac = v.hp or 0
 	else
 		fill_frac = v.hp or 0
 		if fill_frac < LOW_HP then fill_c = { A.state_color("down") } end
 		if r.rest then
-			icon, icon_c = "coop_hud_z", CLR.white
-			seg_mul = 0.65 + 0.15 * math.sin(tg * 2 * math.pi / BREATH_MS) -- 0.5 <-> 0.8
+			icon, icon_c = "sleep", CLR.camp
 		elseif r.camp then
-			icon, icon_c = "coop_hud_tent", CLR.camp
+			icon, icon_c = "camp", CLR.camp
 		end
 	end
-	-- strip, nick, distance
-	tint(r.strip, argb(255 * row_a * (grey and 0.45 or 1), r.color))
-	text_color(r.name, argb(255 * row_a * nick_a, grey and CLR.eye or CLR.white))
-	text_color(r.name_sh, GetARGB(math_floor(255 * A_SHADOW * row_a * nick_a), 0, 0, 0))
-	text_color(r.dist, argb(A_DIST * row_a, v.loading and CLR.amber or CLR.dist))
-	text_color(r.dist_sh, GetARGB(math_floor(A_DIST * A_SHADOW * row_a), 0, 0, 0))
-	if v.host then tint(r.host, argb(230 * row_a, grey and CLR.eye or r.color)) end -- the host's star in his colour
+	-- bracket, nick, distance, star
+	tint(r.strip, argb(255, brk_c))
+	text_color(r.name, argb(255 * nick_a, nick_c))
+	text_color(r.name_sh, GetARGB(math_floor(255 * A_SHADOW * nick_a), 0, 0, 0))
+	text_color(r.dist, argb(255, v.loading and CLR.amber or CLR.ink))
+	text_color(r.dist_sh, GetARGB(math_floor(255 * A_SHADOW), 0, 0, 0))
+	if v.host then tint(r.host, argb(255, GREYED[v.state] and CLR.brk_dim or r.color)) end -- the host's star in his colour
 	-- segments
-	local flash_a = 0
-	if tr_.flash_at then
-		local age = tg - tr_.flash_at
-		if age >= 0 and age < FLASH_MS then flash_a = 1 - age / FLASH_MS else tr_.flash_at = nil end
-	end
 	for k = 1, SEGS do
 		local s = r.segs[k]
 		local f = seg_share(fill_frac, k)
 		put(s.fill, s.fill.x, s.fill.y, seg_w * f, s.fill.h)
-		tint(s.fill, argb(fill_a * row_a * seg_mul, fill_c))
+		tint(s.fill, argb(255, fill_c))
 		show(s.fill, f > 0)
-		tint(s.bg, argb(255 * L.team_seg_empty_alpha * row_a, CLR.white))
 		local o = over_c and seg_share(over_frac, k) or 0
 		show(s.over, o > 0)
 		if o > 0 then
 			put(s.over, s.over.x, s.over.y, seg_w * o, s.over.h)
-			tint(s.over, argb(A_FILL * row_a, over_c))
+			tint(s.over, argb(255, over_c))
 		end
-		local fl = 0
-		if flash_a > 0 then
-			local a0, a1 = tr_.flash_from * SEGS - (k - 1), tr_.flash_to * SEGS - (k - 1)
-			a0, a1 = math_max(0, math_min(1, a0)), math_max(0, math_min(1, a1))
-			if a1 > a0 then
-				fl = a1 - a0
-				put(s.flash, s.bg.x + seg_w * a0, s.flash.y, seg_w * fl, s.flash.h)
-				tint(s.flash, argb(255 * flash_a, CLR.white))
-			end
-		end
-		show(s.flash, fl > 0)
 	end
-	-- state icon, the melting ring, the timer
-	show(r.icon, icon ~= nil)
-	if icon then
-		set_tex(r.icon, icon)
-		tint(r.icon, argb(255 * row_a, icon_c))
-	end
-	local arcs_on = ring_frac and math.ceil(ring_frac * ARCS - 1e-6) or 0
-	for k = 1, ARCS do
-		local on = k <= arcs_on
-		show(r.arcs[k], on)
-		if on then tint(r.arcs[k], argb(255 * row_a, icon_c)) end
+	self:Beat(r, tg, dying)
+	-- state badge, timer
+	local itex = icon and tex3(icon)
+	show(r.icon, itex ~= nil)
+	if itex then
+		set_tex(r.icon, itex)
+		tint(r.icon, argb(255 * icon_a, icon_c))
 	end
 	show(r.timer, timer ~= nil)
 	show(r.timer_sh, timer ~= nil)
 	if timer then
-		local tw = self:TextWidth(r, timer)
-		local tx = r.icon_cx + L.team_status * kx / 2 + 4 * kx
-		local ty = r.icon_cy - L.team_timer_h / 2
+		local tw = self:TextWidth(r, timer, true)
+		local tx, ty, th = ux(m, V.timer_x), uy(V.timer_y), uy(V.timer_h)
 		if r._timer ~= timer then
 			r._timer = timer
 			r.timer.e:SetText(timer)
 			r.timer_sh.e:SetText(timer)
 		end
-		put(r.timer, tx, ty, tw, L.team_timer_h)
-		put(r.timer_sh, tx + m.px, ty + m.py, tw, L.team_timer_h)
-		text_color(r.timer, argb(255 * row_a, timer_c))
-		text_color(r.timer_sh, GetARGB(math_floor(255 * A_SHADOW * row_a), 0, 0, 0))
+		put(r.timer, tx, ty, tw, th)
+		put(r.timer_sh, tx + m.px, ty + m.py, tw, th)
+		text_color(r.timer, argb(255 * timer_a, timer_c))
+		text_color(r.timer_sh, GetARGB(math_floor(255 * A_SHADOW * timer_a), 0, 0, 0))
 	end
 	-- arrow: relative to the camera
 	local on = false
 	local C = compass()
-	if heading and cam and r.pos and C then
+	if heading and cam and r.pos and C and r.arrow.tex then
 		local b = C.bearing(cam, r.pos)
 		if b then
 			r.arrow.e:SetHeading(-math.rad(C.rel_angle(b, heading)))
-			tint(r.arrow, argb(220 * row_a, CLR.white))
+			tint(r.arrow, argb(255, GREYED[v.state] and CLR.dim or CLR.ink))
 			on = true
 		end
 	end
 	show(r.arrow, on)
+end
+
+-- R61 + Р67: the whole panel on the near depth layer (coop_hud_depth, units of 1024x768), in whole screen pixels; no module: 0.
+function UICoopParty:Depth()
+	local dx, dy = 0, 0
+	local D = rawget(_G, "coop_hud_depth")
+	if D and type(D.offset) == "function" then
+		local ok, x, y = pcall(D.offset, "near")
+		if ok then dx, dy = tonumber(x) or 0, tonumber(y) or 0 end
+	end
+	local m = self.m
+	if m then
+		dx = math_floor(dx / m.px + 0.5) * m.px
+		dy = math_floor(dy / m.py + 0.5) * m.py
+	end
+	put(self.root, dx, dy)
 end
 
 function UICoopParty:Refresh(tg)
@@ -880,7 +1013,10 @@ function UICoopParty:Refresh(tg)
 		list = shared_views(tg, true) -- TZ P48: the list the transition board reads too
 	end
 	local m = metrics()
-	if not self.m or m.W ~= self.m.W or m.H ~= self.m.H or layout() ~= self.L then self:Relayout() end
+	if not self.m or m.W ~= self.m.W or m.H ~= self.m.H or layout() ~= self.L
+		or (self.fonts_wait and rawget(_G, "coop_hud3_fonts") ~= nil) then
+		self:Relayout()
+	end
 	local most = allies().others_max() -- the session's other players (a Welcome after the panel was made can say more)
 	if most > #self.rows then self:AddRows(most) end
 	local n = math_min(#list, most)
@@ -906,6 +1042,7 @@ function UICoopParty:Refresh(tg)
 end
 
 function UICoopParty:Frame(tg)
+	self:Depth()
 	local C = compass()
 	local dev = device()
 	local dir, cam = dev.cam_dir, dev.cam_pos

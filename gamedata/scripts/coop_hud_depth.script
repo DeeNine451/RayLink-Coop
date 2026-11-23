@@ -1,0 +1,176 @@
+-- Ядро: без проверок режима (docs/MODES.md)
+-- HUD "Visor", TZ R67/R69. Springs run in 1080p design pixels at unit strength.
+local REF_HEIGHT = 1080
+local MAX_DT = 0.05
+local MAX_STEP = 1 / 240
+local VELOCITY_TAU = 0.04
+local abs, ceil, exp, min, max = math.abs, math.ceil, math.exp, math.min, math.max
+local atan2, deg, sqrt = math.atan2, math.deg, math.sqrt
+
+local function spring(k, cap, f, zeta)
+	local w0 = 2 * math.pi * f
+	return { k = k, cap = cap, w2 = w0 * w0, drag = 2 * zeta * w0, x = 0, v = 0 }
+end
+
+local layers = {
+	far = { x = spring(-0.09, 4.2, 2.2, 0.60), y = spring(0.075, 1.8, 2.2, 0.60) },
+	mid = { x = spring(-0.165, 6.6, 1.9, 0.58), y = spring(0.135, 3, 1.9, 0.58) },
+	near = { x = spring(-0.27, 10.8, 1.5, 0.55), y = spring(0.21, 4.8, 1.5, 0.55) },
+}
+local arc = spring(0.036, 1.8, 2.0, 0.60)
+local springs = { layers.far.x, layers.far.y, layers.mid.x, layers.mid.y, layers.near.x, layers.near.y, arc }
+
+local frame, last_ms, last_yaw, last_pitch
+local yaw_velocity, pitch_velocity = 0, 0
+local strength, detail_key, detailed = 1, nil, false
+local ui_x, ui_y = 0, 0
+local dirty_options, started = true, false
+local errors, last_error = 0, nil
+
+local function clear_motion()
+	last_ms, last_yaw, last_pitch = nil, nil, nil
+	yaw_velocity, pitch_velocity = 0, 0
+	for _, s in ipairs(springs) do s.x, s.v = 0, 0 end
+end
+
+local function reset()
+	detailed, frame = false, nil
+	if last_ms then clear_motion() end
+end
+
+local function refresh_options()
+	dirty_options = true
+end
+
+local function read_options()
+	local options = coop_menu_options
+	strength = options and options.hud_parallax_strength() / 100 or 1
+	detail_key = options and options.hud_detail_key()
+	dirty_options = false
+end
+
+local function step(s, speed, dt, substeps)
+	local u = s.k * speed / s.cap
+	-- Stable tanh for even the fastest turn. The sign of k makes the X layers lag.
+	local e = exp(-2 * abs(u))
+	local target = s.cap * (1 - e) / (1 + e)
+	if u < 0 then target = -target end
+	local x, v = s.x, s.v
+	for _ = 1, substeps do
+		v = v + (s.w2 * (target - x) - s.drag * v) * dt
+		x = x + v * dt
+	end
+	s.x, s.v = x, v
+end
+
+local function update()
+	local api = rawget(_G, "coop")
+	if not (api and api.is_active() and api.is_live() and coop_mode.actor_is_player()) then
+		reset()
+		return
+	end
+	local shown = rawget(_G, "main_hud_shown")
+	if rawget(_G, "_HUD_STATE") == false or (shown and not shown()) then
+		reset()
+		return
+	end
+
+	local dev = device()
+	if dev.frame == frame then return end
+	frame = dev.frame
+	if dirty_options then read_options() end
+	local read_key = rawget(_G, "key_state")
+	local down = detail_key and read_key and read_key(detail_key)
+	detailed = down == true or (type(down) == "number" and down ~= 0)
+
+	if strength == 0 then
+		if last_ms then clear_motion() end
+		return
+	end
+
+	-- One design pixel grows with screen height; X-Ray stretches the two UI axes independently.
+	local width, height = dev.width, dev.height
+	if width <= 0 or height <= 0 then
+		reset()
+		return
+	end
+	ui_x = (height / REF_HEIGHT) * (1024 / width)
+	ui_y = 768 / REF_HEIGHT
+
+	local dir = dev.cam_dir
+	local yaw = deg(atan2(dir.x, dir.z))
+	local pitch = deg(atan2(dir.y, sqrt(dir.x * dir.x + dir.z * dir.z)))
+	local now = dev:time_continual()
+	if not last_ms or now < last_ms then
+		clear_motion()
+		last_ms, last_yaw, last_pitch = now, yaw, pitch
+		return
+	end
+	if now == last_ms then return end
+	local elapsed = (now - last_ms) / 1000
+	local dyaw = (yaw - last_yaw + 180) % 360 - 180
+	local dpitch = pitch - last_pitch
+	last_ms, last_yaw, last_pitch = now, yaw, pitch
+
+	local blend = 1 - exp(-elapsed / VELOCITY_TAU)
+	yaw_velocity = yaw_velocity + blend * (dyaw / elapsed - yaw_velocity)
+	pitch_velocity = pitch_velocity + blend * (dpitch / elapsed - pitch_velocity)
+	local dt = min(elapsed, MAX_DT)
+	local count = ceil(dt / MAX_STEP)
+	local h = dt / count
+	for _, layer in pairs(layers) do
+		step(layer.x, yaw_velocity, h, count)
+		step(layer.y, pitch_velocity, h, count)
+	end
+	step(arc, yaw_velocity, h, count)
+end
+
+local function actor_on_update()
+	local ok, err = pcall(update)
+	if not ok then
+		errors, last_error = errors + 1, err
+		reset()
+	end
+end
+
+-- Scaling the target and the cap is equivalent to scaling the spring output.
+-- Clamp visible displacement at the R67 cap while retaining the demo's underdamped spring state.
+local function displacement(s, units)
+	return min(s.cap, max(-s.cap, s.x)) * units * strength
+end
+
+function offset(layer)
+	local s = layers[layer]
+	if not s then return 0, 0 end
+	return displacement(s.x, ui_x), displacement(s.y, ui_y)
+end
+
+function tilt()
+	return displacement(arc, ui_y)
+end
+
+function detail()
+	return detailed
+end
+
+function print_status()
+	printf("[coop-hud-depth] errors %d%s", errors, last_error and (": " .. tostring(last_error)) or "")
+end
+
+function on_game_start()
+	if started or not rawget(_G, "coop") then return end
+	started = true
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_net_destroy", reset)
+	RegisterScriptCallback("actor_on_first_update", refresh_options)
+	RegisterScriptCallback("on_option_change", refresh_options)
+
+	local main = rawget(_G, "coop_main")
+	local status = main and main.STATUS_MODULES
+	if status then
+		for _, name in ipairs(status) do
+			if name == "coop_hud_depth" then return end
+		end
+		status[#status + 1] = "coop_hud_depth"
+	end
+end

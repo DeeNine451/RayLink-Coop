@@ -545,6 +545,31 @@ if ok_api then
 	C.pick_labels(items, 4)
 	check(items[2].show and not items[1].show and items[3].show and not items[4].show, "labels: higher priority wins a collision, a far one stays")
 	check(C.fov_of("200") == 200 and C.fov_of(130) == 160 and C.fov_of(nil) == 160 and C.fov_of(120) == 120, "FOV option: 120 / 160 / 200, else 160")
+	-- Visor arc (hud_v2.js cpos / cang / cscale / calpha, markGeom)
+	check(type(C.arc_point) == "function" and type(C.tier_of) == "function", "Visor arc helpers exported")
+	if C.arc_point then
+		local x, y = C.arc_point(0, 372, 64, 21, 0)
+		local x2, y2 = C.arc_point(90, 372, 64, 21, 0)
+		local _, yl = C.arc_point(-30, 372, 64, 21, 2)
+		local _, yr = C.arc_point(30, 372, 64, 21, 2)
+		check(near(x, 0) and near(y, 64) and near(x2, 372) and near(y2, 85), "arc: x = R sin th, y = y0 + sag (1 - cos th)")
+		check(near(yr - yl, 2), "arc: tilt moves the ends in opposite directions (tilt sin th)")
+		check(near(C.arc_angle(0, 372, 21, 0), 0) and C.arc_angle(40, 372, 21, 0) > 0 and near(C.arc_angle(-40, 372, 21, 0), -C.arc_angle(40, 372, 21, 0)),
+			"arc slope: 0 at the centre, down to the right, symmetric")
+		check(near(C.arc_scale(0), 1) and near(C.arc_scale(90), 0.64), "scale along the arc 1 .. 0.64")
+		check(near(C.arc_alpha(0, 82), 1) and near(C.arc_alpha(50, 82), 1) and near(C.arc_alpha(84, 82), 0), "ends fade 50 .. 84 deg")
+		check(near(C.arc_th(80, 160, 82), 82) and near(C.arc_th(-60, 120, 82), -82), "the field fills +-82 deg of the arc")
+		check(C.tier_of({ priority = 30 }) == 1 and C.tier_of({ priority = 50 }) == 1 and C.tier_of({ priority = 20 }) == 1
+			and C.tier_of({ priority = 22 }) == 1 and C.tier_of({ priority = 10 }) == 2 and C.tier_of({ priority = 5 }) == 2
+			and C.tier_of({ priority = 10, tier = 1 }) == 1, "levels (R56): allies, pings, waypoint, active task always; the rest by look")
+		check(near(C.look_vis(10, 0, 20, 4), 1) and near(C.look_vis(25, 0, 20, 4), 0) and near(C.look_vis(25, 1, 20, 4), 1),
+			"look window +-20 deg (fading over 4), detail shows all")
+		check(near(C.focus_of(5, 12), 1) and near(C.focus_of(13, 12), 0), "focus +-12 deg")
+		check(C.icon_of({ kind = "ally" }, true) == "coop_h3_ally" and C.icon_of({ kind = "ally" }, false) == "coop_hud_chevron"
+			and C.icon_of({ kind = "stash", state = "player" }, true) == "coop_h3_stash_own" and C.icon_of({ kind = "npc", state = "trader" }, true) == "coop_h3_trader"
+			and C.icon_of({ kind = "ally", state = "spec" }, true) == "coop_h3_ally_spectator" and C.icon_of({ kind = "x", icon = "mine" }, true) == "mine",
+			"icons: the Visor atlas when present, else the old ones; a marker's own icon wins")
+	end
 end
 
 -- ================================================================ 2. marker sources
@@ -702,53 +727,64 @@ M.tm = { task_info = {
 } }
 M.object(900, at(212, 312))
 M.object(901, at(296, 150, 20)) -- 20 m above
+-- the Visor atlas is there (coop_hud_compass checks ui\coop\ui_coop_hud3.dds once per window)
+M.env.getFS = function() return { exist = function(_, root, name) if root == "$game_textures$" and name == M.env.coop_hud_compass.ATLAS .. ".dds" then return 1 end end } end
 run(400, M)
 local W = M.compass.get_window and M.compass.get_window()
 check(W ~= nil and M.hud[W] == true, "compass window on the HUD")
-check(#MISSING == 0, "compass and cards built from the XML (missing: " .. table.concat(MISSING, ", ") .. ")")
-local CW = 1024 * 0.38
+local miss_c, miss_o = {}, {}
+for _, m in ipairs(MISSING) do if m:find("ui_coop_compass", 1, true) then miss_c[#miss_c + 1] = m else miss_o[#miss_o + 1] = m end end
+check(#miss_c == 0, "compass built from the XML (missing: " .. table.concat(miss_c, ", ") .. ")")
+check(#miss_o == 0, "cards built from the XML (missing: " .. table.concat(miss_o, ", ") .. ")")
 local KX = 1024 * DEV.height / (768 * DEV.width) -- px@768 -> units across
+local LA = M.env.coop_hud_layout.get()
+-- Visor arc (TZ 6.13): x = cx + R sin th (* kx), y = y0 + sag (1 - cos th); th = rel * 82 / (fov / 2)
+local function arc_x(rel, f) return 512 + LA.arc_r * math.sin(math.rad(rel * LA.arc_half / ((f or 160) / 2))) * KX end
+local function arc_y(rel, f) return LA.arc_y0 + LA.arc_sag * (1 - math.cos(math.rad(rel * LA.arc_half / ((f or 160) / 2)))) end
 if W then
+	check(W.h3 == true, "the Visor atlas found (getFS stub): coop_h3_* icons")
 	check(W.heading and W.heading.text == "247" .. string.char(176), "heading text 247 deg (" .. tostring(W.heading and W.heading.text) .. ")")
-	local bx = W.bar_x and W.bar_x or -1
-	check(near(W.bar_w, CW, 0.5) and near(bx, (1024 - CW) / 2, 0.5), "bar: 38 % of the width, centred (owner: a bit smaller)")
-	check(near(W.bar_y, 20) and near(W.bar_h, 24), "bar: 20 down from the top, 24 high (1024x768 units)")
-	-- the scale is white (owner 2026-10-23): plate #0C0D0A ~0.33, white line ~0.8 through the bar, white ticks under it
-	local PY = 768 / DEV.height
-	local line_y = math.floor((20 + 15) / PY + 0.5) * PY
-	check(W.bg.tcolor == M.env.GetARGB(84, 12, 13, 10), "plate #0C0D0A at ~0.33 (" .. tostring(alpha_of(W.bg.tcolor)) .. ")")
-	check(W.line.tcolor == M.env.GetARGB(204, 244, 245, 246) and near(W.line.y, line_y) and near(W.line.h, PY),
-		"a white line #F4F5F6 at ~0.8, one screen pixel, 15 under the bar's top")
-	local cx = bx + CW / 2
-	local half = CW / 2
+	check(near(LA.arc_r, 372 * 768 / 1080, 0.1) and near(LA.arc_y0, 64 * 768 / 1080, 0.1) and near(LA.arc_sag, 21 * 768 / 1080, 0.1)
+		and LA.arc_half == 82, "arc numbers of the design (R 372, y0 64, sag 21 px at 1080, +-82 deg)")
+	-- the plate: #0C0D0A at a_shade 0.25 (calm)
+	check(W.bg.tcolor == M.env.GetARGB(64, 12, 13, 10), "plate #0C0D0A at ~0.25 (" .. tostring(alpha_of(W.bg.tcolor)) .. ")")
+	-- the line: segments along the arc, rotated, warm white
+	local segs_on, seg_ok = 0, true
+	for i, s in ipairs(W.segs or {}) do
+		if s.visible then
+			segs_on = segs_on + 1
+			local r, g, b = rgb_of(s.tcolor)
+			seg_ok = seg_ok and r == 241 and g == 236 and b == 223 and s.heading_on
+		end
+	end
+	check(segs_on >= 38 and seg_ok, "the arc line: rotated warm-white segments (" .. segs_on .. ")")
+	local s1_, sN = W.segs[1], W.segs[#W.segs]
+	check(s1_.heading > 0 and sN.heading < 0 and near(s1_.y, sN.y, 1e-6) and s1_.y > W.segs[#W.segs / 2].y,
+		"the arc bends down to both ends, symmetric, segments follow the slope")
 	local function shown_letter(deg) local t = W.letters and W.letters[deg] return t and t.visible and t end
 	local sw = shown_letter(225)
 	check(shown_letter(180) and sw and shown_letter(270) and shown_letter(315) and not shown_letter(0) and not shown_letter(90),
 		"letters on screen: S SW W NW")
-	check(sw and near(sw.x + sw.w / 2, cx + (225 - 247) / 80 * half, 1), "SW at its angle")
+	check(sw and near(sw.x + sw.w / 2, arc_x(225 - 247), 2) and sw.y + sw.h / 2 < arc_y(225 - 247), "SW at its angle, above the arc")
 	local lr, lg, lb = rgb_of(W.letters[225].color)
-	check(lr == 244 and lg == 245 and lb == 246 and W.letters[225].y < line_y, "letters white, above the line")
-	check(W.letter_shadows and W.letter_shadows[225].visible and select(1, rgb_of(W.letter_shadows[225].color)) == 0
-		and near(W.letter_shadows[225].x - W.letters[225].x, 1024 / DEV.width), "letters with a 1 px shadow")
-	local nt, white, below, lens = 0, true, true, {}
+	check(lr == 241 and lg == 236 and lb == 223, "letters warm white #F1ECDF")
+	check(alpha_of(W.letters[270].color) > alpha_of(W.letters[225].color), "N E S W brighter than the in-between letters")
+	-- calm: ticks every 15 deg only (167..327: 180, 195 ... 315), perpendicular to the arc, no numbers
+	local nt, left_pos, right_neg = 0, true, true
 	for _, t in ipairs(W.ticks or {}) do
 		if t.visible then
 			nt = nt + 1
-			local r, g, b = rgb_of(t.tcolor)
-			white = white and r == 244 and g == 245 and b == 246
-			below = below and t.y > line_y - 1e-6
-			lens[string.format("%.0f", t.h)] = true
+			local cxk = t.x + t.w / 2
+			if cxk < 500 and not (t.heading > 0) then left_pos = false end
+			if cxk > 524 and not (t.heading < 0) then right_neg = false end
 		end
 	end
-	check(nt == 32, "a tick every 5 deg within the field: 32 (" .. nt .. ")")
-	check(white and below, "ticks white, down from the line")
-	check(lens["2"] and lens["4"] and lens["5"], "ticks 2 / 4 / 5 px for 5 / 15 / 45 deg")
-	local sh_n = 0
-	for _, t in ipairs(W.tick_shadows or {}) do if t.visible then sh_n = sh_n + 1 end end
-	check(sh_n == nt, "every tick has its 1 px shadow")
-	check(W.notch.y >= line_y and near(W.notch.x + W.notch.w / 2, (1024 - CW) / 2 + CW / 2, 0.01)
-		and W.notch.tcolor % 16777216 == M.env.GetARGB(0, 244, 245, 246), "white notch under the line at the centre")
-	check(W.heading.color % 16777216 == M.env.GetARGB(0, 244, 245, 246) and W.heading.y < 20, "heading white, above the bar")
+	check(nt == 10, "calm: a tick every 15 deg: 10 in the field (" .. nt .. ")")
+	check(left_pos and right_neg, "ticks turned with the arc (left / right in opposite directions)")
+	local dg = 0
+	for _, d in ipairs(W.digits or {}) do if d.visible then dg = dg + 1 end end
+	check(dg == 0, "calm: no numbers on the scale")
+	check(W.center.visible ~= false and near(W.center.x + W.center.w / 2, 512, 0.01), "the centre line at the middle")
 	-- markers
 	local function slot(key_part)
 		for _, s in ipairs(W.slots or {}) do
@@ -757,30 +793,35 @@ if W then
 	end
 	dump("compass", flatten(W.root, W.root.x, W.root.y))
 	local s0 = slot("ally:0")
-	check(s0 and s0.icon.texture == "coop_hud_chevron", "ally: chevron")
-	check(s0 and near(s0.icon.y + s0.icon.h / 2, 20 + 9) and near(s0.icon.h, 12), "markers 12 px, on the line (a bit above it)")
-	check(s0 and select(1, rgb_of(s0.icon.tcolor)) == 217, "ally: in his colour (sand)")
+	check(s0 and s0.icon.texture == "coop_h3_ally", "ally: the Visor icon")
+	local sc8 = 0.64 + 0.36 * math.cos(math.rad(8 * 82 / 80))
+	check(s0 and near(s0.icon.h, LA.arc_icon_ally * sc8, 0.01) and near(s0.icon.h, 22 * 768 / 1080 * sc8, 0.1), "ally icon 22 px at 1080 (" .. tostring(s0 and s0.icon.h) .. ")")
+	check(s0 and alpha_of(s0.icon.tcolor) >= 254 and select(1, rgb_of(s0.icon.tcolor)) == 217, "ally: full alpha, in his colour (sand)")
 	local x0 = s0 and (s0.icon.x + s0.icon.w / 2) or 0
-	check(near(x0, cx + (255 - 247) / 80 * half, 1.5), "ally at his bearing (x " .. string.format("%.1f", x0) .. ")")
-	check(s0 and s0.label.visible and s0.label.text == "player_a  26 m", "ally within 10 deg of the centre: nick and distance (" .. tostring(s0 and s0.label.text) .. ")")
+	check(near(x0, arc_x(255 - 247), 1.5), "ally at his bearing on the arc (x " .. string.format("%.1f", x0) .. ")")
+	check(s0 and s0.icon.y > arc_y(8) and s0.stem.visible, "icons hang under the arc on a stem")
+	check(s0 and s0.label.visible and s0.label.text == "player_a" and s0.info.visible and s0.info.text == "26 m",
+		"ally in the focus (8 deg): nick, then distance (" .. tostring(s0 and s0.label.text) .. " / " .. tostring(s0 and s0.info.text) .. ")")
 	local s1 = slot("ally:1")
-	check(s1 and s1.icon.texture == "coop_hud_down", "downed ally: ring with a cross")
-	check(s1 and s1.side.visible and s1.side.texture == "coop_hud_tri_right" and s1.icon.x + s1.icon.w / 2 > cx + half * 0.9,
-		"downed ally behind on the right: pinned to the right edge with an arrow")
-	check(s1 and not s1.label.visible, "a pinned marker has no label")
+	check(s1 and s1.icon.texture == "coop_h3_ally_down", "downed ally: the down icon")
+	check(s1 and s1.side.visible and s1.side.texture == "coop_hud_tri_right" and s1.icon.x + s1.icon.w / 2 > arc_x(75),
+		"downed ally behind on the right: pinned to the right end with an arrow")
+	check(s1 and not s1.label.visible and not s1.info.visible, "a pinned marker has no label")
 	local a_s1 = s1 and alpha_of(s1.icon.tcolor)
 	run(240, M)
 	check(s1 and alpha_of(s1.icon.tcolor) ~= a_s1, "downed ally pulses")
 	local st = slot("task:a")
-	check(st and st.icon.texture == "coop_hud_diamond" and st.label.visible and st.label.text == "310 m", "active task: diamond + distance (" .. tostring(st and st.label.text) .. ")")
-	local so = slot("task:b")
-	check(so and so.icon.texture == "coop_hud_diamond_hollow" and alpha_of(so.icon.tcolor) <= 160 and alpha_of(so.icon.tcolor) >= 140,
-		"other task: hollow diamond, alpha ~0.6 (" .. tostring(so and alpha_of(so.icon.tcolor)) .. ")")
-	check(so and not so.label.visible, "other task: no label off the centre")
-	-- height: the other task is 20 m above; turn to it so its label shows
+	check(st and st.icon.texture == "coop_h3_task_active" and same_rgb({ rgb_of(st.icon.tcolor) }, 241, 236, 223),
+		"active task: sight icon, warm white")
+	check(st and not st.label.visible and not st.info.visible, "active task off the focus: icon only (R56)")
+	check(st and math.abs(alpha_of(st.icon.tcolor) - 64) <= 3, "level 1 off the focus, 310 m (past fade_ref_m 300): a_main 0.72 x 0.35 (" .. tostring(st and alpha_of(st.icon.tcolor)) .. ")")
+	check(not slot("task:b"), "other task 49 deg off: level 2, not shown out of the +-20 deg look window")
+	-- height: the other task is 20 m above; turn to it: it shows, with the distance and an up arrow
 	look(296)
 	run(300, M)
-	check(so.label.visible and so.updown.visible and so.updown.texture == "coop_hud_tri_up", "20 m above, looked at: distance with an up arrow")
+	local so = slot("task:b")
+	check(so and so.icon.texture == "coop_h3_task_other" and so.info.visible and so.updown.visible and so.updown.texture == "coop_hud_tri_up",
+		"looked at: other task with its distance and an up arrow")
 	look(247)
 	run(300, M)
 	-- draw order: the higher priority is attached later (drawn on top)
@@ -794,10 +835,11 @@ if W then
 	local mid = s0.icon.x
 	run(500, M)
 	local after = s0.icon.x
-	local target = cx + (265 - 247) / 80 * half - s0.icon.w / 2
+	local target = arc_x(265 - 247) - s0.icon.w / 2
 	check(mid > before and mid < after - 0.5 and near(after, target, 1.5), "movement is interpolated over frames (" ..
 		string.format("%.1f -> %.1f -> %.1f, target %.1f", before, mid, after, target) .. ")")
-	-- fade in / out
+	check(not s0.label.visible and not s0.info.visible, "ally 18 deg off: out of the focus, icon only")
+	-- fade in / out (a level-2 marker within the look window)
 	M.tm.task_info.c = { t = task(false), current_target = 902, status = "normal" }
 	M.object(902, at(250, 80))
 	run(112, M)
@@ -810,18 +852,52 @@ if W then
 	check(sc and sc.icon.visible, "a gone marker fades out, not cut")
 	run(300, M)
 	check(not (sc and sc.icon.visible and sc.key and sc.key:find("task:c", 1, true)), "faded out after ~150 ms")
-	-- labels never overlap: a ping next to the ally hides the ally's label
-	local ping_m = { key = "p", kind = "ping", pos = at(266, 30), color = { 217, 177, 96 }, priority = 50 }
+	-- labels never overlap: the ally back in the focus, a ping right next to him: the ping's label wins
+	M.objects[500]._p = at(255, 26)
+	local ping_m = { key = "p", kind = "ping", pos = at(257, 30), color = { 217, 177, 96 }, priority = 50 }
 	M.markers.add_source("t", function() return { ping_m } end)
-	run(300, M)
+	run(700, M)
 	local sp = slot("t/p")
-	check(sp and sp.icon.texture == "coop_hud_ring" and sp.core and sp.core.visible and sp.core.texture == "coop_hud_dot", "ping: ring + dot")
-	check(sp and sp.label.visible and not s0.label.visible, "ping next to the ally: the ping's label shows, the ally's is hidden")
+	check(sp and sp.icon.texture == "coop_h3_ping" and not sp.core.visible, "ping: the Visor icon (no separate dot)")
+	check(sp and sp.info.visible and not s0.label.visible and not s0.info.visible, "ping next to the ally: the ping's label shows, the ally's is hidden")
+	-- a fresh ping shows its distance off the focus for 3 s
+	ping_m.pos, ping_m.born = at(277, 30), NOW
+	run(300, M)
+	check(sp.info.visible and sp.info.text == "30 m", "fresh ping 30 deg off: distance for 3 s (" .. tostring(sp.info.text) .. ")")
+	run(3000, M)
+	check(not sp.info.visible, "after 3 s: icon only")
 	M.markers.remove_source("t")
+	-- detail (coop_hud_depth.detail, Tab): every 5 deg tick, numbers, every kind with labels
+	local DEP = { dx = 0, dy = 0, tilt = 0, det = true }
+	M.env.coop_hud_depth = { offset = function(l) if l == "far" then return DEP.dx, DEP.dy end return 0, 0 end,
+		tilt = function() return DEP.tilt end, detail = function() return DEP.det end }
+	run(700, M)
+	nt, dg = 0, 0
+	for _, t in ipairs(W.ticks) do if t.visible then nt = nt + 1 end end
+	for _, d in ipairs(W.digits) do if d.visible then dg = dg + 1 end end
+	check(nt == 32, "detail: a tick every 5 deg (" .. nt .. ")")
+	check(dg == 4, "detail: numbers of the scale at 15 deg, not at the letters, not near the centre: 195 210 285 300 (" .. dg .. ")")
+	local sb = slot("task:b")
+	check(sb and sb.info.visible, "detail: the other task 49 deg off is shown with its distance")
+	check(W.bg.tcolor == M.env.GetARGB(84, 12, 13, 10), "detail: plate at 0.33")
+	DEP.det = false
+	run(700, M)
+	check(not slot("task:b"), "detail released: back to the calm view")
+	-- depth: the whole compass on the far layer, the ends of the arc sway in opposite directions
+	DEP.dx, DEP.dy, DEP.tilt = 3, -2, 1.5
+	run(100, M)
+	check(near(W.root.x, 3) and near(W.root.y, -2), "depth: the compass moves by offset('far')")
+	local l_y, r_y = W.segs[1].y, W.segs[#W.segs].y
+	check(l_y < r_y - 2, "depth: tilt raises the left end and lowers the right one (" .. string.format("%.2f / %.2f", l_y, r_y) .. ")")
+	M.env.coop_hud_depth = nil
+	run(100, M)
+	check(near(W.root.x, 0) and near(W.root.y, 0) and near(W.segs[1].y, W.segs[#W.segs].y, 1e-6), "no depth module: no movement")
 	-- FOV option
+	M.objects[500]._p = at(265, 26)
+	run(600, M)
 	M.compass.set_fov(120)
 	run(200, M)
-	check(near(s0.icon.x + s0.icon.w / 2, cx + (265 - 247) / 60 * half, 1.5), "FOV 120: the ally moves outwards")
+	check(near(s0.icon.x + s0.icon.w / 2, arc_x(265 - 247, 120), 1.5), "FOV 120: the ally moves outwards")
 	M.compass.set_fov(160)
 	-- hidden with the main HUD, removed when switched off
 	M.hud_shown = false
@@ -997,6 +1073,8 @@ print("== team panel")
 NET = {}
 NOW = 500000
 M = machine(2)
+-- the Visor atlas is there: coop_h3_* (test_allies / test_core run without it: the HUD v2 ids)
+M.env.getFS = function() return { exist = function(_, root, name) if root == "$game_textures$" and name == "ui\\coop\\ui_coop_hud3.dds" then return 1 end end } end
 M.players = {
 	{ id = 0, nick = "player_a", avatar_id = 500, is_self = false },
 	{ id = 1, nick = "Guest", avatar_id = 501, is_self = false },
@@ -1019,43 +1097,48 @@ local function fill_w(r, part)
 	for _, s in ipairs(r.segs) do if s[part or "fill"].e.visible then w = w + s[part or "fill"].e.w end end
 	return w
 end
-local SEG = 30 * KX
+local U = 768 / 1080 -- Visor sizes are px at 1080
+local SEG = 38 * U * KX
+local PITCH = 58 * U
 if P then
 	local r1, r2, r3 = P.rows[1], P.rows[2], P.rows[3]
 	check(r1.base.e.visible and r2.base.e.visible and r3.base.e.visible and not P.rows[4].base.e.visible, "one row per other player")
 	check(r1.name.e.text == "player_a" and r2.name.e.text == "Guest" and r3.name.e.text == "p3", "sorted by peer: host on top")
-	check(near(r1.base.e.x, 18 * KX) and near(r1.base.e.y, 20) and near(r2.base.e.y, 20 + 36) and near(r3.base.e.y, 20 + 72),
-		"top left (owner 2026-10-23: bottom left covered the PDA news): the block goes down from 20, 36 apart")
-	check(r1.strip.e.tcolor % 16777216 == M.allies.argb(0) % 16777216 and near(r1.strip.e.w, 2 * KX) and near(r1.strip.e.h, 22),
-		"2 px bar in his colour")
+	check(near(r1.base.e.x, 18 * KX) and near(r1.base.e.y, 20) and near(r2.base.e.y, 20 + PITCH) and near(r3.base.e.y, 20 + 2 * PITCH)
+		and near(r2.base.e.x, r1.base.e.x) and near(r3.base.e.x, r1.base.e.x),
+		"top left, rows straight under each other 58 px apart (R61: no stair)")
+	check(r1.strip.e.tcolor % 16777216 == M.allies.argb(0) % 16777216 and r1.strip.e.texture == "coop_h3_bracket_l"
+		and near(r1.strip.e.w, 8 * U * KX) and near(r1.strip.e.h, 42 * U) and alpha_of(r1.strip.e.tcolor) == 255,
+		"the [ in his colour, full brightness")
 	local nr, ng, nb = rgb_of(r1.name.e.color)
-	check(nr == 244 and ng == 245 and nb == 246 and r1.name_sh.e.text == "player_a" and select(1, rgb_of(r1.name_sh.e.color)) == 0,
-		"nick white with a shadow")
-	check(r1.host.e.visible and r1.host.e.texture == "coop_hud_star" and not r2.host.e.visible, "host star on the host only")
+	check(nr == 247 and ng == 244 and nb == 236 and alpha_of(r1.name.e.color) == 255 and r1.name_sh.e.text == "player_a"
+		and select(1, rgb_of(r1.name_sh.e.color)) == 0, "nick white (#F7F4EC) with a shadow")
+	check(r1.host.e.visible and r1.host.e.texture == "coop_h3_host_star" and not r2.host.e.visible, "host star on the host only")
 	check(r1.host.e.tcolor and r1.host.e.tcolor % 16777216 == M.allies.argb(0) % 16777216, "the star in the host's colour")
 	check(r1.dist.e.text == "26 m" and r1.dist.e.x > r1.host.e.x and r2.dist.e.text == "71 m", "distance after the nick (" .. r1.dist.e.text .. ")")
+	check(near(r1.dist.e.x + r1.dist.e.w, 222 * U * KX) and near(r2.dist.e.x + r2.dist.e.w, 222 * U * KX), "the metres end at 222 px")
+	check(r1.arrow.e.texture == "coop_h3_needle" and r1.arrow.e.x > r1.dist.e.x, "the needle right of the metres")
 	check(near(r1.arrow.e.heading, -math.pi / 2, 0.02) and near(math.abs(r2.arrow.e.heading), math.pi, 0.02) and near(r3.arrow.e.heading, math.pi / 2, 0.02),
 		"direction arrow turned relative to the camera (right / behind / left)")
 	look(90)
 	run(50, M)
 	check(near(r1.arrow.e.heading, 0, 0.02), "the arrow follows the camera every frame")
 	look(0)
-	-- health: 4 segments of 25 %, 30x5, 3 apart
+	-- health: 4 segments of 25 %, 38x3, 4 apart, 33 px down
 	local s1, s2 = r1.segs[1], r1.segs[2]
-	check(near(s1.bg.e.w, SEG) and near(s1.bg.e.h, 5) and near(s2.bg.e.x - s1.bg.e.x, 33 * KX), "segments 30x5 px, 3 px apart")
+	check(near(s1.bg.e.w, SEG) and near(s1.bg.e.h, 3 * U) and near(s2.bg.e.x - s1.bg.e.x, 42 * U * KX) and near(s1.bg.e.y, 33 * U),
+		"segments 38x3 px, 4 px apart, under the nick")
 	check(alpha_of(s1.bg.e.tcolor) == 46 and select(1, rgb_of(s1.bg.e.tcolor)) == 244, "the empty part white at ~0.18")
 	check(near(fill_w(r1), SEG * 4 * 0.86, 0.05) and near(r1.segs[4].fill.e.w, SEG * 0.44, 0.05), "86 %: three full segments and 0.44 of the fourth")
 	check(select(1, rgb_of(r1.segs[1].fill.e.tcolor)) == 244, "fill white")
 	local r_, g_, b_ = rgb_of(r2.segs[1].fill.e.tcolor)
 	check(r_ == 226 and g_ == 58 and b_ == 48 and not r2.segs[2].fill.e.visible, "18 %: red, under one segment")
 	check(not r1.icon.e.visible and not r1.timer.e.visible, "a well player: no icon, no words")
-	-- healed: the gain flashes white for 0.4 s
+	check(not r1.head.e.visible and not r1.pulses[1].e.visible, "a well player: no beats (owner: only a dying row moves)")
+	-- healed: the segments just follow (no flash: the owner 2026-11-23)
 	status(M, 1, "alive", 0.5)
 	run(600, M)
-	local fl = fill_w(r2, "flash")
-	check(fl > 0 and alpha_of(r2.segs[2].flash.e.tcolor) > 0, "healed 18 -> 50 %: the gain flashes (" .. string.format("%.1f", fl) .. ")")
-	run(500, M)
-	check(fill_w(r2, "flash") == 0, "the flash is over after 0.4 s")
+	check(r2.segs[1].flash == nil and near(fill_w(r2), SEG * 2, 0.05), "healed 18 -> 50 %: two segments, no flash")
 	-- down: the segments are the bleed-out timer
 	status(M, 1, "down", 0.01, 42)
 	run(600, M)
@@ -1065,40 +1148,48 @@ if P then
 	local w0 = fill_w(r2)
 	r_, g_, b_ = rgb_of(r2.segs[1].fill.e.tcolor)
 	check(r_ == 226 and near(w0, SEG * 4, 1.5), "down: red full bar at the start of the bleed-out (" .. string.format("%.1f", w0) .. ")")
-	check(r2.icon.e.visible and r2.icon.e.texture == "coop_hud_cross", "a cross right of the segments")
-	local arcs = 0
-	for _, a in ipairs(r2.arcs) do if a.e.visible then arcs = arcs + 1 end end
-	check(arcs == 8, "in a full ring of 8 arcs (" .. arcs .. ")")
-	check(r2.timer.e.visible and r2.timer.e.text:match("^0:4[12]$") and r2.timer.e.x > r2.icon.e.x, "0:42 after the cross (" .. r2.timer.e.text .. ")")
-	local sa = alpha_of(r2.strip.e.tcolor)
+	check(r2.icon.e.visible and r2.icon.e.texture == "coop_h3_ally_down" and r2.icon.e.tcolor % 16777216 == M.allies.argb(1) % 16777216,
+		"the ally_down badge in his colour right of the segments")
+	check(r2.timer.e.visible and r2.timer.e.text:match("^0:4[12]$") and r2.timer.e.x < r2.icon.e.x
+		and select(1, rgb_of(r2.timer.e.color)) == 226, "0:42 in red before the badge (" .. r2.timer.e.text .. ")")
+	local beats, frame_ok = 0, true
+	for _, b in ipairs(r2.pulses) do
+		if b.e.visible then
+			beats = beats + 1
+			frame_ok = frame_ok and (b.e.texture or ""):match("^coop_h3_pulse_[0-7]$") ~= nil and select(1, rgb_of(b.e.tcolor)) == 226
+		end
+	end
+	check(beats >= 1 and frame_ok and r2.head.e.visible, "the dying heart beats over the segments (" .. beats .. " beats, coop_h3_pulse_*)")
+	local hx = r2.head.e.x
+	local ta = alpha_of(r2.timer.e.color)
 	run(300, M)
-	check(sa ~= alpha_of(r2.strip.e.tcolor), "the row breathes at 1 Hz")
+	check(hx ~= r2.head.e.x and ta ~= alpha_of(r2.timer.e.color) and alpha_of(r2.strip.e.tcolor) == 255,
+		"the sweep runs, the timer pulses at 1 Hz, the bracket stays at full brightness")
 	run(10000, M)
 	status(M, 1, "down", 0.01, 32) -- he keeps reporting (a status older than 15 s is "no signal")
 	run(10400, M)
 	local w1 = fill_w(r2)
-	arcs = 0
-	for _, a in ipairs(r2.arcs) do if a.e.visible then arcs = arcs + 1 end end
 	check(w1 < w0 * 0.55 and w1 > w0 * 0.4 and r2.segs[1].fill.e.visible and not r2.segs[4].fill.e.visible,
 		"half the time gone: the red melted right to left to about half (" .. string.format("%.1f of %.1f", w1, w0) .. ")")
-	check(arcs == 4 or arcs == 5, "the ring melts with it (" .. arcs .. " arcs)")
 	-- part 2 seam: being revived fills the red in the reviver's colour
 	M.hudm.set_revive(1, 0.5, 0)
 	run(50, M)
 	local ov = fill_w(r2, "over")
 	r_ = rgb_of(r2.segs[1].over.e.tcolor)
 	check(near(ov, w1 * 0.5, 2) and r_ == 217, "set_revive(peer, 0.5, host): half of the red in the host's colour (" .. string.format("%.1f", ov) .. ")")
+	check(r2.icon.e.texture == "coop_h3_ally_revive" and not r2.head.e.visible and not r2.pulses[1].e.visible
+		and alpha_of(r2.timer.e.color) == 255, "being revived: ally_revive, no beats, the timer steady")
 	M.hudm.set_revive(1, nil)
-	-- back on his feet: the whole bar flashes
+	-- back on his feet: no flash, the beats stop
 	status(M, 1, "alive", 0.3)
 	run(600, M)
-	check(fill_w(r2, "flash") > SEG, "revived: the bar flashes white")
-	check(not r2.icon.e.visible and not r2.timer.e.visible, "cross and timer gone")
+	check(not r2.icon.e.visible and not r2.timer.e.visible and not r2.head.e.visible, "badge, timer and beats gone")
 	-- dead / returning
 	status(M, 1, "dead", 0)
 	run(600, M)
 	r_, g_, b_ = rgb_of(r2.segs[1].fill.e.tcolor)
-	check(r_ == 120 and g_ == 120 and near(fill_w(r2), SEG * 4, 0.5) and r2.icon.e.texture == "coop_hud_skull", "dead: grey segments and a skull")
+	check(r_ == 120 and g_ == 120 and near(fill_w(r2), SEG * 4, 0.5) and r2.icon.e.texture == "coop_h3_ally_dead"
+		and select(1, rgb_of(r2.strip.e.tcolor)) == 142, "dead: grey segments and bracket, ally_dead")
 	check(not r2.timer.e.visible, "no respawn time known: no timer")
 	local resp_end = NOW + 21000
 	M.env.coop.respawn_left = function(id) return id == 501 and math.max(0, resp_end - NOW) or nil end
@@ -1115,19 +1206,18 @@ if P then
 	-- spectating, sleeping, no signal
 	status(M, 1, "spec", 1)
 	run(600, M)
-	check(r2.icon.e.texture == "coop_hud_eye" and select(1, rgb_of(r2.segs[1].fill.e.tcolor)) == 120, "spectating: eye, grey segments")
+	check(r2.icon.e.texture == "coop_h3_ally_spectator" and select(1, rgb_of(r2.segs[1].fill.e.tcolor)) == 120, "spectating: eye, grey segments")
 	status(M, 1, "alive", 1)
 	M.rest[501] = "sleeping"
 	run(600, M)
-	check(r2.icon.e.visible and r2.icon.e.texture == "coop_hud_z", "sleeping: z")
+	check(r2.icon.e.visible and r2.icon.e.texture == "coop_h3_sleep", "sleeping: the sleep badge")
 	local ba = alpha_of(r2.segs[1].fill.e.tcolor)
 	run(750, M)
 	local bb = alpha_of(r2.segs[1].fill.e.tcolor)
-	check(ba ~= bb and ba >= 0.5 * 230 - 2 and ba <= 0.8 * 230 + 2 and bb >= 0.5 * 230 - 2 and bb <= 0.8 * 230 + 2,
-		"sleeping: the segments breathe 0.5..0.8 (" .. ba .. " -> " .. bb .. ")")
+	check(ba == 255 and bb == 255, "sleeping: the segments stand still at full brightness (" .. ba .. " -> " .. bb .. ")")
 	M.rest[501] = nil
 	run(16000, M)
-	check(r1.icon.e.visible and r1.icon.e.texture == "coop_hud_warn", "status stopped coming: amber !")
+	check(r1.icon.e.visible and r1.icon.e.texture == "coop_h3_ally_offline", "status stopped coming: amber ally_offline")
 	r_, g_, b_ = rgb_of(r1.icon.e.tcolor)
 	check(r_ > 200 and g_ > 120 and g_ < 200 and b_ < 100, "the ! is amber")
 	check(alpha_of(r1.name.e.color) <= 130, "the nick dimmed")
@@ -1140,10 +1230,25 @@ if P then
 	M.env.coop_checkpoints = { last_update = function(id) return id == 501 and at_cp or nil end }
 	run(600, M)
 	r_, g_, b_ = rgb_of(r2.icon.e.tcolor)
-	check(r2.icon.e.visible and r2.icon.e.texture == "coop_hud_tent" and r_ == 146 and g_ == 190, "checkpoint changed: a sage tent (no words)")
+	check(r2.icon.e.visible and r2.icon.e.texture == "coop_h3_camp" and r_ == 146 and g_ == 190, "checkpoint changed: a sage tent (no words)")
 	run(10000, M)
 	check(not r2.icon.e.visible, "10 s later it is gone")
 	M.env.coop_checkpoints = nil
+	-- R61 / R67: the whole panel on coop_hud_depth's near layer, one block, whole pixels; no module: no offset
+	local y1, y2 = r1.base.e.y, r2.base.e.y
+	check(near(P.root.e.x, 0) and near(P.root.e.y, 0), "no coop_hud_depth: the panel stands still")
+	local layers = {}
+	M.env.coop_hud_depth = { offset = function(l) layers[l] = true if l == "near" then return 5.3, -2.2 end return 0, 0 end,
+		tilt = function() return 0 end, detail = function() return false end }
+	run(50, M)
+	check(layers.near and near(P.root.e.x, 10 * 1024 / 1920) and near(P.root.e.y, -3 * 768 / 1080),
+		"near layer: the root moves (5.3, -2.2) rounded to whole pixels (" .. tostring(P.root.e.x) .. ", " .. tostring(P.root.e.y) .. ")")
+	check(r1.base.e.y == y1 and r2.base.e.y == y2 and near(r2.base.e.y - r1.base.e.y, PITCH), "the rows never move against each other")
+	M.env.coop_hud_depth = { offset = function() error("boom") end }
+	run(50, M)
+	check(near(P.root.e.x, 0) and r1.base.e.visible, "a failing depth module: no offset, the panel stays")
+	M.env.coop_hud_depth = nil
+	run(50, M)
 	-- switches and visibility
 	M.hudm.set_party_enabled(false)
 	run(100, M)
@@ -1168,7 +1273,7 @@ if P then
 		DEV.width, DEV.height = res[1], res[2]
 		run(600, M)
 		local kx = 1024 * res[2] / (768 * res[1])
-		check(near(r1.base.e.x, 18 * kx) and near(r1.base.e.y, 20) and near(r1.segs[1].bg.e.w, 30 * kx),
+		check(near(r1.base.e.x, 18 * kx) and near(r1.base.e.y, 20) and near(r1.segs[1].bg.e.w, 38 * U * kx),
 			("%dx%d: rows at x %.1f units, segments %.1f wide"):format(res[1], res[2], r1.base.e.x, r1.segs[1].bg.e.w))
 	end
 	DEV.width, DEV.height = 1920, 1080
@@ -1176,7 +1281,7 @@ if P then
 	check(INI.data.coop_hud_layout and INI.data.coop_hud_layout.team_x == "18" and INI.data.coop_hud_layout.bar_bg_alpha == "0.33",
 		"mod_system_coop.ltx has [coop_hud_layout] with the defaults")
 	INI.data.coop_hud_layout.team_x = "40"
-	INI.data.coop_hud_layout.bar_bg_alpha = "0.5"
+	INI.data.coop_hud_layout.a_shade = "0.5"
 	INI.data.coop_hud_layout.bar_top = "garbage"
 	M.env.coop_hud_layout.reload()
 	run(600, M)
@@ -1185,13 +1290,13 @@ if P then
 	INI.data.coop_hud_layout.team_top = "-1"
 	M.env.coop_hud_layout.reload()
 	run(600, M)
-	check(near(r3.base.e.y + 22, 590) and near(r1.base.e.y, 590 - 22 - 72),
+	check(near(r3.base.e.y + 42 * U, 590) and near(r1.base.e.y, 590 - 42 * U - 2 * PITCH),
 		"team_top = -1: the old place, hanging from team_bottom (590) upwards")
 	check(INI.data.coop_hud_layout.team_bottom == "590", "team_bottom stays in the ltx for that mode")
 	INI.data.coop_hud_layout.team_top = "20"
-	check(Wc and alpha_of(Wc.bg.tcolor) == 128 and near(Wc.bar_y, 20), "bar_bg_alpha = 0.5 applied; a broken line keeps the default")
+	check(Wc and alpha_of(Wc.bg.tcolor) == 128 and near(Wc.bar_y, 45.5 - 21.5), "compass a_shade = 0.5 applied; a broken line keeps the default")
 	INI.data.coop_hud_layout.team_x = "18"
-	INI.data.coop_hud_layout.bar_bg_alpha = "0.33"
+	INI.data.coop_hud_layout.a_shade = "0.25"
 	INI.data.coop_hud_layout.bar_top = "20"
 	M.env.coop_hud_layout.reload()
 end
@@ -1512,10 +1617,11 @@ NOW = 780000
 M = machine(2)
 look(0)
 spot(1101, "treasure", "", at(5, 10)) -- 10 m: full
-spot(1102, "treasure", "", at(-20, 62)) -- 62 m: dimmer, smaller
+spot(1102, "treasure", "", at(-10, 62)) -- 62 m: dimmer, smaller (Visor: within the +-20 deg look window)
 spot(1103, "treasure", "", at(20, 150)) -- 150 m > 100: not drawn
 spot(1104, "treasure", "", at(180, 30)) -- behind: not pinned
-spot(1105, "ui_pda2_trader_location", "Trader", at(40, 18))
+spot(1105, "ui_pda2_trader_location", "Trader", at(14, 18))
+spot(1106, "treasure", "", at(35, 15)) -- Visor: 35 deg off, out of the look window
 -- the icons of the new kinds (12 m ahead)
 spot(1110, "ui_pda2_mechanic_location", "", at(3, 12))
 spot(1111, "ui_pda2_medic_location", "", at(-3, 12))
@@ -1530,16 +1636,18 @@ run(800, M)
 W = M.compass.get_window()
 local b1, b2, b3, b4, b5, ba = slot_of(W, "pda:1101"), slot_of(W, "pda:1102"), slot_of(W, "pda:1103"), slot_of(W, "pda:1104"),
 	slot_of(W, "pda:1105"), slot_of(W, "ally:0")
-check(b1 and b1.icon.texture == "coop_hud_stash" and alpha_of(b1.icon.tcolor) >= 250 and near(b1.icon.h, 12),
-	"stash 10 m: crate, full alpha, 12 px (" .. tostring(b1 and alpha_of(b1.icon.tcolor)) .. ")")
-check(b2 and alpha_of(b2.icon.tcolor) < 230 and alpha_of(b2.icon.tcolor) > 100 and b2.icon.h < 12 and b2.icon.h > 9.5,
+local LB = M.env.coop_hud_layout.get()
+check(b1 and b1.icon.texture == "coop_hud_stash" and alpha_of(b1.icon.tcolor) >= 250 and near(b1.icon.h, LB.arc_icon_mark * (0.64 + 0.36 * math.cos(math.rad(5 * 82 / 80))), 0.01),
+	"stash 10 m (no Visor atlas: the old icon): full alpha in the focus, 19 px at 1080 (" .. tostring(b1 and alpha_of(b1.icon.tcolor)) .. ")")
+check(b2 and alpha_of(b2.icon.tcolor) < 230 and alpha_of(b2.icon.tcolor) > 100 and b2.icon.h < LB.arc_icon_mark * 0.95 and b2.icon.h > LB.arc_icon_mark * 0.8,
 	"stash 62 m: dimmer and smaller (" .. tostring(b2 and alpha_of(b2.icon.tcolor)) .. ", " .. tostring(b2 and b2.icon.h) .. ")")
 check(not b3, "stash 150 m (range 100): not on the bar")
 check(not b4, "a stash behind: not pinned to an end (only allies, pings, the waypoint, the active task are)")
+check(not slot_of(W, "pda:1106"), "Visor level 2: a stash 35 deg off (out of the +-20 deg look window) is not shown")
 check(b5 and b5.icon.texture == "coop_hud_trader", "trader: coins")
-check(ba and alpha_of(ba.icon.tcolor) >= 85 and alpha_of(ba.icon.tcolor) <= 95, "ally 600 m away: on the bar at ~0.35 ("
+check(ba and alpha_of(ba.icon.tcolor) >= 254, "Visor: an ally 600 m away keeps full alpha ("
 	.. tostring(ba and alpha_of(ba.icon.tcolor)) .. ")")
-check(ba and ba.label.visible and ba.label.text:find("600", 1, true), "far ally: still labelled (" .. tostring(ba and ba.label.text) .. ")")
+check(ba and ba.info.visible and ba.info.text:find("600", 1, true), "far ally in the focus: distance (" .. tostring(ba and ba.info.text) .. ")")
 -- styles of the new kinds
 local function tex_of(id)
 	local s = slot_of(W, "pda:" .. id)
@@ -1549,12 +1657,12 @@ check(tex_of(1110) == "coop_hud_mechanic" and tex_of(1111) == "coop_hud_medic" a
 	and tex_of(1113) == "coop_hud_sleep" and tex_of(1114) == "coop_hud_transition" and tex_of(1115) == "coop_hud_flag",
 	"icons: wrench, plus, person, moon, gate, flag")
 -- a marker moving past its range (a mod's marker with its own range) fades out, not cut
-local poi = { key = "p", kind = "poi", pos = at(-30, 40), range = 50 }
+local poi = { key = "p", kind = "poi", pos = at(-8, 40), range = 50 }
 M.markers.add_source("t21", function() return { poi } end)
 run(300, M)
 local bp = slot_of(W, "t21/p")
 check(bp and bp.icon.visible, "a mod's marker within its own range (40 of 50 m): drawn")
-poi.pos = at(-30, 60)
+poi.pos = at(-8, 60)
 run(112, M)
 check(bp.icon.visible and bp.key == "t21/p", "past its range: it fades out ...")
 run(300, M)
@@ -1562,11 +1670,13 @@ check(not slot_of(W, "t21/p"), "... and is gone after ~150 ms")
 M.markers.remove_source("t21")
 -- crowded: 40 stashes in range and a far ally: the ally is drawn, the nearest stashes keep the slots
 for i = 1, 40 do spot(1200 + i, "treasure", "", at(-60 + i * 3, 20 + i)) end
+M.env.coop_hud_depth = { detail = function() return true end } -- Visor: all of the field while detail is held
 run(math.ceil(65534 / LAY.get().pda_scan_frame) * 16 + 700, M)
 local drawn, near_in, far_in = 0, slot_of(W, "pda:1201") ~= nil, slot_of(W, "pda:1240") ~= nil
 for _, s in ipairs(W.slots) do if s.icon.visible then drawn = drawn + 1 end end
 check(slot_of(W, "ally:0") ~= nil and near_in and not far_in and drawn == #W.slots,
 	"crowded bar: the ally stays, the nearest stashes keep the slots (" .. drawn .. " drawn)")
+M.env.coop_hud_depth = nil
 
 -- ================================================================ 7. performance (Lua side, stubs): 8 players, 20 markers
 print("== frame cost")

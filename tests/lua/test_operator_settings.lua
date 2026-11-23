@@ -397,6 +397,14 @@ check(ok == true and gs.active().values["c|coop_friendly_fire"] == "0", "a conso
 ok = gs.operator_set("o|alife/event/emission_state", "FALSE", 1)
 check(ok == true and gs.value("o", "alife/event/emission_state") == "false", "an option flag: true / false")
 
+local population = "SMR/smr_amain/monster_pop_factor"
+local rev_pop = gs.active().rev
+ok = gs.operator_set("m|" .. population, "1.050", 1)
+local card = card_of(REC.id)
+check(ok and gs.value("m", population) == "1.05" and gs.active().rev == rev_pop + 1
+	and card and card.values["m|" .. population] == "1.05",
+	"the server operator can set an exact ZCP step through the existing command")
+
 local function refused(key, raw, what)
 	local before = gs.active().values[key]
 	local rev = gs.active().rev
@@ -410,6 +418,7 @@ refused("c|coop_death_mode", "hardcore", "a rule set when the world was created 
 refused("c|coop_world_server", "1", "the world's mode too")
 refused("faction", "monolith", "and the world's faction")
 refused("o|alife/event/emission_frequency", "37", "a number in the range but not a value of the list is refused")
+refused("m|" .. population, "1.03", "the server operator cannot set a value between ZCP steps")
 refused("c|coop_bleedout", "abc", "a value that is no number is refused")
 refused("o|coop/coop_session/join_spawn", "anywhere", "a word that is not in the list is refused")
 refused("g|hit_power", "1", "a difficulty factor is not a catalog item: refused")

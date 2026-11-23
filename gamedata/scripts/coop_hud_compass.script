@@ -1,39 +1,30 @@
 --[[
-	Anomaly Coop - HUD v2: the compass bar (gamedata\scripts\coop_hud_compass.script). Spec: docs\HUD_V2.md, look:
-	docs\hud\hud_v2_mockup.png. Layout configs\ui\ui_coop_compass.xml (+ _16, the same nodes: textures and fonts only),
-	textures configs\ui\textures_descr\ui_coop_hud.xml (atlas tools\make_hud_atlas.py), every size and the plate alphas
-	coop_hud_layout.get() (configs\mod_system_coop.ltx [coop_hud_layout] overrides it, one line per value).
+	Anomaly Coop - HUD "Visor" (TZ.md 6.13, R55-R69): the compass arc (gamedata\scripts\coop_hud_compass.script).
+	Design: E:\coop-hud-design\vizor\spec_v2.md (the owner's corrections win), numbers from its hud_v2.js / demo_v2.js.
+	Previous look and the marker data: docs\HUD_V2.md. Layout configs\ui\ui_coop_compass.xml (+ _16, the same nodes),
+	icons: the atlas ui_coop_hud3 (coop_h3_<name>, white, tinted with SetTextureColor); the scale and the fallback icons:
+	ui_coop_hud (coop_hud_*). Every size and alpha: coop_hud_layout.get() ([coop_hud_layout] of mod_system_coop.ltx wins).
 
 	The default look of the core's markers (coop_hud_markers.list()). A mod may replace this file, or switch it off
 	(coop_hud_compass.set_enabled(false)) and draw coop_hud_markers.list() its own way.
 
-	Geometry, in the 1024x768 UI space (defaults, owner 2026-10-23 "a bit smaller"): 38 % of the screen width, centred,
-	20 down from the top, 24 high. Sizes are px at 768 high: units down and px * kx units across (kx = 1024 * H / (768 * W)),
-	so nothing stretches on a wide screen. The line and the ticks are one screen pixel, snapped to the pixel grid.
-	- The scale is white (owner: "more white, not yellow; colours only on the markers"): a dark plate #0C0D0A at ~0.33
-	  fading out on the last 16 % of the width at each end (texture coop_hud_bar_bg), a thin white line #F4F5F6 at ~0.8
-	  through it (coop_hud_bar_line, the same fade), the letters N NE E SE S SW W NW above the line, ticks down from it
-	  every 5 deg (2 px), 15 deg (4 px) and 45 deg (5 px), all white #F4F5F6 with a 1 px shadow and the same fade. A white
-	  notch under the line at the centre, the heading ("247" + degree sign, st_coop_hud_heading) in white above the bar.
-	  Field of view 160 deg (the player's option: 120 / 160 / 200).
-	- Markers sit on the line (a bit above it): 12 px glyphs with a dark 1 px outline, flat, no glow (style table STYLE
-	  below): ally chevron in his colour (grey when dead / spectating / returning), downed ally red ring with a cross
-	  pulsing at 1 Hz, active task filled diamond #E8C25A, other tasks hollow at ~0.6, death mark skull / bag in muted red,
-	  own camp tent / fire in sage, ping a ring in the author's colour around a cyan dot that pops in for 300 ms.
-	- v2.1 (owner 2026-10-23 19:40): the PDA marks too (coop_hud_markers source pda: traders / mechanics / medics / other
-	  PDA people, stashes, sleeping places, level changers, PAW pins) and the player's own waypoint, each with its icon
-	  and colour. The fade by distance (fade_of, range_of): full alpha up to fade_near_pct % of the kind's range, smoothly
-	  down to fade_far_alpha (0.35) and the icon to fade_far_scale (x0.8) at it, not shown beyond it; allies, pings, the
-	  waypoint and the active task have no range (dimmed against fade_ref_m, never hidden). A marker well past its range
-	  or well out of the field (and not pinnable) takes no slot; a crowded bar keeps the nearest.
-	- Out of the field: pinned to the end of the bar with an arrow, alpha ~0.7, no label - only pings, allies, the
-	  waypoint and the active task (priority >= 20); the rest is not shown there (v2.1: the ends stay clean).
-	- Labels under the bar (in the marker's colour, 1 px shadow): distance for allies, pings and the active task; the nick
-	  (or a marker's label) too while it is within 10 deg of the centre; a small up / down arrow when the height differs
-	  by more than 5 m. Labels never overlap: the higher priority keeps its label (ping > down > ally > active task > the
-	  rest).
-	- Positions are smoothed every frame (markers come 10 times a second), markers fade in and out in 150 ms. The camera's
-	  own turn is applied at once.
+	The arc (sizes in the 1024x768 UI space; px at 768 high = units down, across * kx = 1024 * H / (768 * W)):
+	- A gentle arc on the helmet glass: a point at the arc angle th lies at x = cx + R sin th, y = y0 + sag (1 - cos th)
+	  (+ tilt sin th, the glass "sway" of coop_hud_depth). th = the bearing relative to the heading, scaled so the
+	  player's field (120 / 160 / 200) fills arc_half (82 deg). The line: short segments along the arc (SetHeading),
+	  fading out on the last 16 %; ticks across it, perpendicular to the arc (SetHeading), every 15 deg in the calm view
+	  (5 deg while "detail" is held), no numbers; letters N / E / S / W (head font, a_main) and NE / SE / SW / NW (a_sec)
+	  above the arc; the heading in degrees on top (head font), a down chevron and a centre line; a dark plate (~0.25).
+	  Warm white #F1ECDF. Things fade towards the ends of the arc (smoothstep 50 deg .. arc_half + 2).
+	- Markers hang under the arc on a thin stem: allies 22 px at 1080 (alpha 1), the rest 19 px, scaled to 0.64 at the
+	  ends. Three levels (R56): always - allies, pings, the active task, the own waypoint (priority >= 20; out of the
+	  field they are pinned to an end with an arrow); by look - every other kind only within +-20 deg of the heading
+	  (fading over 4 deg) and within its kind's range; detail (coop_hud_depth.detail(), Tab) - everything, with labels,
+	  numbers on the scale and 5 deg ticks. Labels (nick / name, then the distance) only in the focus +-12 deg; a downed
+	  ally always shows his timer, a fresh ping (3 s) its distance. Labels never overlap (higher priority wins).
+	- Depth: the whole compass moves by coop_hud_depth.offset("far"), the ends of the arc by coop_hud_depth.tilt() (in
+	  opposite directions). Without the module: no movement.
+	- No atlas (ui\coop\ui_coop_hud3.dds) - the old icons of ui_coop_hud; no font module - the XML font. Checked once.
 	Statics are pooled (made once), nothing is created in a frame. Frame time: coop_hud_markers.perf_* ("compass").
 
 	For other scripts:
@@ -41,68 +32,76 @@
 		coop_hud_compass.set_fov(120 | 160 | 200) / get_fov() the player's option coop/coop_player/compass_fov
 		coop_hud_compass.get_window() -> the window while it is on the HUD
 		pure helpers (tests): heading_of, bearing, rel_angle, place, edge_alpha, tick_list, smooth_k, step_alpha,
-		pick_labels, fov_of, fade_of, range_of
+		pick_labels, fov_of, fade_of, range_of, arc_point, arc_angle, arc_scale, arc_alpha, arc_th, tier_of, look_vis,
+		focus_of, icon_of
 --]]
 
 local api = rawget(_G, "coop") -- engine namespace, nil on an exe without co-op
 
 local tostring, tonumber, type, ipairs, pairs, pcall = tostring, tonumber, type, ipairs, pairs, pcall
 local math_floor, math_max, math_min, math_abs, math_sqrt = math.floor, math.max, math.min, math.abs, math.sqrt
-local math_atan2, math_deg, math_exp, math_sin, math_pi = math.atan2, math.deg, math.exp, math.sin, math.pi
+local math_atan2, math_deg, math_exp, math_sin, math_cos, math_pi, math_rad = math.atan2, math.deg, math.exp, math.sin, math.cos, math.pi, math.rad
 local string_format, table_sort = string.format, table.sort
 
 XML_FILE = "ui_coop_compass.xml"
 FOVS = { 120, 160, 200 }
 DEFAULT_FOV = 160
+ATLAS = "ui\\coop\\ui_coop_hud3" -- the Visor icons (coop_h3_*), made by the lead; without it the old icons are used
 
-local EDGE_FADE = 0.16 -- of the bar width, at each end (baked into the plate and line textures too)
-local LETTER_W, HEAD_W, LABEL_W = 40, 60, 120 -- text boxes, px at 768 high (the text is centred / measured)
+local EDGE_FADE = 0.16 -- of the arc's width, at each end (the line)
+local LETTER_W, HEAD_W, LABEL_W, DIGIT_W = 40, 60, 120, 30 -- text boxes, px at 768 high (the text is centred / measured)
 local SLOTS = 24
-local FOCUS_DEG = 10
+local DIGITS = 16
+local SEGS = 42 -- the arc line: one segment per 4 deg over +-84
+local SEG_DEG = 4
 local HEIGHT_M = 5
 local POS_TAU_MS = 90 -- smoothing of a marker's position between the 10 Hz updates
 local FADE_MS = 150
 local PING_POP_MS = 300
 local SNAP_M = 60 -- a jump longer than this is not smoothed (teleport, a new avatar)
+local CENTER_DIM_DEG = 13 -- letters dim and numbers hide this close to the centre (the heading sits there)
 
--- colours and alphas of the scale (the plate and the line: coop_hud_layout)
-local C_WHITE = { 244, 245, 246 } -- #F4F5F6
+-- colours (Visor: warm white, the nick a bit whiter)
+local C_WHITE = { 241, 236, 223 } -- #F1ECDF
+local C_NICK = { 247, 244, 236 } -- #F7F4EC
 local C_BG = { 12, 13, 10 } -- #0C0D0A
-local C_PING = { 120, 225, 235 } -- #78E1EB
-local A_TICK = { [5] = 110, [15] = 170, [45] = 230 }
-local A_LETTER, A_NOTCH, A_HEAD, A_LABEL = 255, 240, 225, 230
+local C_PING = { 120, 225, 235 } -- #78E1EB (fallback ring + dot)
 local A_SHADOW = 0.65 -- of the white it sits under
+local A_HALO = 0.45 -- the dark line under the arc and the ticks
 local A_PINNED = 0.7
 
--- marker look: kind[_state] -> texture, alpha, pulse; a marker's own icon / alpha win
+-- marker look: kind[_state] -> h3 (the Visor atlas) / tex (fallback), alpha, pulse; a marker's own icon / alpha win
 local STYLE = {
-	ally = { tex = "coop_hud_chevron" },
-	ally_down = { tex = "coop_hud_down", pulse = true },
-	ally_dead = { tex = "coop_hud_chevron", alpha = 0.85 },
-	ally_spec = { tex = "coop_hud_chevron", alpha = 0.85 },
-	ally_respawn = { tex = "coop_hud_chevron", alpha = 0.85 },
-	task_active = { tex = "coop_hud_diamond", always = true },
-	task = { tex = "coop_hud_diamond_hollow", alpha = 0.6 },
-	death_corpse = { tex = "coop_hud_skull" },
-	death = { tex = "coop_hud_bag" },
-	camp_campfire = { tex = "coop_hud_fire" },
-	camp = { tex = "coop_hud_tent" },
-	ping = { tex = "coop_hud_ring", core = "coop_hud_dot", pop = true },
-	-- v2.1: the player's waypoint and the PDA marks
-	waypoint = { tex = "coop_hud_waypoint", always = true },
-	pin = { tex = "coop_hud_flag" },
-	stash_searched = { tex = "coop_hud_stash", alpha = 0.6 },
-	stash = { tex = "coop_hud_stash" },
-	npc_trader = { tex = "coop_hud_trader" },
-	npc_mechanic = { tex = "coop_hud_mechanic" },
-	npc_medic = { tex = "coop_hud_medic" },
-	npc = { tex = "coop_hud_npc" },
-	sleep = { tex = "coop_hud_sleep" },
-	transition = { tex = "coop_hud_transition", alpha = 0.85 },
-	default = { tex = "coop_hud_dot" },
+	ally = { h3 = "coop_h3_ally", tex = "coop_hud_chevron" },
+	ally_down = { h3 = "coop_h3_ally_down", tex = "coop_hud_down", pulse = true },
+	ally_revive = { h3 = "coop_h3_ally_revive", tex = "coop_hud_down" },
+	ally_dead = { h3 = "coop_h3_ally_dead", tex = "coop_hud_chevron", alpha = 0.85 },
+	ally_spec = { h3 = "coop_h3_ally_spectator", tex = "coop_hud_chevron", alpha = 0.85 },
+	ally_respawn = { h3 = "coop_h3_ally_offline", tex = "coop_hud_chevron", alpha = 0.85 },
+	ally_unknown = { h3 = "coop_h3_ally_offline", tex = "coop_hud_chevron", alpha = 0.85 },
+	task_active = { h3 = "coop_h3_task_active", tex = "coop_hud_diamond", white = true },
+	task = { h3 = "coop_h3_task_other", tex = "coop_hud_diamond_hollow", alpha = 0.6, white = true },
+	death_corpse = { h3 = "coop_h3_death_bag", tex = "coop_hud_skull" },
+	death = { h3 = "coop_h3_death_bag", tex = "coop_hud_bag" },
+	camp_campfire = { h3 = "coop_h3_camp", tex = "coop_hud_fire" },
+	camp = { h3 = "coop_h3_camp", tex = "coop_hud_tent" },
+	ping = { h3 = "coop_h3_ping", tex = "coop_hud_ring", core = "coop_hud_dot", pop = true },
+	ping_target = { h3 = "coop_h3_ping_target", tex = "coop_hud_ring", core = "coop_hud_dot", pop = true },
+	waypoint = { h3 = "coop_h3_waypoint", tex = "coop_hud_waypoint", white = true },
+	pin = { h3 = "coop_h3_pda_pin", tex = "coop_hud_flag" },
+	stash_searched = { h3 = "coop_h3_stash_searched", tex = "coop_hud_stash", alpha = 0.6 },
+	stash_unique = { h3 = "coop_h3_stash_unique", tex = "coop_hud_stash" },
+	stash_player = { h3 = "coop_h3_stash_own", tex = "coop_hud_stash" },
+	stash = { h3 = "coop_h3_stash", tex = "coop_hud_stash" },
+	npc_trader = { h3 = "coop_h3_trader", tex = "coop_hud_trader" },
+	npc_mechanic = { h3 = "coop_h3_mechanic", tex = "coop_hud_mechanic" },
+	npc_medic = { h3 = "coop_h3_medic", tex = "coop_hud_medic" },
+	npc = { h3 = "coop_h3_npc", tex = "coop_hud_npc" },
+	sleep = { h3 = "coop_h3_sleep", tex = "coop_hud_sleep" },
+	transition = { h3 = "coop_h3_transition", tex = "coop_hud_transition", alpha = 0.85 },
+	default = { h3 = "coop_h3_dot", tex = "coop_hud_dot" },
 }
-local ALWAYS_LABEL = { ally = true, ping = true }
-local PIN_PRIORITY = 20 -- out of the field only these are pinned to an end: pings, allies, the waypoint, the active task
+local PIN_PRIORITY = 20 -- level 1 ("always"): pings, allies, the waypoint, the active task; only these are pinned to an end
 local RANGE_SLACK = 1.05 -- a marker this far past its range is dropped from the bar's list (the fade-out ran before)
 local FIELD_SLACK_DEG = 10 -- the same for a marker this far out of the field that is not pinned
 
@@ -276,11 +275,80 @@ function range_of(m, L)
 end
 
 -------------------------------------------------------------------------------
+-- Pure helpers of the Visor arc (hud_v2.js cpos / cang / cscale / calpha, markGeom)
+-------------------------------------------------------------------------------
+local function smoothstep(e0, e1, v)
+	if e1 == e0 then return v < e0 and 0 or 1 end
+	local t = (v - e0) / (e1 - e0)
+	if t <= 0 then return 0 end
+	if t >= 1 then return 1 end
+	return t * t * (3 - 2 * t)
+end
+
+-- A point of the arc at the arc angle th (deg): sx (from the centre, square units: multiply by kx across), y.
+function arc_point(th, R, y0, sag, tilt)
+	local r = math_rad(th)
+	local s = math_sin(r)
+	return R * s, y0 + sag * (1 - math_cos(r)) + (tilt or 0) * s
+end
+
+-- The slope of the arc at th, radians, positive = going down to the right (screen y is down).
+function arc_angle(th, R, sag, tilt)
+	local r = math_rad(th)
+	return math_atan2(sag * math_sin(r) + (tilt or 0) * math_cos(r), R * math_cos(r))
+end
+
+-- Size factor of the ticks, letters and icons along the arc: 1 at the centre, 0.64 at 90 deg.
+function arc_scale(th)
+	return 0.64 + 0.36 * math_cos(math_rad(th))
+end
+
+-- Alpha factor towards the ends of the arc.
+function arc_alpha(th, half)
+	return 1 - smoothstep(50, half + 2, math_abs(th))
+end
+
+-- The arc angle of a relative bearing: the player's field fills +-half of the arc.
+function arc_th(rel, fov_deg, half)
+	return rel * half / (fov_deg / 2)
+end
+
+-- Level of a marker (R56): 1 = always (allies, pings, the active task, the waypoint: priority >= 20), 2 = by look.
+function tier_of(m)
+	local t = tonumber(m.tier)
+	if t == 1 or t == 2 then return t end
+	return (tonumber(m.priority) or 0) >= PIN_PRIORITY and 1 or 2
+end
+
+-- Visibility of a level-2 marker at the relative bearing rel: 1 within +-(look - fade), 0 past look; the detail
+-- factor d (0..1) shows it anyway.
+function look_vis(rel, d, look, fade)
+	return math_max(d or 0, 1 - smoothstep(look - fade, look + 0.5, math_abs(rel)))
+end
+
+-- The focus factor: 1 within +-(focus - 2) deg of the heading, 0 past focus + 0.5.
+function focus_of(rel, focus)
+	return 1 - smoothstep(focus - 2, focus + 0.5, math_abs(rel))
+end
+
+local function style_of(m)
+	return STYLE[m.kind .. "_" .. tostring(m.state)] or STYLE[m.kind] or STYLE.default
+end
+
+-- The texture of a marker: its own icon, else the Visor icon (atlas) or the old one.
+function icon_of(m, h3)
+	if m.icon then return m.icon end
+	local sty = style_of(m)
+	return h3 and sty.h3 or sty.tex
+end
+
+-------------------------------------------------------------------------------
 -- Options
 -------------------------------------------------------------------------------
 local enabled = true
 local fov = DEFAULT_FOV
 local HUD -- the window while it is on the HUD
+local errors = 0 -- frames that failed (coop_status)
 
 function set_enabled(on)
 	enabled = on and true or false
@@ -309,6 +377,45 @@ local function markers_mod()
 	return rawget(_G, "coop_hud_markers")
 end
 
+-- coop_hud_depth (executor D): offset(layer) -> dx, dy; tilt() -> units; detail() -> bool. Absent: no depth.
+local function depth()
+	local d = rawget(_G, "coop_hud_depth")
+	if type(d) ~= "table" then return 0, 0, 0, false end
+	local dx, dy, t, det = 0, 0, 0, false
+	if d.offset then
+		local ok, a, b = pcall(d.offset, "far")
+		if ok then dx, dy = tonumber(a) or 0, tonumber(b) or 0 end
+	end
+	if d.tilt then
+		local ok, a = pcall(d.tilt)
+		if ok then t = tonumber(a) or 0 end
+	end
+	if d.detail then
+		local ok, a = pcall(d.detail)
+		det = ok and a == true
+	end
+	return dx, dy, t, det
+end
+
+local function hud3_font(role)
+	local f = rawget(_G, "coop_hud3_fonts")
+	if type(f) ~= "table" or not f.font then return nil end
+	local ok, font = pcall(f.font, role)
+	return ok and font or nil
+end
+
+local function set_font(w, font)
+	if font then pcall(w.SetFont, w, font) end
+end
+
+-- The Visor atlas is there (checked once per window).
+local function atlas_present()
+	local fs = rawget(_G, "getFS")
+	if type(fs) ~= "function" then return false end
+	local ok, found = pcall(function() return fs():exist("$game_textures$", ATLAS .. ".dds") end)
+	return ok and found ~= nil and found ~= false
+end
+
 local function format_distance(d)
 	local m = rawget(_G, "coop_allies_map")
 	if m and m.format_distance then
@@ -316,6 +423,11 @@ local function format_distance(d)
 		if ok and s then return s end
 	end
 	return string_format("%d m", math_floor(d + 0.5))
+end
+
+local function format_timer(s)
+	s = math_max(0, math_floor(s + 0.5))
+	return string_format("%d:%02d", math_floor(s / 60), s % 60)
 end
 
 local function hud_visible()
@@ -333,6 +445,16 @@ local function shadow(a)
 	return GetARGB(math_max(0, math_min(255, math_floor(a * A_SHADOW + 0.5))), 0, 0, 0)
 end
 
+local function lerp(a, b, k) return a + (b - a) * k end
+
+local function show(w, on)
+	if w:IsShown() ~= on then w:Show(on) end
+end
+
+local function heading_on(w)
+	pcall(w.EnableHeading, w, true)
+end
+
 class "UICoopCompass" (CUIScriptWnd)
 
 function UICoopCompass:__init() super()
@@ -345,7 +467,11 @@ function UICoopCompass:__init() super()
 	self.vis_at = 0
 	self.last_tg = nil
 	self.heading_deg = nil
+	self.d = 0 -- the detail factor (0 calm .. 1 held)
+	self.tilt = 0
+	self.dx, self.dy = 0, 0
 	self.v2 = vector2() -- one vector for every SetWndPos / SetWndSize (the engine copies it)
+	self.h3 = atlas_present()
 	self:InitControls()
 end
 
@@ -363,16 +489,31 @@ function UICoopCompass:InitControls()
 	self.root = xml:InitStatic("coop_compass", self)
 	local root = self.root
 	self.bg = xml:InitStatic("coop_compass:bg", root)
-	self.line = xml:InitStatic("coop_compass:line", root)
-	-- ticks: shadows first (drawn under), then the white ones
+	-- the arc line: dark halo segments first, then the white ones (rotated along the arc)
+	self.seg_halos, self.segs = {}, {}
+	for i = 1, SEGS do
+		local h = xml:InitStatic("coop_compass:seg", root)
+		heading_on(h)
+		h:Show(false)
+		self.seg_halos[i] = h
+	end
+	for i = 1, SEGS do
+		local s = xml:InitStatic("coop_compass:seg", root)
+		heading_on(s)
+		s:Show(false)
+		self.segs[i] = s
+	end
+	-- ticks: shadows first (drawn under), then the white ones; perpendicular to the arc
 	local n_ticks = math_floor(FOVS[#FOVS] / 5) + 2
 	self.tick_shadows, self.ticks = {}, {}
 	for i = 1, n_ticks do
 		self.tick_shadows[i] = xml:InitStatic("coop_compass:tick", root)
+		heading_on(self.tick_shadows[i])
 		self.tick_shadows[i]:Show(false)
 	end
 	for i = 1, n_ticks do
 		self.ticks[i] = xml:InitStatic("coop_compass:tick", root)
+		heading_on(self.ticks[i])
 		self.ticks[i]:Show(false)
 	end
 	self.letters, self.letter_shadows = {}, {}
@@ -386,7 +527,18 @@ function UICoopCompass:InitControls()
 		l:Show(false)
 		self.letters[deg], self.letter_shadows[deg] = l, sh
 	end
+	-- the numbers of the scale (detail only)
+	self.digits, self.digit_shadows, self.digit_deg = {}, {}, {} -- no Lua fields on engine windows
+	for i = 1, DIGITS do
+		local sh = xml:InitTextWnd("coop_compass:digit", root)
+		local d = xml:InitTextWnd("coop_compass:digit", root)
+		sh:Show(false)
+		d:Show(false)
+		self.digits[i], self.digit_shadows[i] = d, sh
+	end
+	self.center = xml:InitStatic("coop_compass:center", root)
 	self.notch = xml:InitStatic("coop_compass:notch", root)
+	heading_on(self.notch)
 	self.heading_shadow = xml:InitTextWnd("coop_compass:heading", root)
 	self.heading = xml:InitTextWnd("coop_compass:heading", root)
 	self.heading_fmt = tr("st_coop_hud_heading", "%d")
@@ -395,13 +547,17 @@ function UICoopCompass:InitControls()
 	self.slots = {}
 	for i = 1, SLOTS do
 		local s = {}
+		s.stem = xml:InitStatic("coop_compass:stem", root)
 		s.icon = xml:InitStatic("coop_compass:icon", root)
 		s.core = xml:InitStatic("coop_compass:core", root)
 		s.side = xml:InitStatic("coop_compass:side", root)
 		s.updown = xml:InitStatic("coop_compass:updown", root)
 		s.shadow = xml:InitTextWnd("coop_compass:label", root)
 		s.label = xml:InitTextWnd("coop_compass:label", root)
-		for _, w in pairs({ s.icon, s.core, s.side, s.updown, s.shadow, s.label }) do w:Show(false) end
+		s.info_shadow = xml:InitTextWnd("coop_compass:info", root)
+		s.info = xml:InitTextWnd("coop_compass:info", root)
+		s.all = { s.stem, s.icon, s.core, s.side, s.updown, s.shadow, s.label, s.info_shadow, s.info }
+		for _, w in ipairs(s.all) do w:Show(false) end
 		s.shown = false
 		self.slots[i] = s
 		self.items[i] = { x = 0, w = 0, pri = 0, want = false, show = false }
@@ -416,50 +572,61 @@ function UICoopCompass:Relayout()
 	local W, H = dev.width, dev.height
 	local kx = 1024 * H / (768 * W)
 	local g = { W = W, H = H, kx = kx, px = 1024 / W, py = 768 / H, L = L }
-	local function snap_y(u) return math_floor(u / g.py + 0.5) * g.py end
-	g.bar_w = 1024 * L.bar_width_pct / 100
-	g.bar_x = (1024 - g.bar_w) / 2
-	g.half = g.bar_w / 2
-	g.cx = g.bar_x + g.half
-	g.top, g.h = L.bar_top, L.bar_height
-	g.line_y = snap_y(L.bar_top + L.line_y) -- one screen pixel at this y
-	g.icon_cy = L.bar_top + L.marker_y
-	g.pad = L.side_gap * kx
-	g.label_y = L.bar_top + L.bar_height + L.label_gap
+	g.cx = 512
+	g.R, g.y0, g.sag, g.half = L.arc_r, L.arc_y0, L.arc_sag, L.arc_half
+	local ex = g.R * math_sin(math_rad(math_min(89, g.half + 4))) * kx
+	g.bar_x, g.bar_w = g.cx - ex, 2 * ex
+	g.top = g.y0 - L.arc_above
+	g.h = L.arc_above + g.sag * (1 - math_cos(math_rad(g.half))) + L.arc_below
+	g.pad = 0
 	self.g = g
 	self.bar_x, self.bar_w, self.bar_y, self.bar_h = g.bar_x, g.bar_w, g.top, g.h
-	self.root:SetWndPos(self:V(0, 0))
+	self.root:SetWndPos(self:V(self.dx, self.dy))
 	self.root:SetWndSize(self:V(1024, 768))
 	self.bg:SetWndPos(self:V(g.bar_x, g.top))
 	self.bg:SetWndSize(self:V(g.bar_w, g.h))
-	self.bg:SetTextureColor(argb(255 * L.bar_bg_alpha, C_BG))
-	self.line:SetWndPos(self:V(g.bar_x, g.line_y))
-	self.line:SetWndSize(self:V(g.bar_w, g.py))
-	self.line:SetTextureColor(argb(255 * L.bar_line_alpha, C_WHITE))
-	self.notch:SetWndPos(self:V(g.cx - L.notch_w * kx / 2, g.line_y + L.notch_gap))
-	self.notch:SetWndSize(self:V(L.notch_w * kx, L.notch_h))
-	self.notch:SetTextureColor(argb(A_NOTCH, C_WHITE))
-	local hy = g.top + L.heading_y
+	-- the centre line through the arc (2 px) and the chevron under the heading, pointing down
+	local cw = 2 * g.px
+	self.center:SetWndPos(self:V(g.cx - cw / 2, g.y0 - L.arc_center_above))
+	self.center:SetWndSize(self:V(cw, L.arc_center_above + L.arc_center_below))
+	self.notch:SetWndSize(self:V(L.arc_notch_w, L.arc_notch_h)) -- rotated: square units, the engine scales across
+	self.notch:SetWndPos(self:V(g.cx - L.arc_notch_w / 2, L.arc_notch_y))
+	pcall(self.notch.SetHeading, self.notch, math_pi)
+	local hy = L.arc_head_y
 	self.heading:SetWndPos(self:V(g.cx - HEAD_W * kx / 2, hy))
-	self.heading:SetWndSize(self:V(HEAD_W * kx, L.heading_h))
-	self.heading:SetTextColor(argb(A_HEAD, C_WHITE))
+	self.heading:SetWndSize(self:V(HEAD_W * kx, L.arc_head_h))
 	self.heading_shadow:SetWndPos(self:V(g.cx - HEAD_W * kx / 2 + g.px, hy + g.py))
-	self.heading_shadow:SetWndSize(self:V(HEAD_W * kx, L.heading_h))
-	self.heading_shadow:SetTextColor(shadow(A_HEAD))
+	self.heading_shadow:SetWndSize(self:V(HEAD_W * kx, L.arc_head_h))
+	local f_head, f_nick, f_small = hud3_font("head"), hud3_font("nick"), hud3_font("small")
+	set_font(self.heading, f_head)
+	set_font(self.heading_shadow, f_head)
 	for deg, l in pairs(self.letters) do
-		l:SetWndSize(self:V(LETTER_W * kx, L.letter_h))
-		self.letter_shadows[deg]:SetWndSize(self:V(LETTER_W * kx, L.letter_h))
+		local f = deg % 90 == 0 and f_head or f_nick
+		set_font(l, f)
+		set_font(self.letter_shadows[deg], f)
+		l:SetWndSize(self:V(LETTER_W * kx, L.arc_letter_h))
+		self.letter_shadows[deg]:SetWndSize(self:V(LETTER_W * kx, L.arc_letter_h))
 	end
+	for i, d in ipairs(self.digits) do
+		set_font(d, f_small)
+		set_font(self.digit_shadows[i], f_small)
+		d:SetWndSize(self:V(DIGIT_W * kx, L.arc_label_h))
+		self.digit_shadows[i]:SetWndSize(self:V(DIGIT_W * kx, L.arc_label_h))
+	end
+	set_font(self.measure, f_small)
 	self.tick_len, self.tick_alpha = {}, {}
 	for _, s in ipairs(self.slots) do
 		s.size = nil
-		s.side:SetWndSize(self:V(L.side * kx, L.side))
-		s.core:SetWndSize(self:V(L.ping_dot * kx, L.ping_dot))
-		s.updown:SetWndSize(self:V(L.updown * kx, L.updown))
-		s.label:SetWndSize(self:V(LABEL_W * kx, L.label_h))
-		s.shadow:SetWndSize(self:V(LABEL_W * kx, L.label_h))
+		s.side:SetWndSize(self:V(L.arc_side * kx, L.arc_side))
+		s.core:SetWndSize(self:V(L.arc_ping_dot * kx, L.arc_ping_dot))
+		s.updown:SetWndSize(self:V(L.arc_updown * kx, L.arc_updown))
+		for _, w in ipairs({ s.label, s.shadow, s.info, s.info_shadow }) do
+			set_font(w, f_small)
+			w:SetWndSize(self:V(LABEL_W * kx, L.arc_label_h))
+		end
 	end
 	self.width_cache, self.width_n = {}, 0
+	self.scale_key, self.line_key = nil, nil
 end
 
 -- Width (units) of a label text, measured once per text.
@@ -475,74 +642,150 @@ function UICoopCompass:TextWidth(text)
 	return w
 end
 
--- The scale at the current heading: a tick every 5 deg down from the line, the letters above it.
-function UICoopCompass:DrawScale(heading)
-	-- standing still: the scale is where it was (most frames), nothing to move
-	if self.scale_heading and math_abs(heading - self.scale_heading) < 0.005 and self.scale_g == self.g and self.scale_fov == fov then return end
-	self.scale_heading, self.scale_g, self.scale_fov = heading, self.g, fov
+-- A rotated static (heading on): centre X, Y (units), size in square units (the engine scales it across), slope ang.
+function UICoopCompass:PutRot(w, X, Y, wq, hq, ang)
+	w:SetWndSize(self:V(wq, hq))
+	w:SetWndPos(self:V(X - wq / 2, Y - hq / 2))
+	w:SetHeading(-ang) -- the engine turns a positive heading counter-clockwise on screen
+end
+
+-- The plate and the line along the arc: only when the sway or the detail factor changed.
+function UICoopCompass:DrawLine(a_main, a_shade)
 	local g = self.g
+	local tilt = self.tilt
+	local key = math_floor(tilt * 20 + 0.5) * 1000 + math_floor(a_main * 100 + 0.5) + math_floor(a_shade * 100 + 0.5) * 1000000
+	if self.line_key == key and self.line_g == g then return end
+	self.line_key, self.line_g = key, g
+	self.bg:SetTextureColor(argb(255 * a_shade, C_BG))
+	local R, y0, sag, kx = g.R, g.y0, g.sag, g.kx
+	local thick = g.py -- one screen pixel (square units)
+	local lim = g.half + 2
+	for i = 1, SEGS do
+		local a = -SEGS / 2 * SEG_DEG + (i - 1) * SEG_DEG
+		local b = a + SEG_DEG
+		local seg, halo = self.segs[i], self.seg_halos[i]
+		if math_abs(a + SEG_DEG / 2) > lim then
+			show(seg, false)
+			show(halo, false)
+		else
+			local xa, ya = arc_point(a, R, y0, sag, tilt)
+			local xb, yb = arc_point(b, R, y0, sag, tilt)
+			local len = math_sqrt((xb - xa) * (xb - xa) + (yb - ya) * (yb - ya)) + thick
+			local ang = math_atan2(yb - ya, xb - xa)
+			local X, Y = g.cx + (xa + xb) / 2 * kx, (ya + yb) / 2
+			local fade = edge_alpha((xa + xb) / 2, R, EDGE_FADE)
+			self:PutRot(halo, X, Y, len, 3 * thick, ang)
+			self:PutRot(seg, X, Y, len, thick, ang)
+			halo:SetTextureColor(GetARGB(math_floor(255 * 0.5 * a_main * A_HALO * fade + 0.5), 0, 0, 0))
+			seg:SetTextureColor(argb(255 * a_main * 0.9 * fade, C_WHITE))
+			show(seg, fade > 0)
+			show(halo, fade > 0)
+		end
+	end
+end
+
+-- The scale at the current heading: ticks across the arc, the letters above it, numbers while detail is held.
+function UICoopCompass:DrawScale(heading, a_main, a_sec)
+	local g = self.g
+	local d = self.d
+	-- one number (no string per frame): heading 1/200 deg, sway 1/20 unit, detail 1/50, field
+	local tk = math_max(-127, math_min(127, math_floor(self.tilt * 20 + 0.5))) + 128
+	local key = ((math_floor(heading * 200 + 0.5) * 256 + tk) * 64 + math_floor(d * 50 + 0.5)) * 512 + fov
+	if self.scale_key == key and self.scale_g == g then return end
+	self.scale_key, self.scale_g = key, g
 	local L = g.L
-	local half, kx = g.half, g.kx
+	local R, y0, sag, kx, half = g.R, g.y0, g.sag, g.kx, g.half
+	local tilt = self.tilt
 	local n = tick_list(heading, fov, self.tick_buf)
 	local letter_on = {}
+	local nd, nt = 0, 0
 	for i = 1, n do
 		local t = self.tick_buf[i]
-		local x = t.rel / (fov / 2) * half
-		local a = edge_alpha(x, half, EDGE_FADE)
-		local kind = t.letter and 45 or (t.mid and 15 or 5)
-		local w, sh = self.ticks[i], self.tick_shadows[i]
-		if w then
-			local len = kind == 45 and L.tick_45 or (kind == 15 and L.tick_15 or L.tick_5)
-			if self.tick_len[i] ~= len then
-				self.tick_len[i] = len
-				w:SetWndSize(self:V(g.px, len))
-				sh:SetWndSize(self:V(g.px, len))
-			end
-			local px = math_floor((g.cx + x) / g.px + 0.5) * g.px
-			w:SetWndPos(self:V(px, g.line_y + g.py))
-			sh:SetWndPos(self:V(px + g.px, g.line_y + 2 * g.py))
-			local alpha = math_floor(A_TICK[kind] * a / 4 + 0.5) * 4
-			if self.tick_alpha[i] ~= alpha then
-				self.tick_alpha[i] = alpha
-				w:SetTextureColor(argb(alpha, C_WHITE))
-				sh:SetTextureColor(shadow(alpha))
-			end
-			local on = alpha > 0
-			if w:IsShown() ~= on then
-				w:Show(on)
-				sh:Show(on)
+		local th = arc_th(t.rel, fov, half)
+		local is45, is15 = t.letter, t.letter or t.mid
+		local ca = arc_alpha(th, half)
+		local tick_a = (is15 and a_sec or a_sec * d) * ca
+		local x, y = arc_point(th, R, y0, sag, tilt)
+		local ang = arc_angle(th, R, sag, tilt)
+		local sc = arc_scale(th)
+		local nx, ny = -math_sin(ang), math_cos(ang) -- the normal, down from the arc
+		local X = g.cx + x * kx
+		if tick_a >= 0.02 then
+			nt = nt + 1
+			local w, sh = self.ticks[nt], self.tick_shadows[nt]
+			if w then
+				local len = (is45 and L.arc_tick_45 or (is15 and L.arc_tick_15 or L.arc_tick_5)) * sc
+				local thick = (is45 and 2 or 1) * g.py
+				local cx_, cy_ = X + nx * len / 2 * kx, y + ny * len / 2
+				self:PutRot(w, cx_, cy_, thick, len, ang)
+				self:PutRot(sh, cx_ + g.px, cy_ + g.py, thick + 2 * g.py, len + g.py, ang)
+				local alpha = math_floor(255 * tick_a / 4 + 0.5) * 4
+				if self.tick_alpha[nt] ~= alpha then
+					self.tick_alpha[nt] = alpha
+					w:SetTextureColor(argb(alpha, C_WHITE))
+					sh:SetTextureColor(GetARGB(math_floor(alpha * A_HALO + 0.5), 0, 0, 0))
+				end
+				show(w, alpha > 0)
+				show(sh, alpha > 0)
 			end
 		end
-		if t.letter then
+		local center = math_abs(th) < CENTER_DIM_DEG
+		if is45 then
 			local l, ls = self.letters[t.deg], self.letter_shadows[t.deg]
 			if l then
 				letter_on[t.deg] = true
-				local lx = g.cx + x - LETTER_W * kx / 2
-				local ly = g.top + L.letter_y
+				local card = t.deg % 90 == 0
+				local la = 255 * (card and a_main or a_sec) * ca * (center and 0.55 or 1)
+				local gap = L.arc_letter_gap
+				local lx = X - nx * gap * kx - LETTER_W * kx / 2
+				local ly = y - ny * gap - L.arc_letter_h / 2
 				l:SetWndPos(self:V(lx, ly))
 				ls:SetWndPos(self:V(lx + g.px, ly + g.py))
-				l:SetTextColor(argb(A_LETTER * a, C_WHITE))
-				ls:SetTextColor(shadow(A_LETTER * a))
-				local on = a > 0.02
-				if l:IsShown() ~= on then
-					l:Show(on)
-					ls:Show(on)
-				end
+				l:SetTextColor(argb(la, C_WHITE))
+				ls:SetTextColor(shadow(la))
+				show(l, la > 5)
+				show(ls, la > 5)
 			end
+		elseif is15 and not center and d > 0.02 and nd < DIGITS then
+			nd = nd + 1
+			local dw, ds = self.digits[nd], self.digit_shadows[nd]
+			local gap = L.arc_digit_gap
+			local dx_ = X - nx * gap * kx - DIGIT_W * kx / 2
+			local dy_ = y - ny * gap - L.arc_label_h / 2
+			local text = tostring(t.deg)
+			if self.digit_deg[nd] ~= t.deg then
+				self.digit_deg[nd] = t.deg
+				dw:SetText(text)
+				ds:SetText(text)
+			end
+			local da = 255 * ca * 0.62 * d
+			dw:SetWndPos(self:V(dx_, dy_))
+			ds:SetWndPos(self:V(dx_ + g.px, dy_ + g.py))
+			dw:SetTextColor(argb(da, C_WHITE))
+			ds:SetTextColor(shadow(da))
+			show(dw, true)
+			show(ds, true)
 		end
 	end
-	for i = n + 1, #self.ticks do
-		if self.ticks[i]:IsShown() then
-			self.ticks[i]:Show(false)
-			self.tick_shadows[i]:Show(false)
-		end
+	for i = nt + 1, #self.ticks do
+		show(self.ticks[i], false)
+		show(self.tick_shadows[i], false)
+	end
+	for i = nd + 1, DIGITS do
+		show(self.digits[i], false)
+		show(self.digit_shadows[i], false)
 	end
 	for deg, l in pairs(self.letters) do
-		if not letter_on[deg] and l:IsShown() then
-			l:Show(false)
-			self.letter_shadows[deg]:Show(false)
+		if not letter_on[deg] then
+			show(l, false)
+			show(self.letter_shadows[deg], false)
 		end
 	end
+	local ha = 255 * a_main
+	self.heading:SetTextColor(argb(ha, C_WHITE))
+	self.heading_shadow:SetTextColor(shadow(ha))
+	self.notch:SetTextureColor(argb(ha, C_WHITE))
+	self.center:SetTextureColor(argb(ha, C_WHITE))
 	local hd = math_floor(heading + 0.5) % 360
 	if hd ~= self.heading_deg then
 		self.heading_deg = hd
@@ -553,7 +796,7 @@ function UICoopCompass:DrawScale(heading)
 	end
 end
 
--- New marker list (10 Hz): states follow it, the draw order is rebuilt. v2.1: a marker well past its range, or well out
+-- New marker list (10 Hz): states follow it, the draw order is rebuilt. A marker well past its range, or well out
 -- of the field without the right to be pinned (seen from the camera `cam` at `heading`), is not wanted and takes no
 -- slot; the draw order is low priority first, the farther first within a priority.
 function UICoopCompass:Sync(list, tg, cam, heading)
@@ -598,10 +841,6 @@ function UICoopCompass:Sync(list, tg, cam, heading)
 	self.order = order
 end
 
-local function style_of(m)
-	return STYLE[m.kind .. "_" .. tostring(m.state)] or STYLE[m.kind] or STYLE.default
-end
-
 local function set_tex(w, cache_owner, field, tex)
 	if cache_owner[field] ~= tex then
 		cache_owner[field] = tex
@@ -610,15 +849,25 @@ local function set_tex(w, cache_owner, field, tex)
 	end
 end
 
-function UICoopCompass:DrawMarkers(tg, dt, heading, cam, me)
+local function hide_slot(s)
+	if s.shown then
+		for _, w in ipairs(s.all) do w:Show(false) end
+		s.shown = false
+	end
+end
+
+function UICoopCompass:DrawMarkers(tg, dt, heading, cam, me, a_main)
 	local g = self.g
 	local L = g.L
 	local kx, half = g.kx, g.half
+	local R, y0, sag, tilt = g.R, g.y0, g.sag, self.tilt
+	local d = self.d
 	local k = smooth_k(dt, POS_TAU_MS)
 	local items = self.items
 	local order = self.order
 	local n = #order
-	local pulse = 0.55 + 0.45 * (0.5 + 0.5 * math_sin(tg * 2 * math_pi / 1000))
+	local pulse = 0.65 + 0.35 * (0.5 + 0.5 * math_sin(tg * 2 * math_pi / 1000))
+	local fresh_ms = L.ping_fresh_s * 1000
 	-- pass 1: positions, alphas, label texts
 	for i = 1, n do
 		local st = order[i]
@@ -632,29 +881,49 @@ function UICoopCompass:DrawMarkers(tg, dt, heading, cam, me)
 		end
 		local b = bearing(cam, p)
 		local rel = b and rel_angle(b, heading) or 0
-		local x, side = place(rel, fov, half, g.pad)
-		st.x, st.side, st.rel = x, side, rel
-		-- v2.1: the fade by distance; past the range, or out of the field without the right to be pinned: fade out
+		local tier = tier_of(m)
+		local th = arc_th(rel, fov, half)
+		local side = 0
+		if math_abs(th) > half - 2 then
+			side = th > 0 and 1 or -1
+			th = side * (half - 2)
+		end
+		st.th, st.side, st.rel = th, side, rel
 		local ex, ez = p.x - me.x, p.z - me.z
 		local hy = p.y - me.y
-		local d = math_sqrt(ex * ex + hy * hy + ez * ez)
-		local fa, fs = fade_of(d, st.range or range_of(m, L), L)
+		local dist = math_sqrt(ex * ex + hy * hy + ez * ez)
+		local fa, fs = fade_of(dist, st.range or range_of(m, L), L)
 		if fa > 0 then st.fa, st.fs = fa, fs end
-		local shown = st.want > 0 and fa > 0 and (side == 0 or m.priority >= PIN_PRIORITY)
+		-- level 2: only within the look window (all of the field while detail is held)
+		local vis = 1
+		if tier == 2 then vis = side ~= 0 and 0 or look_vis(rel, d, L.look_deg, L.look_fade_deg) end
+		st.vis = vis
+		local shown = st.want > 0 and fa > 0 and vis > 0.02 and (side == 0 or tier == 1)
 		st.alpha = step_alpha(st.alpha, shown and 1 or 0, dt, FADE_MS)
+		local ally = m.kind == "ally"
+		local hot = m.state == "down" or (m.kind == "ping" and m.born and tg - m.born < fresh_ms)
+		local focus = side == 0 and focus_of(rel, L.focus_deg) or 0
+		st.focus, st.hot, st.ally = focus, hot, ally
 		local it = items[i]
-		it.x, it.pri, it.want, it.w = x, m.priority, false, 0
-		st.text, st.up = nil, nil
+		it.x, it.pri, it.want, it.w = g.cx + R * math_sin(math_rad(th)) * kx, m.priority, false, 0
+		st.name, st.info, st.up = nil, nil, nil
 		if side == 0 and shown then
-			local sty = style_of(m)
-			local focus = math_abs(rel) <= FOCUS_DEG
-			if ALWAYS_LABEL[m.kind] or sty.always or focus then
-				local text = format_distance(d)
-				if focus and m.label then text = m.label .. "  " .. text end
-				st.text = text
+			local name_f = math_max(focus, d)
+			if name_f > 0.02 and m.label and m.label ~= "" then st.name = m.label end
+			local parts
+			if m.state == "down" and m.bleed then parts = format_timer(m.bleed) end
+			local dist_f = math_max(focus, d, (m.kind == "ping" and hot) and 1 or 0)
+			if dist_f > 0.02 then
+				local ds = format_distance(dist)
+				parts = parts and (parts .. "  " .. ds) or ds
 				if hy > HEIGHT_M then st.up = "coop_hud_tri_up" elseif hy < -HEIGHT_M then st.up = "coop_hud_tri_down" end
+			end
+			st.info = parts
+			if st.name or st.info then
 				it.want = true
-				it.w = self:TextWidth(text) + (st.up and (L.updown + 2) * kx or 0)
+				local w1 = st.name and self:TextWidth(st.name) or 0
+				local w2 = st.info and (self:TextWidth(st.info) + (st.up and (L.arc_updown + 2) * kx or 0)) or 0
+				it.w = math_max(w1, w2)
 			end
 		end
 	end
@@ -665,96 +934,127 @@ function UICoopCompass:DrawMarkers(tg, dt, heading, cam, me)
 		local st, s, it = order[i], self.slots[i], items[i]
 		local m = st.m
 		local sty = style_of(m)
-		local cxm = g.cx + st.x
-		local fa, fs = st.fa or 1, st.fs or 1 -- v2.1: the fade by distance (the last one in range while fading out)
-		local size = L.icon * fs
+		local th = st.th
+		local x, y = arc_point(th, R, y0, sag, tilt)
+		local X = g.cx + x * kx
+		local sc = arc_scale(th)
+		local fa, fs = st.fa or 1, st.fs or 1 -- the fade by distance (the last one in range while fading out)
+		local ally = st.ally
+		local size = (ally and L.arc_icon_ally or L.arc_icon_mark) * sc * (ally and 1 or fs)
 		if sty.pop and m.born then
 			local age = tg - m.born
 			if age >= 0 and age < PING_POP_MS then size = size * (1 + 0.8 * (1 - age / PING_POP_MS)) end
 		end
+		local lift = math_max(st.focus or 0, self.d, st.hot and 1 or 0, ally and 1 or 0)
+		local a = arc_alpha(th, half) * (ally and 1 or fa) * (st.vis or 1) * lerp(a_main, 1, lift) * (m.alpha or sty.alpha or 1)
+		if st.side ~= 0 then a = math_max(a, 0.5) * A_PINNED end
+		a = a * st.alpha
+		local ia = a * (sty.pulse and pulse or 1)
+		local color = (self.h3 and sty.white) and C_WHITE or m.color
+		local iy = y + L.arc_icon_drop * sc
 		if s.size ~= size then
 			s.size = size
 			s.icon:SetWndSize(self:V(size * kx, size))
 		end
-		set_tex(s.icon, s, "tex", m.icon or sty.tex)
-		s.icon:SetWndPos(self:V(cxm - size * kx / 2, g.icon_cy - size / 2))
-		local a = 255 * st.alpha * fa * (m.alpha or sty.alpha or 1) * (st.side ~= 0 and A_PINNED or 1) * (sty.pulse and pulse or 1)
-		s.icon:SetTextureColor(argb(a, m.color))
-		if a < 0.5 then
-			-- faded out (past its range, or out of the field and not pinned): nothing of the slot on screen
-			if s.shown then
-				for _, w in pairs({ s.icon, s.core, s.side, s.updown, s.shadow, s.label }) do w:Show(false) end
-				s.shown = false
-			end
-			s.key = m.key
+		set_tex(s.icon, s, "tex", icon_of(m, self.h3))
+		s.icon:SetWndPos(self:V(X - size * kx / 2, iy - size / 2))
+		s.icon:SetTextureColor(argb(255 * ia, color))
+		s.key = m.key
+		if 255 * a < 0.5 then
+			hide_slot(s) -- faded out (past its range, out of the look window, out of the field and not pinned)
 		else
 			if not s.shown then
 				s.icon:Show(true)
 				s.shown = true
 			end
-			s.key = m.key
-			-- ping: the cyan dot inside the ring
-			if sty.core then
+			-- the stem from the arc down to the icon
+			local stem_top, stem_bot = y + g.py, iy - size / 2 - g.py
+			if stem_bot - stem_top > g.py then
+				s.stem:SetWndPos(self:V(X - g.px / 2, stem_top))
+				s.stem:SetWndSize(self:V(g.px, stem_bot - stem_top))
+				s.stem:SetTextureColor(argb(255 * a * 0.55, C_WHITE))
+				show(s.stem, true)
+			else
+				show(s.stem, false)
+			end
+			-- fallback ping: the cyan dot inside the ring
+			if sty.core and not self.h3 and not m.icon then
 				set_tex(s.core, s, "core_tex", sty.core)
-				s.core:SetWndPos(self:V(cxm - L.ping_dot * kx / 2, g.icon_cy - L.ping_dot / 2))
-				s.core:SetTextureColor(argb(255 * st.alpha * fa * (st.side ~= 0 and A_PINNED or 1), C_PING))
-				if not s.core:IsShown() then s.core:Show(true) end
-			elseif s.core:IsShown() then
-				s.core:Show(false)
+				s.core:SetWndPos(self:V(X - L.arc_ping_dot * kx / 2, iy - L.arc_ping_dot / 2))
+				s.core:SetTextureColor(argb(255 * a, C_PING))
+				show(s.core, true)
+			else
+				show(s.core, false)
 			end
 			-- pinned: an arrow outside
 			if st.side ~= 0 then
 				set_tex(s.side, s, "side_tex", st.side > 0 and "coop_hud_tri_right" or "coop_hud_tri_left")
-				s.side:SetWndPos(self:V(cxm + st.side * L.side_gap * kx - L.side * kx / 2, g.icon_cy - L.side / 2))
-				s.side:SetTextureColor(argb(a, m.color))
-				if not s.side:IsShown() then s.side:Show(true) end
-			elseif s.side:IsShown() then
-				s.side:Show(false)
+				s.side:SetWndPos(self:V(X + st.side * (size / 2 + L.arc_side_gap / 2) * kx - L.arc_side * kx / 2, iy - L.arc_side / 2))
+				s.side:SetTextureColor(argb(255 * a, color))
+				show(s.side, true)
+			else
+				show(s.side, false)
 			end
-			-- label (+ height arrow)
-			if it.show and st.text then
-				local tw = self:TextWidth(st.text)
-				local lx = cxm - it.w / 2
-				local la = A_LABEL * st.alpha * math_max(fa, 0.6) -- labels stay readable on a dimmed marker
-				if s.text ~= st.text then
-					s.text = st.text
-					s.label:SetText(st.text)
-					s.shadow:SetText(st.text)
+			-- labels under the icon: the name, then the timer / distance (+ height arrow)
+			local ly = iy + size / 2 + L.arc_label_gap
+			if it.show and st.name then
+				local tw = self:TextWidth(st.name)
+				local la = 255 * st.alpha * math_max(st.focus or 0, self.d)
+				if s.name_text ~= st.name then
+					s.name_text = st.name
+					s.label:SetText(st.name)
+					s.shadow:SetText(st.name)
 				end
-				s.label:SetWndSize(self:V(tw, L.label_h))
-				s.shadow:SetWndSize(self:V(tw, L.label_h))
-				s.label:SetWndPos(self:V(lx, g.label_y))
-				s.shadow:SetWndPos(self:V(lx + g.px, g.label_y + g.py))
-				s.label:SetTextColor(argb(la, m.color))
+				s.label:SetWndSize(self:V(tw, L.arc_label_h))
+				s.shadow:SetWndSize(self:V(tw, L.arc_label_h))
+				s.label:SetWndPos(self:V(X - tw / 2, ly))
+				s.shadow:SetWndPos(self:V(X - tw / 2 + g.px, ly + g.py))
+				s.label:SetTextColor(argb(la, C_NICK))
 				s.shadow:SetTextColor(GetARGB(math_floor(la * 0.8), 0, 0, 0))
-				if not s.label:IsShown() then
-					s.label:Show(true)
-					s.shadow:Show(true)
+				show(s.label, true)
+				show(s.shadow, true)
+				ly = ly + L.arc_label_h
+			else
+				show(s.label, false)
+				show(s.shadow, false)
+			end
+			if it.show and st.info then
+				local tw = self:TextWidth(st.info)
+				local full = tw + (st.up and (L.arc_updown + 2) * kx or 0)
+				local lx = X - full / 2
+				local la = 255 * st.alpha
+				if s.info_text ~= st.info then
+					s.info_text = st.info
+					s.info:SetText(st.info)
+					s.info_shadow:SetText(st.info)
 				end
+				s.info:SetWndSize(self:V(tw, L.arc_label_h))
+				s.info_shadow:SetWndSize(self:V(tw, L.arc_label_h))
+				s.info:SetWndPos(self:V(lx, ly))
+				s.info_shadow:SetWndPos(self:V(lx + g.px, ly + g.py))
+				s.info:SetTextColor(argb(la, m.state == "down" and m.color or C_WHITE))
+				s.info_shadow:SetTextColor(GetARGB(math_floor(la * 0.8), 0, 0, 0))
+				show(s.info, true)
+				show(s.info_shadow, true)
 				if st.up then
 					set_tex(s.updown, s, "up_tex", st.up)
-					s.updown:SetWndPos(self:V(lx + tw + 2 * kx, g.label_y + (L.label_h - L.updown) / 2))
+					s.updown:SetWndPos(self:V(lx + tw + 2 * kx, ly + (L.arc_label_h - L.arc_updown) / 2))
 					s.updown:SetTextureColor(argb(la, C_WHITE))
-					if not s.updown:IsShown() then s.updown:Show(true) end
-				elseif s.updown:IsShown() then
-					s.updown:Show(false)
+					show(s.updown, true)
+				else
+					show(s.updown, false)
 				end
 			else
-				if s.label:IsShown() then
-					s.label:Show(false)
-					s.shadow:Show(false)
-				end
-				if s.updown:IsShown() then s.updown:Show(false) end
+				show(s.info, false)
+				show(s.info_shadow, false)
+				show(s.updown, false)
 			end
 		end
 	end
 	for i = n + 1, SLOTS do
 		local s = self.slots[i]
-		if s.shown then
-			for _, w in pairs({ s.icon, s.core, s.side, s.updown, s.shadow, s.label }) do w:Show(false) end
-			s.shown = false
-			s.key = nil
-		end
+		hide_slot(s)
+		s.key = nil
 	end
 	-- fully faded out: forget
 	for i = n, 1, -1 do
@@ -786,9 +1086,24 @@ function UICoopCompass:Frame(tg)
 	local dev = device()
 	local dir, cam = dev.cam_dir, dev.cam_pos
 	if not (dir and cam) then return end
+	-- depth: the whole compass on the far layer, the ends of the arc sway; detail (Tab) eases in and out
+	local L = self.g.L
+	local ddx, ddy, tilt, det = depth()
+	if math_abs(ddx - self.dx) > 0.01 or math_abs(ddy - self.dy) > 0.01 then
+		self.dx, self.dy = ddx, ddy
+		self.root:SetWndPos(self:V(ddx, ddy))
+	end
+	self.tilt = tilt
+	self.d = self.d + ((det and 1 or 0) - self.d) * smooth_k(dt, L.detail_tau_ms)
+	if self.d < 0.005 then self.d = 0 elseif self.d > 0.995 then self.d = 1 end
+	local d = self.d
+	local a_main = lerp(L.a_main, L.a_detail_main, d)
+	local a_sec = lerp(L.a_sec, L.a_detail_sec, d)
+	local a_shade = lerp(L.a_shade, L.a_detail_shade, d)
 	local heading = heading_of(dir) or self.heading_last or 0
 	self.heading_last = heading
-	self:DrawScale(heading)
+	self:DrawLine(a_main, a_shade)
+	self:DrawScale(heading, a_main, a_sec)
 	local M = markers_mod()
 	if M and M.list then
 		local list = M.list(tg)
@@ -803,7 +1118,7 @@ function UICoopCompass:Frame(tg)
 		local ok, p = pcall(actor.position, actor)
 		if ok and p then me = p end
 	end
-	self:DrawMarkers(tg, dt, heading, cam, me)
+	self:DrawMarkers(tg, dt, heading, cam, me, a_main)
 end
 
 function UICoopCompass:Update()
@@ -815,6 +1130,7 @@ function UICoopCompass:Update()
 	local ok, err = pcall(self.Frame, self, tg)
 	if pf then M.perf_stop(pf) end
 	if not ok then
+		errors = errors + 1
 		self.off_until = tg + 5000
 		log("! compass frame failed: %s", tostring(err))
 	end
@@ -853,8 +1169,9 @@ local function actor_on_net_destroy()
 end
 
 function print_status()
-	log("compass %s, field %d deg%s", enabled and "on" or "off by the player", fov,
-		HUD and string_format(", %d marker(s) drawn", #HUD.order) or "")
+	log("compass %s, field %d deg%s%s", enabled and "on" or "off by the player", fov,
+		HUD and string_format(", %d marker(s) drawn, icons %s", #HUD.order, HUD.h3 and "visor" or "old (no ui_coop_hud3)") or "",
+		errors > 0 and string_format(", %d failed frame(s)", errors) or "")
 end
 
 function on_game_start()

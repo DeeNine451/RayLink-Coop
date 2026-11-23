@@ -26,8 +26,8 @@
 	The host's game (game settings, docs\GAME_SETTINGS.md 3.5 and 4.3): a host with the record of its game
 	(coop_game_settings.active) in a level gets the same overlay over axr_options.ltx as a client: a game-owned key reads
 	the record's value (a key the record lacks reads the machine's value and joins the record), a write of such a key goes
-	to the record and not to the file, and the options / MCM windows, ui_mcm.set and the difficulty setters refuse the
-	edits like on a client. The game owns what the explicit host lists name ([options_host], [mcm_host], prefix or exact
+	to the record and not to the file. The playing authority can change editable catalog options from Options and MCM.
+	The game owns what the explicit host lists name ([options_host], [mcm_host], prefix or exact
 	path, the co-op rules): is_game_owned. An MCM option that is the host's only by the default rule or a word of its
 	path stays the machine's on the host (Ruling GS-1: the owner keeps the cosmetic options of the mods); a client still
 	gets every host-owned value. Outside a level the machine's values show, the note on a host page says so.
@@ -982,11 +982,17 @@ function on_operator_answer(good, lines)
 	return true
 end
 
--- Is the key locked on this machine now? A client: every host-owned key. A host with the record of its game in a level:
--- the keys the game owns (Ruling GS-1). Else nothing.
+-- Is this edit handled by the session? A client: every host-owned key. A host with a running record: game-owned keys.
 local function lock_applies(src, key)
 	if client_mode then return owner_src(src, key) == "host" end
 	return game_owned(src, key) and host_game_on()
+end
+
+local function local_editor(src, path)
+	if client_mode then return nil end
+	local g = gs()
+	if g and g.can_edit_local_option and g.can_edit_local_option(src, path) then return g end
+	return nil
 end
 
 local function menu_refused(self, id)
@@ -1013,7 +1019,8 @@ local function patch_menu_class(cls, src, what)
 	cls.CacheValue = function(self, path, opt, value, v, ...)
 		if value ~= nil and type(path) == "string" and type(opt) == "string" then
 			local id = path .. "/" .. opt
-			local op_key = lock_applies(src, id) and operator_key(src, id)
+			local locked = lock_applies(src, id)
+			local op_key = locked and operator_key(src, id)
 			if op_key then
 				-- the operator: the edit goes to the server, the page shows the value in force until the server's settings come back
 				op_state.window = self
@@ -1024,7 +1031,17 @@ local function patch_menu_class(cls, src, what)
 				end)
 				return orig_cache(self, path, opt, nil, v, ...)
 			end
-			if lock_applies(src, id) then
+			if locked then
+				local editor = local_editor(src, id)
+				if editor then
+					local applied, why = editor.set_local_option(src, id, value)
+					if not applied then
+						self.coop_redraw = true
+						self.coop_hint = tostring(why)
+						hint(self.coop_hint)
+					end
+					return orig_cache(self, path, opt, nil, v, ...)
+				end
 				menu_refused(self, id)
 				return orig_cache(self, path, opt, nil, v, ...)
 			end
@@ -1082,7 +1099,7 @@ local function locked_keys(src, curr_tree, path, mode)
 			if mode == "client" then
 				hit = owner_src(src, key) == "host" and not operator_key(src, key) -- the operator changes a rule through the server
 			else
-				hit = game_owned(src, key)
+				hit = game_owned(src, key) and (mode ~= "host" or not local_editor(src, key))
 			end
 			if hit then
 				out = out or {}
@@ -1181,15 +1198,21 @@ local function install_client_hooks()
 		end
 		if type(mcm.set) == "function" then
 			local orig_set = mcm.set
-			mcm.set = function(id, ...)
+			mcm.set = function(id, value, ...)
 				if type(id) == "string" and lock_applies("m", id) then
+					local editor = local_editor("m", id)
+					if editor then
+						local applied, why = editor.set_local_option("m", id, value)
+						if not applied then log("ui_mcm.set(%s) refused: %s", id, tostring(why)) end
+						return
+					end
 					stats.refused = stats.refused + 1
 					if stats.refused <= 5 then
 						log("ui_mcm.set(%s) refused: set by the %s", id, client_mode and "host" or "game's settings")
 					end
 					return
 				end
-				return orig_set(id, ...)
+				return orig_set(id, value, ...)
 			end
 		end
 		for _, name in ipairs({ "UIMCM", "UIMCMMenu", "UI_MCM" }) do

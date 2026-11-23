@@ -41,14 +41,16 @@
 		</line>
 	</chat_feed>
 
-	<!-- Team panel (HUD v2, variant B, docs\HUD_V2.md; scripts\coop_core_hud.script): one row per other player, bottom
-	     left above the own HUD. These nodes give the textures and fonts; the script places and sizes everything from the
-	     layout table (scripts\coop_hud_layout.script team_*, one line per value in [coop_hud_layout] of
-	     configs\mod_system_coop.ltx) and sets colours and alphas (player colours: [coop_player_colors]).
-	     bar: the colour strip and the health segments; label: nick, distance, timer (with their shadows; not
-	     named `text`: InitStatic("team_row") would read it as the row's own font node and FATAL on pTmpFont); icon: host
-	     star and the state icon; arrow and arc turn (heading="1": the box stays square, the engine applies the aspect).
-	     Textures: configs\ui\textures_descr\ui_coop_hud.xml (tools\make_hud_atlas.py). -->
+	<!-- Team panel ("Visor", TZ 6.13 / R61: the owner's v1 frame; scripts\coop_core_hud.script UICoopParty): one row per
+	     other player, top left, rows straight under each other (58 px at 1080), the whole panel one root on the near depth
+	     layer (coop_hud_depth). These nodes give the textures and fonts; the script places and sizes everything (its own
+	     constants V, px at 1080) and sets colours (player colours: [coop_player_colors]) and the Visor textures / fonts
+	     (ui_coop_hud3 atlas coop_h3_*, coop_hud3_fonts) when they exist, else the HUD v2 ones named here.
+	     bracket: the "[" in his colour; bar: the health segments and the sweep cursor; pulse: one beat of a dying player's
+	     heart (coop_h3_pulse_0..7); label: nick, distance, timer (with their shadows; not named `text`: InitStatic("team_row")
+	     would read it as the row's own font node and FATAL on pTmpFont); icon: host star and the state badge; arrow turns
+	     (heading="1": the box stays square, the engine applies the aspect).
+	     Textures: configs\ui\textures_descr\ui_coop_hud.xml (tools\make_hud_atlas.py), ui_coop_hud3.xml. -->
 	<team_row x="0" y="0" width="1" height="1">
 		<bar x="0" y="0" width="30" height="5" stretch="1">
 			<texture>coop_hud_white</texture>
@@ -62,8 +64,11 @@
 		<arrow x="0" y="0" width="10" height="10" stretch="1" heading="1">
 			<texture>coop_hud_arrow</texture>
 		</arrow>
-		<arc x="0" y="0" width="12" height="12" stretch="1" heading="1">
-			<texture>coop_hud_arc8</texture>
-		</arc>
+		<bracket x="0" y="0" width="6" height="30" stretch="1">
+			<texture>coop_hud_white</texture>
+		</bracket>
+		<pulse x="0" y="0" width="16" height="15" stretch="1">
+			<texture>coop_hud_white</texture>
+		</pulse>
 	</team_row>
 </w>

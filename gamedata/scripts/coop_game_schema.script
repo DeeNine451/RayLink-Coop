@@ -2,8 +2,8 @@
 	Anomaly Coop - game settings catalog (gamedata\scripts\coop_game_schema.script)
 
 	Which host settings belong to a game (docs\GAME_SETTINGS.md section 3.6), their lists of values, defaults, when they
-	can be changed and when they start to act. Pure data and rules: no engine call, no global state of the game, every
-	outside value is a parameter. The record built on this catalog is coop_game_record.script.
+		can be changed and when they start to act. The value rules are independent of the engine; the tab list can
+		hide options replaced by installed addons. The record built on this catalog is coop_game_record.script.
 
 	Keys. A key is "<source>|<path>", the source says where the value lives (the wire format of coop_settings):
 		c|<name>        console variable of the engine (CVARS below, 20 of them)
@@ -33,6 +33,7 @@
 		                        or the number with "." as "_" (0.25 -> "0_25"); difficulty and economy use the stock
 		                        st_diff_N / st_econ_N
 		cvar                    console variable name or nil; needs_mcm = MCM addon id or nil (hide the item without it)
+		hidden_by_script        script name or nil (hide the item in-game when the script is installed)
 		unit                    "s" | "min" | "m" | "h" | "pct" | "frac" (a fraction shown as percent) | nil
 		shown_if                { key = <key>, any = { values } } or nil: show the item only while that item holds one
 		                        of the values (death share with drop / lose, new kit with hardcore)
@@ -136,7 +137,8 @@ local BY_TAB = {} -- tab -> { item, ... }
 for _, tab in ipairs(TABS) do BY_TAB[tab] = {} end
 
 -- o: tab, key, kind and fields (see the header): v = the values, texts = their text ids when not generated,
--- def, when, applies, note, unit, mcm, shown_if, range, int, vt ("name" = a free name), tail = a value that stays last
+-- text overrides the caption; numeric_labels shows the numeric entries directly.
+-- def, when, applies, note, unit, mcm, hidden_by_script, shown_if, range, int, vt ("name" = a free name), tail
 local function add(tab, key, kind, o)
 	o = o or {}
 	local cv = o.cvar and CVAR[o.cvar] or nil
@@ -154,7 +156,8 @@ local function add(tab, key, kind, o)
 	local item = {
 		key = key, tab = tab, kind = kind, id = id, src = key:match("^(%a)|"), vt = vt,
 		values = {}, when = o.when or "session", applies = o.applies or "live",
-		text = TEXT .. id, note = o.note, unit = o.unit, needs_mcm = o.mcm, cvar = o.cvar, shown_if = o.shown_if,
+		text = o.text or TEXT .. id, note = o.note, unit = o.unit, needs_mcm = o.mcm, cvar = o.cvar, shown_if = o.shown_if,
+		hidden_by_script = o.hidden_by_script,
 		aliases = cv and cv.aliases or nil,
 		range = o.range, int = o.int,
 	}
@@ -171,7 +174,8 @@ local function add(tab, key, kind, o)
 		item.values = { { true, TEXT .. "on" }, { false, TEXT .. "off" } }
 	else
 		for i, v in ipairs(o.v or {}) do
-			local e = { v, o.texts and o.texts[i] or (TEXT .. id .. "_" .. token(v)) }
+			local text = not o.numeric_labels and (o.texts and o.texts[i] or (TEXT .. id .. "_" .. token(v))) or nil
+			local e = { v, text }
 			if o.tail ~= nil and o.tail == v then e.tail = true end
 			item.values[i] = e
 		end
@@ -241,10 +245,17 @@ add("party", RULE .. "trader_rep", "list", { v = { "best", "mean_online", "mean_
 add("world", "faction", "list", { vt = "name", when = "create", applies = "create" })
 add("world", "w|story", "check", { def = true, when = "create", applies = "create" })
 add("world", "w|routes", "check", { def = false, when = "create", applies = "create" })
+-- Match GAMMA's two preconditions in ui_options and the SMR tracks in smr_amain_mcm.
 add("world", "o|alife/general/alife_stalker_pop", "list", { v = { 0.25, 0.5, 0.75, 1 }, def = 0.5,
-	range = { 0, 1 }, applies = "next", unit = "frac" }) -- the start population is made once, later it is the respawn rate
+	range = { 0, 1 }, applies = "next", unit = "frac", hidden_by_script = "smr_mutants_mcm" })
 add("world", "o|alife/general/alife_mutant_pop", "list", { v = { 0.25, 0.5, 0.75, 1 }, def = 0.75,
-	range = { 0, 1 }, applies = "next", unit = "frac" })
+	range = { 0, 1 }, applies = "next", unit = "frac", hidden_by_script = "smr_stalkers_mcm" })
+local population_factors = {}
+for i = 0, 60 do population_factors[i + 1] = i / 20 end
+add("world", "m|SMR/smr_amain/stalker_pop_factor", "list", { v = population_factors, def = 0.5, applies = "next",
+	mcm = "SMR", text = TEXT .. "alife_stalker_pop", numeric_labels = true })
+add("world", "m|SMR/smr_amain/monster_pop_factor", "list", { v = population_factors, def = 0.5, applies = "next",
+	mcm = "SMR", text = TEXT .. "alife_mutant_pop", numeric_labels = true })
 add("world", "o|alife/general/offline_combat", "list", { v = { "full", "on_smarts_only", "off" }, def = "full" })
 add("world", "o|alife/general/excl_dist", "list", { v = { 0, 25, 50, 75, 100 }, def = 75, range = { 0, 100 },
 	applies = "load", unit = "m" })
@@ -338,10 +349,18 @@ end
 -------------------------------------------------------------------------------
 -- Interface
 -------------------------------------------------------------------------------
--- Items of a tab in display order (a new array, the items are shared). An unknown tab has none.
+-- Items of a tab in display order. Only the tab list checks addon script presence.
+-- The launcher export runs without game scripts. item() and keys() keep the complete catalog for records.
 function items(tab)
 	local out = {}
-	for i, it in ipairs(BY_TAB[tab] or {}) do out[i] = it end
+	for _, it in ipairs(BY_TAB[tab] or {}) do
+		local hidden = false
+		if it.hidden_by_script then
+			local ok, addon = pcall(function() return _G[it.hidden_by_script] end)
+			hidden = ok and addon
+		end
+		if not hidden then out[#out + 1] = it end
+	end
 	return out
 end
 

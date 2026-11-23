@@ -4,16 +4,14 @@
 	The "Co-op: ping" key (engine action chat_team, an MP action the single-player game never uses; Options > Controls >
 	Common, entry added by modxml_coop_hud) marks the point the camera looks at: what level.get_target_pos() hits within
 	300 m, else the point 300 m along the view. Only in a session.
-	Flow (script events of the core): the client asks the host (core.ping_req -> host), the host keeps it and sends it to
-	everybody (core.ping, -1) with the author's peer id and a number of its own; the author shows it when it comes back, so
-	every machine shows the same pings. The host's own ping goes the same way without the first step. A ping lives 20 s
-	on every machine, the author's included. With split levels the host relays a ping of another level as it is and does not
-	show it: a machine shows the pings of the level it stands on.
+	The player asks the world authority (core.ping_req), which stamps and relays the ping (core.ping). In Co-op the
+	playing host also keeps it. In Server the world server relays the target ID in world numbering, and the recipients
+	read the creature from their replicas of the map server's objects. Only the ping's map displays it for 20 s.
 	Limits: one ping in 2 s per player, on the client (the key) and on the host (per sender; 250 ms of slack for the
 	network's jitter, F2 T3 caps script events in the engine as well). At most 3 live pings per author (the oldest goes),
 	24 in all. Bad coordinates, another level, a relay that did not come from the host: dropped and counted.
-	On arrival: a quiet stock interface click. On the compass: coop_hud_markers' "pings" source. In the world: a ring in the
-	author's colour around a cyan dot over the point, with the distance (game.world2ui), hidden off screen and with the HUD.
+	On arrival: a quiet DA-2 beep. On the compass: coop_hud_markers' "pings" source. In the world: brackets in the author's
+	colour around a white dot or a red creature cross, with the distance, hidden off screen and with the HUD.
 	Default key: F8, set in a session with "bind chat_team kF8" when chat_team has no key and F8 does nothing; a key the player
 	chose stays. Not mouse 5: it is GAMMA's Free Zoom key (an MCM key, which dik_to_bind cannot see), H, comma and + are too.
 
@@ -43,6 +41,8 @@ XML_FILE = "ui_coop_compass.xml"
 local COORD_MAX = 100000
 local LEVEL_NAME_MAX = 64 -- coop_transition.h kMaxLevelName
 local MAX_PLAYER_SLOT = 16 -- coop_protocol.h kMaxPlayers
+local MAX_OBJECT_ID = 65534 -- 0 is the local actor, 65535 is the engine's no-object id
+local TARGET_HEIGHT = 1.2
 local SERIAL_MAX = 0xffffffff
 -- TZ Р64 (owner 2026-11-23: «короткий пик» of a device, not a fat one): the DA-2 "Otklik" detector beep, GAMMA's 80 ms
 -- version (stock Anomaly has a longer one under the same name). Mono, ~1.8 kHz, quiet in the file itself.
@@ -56,7 +56,7 @@ local pings = {} -- { key, peer, n, pos, at, nick }, oldest first
 local last_sent -- time of my own last ping (client and host)
 local last_from = {} -- host: peer -> time of his last accepted ping
 local host_seq = 0
-local stats = { sent = 0, refused = 0, relayed = 0, received = 0, rate = 0, bad = 0, foreign = 0 }
+local stats = { sent = 0, refused = 0, relayed = 0, received = 0, rate = 0, bad = 0, foreign = 0, frame_errors = 0 }
 
 local function log(fmt, ...)
 	local ok, line = pcall(string_format, fmt, ...)
@@ -98,6 +98,60 @@ local function coord(v)
 	return v
 end
 
+local function whole(n, min, max)
+	return type(n) == "number" and n >= min and n <= max and n == math_floor(n)
+end
+
+local function object_id(fn, id)
+	if not (fn and whole(id, 1, MAX_OBJECT_ID)) then return end
+	local ok, mapped = pcall(fn, id)
+	if ok and whole(mapped, 1, MAX_OBJECT_ID) then return mapped end
+end
+
+local function creature(obj, id)
+	if not (obj and whole(id, 1, MAX_OBJECT_ID) and (IsMonster(obj) or IsStalker(obj))) then return false end
+	if api.peer_of_avatar then return api.peer_of_avatar(id) == nil end
+	for _, player in ipairs(api.players()) do
+		if player.avatar_id == id then return false end
+	end
+	return true
+end
+
+local function aimed_creature()
+	local obj = level.get_target_obj()
+	local id = obj and obj:id()
+	if creature(obj, id) and obj:alive() then return object_id(api.to_host_id, id) end
+end
+
+local function head_y(obj)
+	if not (obj.get_bone_id and obj.bone_position) then return end
+	local bone = obj:get_bone_id("bip01_head")
+	if not whole(bone, 0, MAX_OBJECT_ID) then return end
+	local head = obj:bone_position(bone)
+	if head then return coord(head.y) end
+end
+
+local function target_position(id)
+	local obj = level.object_by_id(id)
+	if not creature(obj, id) or not obj:alive() then return end
+	local pos = obj:position()
+	if not (pos and coord(pos.x) and coord(pos.y) and coord(pos.z)) then return end
+	local ok, height = pcall(head_y, obj)
+	return pos.x, (ok and height) or pos.y + TARGET_HEIGHT, pos.z
+end
+
+local function follow_target(p, tg)
+	if not p.target or p.target_at == tg then return end
+	p.target_at = tg
+	local ok, x, y, z = pcall(target_position, p.target)
+	if ok and x then
+		p.pos.x, p.pos.y, p.pos.z = x, y, z
+	else
+		-- The point is already the last known position (or the original hit). Do not reattach a reused ID.
+		p.target = nil
+	end
+end
+
 local snd
 local function click()
 	local ok = pcall(function()
@@ -118,7 +172,7 @@ local function prune(tg)
 	end
 end
 
-local function add_ping(peer, n, x, y, z, tg)
+local function add_ping(peer, n, x, y, z, tg, target)
 	local key = tostring(peer) .. ":" .. tostring(n)
 	for _, p in ipairs(pings) do
 		if p.key == key then return false end
@@ -132,13 +186,18 @@ local function add_ping(peer, n, x, y, z, tg)
 	end
 	if own >= MAX_PER_AUTHOR and oldest then table.remove(pings, oldest) end
 	if #pings >= MAX_TOTAL then table.remove(pings, 1) end
-	pings[#pings + 1] = { key = key, peer = peer, n = n, pos = { x = x, y = y, z = z }, at = tg, nick = nick_of(peer) }
+	local ping = { key = key, peer = peer, n = n, pos = { x = x, y = y, z = z }, at = tg, nick = nick_of(peer),
+		target = object_id(api.to_local_id, target) }
+	follow_target(ping, tg)
+	pings[#pings + 1] = ping
 	click()
 	return true
 end
 
 function active(tg)
-	prune(tg or time_global())
+	tg = tg or time_global()
+	prune(tg)
+	for _, p in ipairs(pings) do follow_target(p, tg) end
 	return pings
 end
 
@@ -147,14 +206,14 @@ function clear()
 end
 
 -- The point the camera looks at: the hit within RANGE, else RANGE along the view.
-function target_point()
+local function point_under_aim()
 	local dev = device()
 	local cam, dir = dev.cam_pos, dev.cam_dir
 	local okd, d = pcall(level.get_target_dist)
 	d = okd and tonumber(d) or 0
 	if d > 0 and d <= RANGE then
 		local okp, p = pcall(level.get_target_pos)
-		if okp and p and coord(p.x) and coord(p.y) and coord(p.z) then return { x = p.x, y = p.y, z = p.z } end
+		if okp and p and coord(p.x) and coord(p.y) and coord(p.z) then return { x = p.x, y = p.y, z = p.z }, true end
 	end
 	if not (cam and dir) then return nil end
 	local len = math_sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z)
@@ -163,32 +222,44 @@ function target_point()
 	return { x = cam.x + dir.x * k, y = cam.y + dir.y * k, z = cam.z + dir.z * k }
 end
 
-local function host_keep(from, x, y, z, lvl, tg)
+function target_point()
+	local p = point_under_aim()
+	return p
+end
+
+local function host_keep(from, x, y, z, lvl, tg, target)
 	host_seq = host_seq % SERIAL_MAX + 1
-	local here = level_name()
-	if not (lvl and here) or lvl == here then add_ping(from, host_seq, x, y, z, tg) end
-	local t = { x = r2(x), y = r2(y), z = r2(z), p = from, n = host_seq }
+	if coop_mode.actor_is_player() then
+		local here = level_name()
+		if not (lvl and here) or lvl == here then add_ping(from, host_seq, x, y, z, tg, here and target) end
+	end
+	local t = { x = r2(x), y = r2(y), z = r2(z), p = from, n = host_seq, t = target }
 	if lvl then t.l = lvl end
-	if api.send_event(EV_PING, codec().encode(t), -1) then stats.relayed = stats.relayed + 1 end
+	if coop_mode.publish(EV_PING, t) then stats.relayed = stats.relayed + 1 end
 end
 
 function request(tg)
 	tg = tg or time_global()
-	if not live() then return false, "off" end
+	if not live() or not coop_mode.actor_is_player() then return false, "off" end
 	if last_sent and tg - last_sent < GAP_MS and tg >= last_sent then
 		stats.refused = stats.refused + 1
 		return false, "rate"
 	end
-	local p = target_point()
+	local p, hit = point_under_aim()
 	if not p then return false, "no_target" end
 	local lvl = level_name()
+	local target
+	if hit and lvl then
+		local ok, id = pcall(aimed_creature)
+		if ok then target = id end
+	end
 	if coop_mode.decides_world() then
 		last_sent = tg
 		stats.sent = stats.sent + 1
-		host_keep(0, p.x, p.y, p.z, lvl, tg)
+		host_keep(0, p.x, p.y, p.z, lvl, tg, target)
 		return true
 	end
-	local t = { x = r2(p.x), y = r2(p.y), z = r2(p.z) }
+	local t = { x = r2(p.x), y = r2(p.y), z = r2(p.z), t = target }
 	if lvl then t.l = lvl end
 	if not api.send_event(EV_REQ, codec().encode(t), 0) then return false, "send" end
 	last_sent = tg
@@ -207,8 +278,8 @@ local function wire_level(name)
 	return name == nil or (type(name) == "string" and #name <= LEVEL_NAME_MAX and name:match("^[A-Za-z0-9_.%-]+$") ~= nil)
 end
 
-local function whole(n, min, max)
-	return type(n) == "number" and n >= min and n <= max and n == math_floor(n)
+local function packet_target(t)
+	if t.l and whole(t.t, 1, MAX_OBJECT_ID) then return t.t end
 end
 
 local function audit_ping_refusal(event, from, why)
@@ -237,7 +308,7 @@ function on_req(payload, from)
 		return audit_ping_refusal(EV_REQ, from, "ping sent too soon")
 	end
 	last_from[from] = tg
-	host_keep(from, x, y, z, t.l or level_name(), tg)
+	host_keep(from, x, y, z, t.l or level_name(), tg, packet_target(t))
 end
 
 -- Client: the host's relay.
@@ -245,6 +316,7 @@ function on_ping(payload, from)
 	if not (api and api.is_active()) or coop_mode.decides_world() then
 		return audit_ping_refusal(EV_PING, from, "no active receiver")
 	end
+	if not coop_mode.actor_is_player() then return end
 	if from ~= 0 then
 		stats.foreign = stats.foreign + 1
 		return audit_ping_refusal(EV_PING, from, "relay did not come from the world")
@@ -262,14 +334,21 @@ function on_ping(payload, from)
 		stats.bad = stats.bad + 1
 		return
 	end
-	if add_ping(peer, n, x, y, z, time_global()) then stats.received = stats.received + 1 end
+	local target = here and packet_target(t)
+	if add_ping(peer, n, x, y, z, time_global(), target) then stats.received = stats.received + 1 end
 end
 
 -------------------------------------------------------------------------------
--- The world overlay: a ring over every pinged point
+-- The world overlay: Vizor brackets, with the legacy ring as an asset fallback
 -------------------------------------------------------------------------------
 local WORLD -- the window while it is on the HUD
-local RING, DOT = 16, 6 -- px at 768 high: coop_hud_layout world_ring / world_dot
+local ATLAS = "ui\\coop\\ui_coop_hud3.dds"
+local CORNERS = { "tl", "tr", "bl", "br" }
+local UI_PER_REF_PX = 768 / 1080
+local BRACKET_SIZE = 10 * UI_PER_REF_PX
+local DOT_SIZE, DOT_OUTLINE = 8 * UI_PER_REF_PX, 11.2 * UI_PER_REF_PX
+local CROSS_SIZE, CROSS_OUTLINE = 14 * UI_PER_REF_PX, 17 * UI_PER_REF_PX
+local AIM_IN, AIM_OUT, AIM_ALPHA, AIM_MS = 0.06 * 768, 0.079 * 768, 0.2, 200
 
 local function allies()
 	return rawget(_G, "coop_allies")
@@ -291,6 +370,137 @@ local function format_distance(d)
 	return string_format("%d m", math_floor(d + 0.5))
 end
 
+local function unit(v)
+	return math_max(0, math_min(1, v))
+end
+
+local function ease(v)
+	local t = unit(v)
+	return t * t * (3 - 2 * t)
+end
+
+local function aim_alpha(p, s, kx, tg)
+	local dimmed = p.aim_dimmed == true
+	local a = 1
+	if p.aim_at then
+		local step = (1 - AIM_ALPHA) * unit((tg - p.aim_at) / AIM_MS)
+		a = dimmed and math_max(AIM_ALPHA, p.aim_from - step) or math_min(1, p.aim_from + step)
+	end
+	local inside = false
+	if s then
+		-- world2ui returns 1024x768 units; undo the horizontal stretch to measure a circle in screen pixels.
+		local x, y = (s.x - 512) / kx, s.y - 384
+		local d2 = x * x + y * y
+		inside = d2 < AIM_IN * AIM_IN or (dimmed and d2 <= AIM_OUT * AIM_OUT)
+	end
+	if inside ~= dimmed then p.aim_dimmed, p.aim_from, p.aim_at = inside, a, tg end
+	return a
+end
+
+local function show(w, on)
+	if w:IsShown() ~= on then w:Show(on) end
+end
+
+local function hidden_static(xml, path, parent)
+	local w = xml:InitStatic(path, parent)
+	w:Show(false)
+	return w
+end
+
+local function atlas_icon(xml, root, id, probe)
+	-- Reuse the blank XML root style. Legacy statics already have a nonzero texture rect, even after a missing ID.
+	local w = hidden_static(xml, "coop_ping", root)
+	w:InitTexture(id)
+	if probe then
+		local s = w:GetTextureSize()
+		if not (s and s.x > 0 and s.y > 0) then return end
+	end
+	w:SetStretchTexture(true)
+	return w
+end
+
+local function vizor_pool(xml, root)
+	local fs = rawget(_G, "getFS") -- not in every test stub; the game always has it
+	if not (fs and fs():exist("$game_textures$", ATLAS)) then return end
+	local pool = {}
+	for i = 1, WORLD_SLOTS do
+		local slot = { corners = {} }
+		for k, corner in ipairs(CORNERS) do
+			slot.corners[k] = atlas_icon(xml, root, "coop_h3_bracket_" .. corner, i == 1)
+			if not slot.corners[k] then return end
+		end
+		slot.dot_outline = atlas_icon(xml, root, "coop_h3_dot", i == 1)
+		slot.cross_outline = atlas_icon(xml, root, "coop_h3_cross", i == 1)
+		if not (slot.dot_outline and slot.cross_outline) then return end
+		slot.dot = atlas_icon(xml, root, "coop_h3_dot")
+		slot.cross = atlas_icon(xml, root, "coop_h3_cross")
+		pool[i] = slot
+	end
+	return pool
+end
+
+local function centered(w, v, x, y, height, kx)
+	local width = height * kx
+	w:SetWndPos(v:set(x - width / 2, y - height / 2))
+end
+
+local function draw_corners(widgets, s, v, half, kx, color)
+	local left, right = s.x - half * kx, s.x + (half - BRACKET_SIZE) * kx
+	local top, bottom = s.y - half, s.y + half - BRACKET_SIZE
+	for i, w in ipairs(widgets) do
+		w:SetWndPos(v:set(i % 2 == 1 and left or right, i <= 2 and top or bottom))
+		w:SetTextureColor(color)
+		show(w, true)
+	end
+end
+
+local function hide_group(widgets)
+	for _, w in ipairs(widgets) do show(w, false) end
+end
+
+local function draw_vizor(slot, s, v, kx, age, aim, target, r, g, b)
+	local remaining = 1 - ease((age - (LIFE_MS - 2000)) / 2000)
+	local settle = ease(age / 300)
+	local a = ease(age / 120) * remaining * aim
+	local half = (18 + 38 * ((1 - settle) ^ 2 + 1 - remaining)) * UI_PER_REF_PX
+	draw_corners(slot.corners, s, v, half, kx, GetARGB(math_floor(255 * a), r, g, b))
+	local core, outline = slot.dot, slot.dot_outline
+	local height, outline_height = DOT_SIZE, DOT_OUTLINE
+	local cr, cg, cb = 255, 255, 255
+	if target then
+		core, outline = slot.cross, slot.cross_outline
+		height, outline_height = CROSS_SIZE, CROSS_OUTLINE
+		cr, cg, cb = 226, 58, 48
+	end
+	local ca = ease((settle - 0.85) / 0.15) * a
+	-- Flash around the center at capture, leaving the author and creature colors intact.
+	local flash = age >= 300 and unit(1 - (age - 300) / 220) or 0
+	centered(outline, v, s.x, s.y, outline_height, kx)
+	outline:SetTextureColor(GetARGB(math_floor(217 * ca), math_floor(7 + 248 * flash),
+		math_floor(8 + 247 * flash), math_floor(6 + 249 * flash)))
+	centered(core, v, s.x, s.y, height, kx)
+	core:SetTextureColor(GetARGB(math_floor(255 * ca), cr, cg, cb))
+	local dot = not target
+	show(slot.dot_outline, dot)
+	show(slot.dot, dot)
+	show(slot.cross_outline, not dot)
+	show(slot.cross, not dot)
+	return a * ease((age - 300) / 150), s.x + (half + 9 * UI_PER_REF_PX) * kx, s.y - 7
+end
+
+local function draw_legacy(ring, dot, s, v, kx, L, age, aim, r, g, b)
+	local a = unit(age / 150) * unit((LIFE_MS - age) / 1000) * aim
+	local ring_size = L.world_ring * (1 + 0.8 * unit(1 - age / 300))
+	ring:SetWndSize(v:set(ring_size * kx, ring_size))
+	centered(ring, v, s.x, s.y, ring_size, kx)
+	ring:SetTextureColor(GetARGB(math_floor(240 * a), r, g, b))
+	centered(dot, v, s.x, s.y, L.world_dot, kx)
+	dot:SetTextureColor(GetARGB(math_floor(255 * a), C_PING[1], C_PING[2], C_PING[3]))
+	show(ring, true)
+	show(dot, true)
+	return a, s.x - 40 * kx, s.y + L.world_ring / 2 + 2
+end
+
 class "UICoopPingWorld" (CUIScriptWnd)
 
 function UICoopPingWorld:__init() super()
@@ -298,15 +508,28 @@ function UICoopPingWorld:__init() super()
 	xml:ParseFile(XML_FILE)
 	self.root = xml:InitStatic("coop_ping", self)
 	self.rings, self.dots, self.labels, self.shadows = {}, {}, {}, {}
+	local ok, pool = pcall(vizor_pool, xml, self.root)
+	if ok then self.vizor = pool end
+	local font
+	if self.vizor then
+		local fonts = rawget(_G, "coop_hud3_fonts") or coop_hud3_fonts
+		if fonts then font = fonts.font("nick") end
+	end
 	for i = 1, WORLD_SLOTS do
-		self.rings[i] = xml:InitStatic("coop_ping:ring", self.root)
-		self.dots[i] = xml:InitStatic("coop_ping:dot", self.root)
+		if not self.vizor then
+			self.rings[i] = hidden_static(xml, "coop_ping:ring", self.root)
+			self.dots[i] = hidden_static(xml, "coop_ping:dot", self.root)
+		end
 		self.shadows[i] = xml:InitTextWnd("coop_ping:label", self.root)
 		self.labels[i] = xml:InitTextWnd("coop_ping:label", self.root)
-		for _, w in ipairs({ self.rings[i], self.dots[i], self.shadows[i], self.labels[i] }) do w:Show(false) end
+		for _, w in ipairs({ self.shadows[i], self.labels[i] }) do
+			w:Show(false)
+			if self.vizor then w:SetTextAlignment(0) end
+			if font then w:SetFont(font) end
+		end
 	end
 	self.text = {}
-	self.size_w = nil
+	self.v2, self.v3 = vector2(), vector()
 end
 
 function UICoopPingWorld:__finalize()
@@ -317,16 +540,24 @@ function UICoopPingWorld:Frame(tg)
 	local W, H = dev.width, dev.height
 	local lay = rawget(_G, "coop_hud_layout") or coop_hud_layout
 	local L = lay.get()
+	local v = self.v2
 	if self.size_w ~= W or self.size_h ~= H or self.L ~= L then
 		self.size_w, self.size_h, self.L = W, H, L
-		RING, DOT = L.world_ring, L.world_dot
 		local kx = 1024 * H / (768 * W)
 		self.kx, self.px, self.py = kx, 1024 / W, 768 / H
 		for i = 1, WORLD_SLOTS do
-			self.rings[i]:SetWndSize(vector2():set(RING * kx, RING))
-			self.dots[i]:SetWndSize(vector2():set(DOT * kx, DOT))
-			self.labels[i]:SetWndSize(vector2():set(80 * kx, 14))
-			self.shadows[i]:SetWndSize(vector2():set(80 * kx, 14))
+			local slot = self.vizor and self.vizor[i]
+			if slot then
+				for _, w in ipairs(slot.corners) do w:SetWndSize(v:set(BRACKET_SIZE * kx, BRACKET_SIZE)) end
+				slot.dot:SetWndSize(v:set(DOT_SIZE * kx, DOT_SIZE))
+				slot.dot_outline:SetWndSize(v:set(DOT_OUTLINE * kx, DOT_OUTLINE))
+				slot.cross:SetWndSize(v:set(CROSS_SIZE * kx, CROSS_SIZE))
+				slot.cross_outline:SetWndSize(v:set(CROSS_OUTLINE * kx, CROSS_OUTLINE))
+			else
+				self.dots[i]:SetWndSize(v:set(L.world_dot * kx, L.world_dot))
+			end
+			self.labels[i]:SetWndSize(v:set(80 * kx, 14))
+			self.shadows[i]:SetWndSize(v:set(80 * kx, 14))
 		end
 	end
 	local used = 0
@@ -341,25 +572,25 @@ function UICoopPingWorld:Frame(tg)
 		me = ok and p or nil
 	end
 	if vis and w2ui and me then
-		local v = vector()
 		for i = #list, 1, -1 do -- newest first
 			if used >= WORLD_SLOTS then break end
 			local p = list[i]
-			local ok, s = pcall(w2ui, v:set(p.pos.x, p.pos.y, p.pos.z), false, false)
+			local ok, s = pcall(w2ui, self.v3:set(p.pos.x, p.pos.y, p.pos.z), false, false)
 			if ok and s and s.x and s.x > -9000 then
 				used = used + 1
 				local kx = self.kx
 				local age = tg - p.at
-				local a = math_min(1, age / 150) * math_min(1, (LIFE_MS - age) / 1000)
-				a = math_max(0, a)
-				local scale = age < 300 and (1 + 0.8 * (1 - age / 300)) or 1
-				local ring, dot, lab, sh = self.rings[used], self.dots[used], self.labels[used], self.shadows[used]
-				local c = A and { A.color(p.peer) } or C_TEXT
-				ring:SetWndSize(vector2():set(RING * scale * kx, RING * scale))
-				ring:SetWndPos(vector2():set(s.x - RING * scale * kx / 2, s.y - RING * scale / 2))
-				ring:SetTextureColor(GetARGB(math_floor(240 * a), c[1], c[2], c[3]))
-				dot:SetWndPos(vector2():set(s.x - DOT * kx / 2, s.y - DOT / 2))
-				dot:SetTextureColor(GetARGB(math_floor(255 * a), C_PING[1], C_PING[2], C_PING[3]))
+				local aim = aim_alpha(p, s, kx, tg)
+				local r, g, b = C_TEXT[1], C_TEXT[2], C_TEXT[3]
+				if A then r, g, b = A.color(p.peer) end
+				local a, x, y
+				if self.vizor then
+					a, x, y = draw_vizor(self.vizor[used], s, v, kx, age, aim, p.target, r, g, b)
+					r, g, b = C_TEXT[1], C_TEXT[2], C_TEXT[3]
+				else
+					a, x, y = draw_legacy(self.rings[used], self.dots[used], s, v, kx, L, age, aim, r, g, b)
+				end
+				local lab, sh = self.labels[used], self.shadows[used]
 				local dx, dy, dz = p.pos.x - me.x, p.pos.y - me.y, p.pos.z - me.z
 				local text = format_distance(math_sqrt(dx * dx + dy * dy + dz * dz))
 				if self.text[used] ~= text then
@@ -367,20 +598,33 @@ function UICoopPingWorld:Frame(tg)
 					lab:SetText(text)
 					sh:SetText(text)
 				end
-				lab:SetWndPos(vector2():set(s.x - 40 * kx, s.y + RING / 2 + 2))
-				sh:SetWndPos(vector2():set(s.x - 40 * kx + self.px, s.y + RING / 2 + 2 + self.py))
-				lab:SetTextColor(GetARGB(math_floor(230 * a), c[1], c[2], c[3]))
+				lab:SetWndPos(v:set(x, y))
+				sh:SetWndPos(v:set(x + self.px, y + self.py))
+				lab:SetTextColor(GetARGB(math_floor(230 * a), r, g, b))
 				sh:SetTextColor(GetARGB(math_floor(180 * a), 0, 0, 0))
-				for _, w in ipairs({ ring, dot, lab, sh }) do
-					if not w:IsShown() then w:Show(true) end
-				end
+				show(lab, a > 0)
+				show(sh, a > 0)
+			elseif p.aim_dimmed then
+				aim_alpha(p, nil, self.kx, tg)
 			end
 		end
 	end
 	for i = used + 1, WORLD_SLOTS do
-		if self.rings[i]:IsShown() then
-			for _, w in ipairs({ self.rings[i], self.dots[i], self.labels[i], self.shadows[i] }) do w:Show(false) end
+		local slot = self.vizor and self.vizor[i]
+		if slot then
+			if slot.corners[1]:IsShown() then
+				hide_group(slot.corners)
+				show(slot.dot, false)
+				show(slot.dot_outline, false)
+				show(slot.cross, false)
+				show(slot.cross_outline, false)
+			end
+		else
+			show(self.rings[i], false)
+			show(self.dots[i], false)
 		end
+		show(self.labels[i], false)
+		show(self.shadows[i], false)
 	end
 end
 
@@ -393,6 +637,7 @@ function UICoopPingWorld:Update()
 	local ok, err = pcall(self.Frame, self, tg)
 	if pf then M.perf_stop(pf) end
 	if not ok then
+		stats.frame_errors = stats.frame_errors + 1
 		self.off_until = tg + 5000
 		log("! ping overlay frame failed: %s", tostring(err))
 	end
@@ -482,7 +727,7 @@ local function actor_on_update()
 	if live() then
 		key_check()
 		prune(tg)
-		world_on()
+		if coop_mode.actor_is_player() then world_on() end
 	elseif WORLD or #pings > 0 then
 		world_off()
 		clear()
@@ -496,8 +741,8 @@ local function actor_on_net_destroy()
 end
 
 function print_status()
-	log("ping: live %d, mine sent %d (refused %d), host relayed %d, received %d, dropped: rate %d, bad %d, not from the host %d",
-		#pings, stats.sent, stats.refused, stats.relayed, stats.received, stats.rate, stats.bad, stats.foreign)
+	log("ping: live %d, mine sent %d (refused %d), host relayed %d, received %d, dropped: rate %d, bad %d, not from the host %d, frame errors %d",
+		#pings, stats.sent, stats.refused, stats.relayed, stats.received, stats.rate, stats.bad, stats.foreign, stats.frame_errors)
 end
 
 function on_game_start()

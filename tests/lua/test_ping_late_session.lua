@@ -111,4 +111,29 @@ SendScriptCallback("actor_on_first_update")
 hosting = true
 SendScriptCallback("actor_on_update")
 check(#console == n0, "F8 taken by something else: no binding")
+
+if mode == "hostplay" then
+	-- The key bound on a late start still takes the normal playing-host path.
+	make_actor()
+	binds = { [F8] = CHAT_TEAM }
+	local _, target = spawn("test_ping_npc", vec3(2, 0, 20))
+	target._kind = "stalker"
+	level.get_target_dist = function() return 20 end
+	level.get_target_pos = function() return vec3(2, 0, 20) end
+	level.get_target_obj = function() return target end
+	function device() return { cam_pos = vec3(0, 1, 0), cam_dir = vec3(0, 0, 1) } end
+	local path, played
+	sound_object = setmetatable({ s2d = 1 }, { __call = function(_, file)
+		path = file
+		return { play = function() played = true end }
+	end })
+	SendScriptCallback("on_key_press", F8)
+	local packet = sent("core.ping")
+	local marker = ping.active()[1]
+	check(packet and packet.p == 0 and packet.t == target:id() and marker and marker.pos.y == 1.2,
+		"F8: late host keeps and relays its own creature ping")
+	check(played and path == "detectors\\da-2_beep1", "F8: the ordinary DA-2 ping beep is still used")
+	SendScriptCallback("actor_on_net_destroy")
+	check(#ping.active() == 0, "leaving the level clears the host's creature ping")
+end
 done("ping late session " .. mode)

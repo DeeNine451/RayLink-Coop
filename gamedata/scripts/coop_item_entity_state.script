@@ -16,6 +16,10 @@ local function stage(manager, id)
 	local processor = manager.get_item_processor()
 	local uses, cond, ammo = processor.Uses[id], processor.Cond[id], processor.Ammo[id]
 	if uses == nil and cond == nil and ammo == nil then return end
+	-- Online items already have a queued M_SPAWN. Let ItemProcessor update the game object it creates.
+	local sim = alife and alife()
+	local entity = sim and sim:object(id, true)
+	if entity and entity.online then return end
 	local ok, why = api.items.set_initial(id, { uses = uses, condition = cond, ammo = ammo })
 	if ok then
 		processor.Uses[id], processor.Cond[id], processor.Ammo[id], processor.Remove[id] = nil, nil, nil, nil

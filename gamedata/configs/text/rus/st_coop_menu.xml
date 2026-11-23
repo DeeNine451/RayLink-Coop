@@ -730,4 +730,34 @@
 	<string id="st_srv_world_from_launcher">
 		<text>Этот мир работает как сервер. Запустите его в лаунчере RayLink, раздел «Миры».</text>
 	</string>
+	<string id="ui_mm_coop_coop_player_hud_parallax_strength">
+		<text>Сила параллакса HUD</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_hud_parallax_strength_desc">
+		<text>Смещение HUD при повороте камеры. 100% — значение по умолчанию, 0% отключает эффект.</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_hud_detail_key">
+		<text>Кооп: подробно</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_hud_detail_key_desc">
+		<text>Удерживайте выбранную клавишу, чтобы увидеть подробности HUD.</text>
+	</string>
+	<string id="st_coop_key_end">
+		<text>End</text>
+	</string>
+	<string id="st_coop_key_home">
+		<text>Home</text>
+	</string>
+	<string id="st_coop_key_page_up">
+		<text>Page Up</text>
+	</string>
+	<string id="st_coop_key_page_down">
+		<text>Page Down</text>
+	</string>
+	<string id="st_coop_key_insert">
+		<text>Insert</text>
+	</string>
+	<string id="st_coop_key_delete">
+		<text>Delete</text>
+	</string>
 </string_table>

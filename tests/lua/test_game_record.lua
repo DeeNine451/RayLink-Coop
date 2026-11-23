@@ -90,12 +90,12 @@ end
 local EXPECT_TABS = { "death", "party", "world", "difficulty", "saves", "other" }
 check(deep_equal(schema.TABS, EXPECT_TABS), "TABS are death, party, world, difficulty, saves, other")
 
-local EXPECT_COUNT = { death = 13, party = 19, world = 21, difficulty = 2, saves = 2, other = 0 }
+local EXPECT_COUNT = { death = 13, party = 19, world = 23, difficulty = 2, saves = 2, other = 0 }
 for _, tab in ipairs(EXPECT_TABS) do
 	check(#schema.items(tab) == EXPECT_COUNT[tab], "tab " .. tab .. " has " .. EXPECT_COUNT[tab] .. " items (docs 3.6)")
 end
 check(#schema.items("nope") == 0, "an unknown tab has no items")
-check(#schema.keys() == 57, "57 catalog keys in all")
+check(#schema.keys() == 59, "59 catalog keys in all (+2 ZCP population factors, TZ Р68)")
 check(schema.item("c|nope") == nil and schema.item(nil) == nil, "an unknown key has no item")
 
 do
@@ -120,9 +120,11 @@ do
 			if it.kind ~= "list" and it.kind ~= "check" then why = why or "kind " .. tostring(it.kind) end
 			if not WHEN[it.when] then why = why or "when " .. tostring(it.when) end
 			if not APPLIES[it.applies] then why = why or "applies " .. tostring(it.applies) end
-			if it.text ~= "st_coop_game_" .. it.id then why = why or "text " .. tostring(it.text) end
+			-- ZCP population factors (TZ Р68) reuse the hidden stock population captions: the same meaning, never shown together
+			local zcp = it.needs_mcm == "SMR" and it.key:find("^m|SMR/smr_amain/%a+_pop_factor$")
+			if it.text ~= "st_coop_game_" .. it.id and not zcp then why = why or "text " .. tostring(it.text) end
 			if it.unit ~= nil and not UNITS[it.unit] then why = why or "unit " .. tostring(it.unit) end
-			if it.applies == "next" and it.note == nil and not it.key:find("alife_%a+_pop$") then
+			if it.applies == "next" and it.note == nil and not it.key:find("alife_%a+_pop$") and not zcp then
 				why = why or "a next-event item without a hint"
 			end
 			if it.when == "create" and it.applies ~= "create" and it.key ~= "c|coop_death_mode" then
@@ -140,7 +142,7 @@ do
 					if type(e[1]) ~= type(it.values[1][1]) then why = why or "mixed value types" end
 					if tseen[e[1]] then why = why or "duplicate value " .. tostring(e[1]) end
 					tseen[e[1]] = true
-					if type(e[2]) ~= "string" then why = why or "a value without a text id" end
+					if type(e[2]) ~= "string" and not zcp then why = why or "a value without a text id" end
 					if e[1] == it.def then found_def = true end
 					if it.range and type(e[1]) == "number" and (e[1] < it.range[1] or e[1] > it.range[2]) then
 						why = why or "value " .. tostring(e[1]) .. " outside its range"
@@ -150,7 +152,7 @@ do
 			end
 			if it.shown_if and not schema.item(it.shown_if.key) then why = why or "shown_if of an unknown key" end
 			if it.needs_mcm ~= nil and it.src ~= "m" then why = why or "needs_mcm on a non-MCM key" end
-			if it.src == "m" and it.needs_mcm ~= "drx_da" then why = why or "an MCM item without its addon" end
+			if it.src == "m" and it.needs_mcm ~= "drx_da" and it.needs_mcm ~= "SMR" then why = why or "an MCM item without its addon" end
 			if why then bad[#bad + 1] = it.key .. ": " .. why end
 		end
 	end
@@ -502,8 +504,8 @@ do
 					owner[id] = what
 				end
 			end
-			own(it.text, it.key)
-			for _, e in ipairs(it.values) do own(e[2], it.key .. "=" .. tostring(e[1])) end
+			if it.needs_mcm ~= "SMR" then own(it.text, it.key) end -- ZCP shares the hidden stock caption (TZ Р68)
+			for _, e in ipairs(it.values) do if e[2] then own(e[2], it.key .. "=" .. tostring(e[1])) end end -- numeric labels: no id
 		end
 	end
 	check(#clash == 0, "no two items or values share a string id (" .. table.concat(clash, ",") .. ")")

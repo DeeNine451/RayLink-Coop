@@ -126,6 +126,10 @@ for line in file:gmatch("[^\n]+") do
 	end
 end
 check(#items > 0, "the file has items (" .. #items .. ")")
+check(not file:find('"key":"m|SMR/smr_amain/', 1, true)
+	and file:find('"key":"o|alife/general/alife_stalker_pop"', 1, true)
+	and file:find('"key":"o|alife/general/alife_mutant_pop"', 1, true),
+	"the launcher schema retains stock population options and leaves out MCM-only options")
 check(not file:find('"key":"c|coop_split_levels"', 1, true) and not file:find('"key":"c|coop_story_together"', 1, true)
 	and not file:find('"key":"c|coop_world_server"', 1, true), "retired world flags are absent from the launcher form")
 

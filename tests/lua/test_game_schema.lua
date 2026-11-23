@@ -149,6 +149,26 @@ check(downed and downed.range and downed.range[1] == 0 and downed.range[2] == 1 
 check(downed and downed.shown_if == nil, "finish a downed player: always shown")
 
 -------------------------------------------------------------------------------
+print("== World population (ZCP)")
+for _, name in ipairs({ "stalker", "monster" }) do
+	local key = "m|SMR/smr_amain/" .. name .. "_pop_factor"
+	local it = schema.item(key)
+	check(it and it.tab == "world" and it.kind == "list" and it.needs_mcm == "SMR" and it.def == 0.5,
+		key .. ": an SMR multiplier on World, default 0.5")
+	local steps = it and #it.values == 61
+	for i = 0, 60 do
+		if not steps or it.values[i + 1][1] ~= i / 20 then steps = false; break end
+	end
+	check(steps and schema.to_raw(key, "-0.05") == nil and schema.to_raw(key, "3.05") == nil,
+		key .. ": the MCM slider's 0..3 range in steps of 0.05")
+end
+for _, pair in ipairs({ { "stalker", "smr_mutants_mcm" }, { "mutant", "smr_stalkers_mcm" } }) do
+	local key = "o|alife/general/alife_" .. pair[1] .. "_pop"
+	local it = schema.item(key)
+	check(it and it.hidden_by_script == pair[2], key .. ": uses the GAMMA precondition")
+end
+
+-------------------------------------------------------------------------------
 print("== strings")
 local ids = schema.text_ids()
 local want = { "st_coop_game_join_spawn", "st_coop_game_loot_claim", "st_coop_game_npc_finish_downed",

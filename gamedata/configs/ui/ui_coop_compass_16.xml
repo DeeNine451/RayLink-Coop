@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="windows-1251"?>
-<!-- Anomaly Coop HUD v2 (docs\HUD_V2.md): the compass bar (scripts\coop_hud_compass.script) and the world ring of a ping
+<!-- Anomaly Coop HUD "Visor" (TZ.md 6.13): the compass arc - the script turns seg / tick / notch (heading="1")
+     and places everything along the arc (coop_hud_layout arc_*), icons coop_h3_* when ui_coop_hud3 is there.
+     Before (HUD v2, docs\HUD_V2.md): the compass bar (scripts\coop_hud_compass.script) and the world ring of a ping
      (scripts\coop_hud_ping.script). This file gives the textures and fonts. The scripts place and size everything from
      the layout table (scripts\coop_hud_layout.script, one line per value in [coop_hud_layout] of configs\mod_system_coop.ltx:
      38 % of the screen width, 20 down, 24 high, ...; px at 768 high, never stretched) and set colours and alphas: the
@@ -16,18 +18,38 @@
 		<line x="0" y="0" width="389" height="1" stretch="1">
 			<texture>coop_hud_bar_line</texture>
 		</line>
-		<tick x="0" y="0" width="1" height="3" stretch="1">
+		<tick x="0" y="0" width="1" height="3" stretch="1" heading="1">
 			<texture>coop_hud_white</texture>
 		</tick>
 		<letter x="0" y="0" width="40" height="16">
 			<text complex_mode="0" r="244" g="245" b="246" align="c" vert_align="c" font="letterica16"/>
 		</letter>
-		<notch x="0" y="0" width="8" height="6" stretch="1">
+		<notch x="0" y="0" width="8" height="6" stretch="1" heading="1">
 			<texture>coop_hud_notch</texture>
 		</notch>
 		<heading x="0" y="0" width="60" height="14">
 			<text complex_mode="0" r="244" g="245" b="246" align="c" vert_align="c" font="letterica16"/>
 		</heading>
+		<!-- Visor arc (TZ 6.13): one segment of the line along the arc, turned by the script (SetHeading) -->
+		<seg x="0" y="0" width="8" height="1" stretch="1" heading="1">
+			<texture>coop_hud_white</texture>
+		</seg>
+		<!-- the centre line through the arc -->
+		<center x="0" y="0" width="1" height="16" stretch="1">
+			<texture>coop_hud_white</texture>
+		</center>
+		<!-- numbers of the scale (195, 210 ...), only while 'detail' is held -->
+		<digit x="0" y="0" width="30" height="10">
+			<text complex_mode="0" r="241" g="236" b="223" align="c" vert_align="c" font="letterica16"/>
+		</digit>
+		<!-- the thin stem from the arc down to a marker's icon -->
+		<stem x="0" y="0" width="1" height="8" stretch="1">
+			<texture>coop_hud_white</texture>
+		</stem>
+		<!-- the second label line of a marker: timer / distance -->
+		<info x="0" y="0" width="120" height="10">
+			<text complex_mode="0" r="241" g="236" b="223" align="l" vert_align="c" font="letterica16"/>
+		</info>
 		<icon x="0" y="0" width="12" height="12" stretch="1">
 			<texture>coop_hud_dot</texture>
 		</icon>

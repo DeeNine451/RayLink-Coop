@@ -89,6 +89,23 @@ label_gap               = 3     ; labels: this far under the bar
 label_h                 = 12
 world_ring              = 16    ; a ping over its point in the world
 world_dot               = 6
+; Visor compass arc (TZ 6.13; numbers: E:\coop-hud-designizor hud_v2.js, px at 1080 * 768 / 1080)
+arc_r                   = 264.5 ; radius: x = cx + R sin th
+arc_y0                  = 45.5  ; the arc's top from the top of the screen
+arc_sag                 = 14.9  ; y = y0 + sag (1 - cos th)
+arc_half                = 82    ; deg of the arc either side (the player's field fills it)
+arc_icon_ally           = 15.6  ; 22 px at 1080
+arc_icon_mark           = 13.5  ; 19 px at 1080
+a_main                  = 0.72  ; level-1 icons, line, heading, N E S W (calm)
+a_sec                   = 0.50  ; ticks, NE SE SW NW
+a_shade                 = 0.25  ; the dark plate
+a_detail_main           = 0.96  ; the same while 'detail' is held
+a_detail_sec            = 0.78
+a_detail_shade          = 0.33
+focus_deg               = 12    ; labels within this of the heading
+look_deg                = 20    ; 'by look' markers within this of the heading
+look_fade_deg           = 4
+ping_fresh_s            = 3     ; a fresh ping shows its distance
 ; v2.1 (owner 2026-10-23 19:40: "no intensity by distance"): full alpha up to fade_near_pct % of a kind's range, then
 ; smoothly down to fade_far_alpha (the icon to fade_far_scale) at the range; beyond it the marker is not shown. Range 0 =
 ; no limit: always shown, dimmed against fade_ref_m and staying at fade_far_alpha beyond it.

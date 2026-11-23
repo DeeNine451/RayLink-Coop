@@ -48,6 +48,49 @@ DEFAULTS = {
 	label_h = 12,
 	world_ring = 16, -- a ping over its point in the world
 	world_dot = 6,
+	-- "Visor" compass arc (TZ 6.13, R56 / R61; E:\coop-hud-design\vizor hud_v2.js C = { y0 64, R 372, sag 21, half 82 }
+	-- px at 1080 -> units = px * 768 / 1080). Supersedes the bar_* / tick_* / notch_* / heading_* / icon / label_* lines
+	-- above for the compass (they stay for old ltx files). Rotated statics: sizes in square units (px at 768).
+	arc_r = 264.5, -- radius: x = cx + R sin th (across * kx)
+	arc_y0 = 45.5, -- the arc's top (its centre) from the top of the screen
+	arc_sag = 14.9, -- y = y0 + sag (1 - cos th)
+	arc_half = 82, -- deg of the arc either side; the player's field (120 / 160 / 200) fills it
+	arc_above = 21.5, -- the dark plate: this far above y0 ...
+	arc_below = 10, -- ... and this far under the arc's ends
+	arc_center_above = 6.4, -- the centre line through the arc (2 px)
+	arc_center_below = 9.2,
+	arc_notch_y = 24.5, -- the chevron under the heading, pointing down (top of its box)
+	arc_notch_w = 11.4,
+	arc_notch_h = 5,
+	arc_head_y = 7, -- the heading "247 deg" (top of its box, head font)
+	arc_head_h = 15,
+	arc_letter_gap = 8.5, -- letters: centre this far above the arc (along its normal)
+	arc_letter_h = 14,
+	arc_digit_gap = 7.8, -- numbers of the scale (detail only)
+	arc_tick_45 = 7.1, -- tick lengths across the arc (x0.64 at the ends)
+	arc_tick_15 = 5,
+	arc_tick_5 = 2.8,
+	arc_icon_ally = 15.6, -- 22 px at 1080
+	arc_icon_mark = 13.5, -- 19 px at 1080
+	arc_icon_drop = 14.2, -- icon centre this far under the arc (a thin stem between)
+	arc_label_gap = 1.5, -- labels under the icon
+	arc_label_h = 10,
+	arc_side = 7, -- the arrow of a marker pinned to an end
+	arc_side_gap = 6,
+	arc_updown = 5, -- up / down arrow at a distance (height difference > 5 m)
+	arc_ping_dot = 5, -- the dot of a ping (old icons only)
+	-- alphas (spec_v2 "tokens"): calm -> while "detail" is held
+	a_main = 0.72, -- level-1 icons, the line, the heading, N / E / S / W
+	a_sec = 0.50, -- ticks, NE / SE / SW / NW
+	a_shade = 0.25, -- the plate
+	a_detail_main = 0.96,
+	a_detail_sec = 0.78,
+	a_detail_shade = 0.33,
+	focus_deg = 12, -- labels within this of the heading
+	look_deg = 20, -- level 2 ("by look") within this of the heading ...
+	look_fade_deg = 4, -- ... fading out over the last 4 deg
+	ping_fresh_s = 3, -- a fresh ping shows its distance this long
+	detail_tau_ms = 140, -- easing in / out of "detail"
 	-- v2.1 (owner 2026-10-23 19:40: "no intensity by distance"): a marker is at full alpha up to fade_near_pct % of its
 	-- kind's range, then smoothly (smoothstep) down to fade_far_alpha and its icon to fade_far_scale at the range; beyond
 	-- the range it is not shown (it fades out in 150 ms like any marker). A range of 0 = no limit: always shown, dimmed

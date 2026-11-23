@@ -731,7 +731,7 @@ local function seg_fill(r)
 	for _, sg in ipairs(r.segs) do if sg.fill.e.visible then w = w + sg.fill.e.w end end
 	return w
 end
-check(s1.base.e.visible and s1.name.e.text == "bob" and math.abs(seg_fill(s1) - 30 * 0.75 * 4 * 0.8) < 0.05, "row shows the client: nick and health")
+check(s1.base.e.visible and s1.name.e.text == "bob" and math.abs(seg_fill(s1) - 38 * 768 / 1080 * 0.75 * 4 * 0.8) < 0.05, "row shows the client: nick and health")
 check(s1.dist.e.text == "42 <st_coop_allies_m>", "distance to the avatar: " .. tostring(s1.dist.e.text))
 check(not s1.host.e.visible, "no host star for a client")
 check(not party.rows[2].base.e.visible, "unused row hidden")

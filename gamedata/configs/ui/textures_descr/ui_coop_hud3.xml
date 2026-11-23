@@ -51,13 +51,13 @@
 		<texture id="coop_h3_bracket_bl" x="80" y="96" width="16" height="16"/>
 		<texture id="coop_h3_bracket_br" x="96" y="96" width="16" height="16"/>
 		<texture id="coop_h3_bracket_l" x="112" y="96" width="8" height="48"/>
-		<texture id="coop_h3_pulse_0" x="120" y="96" width="128" height="16"/>
-		<texture id="coop_h3_pulse_1" x="248" y="96" width="128" height="16"/>
-		<texture id="coop_h3_pulse_2" x="376" y="96" width="128" height="16"/>
-		<texture id="coop_h3_pulse_3" x="0" y="128" width="128" height="16"/>
-		<texture id="coop_h3_pulse_4" x="128" y="128" width="128" height="16"/>
-		<texture id="coop_h3_pulse_5" x="256" y="128" width="128" height="16"/>
-		<texture id="coop_h3_pulse_6" x="384" y="128" width="128" height="16"/>
-		<texture id="coop_h3_pulse_7" x="0" y="160" width="128" height="16"/>
+		<texture id="coop_h3_pulse_0" x="120" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_1" x="143" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_2" x="166" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_3" x="189" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_4" x="212" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_5" x="235" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_6" x="258" y="96" width="23" height="21"/>
+		<texture id="coop_h3_pulse_7" x="281" y="96" width="23" height="21"/>
 	</file>
 </w>

@@ -434,7 +434,7 @@ local function seg_fill(r)
 	for _, sg in ipairs(r.segs) do if sg.fill.e.visible then w = w + sg.fill.e.w end end
 	return w
 end
-local SEGW = 30 * 1024 * 1080 / (768 * 1920)
+local SEGW = 38 * 768 / 1080 * 1024 * 1080 / (768 * 1920) -- Visor: 38 px at 1080
 check(P.rows[1].name.e.text == "p0" and P.rows[2].name.e.text == "p1" and P.rows[3].name.e.text == "p3", "panel sorted by peer: host first (on top)")
 check(P.rows[1].host.e.visible and not P.rows[2].host.e.visible, "host star only on the host")
 check(P.rows[2].strip.e.tcolor % 16777216 == A.argb(1) % 16777216, "colour bar in the player's colour")
@@ -463,9 +463,10 @@ run(M, 300)
 local a1 = M.statics["mcoop_ally_down501"] and M.statics["mcoop_ally_down501"].tcolor
 check(a0 and a1 and a0 ~= a1 and math.floor(a1 / 16777216) >= 139, "minimap overlay pulses (alpha changes every frame)")
 check(M.statics["lcoop_ally_down501"] ~= nil, "PDA overlay pulses too")
-local b0 = P.rows[2].strip.e.tcolor
+local b0, s0 = P.rows[2].timer.e.color, P.rows[2].strip.e.tcolor
 run(M, 200)
-check(b0 ~= P.rows[2].strip.e.tcolor, "panel row breathes")
+check(b0 ~= P.rows[2].timer.e.color and s0 == P.rows[2].strip.e.tcolor,
+	"a dying row: its timer pulses at 1 Hz, the bracket stays (full brightness)")
 -- countdown runs from the report time
 local before = P.rows[2].timer.e.text
 run(M, 3000)

@@ -730,4 +730,34 @@
 	<string id="st_srv_world_from_launcher">
 		<text>This world runs as a server. Start it in the Worlds section of the RayLink launcher.</text>
 	</string>
+	<string id="ui_mm_coop_coop_player_hud_parallax_strength">
+		<text>HUD parallax strength</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_hud_parallax_strength_desc">
+		<text>HUD movement when you turn the camera. 100% is the default, 0% turns the effect off.</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_hud_detail_key">
+		<text>Co-op: details</text>
+	</string>
+	<string id="ui_mm_coop_coop_player_hud_detail_key_desc">
+		<text>Hold the selected key to see HUD details.</text>
+	</string>
+	<string id="st_coop_key_end">
+		<text>End</text>
+	</string>
+	<string id="st_coop_key_home">
+		<text>Home</text>
+	</string>
+	<string id="st_coop_key_page_up">
+		<text>Page Up</text>
+	</string>
+	<string id="st_coop_key_page_down">
+		<text>Page Down</text>
+	</string>
+	<string id="st_coop_key_insert">
+		<text>Insert</text>
+	</string>
+	<string id="st_coop_key_delete">
+		<text>Delete</text>
+	</string>
 </string_table>

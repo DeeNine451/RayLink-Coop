@@ -418,17 +418,20 @@ local function panel(M)
 	return P, shown
 end
 
-section("team panel, co-op: 7 rows at the HUD v2 pitch", function()
+section("team panel, co-op: 7 rows at the Visor pitch", function()
 	local M = machine({ seats = 8, set = "hostplay", self = 0, others = others(1, 7) })
 	local P, shown = panel(M)
 	local L = M.env.coop_hud_layout.get()
+	local PITCH = 58 * 768 / 1080 -- Visor (R61): 58 px at 1080, straight down
+	check(M.env.coop_core_hud.row_pitch and near(M.env.coop_core_hud.row_pitch(L, 7), PITCH), "row_pitch: 58 px at 1080 for 7 rows")
 	check(#P.rows == 7, "7 rows made (" .. #P.rows .. ")")
 	check(#shown == 7, "7 rows shown (" .. #shown .. ")")
 	for i = 2, #shown do
-		check(near(shown[i].top - shown[i - 1].top, L.team_row), "row " .. i .. " is team_row (" .. L.team_row .. ") below row "
+		check(near(shown[i].top - shown[i - 1].top, PITCH), "row " .. i .. " is 58 px below row "
 			.. (i - 1) .. " (" .. tostring(shown[i].top - shown[i - 1].top) .. ")")
+		check(near(shown[i].base.e.x, shown[1].base.e.x), "row " .. i .. " straight under row 1 (no stair)")
 	end
-	check(near(shown[1].top, L.team_top) and near(shown[7].top, L.team_top + 6 * L.team_row), "rows 20 .. 236 as before")
+	check(near(shown[1].top, L.team_top) and near(shown[7].top, L.team_top + 6 * PITCH), "rows from team_top, 58 px apart")
 	for i, r in ipairs(shown) do
 		check(table.concat(r.color, ",") == table.concat({ M.env.coop_allies.color(i) }, ","), "row " .. i .. " in peer " .. i .. "'s colour")
 	end
@@ -442,15 +445,15 @@ section("team panel, server: 15 rows in the compact layout", function()
 	check(#P.rows == 15, "15 rows made (" .. #P.rows .. ")")
 	check(#shown == 15, "15 other players: 15 rows shown (" .. #shown .. ")")
 	local pitch = H.compact_pitch and H.compact_pitch(L)
-	check(pitch and pitch < L.team_row, "a compact pitch below team_row (" .. tostring(pitch) .. " < " .. L.team_row .. ")")
-	-- one row's own height: the nick box from team_name_y, the state icon / timer under the segments, the strip
-	local icon_bottom = L.team_seg_y + L.team_seg_h / 2 + math.max(L.team_status, L.team_timer_h) / 2
-	local height = math.max(L.team_strip_h, L.team_seg_y + L.team_seg_h, icon_bottom) - math.min(0, L.team_name_y)
+	local FULL = 58 * 768 / 1080
+	check(pitch and pitch < FULL, "a compact pitch below the full 58 px (" .. tostring(pitch) .. " < " .. FULL .. ")")
+	-- one row's own height: the bracket (42 px at 1080) holds the nick, the segments, the badge and the timer
+	local height = 42 * 768 / 1080
 	check(pitch and pitch >= height - 1e-9, "rows do not overlap (pitch " .. tostring(pitch) .. " >= row height " .. height .. ")")
 	for i = 2, #shown do
 		check(pitch and near(shown[i].top - shown[i - 1].top, pitch), "row " .. i .. " follows at the compact pitch")
 	end
-	local bottom = shown[15] and shown[15].top + L.team_strip_h
+	local bottom = shown[15] and shown[15].top + height
 	check(bottom and bottom < 768 and bottom < L.team_bottom, "the 15th row ends on the screen (" .. tostring(bottom) .. ")")
 	local peers = {}
 	for i, r in ipairs(shown) do peers[i] = r.view and r.view.peer end
@@ -460,7 +463,7 @@ section("team panel, server: 15 rows in the compact layout", function()
 	-- 7 others on a server: the full pitch, the same look as the co-op
 	local M7 = machine({ seats = 16, set = "srv_player", self = 1, others = others(2, 8) })
 	local P7, shown7 = panel(M7)
-	check(#shown7 == 7 and near(shown7[2].top - shown7[1].top, L.team_row), "server with 7 others: the HUD v2 pitch")
+	check(#shown7 == 7 and near(shown7[2].top - shown7[1].top, FULL), "server with 7 others: the full 58 px pitch")
 	check(#P7.rows == 15, "and rows for 15 are there")
 end)
 
