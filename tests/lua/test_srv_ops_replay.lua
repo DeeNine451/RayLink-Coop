@@ -4,9 +4,11 @@
 --     kept in the frame's batch).
 --   The world (srv_world) applies the batch: its receiver keeps the record of the level and raises coop_op_done(origin, seq, answer)
 --     for a new record (srv/coop_levels_xfer.cpp host_take_done): the world's ledger takes it and saves it (m_data.coop_ops_done).
---   Map server 2 of that level (srv_map), served a held save older than the record: the engine raises coop_op_done for every record
---     of its level in its snapshot before it serves anybody (client_replay_done): the retry gets the recorded answer, the effect does
---     not run again and the record goes up no more. Served a fresh save instead: the ledger has it from m_data, the replay is no news.
+--   Map server 2 of that level (srv_map): the engine raises coop_op_done for every record of its level in the world's save it was
+--     served (chunk 0xC0C1) on its first frame of the world (client_replay_done): the retry gets the recorded answer, the effect does
+--     not run again and the record goes up no more. The world never serves a held save older than a level's record
+--     (logic_came_since, §8a A22), so the ledger usually has the record from m_data already and the replay is no news; the case
+--     below where m_data misses it stands for a world whose Lua did not hear coop_op_done.
 --   Coop (hostplay): none of it runs: nobody declares or takes coop_op_done, op_done records nothing up, the ledger keeps the answer.
 -- The engine's own rules (bounded store, first answer stands, the snapshot) are tests/test_srv_ops_done_e1.cpp.
 -- The engine here is stand-ins with its contract: this file pins the Lua side and passes the same with or without the engine's code.

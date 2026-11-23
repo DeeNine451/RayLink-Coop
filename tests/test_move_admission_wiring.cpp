@@ -2,7 +2,7 @@
 // character (R32 WP18 P4, temp/r30/design/R32-final.md section 8a A21 E-3).
 //
 // coop_requests.cpp is an engine file and cannot be linked into this exe. tests/tools/test_move_admission_wiring.py runs the
-// real admitted_move and player_move over stubs (pytest, not in tools\run_all_tests.cmd); this guard keeps the same wiring in
+// real admitted_move and player_move over stubs (pytest; tools\run_all_tests.cmd runs it too); this guard keeps the same wiring in
 // the native suite that run_all_tests.cmd runs. It reads the two functions (comments dropped, white space folded) and checks:
 //   - admitted_move routes by the destination first: the ground asks nothing, a destination whose root is a player goes to
 //     player_move, any other container to the admission book below the switch;

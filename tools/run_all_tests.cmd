@@ -4,7 +4,9 @@ rem   tools\run_all_tests.cmd          (no arguments: always the full suites)
 rem 1. python -I tools\check_gates.py --tests-mark begin: drops the old tests.ok, records both HEAD ids and how many
 rem    uncommitted files the tests read (product, tests\, the runners) into temp\gates\tests.state
 rem 2. tools\build_tests.cmd and tools\test_luajit.cmd (the native tests: xrCoop, and the engine's own LuaJIT) and
-rem    tools\test_lua.cmd (the Lua tests); build_tests.cmd and test_lua.cmd start with tools\check_layers.py
+rem    tools\test_lua.cmd (the Lua tests); build_tests.cmd and test_lua.cmd start with tools\check_layers.py.
+rem    The executed engine-slice test of the move rules wiring (tests\tools\test_move_admission_wiring.py, R32 8a A24:
+rem    admitted_move and player_move cut out of coop_requests.cpp and run over stubs) counts as a native test.
 rem 3. python -I tools\check_gates.py --tests-mark write: tests.ok (mode=tests, both HEAD ids, dirty=0, native=0, lua=0)
 rem    only when both exit 0, the tree was clean before and after, neither HEAD moved, and the Lua runner
 rem    temp\lua\runlua.exe holds the stamp of the sources now (review 4, B5: when tools\test_lua.cmd cannot rebuild it,
@@ -34,9 +36,16 @@ rem The engine's own LuaJIT (tests\luajit, build 57's lua_setupvalue barrier) co
 call "%ROOT%\tools\test_luajit.cmd"
 set "JRC=%ERRORLEVEL%"
 if not "%JRC%"=="0" if "%NRC%"=="0" set "NRC=%JRC%"
+rem (a copy of this runner in a test repository without the file skips it)
+set "PRC=0"
+if exist "%ROOT%\tests\tools\test_move_admission_wiring.py" (
+	python -B -m pytest -q -p no:cacheprovider "%ROOT%\tests\tools\test_move_admission_wiring.py"
+	if errorlevel 1 set "PRC=1"
+)
+if not "%PRC%"=="0" if "%NRC%"=="0" set "NRC=%PRC%"
 call "%ROOT%\tools\test_lua.cmd"
 set "LRC=%ERRORLEVEL%"
-echo [run_all_tests] native tests: exit %NRC% (LuaJIT tests: exit %JRC%); Lua tests: exit %LRC%
+echo [run_all_tests] native tests: exit %NRC% (LuaJIT tests: exit %JRC%, move wiring: exit %PRC%); Lua tests: exit %LRC%
 
 if /i "%COOP_SKIP_LAYERS%"=="1" (
 	echo [run_all_tests] ******************************************************************************************
