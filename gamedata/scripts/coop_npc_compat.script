@@ -28,6 +28,8 @@
 	mod bodies and reject changed versions rather than replacing their policies. Useful Idiots
 	is handled separately by coop_npc_idiots, with token-aware checks derived from the original mod.
 	Function rewrites (FUNCTION_REWRITES): G.A.M.M.A.'s ballistics (grok_bo) counts every player's hit where hits are applied.
+	Stock _g.CActor__BeforeHitCallback (TZ P46, every machine with a player's actor): in a session a teammate's hit is not a
+	friendly NPC's stray bullet: it counts, or the actor got the hurt sound and hit marks with no damage.
 
 	Events: npc.stat host -> client { k = statistic id }
 --]]
@@ -1201,6 +1203,35 @@ local function install_stealth_facts()
 end
 
 -------------------------------------------------------------------------------
+-- A player's hit on this machine's actor (TZ P46)
+-------------------------------------------------------------------------------
+-- CActor::Hit (engine Actor.cpp) plays a hit's hurt sound, hit marks and camera kick first and only then asks the stock
+-- _G.CActor__BeforeHitCallback (_g.script), whose clause "the draftsman is a stalker friendly to db.actor" drops the hit:
+-- a friendly NPC's stray bullet does no damage. A player's character is a stalker as well (his proxy where his level is
+-- led, his avatar on another player's machine), and a teammate's hit reaches an actor only by the session's friendly fire
+-- rule (coop_requests.cpp host_hit, host_actor_hit_dropped, stalker_hit; xrCoop/coop_hits.h). That clause dropped it:
+-- the hit player got the sound and the picture of a hit and no damage (owner, Dev 58: "урон другого игрока передал звук
+-- урона хосту"). The stock function stays as it is; in a session its own IsStalker (used only by that clause) does not
+-- count another player's character. The global IsStalker, every NPC's hit and single player stay stock. Every machine
+-- with an actor of a player (Coop host, every player's machine in both modes).
+local function wrap_actor_friend_hit()
+	local f = rawget(_G, "CActor__BeforeHitCallback")
+	if type(f) ~= "function" or orig.actor_hit then return end
+	if not defined_in(f, "_g.script") or getfenv(f) ~= _G then
+		log("player hits on the actor: CActor__BeforeHitCallback is not the stock one, left as it is")
+		return
+	end
+	orig.actor_hit = f
+	setfenv(f, setmetatable({
+		IsStalker = function(obj, ...)
+			if obj ~= nil and P.active() and P.is_proxy(obj) then return false end
+			return _G.IsStalker(obj, ...)
+		end,
+	}, { __index = _G, __newindex = _G }))
+	applied[#applied + 1] = "actor_friend_hit"
+end
+
+-------------------------------------------------------------------------------
 -- Install
 -------------------------------------------------------------------------------
 local next_tick = 0
@@ -1257,7 +1288,8 @@ function on_game_start()
 			{ "faction_target", wrap_faction_target },
 			{ "peace_zone", wrap_peace_zone }, { "loot", wrap_loot },
 			{ "squads", wrap_squads }, { "smart_respawn", wrap_smart_respawn }, { "helis", wrap_helis },
-			{ "body_release", wrap_body_release }, { "mounted_guns", wrap_mounted_guns } }) do
+			{ "body_release", wrap_body_release }, { "mounted_guns", wrap_mounted_guns },
+			{ "actor_friend_hit", wrap_actor_friend_hit } }) do
 			local ok, err = pcall(s[2])
 			if not ok then report("install " .. s[1], err) end
 		end
