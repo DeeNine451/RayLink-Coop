@@ -7,8 +7,8 @@
 --    does not learn an info a map server gives (no caller of LevelSide::level_info_up yet): the stand-in's has_info answers what
 --    the far view's orders gave or took, or the stock's guard (has_info, then give_info_portion and a hit) repeats after every
 --    answer.
---    A setting merges with its newest order only (fix round FP45b): A, B, A of info/uninfo, health, relation, goodwill, community
---    goodwill, community or place sends all three, so the map server ends on the last call, as before P45b.
+--    A setting merges with its newest order only. A, B, A sends all three on creation but keeps only the last one for retry
+--    or carry-out (W3C-far). A late ack of a superseded order is ignored.
 -- 2. The far hit edge. Inside a scope hit() is the far view's table, and the engine's game_object:hit takes only its own hit:
 --    a far hit given to a game object of the world server raises luabind's "no overload". The only game object of the world
 --    server a task can reach is its ghost actor, and no player is meant by a hit on it: the scan below (task and dialog
@@ -69,6 +69,9 @@ function ENGINE:kill(who)
 end
 function ENGINE:has_info(name) return self.infos[name] == true end
 function ENGINE:give_info_portion(name) self.infos[name] = true return true end
+function ENGINE:disable_info_portion(name) self.infos[name] = nil end
+function ENGINE:set_health_ex(value) self.health = value end
+function ENGINE:give_game_news() end
 function ENGINE:hit(h)
 	if getmetatable(h) ~= HIT_MT then
 		error("no overload of  'game_object:hit' matched the arguments (game_object, table)", 2)
@@ -171,6 +174,9 @@ local function boot(set)
 	load_script_file("coop_srv_quests_core").on_game_start()
 	load_script_file("coop_srv_levels_share")
 	load_script_file("coop_srv_quests_far")
+	load_script_file("coop_mods_core")
+	coop.sync = { on = function() end }
+	load_script_file("coop_world_fx").on_game_start()
 	local qc, far = coop_quests_core, coop_srv_quests_far
 	qc.on_game_start()
 	far.on_game_start()
@@ -210,22 +216,48 @@ mystery_of_the_swamps_configs = { garbage_ghost_configs = { { vector = vec(5, 0,
 local set_timeout = mod_chunk(GAMMA_DIR .. BS .. "nta_utils.script", { "function set_timeout(callback, timeout)" }, "nta_utils",
 	"return set_timeout")
 assert(type(set_timeout) == "function", "set_timeout of nta_utils.script: " .. tostring(set_timeout))
--- the engine's sound_object (script_sound_script.cpp): play(game_object[, float[, int]]); a table as the owner is luabind's error
+-- The engine's sound_object (script_sound_script.cpp) takes only an engine game_object or nil as owner.
 local PLAYS = {}
 local SOUND_MT = {}
 SOUND_MT.__index = SOUND_MT
-function SOUND_MT:play(obj, delay, flags)
-	if obj ~= nil and not (type(obj) == "table" and rawget(obj, "engine_object")) then
-		error("no overload of  'sound_object:play' matched the arguments (sound_object, " .. type(obj) .. ", number, number)", 2)
+local function sound_play(self, method, obj, delay, flags, pos, volume, frequency)
+	if obj ~= nil and getmetatable(obj) ~= ENGINE then
+		error("no overload of 'sound_object:" .. method .. "' matched owner type " .. type(obj), 2)
 	end
-	PLAYS[#PLAYS + 1] = { path = self.path, owner = obj, delay = delay, flags = flags }
+	PLAYS[#PLAYS + 1] = { path = self.path, owner = obj, delay = delay, flags = flags, pos = pos,
+		volume = volume or self.volume, frequency = frequency }
 end
+function SOUND_MT:play(obj, delay, flags) sound_play(self, "play", obj, delay, flags) end
+function SOUND_MT:play_at_pos(obj, pos, delay, flags) sound_play(self, "play_at_pos", obj, delay, flags, pos) end
+function SOUND_MT:play_no_feedback(obj, flags, delay, pos, volume, frequency)
+	sound_play(self, "play_no_feedback", obj, delay, flags, pos, volume, frequency)
+end
+local STOCK_SOUND = setmetatable({ s2d = 2, s3d = 0, looped = 1 }, { __call = function(_, path)
+	return setmetatable({ path = path }, SOUND_MT)
+end })
+sound_object = STOCK_SOUND
 local SOUNDS = {}
 xr_sound = { get_safe_sound_object = function(path)
-	SOUNDS[path] = SOUNDS[path] or setmetatable({ path = path }, SOUND_MT)
+	SOUNDS[path] = SOUNDS[path] or sound_object(path)
 	return SOUNDS[path]
 end }
-sound_object = { s2d = 2, looped = 1 }
+local teleport_visuals = {}
+for _, name in ipairs({ "nta_utils", "new_tasks_addon_tasks_utils" }) do
+	local f = assert(mod_chunk(GAMMA_DIR .. BS .. name .. ".script", { "function teleport_visual()" }, name, "return teleport_visual"))
+	local m = _G[name]
+	m.VEC_ZERO = vec(0, 0, 0)
+	m.teleport_visual = f
+	teleport_visuals[#teleport_visuals + 1] = m
+end
+do
+	dialogs_lostzone = { txr_routes = { open_route = function() end },
+		game = { translate_string = function(s) return s end } }
+	dialogs_lostzone.unlock_routes_south = assert(mod_chunk(GAMMA_DIR .. BS .. "dialogs_lostzone.script",
+		{ "function unlock_routes_south(" }, "dialogs_lostzone", "return unlock_routes_south"))
+	xr_effects = {}
+	xr_effects.play_sound_on_actor = assert(mod_chunk(GAMMA_DIR .. BS .. "xr_effects.script",
+		{ "function play_sound_on_actor(" }, "xr_effects", "return play_sound_on_actor"))
+end
 local spawn_garbage_ghost = mod_chunk(GAMMA_DIR .. BS .. "tasks_mystery_of_the_swamps.script", { "function spawn_garbage_ghost(args)" },
 	"tasks_mystery_of_the_swamps", "return spawn_garbage_ghost")
 assert(type(spawn_garbage_ghost) == "function", "spawn_garbage_ghost of tasks_mystery_of_the_swamps.script")
@@ -240,9 +272,102 @@ local function task_check(qc)
 	end)
 end
 
+local function superseded_settings(far)
+	local function ack(p, result)
+		HANDLERS["quests.far_ack"]({ q = p.q, r = result }, 0x101)
+	end
+	local function offline_send(call)
+		call()
+		local send = SENT[#SENT].payload
+		ack(send, 0)
+		return send
+	end
+	local function online_retry(verb, newest, apply)
+		SENT = {}
+		CLOCK = CLOCK + 4000
+		far._tick()
+		local sends = far_do(verb, 620)
+		-- Deliver the retries newest first to expose any stale setting that can still overwrite it.
+		for i = #sends, 1, -1 do
+			apply(sends[i])
+			ack(sends[i], 1)
+		end
+		check(#sends == 1 and sends[1].q == newest.q, newest.v .. ": only the newest setting is retried, got " .. #sends)
+	end
+
+	print("== srv_world: r = 0 on both health orders, then online: B is the only retry")
+	local npc = far.object(620)
+	local map_npc = engine_object(620)
+	local a = offline_send(function() npc:set_health_ex(1) end)
+	local b = offline_send(function() npc:set_health_ex(0.5) end)
+	check(far.orders_held() == 1 and far._stats().superseded == 1, "health A was superseded once")
+	far.print_status()
+	check(LOG[#LOG]:find("superseded 1", 1, true) ~= nil, "far status counts superseded orders")
+	local acked = far._stats().acks
+	ack(a, 0)
+	check(far._stats().acks == acked and far.orders_held() == 1, "late r = 0 of health A is ignored")
+	online_retry("health", b, function(p) map_npc:set_health_ex(p.a) end)
+	check(map_npc.health == 0.5 and far.orders_held() == 0, "map server ends on health B and answers it")
+
+	print("== srv_world: info then uninfo share a setting on retries")
+	local name = "p45b_superseded"
+	offline_send(function() npc:give_info_portion(name) end)
+	local remove = offline_send(function() npc:disable_info_portion(name) end)
+	check(not npc:has_info(name), "the stand-in remembers uninfo before the map answers")
+	online_retry(nil, remove, function(p)
+		if p.v == "info" then map_npc:give_info_portion(p.a) else map_npc:disable_info_portion(p.a) end
+	end)
+	check(not map_npc:has_info(name), "map server ends on uninfo")
+	far._orders_clear()
+
+	print("== srv_world: A, B, A makes a new A and retires both earlier orders")
+	a = offline_send(function() npc:set_health_ex(1) end)
+	b = offline_send(function() npc:set_health_ex(0.5) end)
+	local last = offline_send(function() npc:set_health_ex(1) end)
+	check(last.q ~= a.q and last.q ~= b.q, "last A is a new order")
+	acked = far._stats().acks
+	ack(a, 1)
+	check(far._stats().acks == acked, "late r = 1 of the first A is ignored")
+	local sent_count, repeats = #SENT, far._stats().repeats
+	check(far.order(620, "health", 1) == true and #SENT == sent_count and far._stats().repeats == repeats + 1,
+		"repeating the newest A merges")
+	online_retry("health", last, function(p) map_npc:set_health_ex(p.a) end)
+	check(map_npc.health == 1 and far.orders_held() == 0, "map server ends on the last A")
+
+	print("== srv_world: money and kill still have independent orders")
+	local n = far._stats().superseded
+	SENT = {}
+	local kill = offline_send(function() npc:kill(npc) end)
+	offline_send(function() npc:give_money(100) end)
+	offline_send(function() npc:give_money(100) end)
+	check(#far_do("money", 620) == 2 and qs(far_do("money", 620)) == 2 and far.orders_held() == 3
+		and far._stats().superseded == n, "two identical payments and the kill are all held")
+	offline_send(function() npc:set_health_ex(0.5) end)
+	offline_send(function() npc:set_health_ex(1) end)
+	SENT = {}
+	CLOCK = CLOCK + 4000
+	far._tick()
+	local kills = far_do("kill", 620)
+	check(#kills == 1 and kills[1].q == kill.q and #far_do("money", 620) == 2, "setting changes do not retire kill or money")
+	far._orders_clear()
+
+	print("== srv_world: a map server gone, only the last info setting is carried out on the ALife record")
+	SIM:give_info(620, name)
+	offline_send(function() npc:give_info_portion(name) end)
+	offline_send(function() npc:disable_info_portion(name) end)
+	local carried = far._stats().on_record
+	MAP_SERVERS = {}
+	far._tick()
+	check(far._stats().on_record == carried + 1 and not SIM:has_info(620, name) and far.orders_held() == 0,
+		"only uninfo was carried out on the record")
+	MAP_SERVERS = { { bridge = 0x101, level = 2 } }
+	SENT = {}
+end
+
 -------------------------------------------------------------------------------
 local function world_server()
 	local _, qc, far = boot("srv_world")
+	superseded_settings(far)
 	local N = 12
 
 	print("== srv_world: N checks of the recover-item task while its orders are held: one order each")
@@ -405,10 +530,10 @@ local function world_server()
 		c[3]()
 		c[4]()
 		c[3]()
-		check(sent_values(c[2], c[6]) == c[5] and far.orders_held() == 3,
-			c[1] .. ": A, B, A sends all three, the last call last: " .. sent_values(c[2], c[6]))
+		check(sent_values(c[2], c[6]) == c[5] and far.orders_held() == 1,
+			c[1] .. ": A, B, A sends all three and holds only the last: " .. sent_values(c[2], c[6]))
 		c[3]()
-		check(far.orders_held() == 3, c[1] .. ": a repeat of the newest is still merged")
+		check(#far_do() == 3, c[1] .. ": a repeat of the newest is still merged")
 	end
 	check(far.object(620):has_info("p45b_z") and not far.object(620):dont_has_info("p45b_z"),
 		"the stand-in answers the last call, the one the map server ends on")
@@ -420,7 +545,7 @@ local function world_server()
 	s:give_info_portion("p45b_w")
 	s:give_info_portion("p45b_v")
 	s:give_info_portion("p45b_w")
-	check(far.orders_held() == 4 and sent_values("health") == "1,0.5", "A, B, B: B merged; another info name is its own setting: "
+	check(far.orders_held() == 3 and sent_values("health") == "1,0.5", "A, B, B: B merged; another info name is its own setting: "
 		.. far.orders_held() .. ", " .. sent_values("health"))
 	HANDLERS["quests.far_ack"]({ q = far_do("health", 620)[2].q, r = 1 }, 0x101)
 	s:set_health_ex(0.5)
@@ -480,11 +605,67 @@ local function mystery_ghost(qc, far)
 	check(xr_sound.get_safe_sound_object("x") == SOUNDS["x"], "get_safe_sound_object answers the engine's object outside a scope")
 end
 
+local function direct_sounds(qc, far, in_world)
+	print("== direct sound constructors in task helpers, xr_effects and dialogs")
+	level.add_pp_effector = function() end
+	PLAYS = {}
+	local function run(fn, ...)
+		if not in_world then
+			return pcall(qc.with_target, 620, 1, TASK, fn, ...)
+		end
+		return qc.with_target(620, 1, TASK, coop_mods_core.as_player, far.object(500), fn, ...)
+	end
+	local expected_owner
+	if not in_world then expected_owner = ACTOR end
+	for _, m in ipairs(teleport_visuals) do
+		local ok, err = run(m.teleport_visual)
+		check(ok, "stock teleport_visual with coop_world_fx's per-script constructor: " .. tostring(err))
+	end
+	local ok, err = run(xr_effects.play_sound_on_actor, nil, nil, { "fx/direct" })
+	check(ok, "xr_effects' direct constructor: " .. tostring(err))
+	ok, err = run(dialogs_lostzone.unlock_routes_south)
+	check(ok, "dialog's direct constructor: " .. tostring(err))
+	check(#PLAYS == 4, "each direct constructor reaches the engine: " .. #PLAYS)
+	for _, p in ipairs(PLAYS) do
+		check(p.owner == expected_owner and p.delay == 0 and p.flags == STOCK_SOUND.s2d,
+			"the stock sound keeps its arguments: " .. p.path)
+	end
+	check(PLAYS[1] and PLAYS[1].pos == teleport_visuals[1].VEC_ZERO and PLAYS[1].volume == 1 and PLAYS[1].frequency == 1,
+		"play_no_feedback keeps position, volume and frequency")
+	check(PLAYS[4] and PLAYS[4].volume == 1, "the dialog's volume write reaches the engine")
+
+	if in_world then
+		local pt = vec(2, 3, 4)
+		ok, err = run(function()
+			local s = teleport_visuals[1].sound_object("fx/position")
+			s:play_at_pos(level.object_by_id(620), pt)
+			s:play(ACTOR, 0, STOCK_SOUND.s2d)
+			local bad, message = pcall(s.play, s, {}, 0, STOCK_SOUND.s2d)
+			check(not bad and message:find("no overload", 1, true), "only far-marked tables are accepted as no owner")
+		end)
+		check(ok and PLAYS[5] and PLAYS[5].owner == nil and PLAYS[5].pos == pt,
+			"play_at_pos removes a stand-in NPC owner and keeps position: " .. tostring(err))
+		check(PLAYS[6] and PLAYS[6].owner == ACTOR, "a real engine owner passes through inside a scope")
+	end
+
+	xr_effects.play_sound_on_actor(nil, nil, { "fx/outside" })
+	check(PLAYS[#PLAYS].owner == ACTOR and sound_object == STOCK_SOUND,
+		"outside a scope the engine class and actor are used")
+end
+
 -------------------------------------------------------------------------------
 local function map_server()
 	local _, qc, far = boot("srv_map")
 	print("== srv_map: a map server makes no order")
-	check(far.order(600, "kill") == false and far.orders_held() == 0 and #far_do() == 0, "order() refuses, nothing held, nothing sent")
+	check(far.order(600, "kill") == false and far.order(620, "health", 1) == false
+		and far.orders_held() == 0 and #far_do() == 0, "order() refuses, nothing held, nothing sent")
+	local health = { q = 6, i = 620, v = "health", a = 0.5 }
+	HANDLERS["quests.far_do"](health, 0)
+	check(sent("quests.far_ack")[1].r == 0, "an offline target answers r = 0")
+	REAL[620] = engine_object(620)
+	HANDLERS["quests.far_do"](health, 0)
+	check(REAL[620].health == 0.5 and sent("quests.far_ack")[2].r == 1, "an online target runs the retry and answers r = 1")
+	SENT = {}
 	print("== srv_map: the same far_do again (a resend after a lost answer) runs once")
 	local corpse = engine_object(600)
 	REAL[600] = corpse
@@ -505,6 +686,7 @@ local function map_server()
 	local snd
 	pcall(qc.with_target, 600, 1, TASK, function() snd = xr_sound.get_safe_sound_object("x") end)
 	check(snd ~= nil and snd == SOUNDS["x"], "get_safe_sound_object answers the engine's object")
+	direct_sounds(qc, far, false)
 end
 
 -------------------------------------------------------------------------------
@@ -514,7 +696,8 @@ local function no_far_view(set)
 	check(qc.part("far") == nil, "the far view gives the Core nothing")
 	check(HANDLERS["quests.far_do"] == nil and HANDLERS["quests.far_ack"] == nil and HANDLERS["quests.far_hit"] == nil,
 		"no far handler is registered")
-	check(coop_mode.far().order(600, "kill") == false and coop_mode.far().in_scope() == nil, "the facade's far view orders nothing")
+	check(coop_mode.far().order(600, "kill") == false and far.order(620, "health", 1) == false
+		and coop_mode.far().in_scope() == nil, "neither the facade nor order() makes a far order")
 	print("== " .. set .. ": the stock check acts on the objects of this process, as before")
 	local corpse, critter = engine_object(600), engine_object(650)
 	REAL[600], REAL[650] = corpse, critter
@@ -554,10 +737,15 @@ local function no_far_view(set)
 		"one engine hit, power 1.3, a wound: " .. #struck.hits)
 	check(#PLAYS == 1 and PLAYS[1].owner == struck, "its sound on the same game object")
 	check(#SENT == 0 and xr_sound.get_safe_sound_object("x") == SOUNDS["x"], "nothing is sent; the sound objects are the stock's")
+	direct_sounds(qc, far, false)
 end
 
 local tests = {
-	srv_world = function() mystery_ghost(world_server()) end,
+	srv_world = function()
+		local qc, far = world_server()
+		mystery_ghost(qc, far)
+		direct_sounds(qc, far, true)
+	end,
 	srv_map = map_server,
 	hostplay = function() no_far_view("hostplay") end,
 	none = function() no_far_view("none") end,

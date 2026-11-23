@@ -301,11 +301,15 @@ local function sound_stand_in(real, path)
 	return behaving(real, { path = path }, sound_methods, on_sound_write)
 end
 
--- sound_object(path) and sound_object.s2d, the class stays readable.
+function new_sound_object(...)
+	return _G.sound_object(...)
+end
+
+-- The constructor is looked up on each call. The engine class still supplies constants such as s2d.
 local function sound_class(real_class)
 	return setmetatable({}, {
 		__index = real_class,
-		__call = function(_, path, ...) return sound_stand_in(real_class(path, ...), path) end,
+		__call = function(_, path, ...) return sound_stand_in(new_sound_object(path, ...), path) end,
 	})
 end
 

@@ -17,8 +17,9 @@
 	An order is held here until the map server answers. When that server is gone, or the object went home, the world server carries it out
 	on its own record; for an object that is no more it is dropped with a line in the log. One order is held per (object, verb,
 	arguments): a task check that asks the same again while it is held adds nothing (P45b); give_money adds up and is never merged; a
-	setting (info/uninfo of a name, health, place, ...) merges with its newest order only, so the map server ends on the last call.
-	A sound object a task gets inside a scope takes a stand-in as no owner (FP45b: the ghost's blow of Mystery of the Swamps).
+	setting (info/uninfo of a name, health, place, ...) holds only its newest order for retry or carry-out.
+	Inside a scope the task sound constructors, the direct dialog and effect constructors, and get_safe_sound_object take a
+	stand-in as no owner.
 
 	The death relay. A death on a map server's level reaches the world through LevelEntity Died, which runs only the server's on_death. The
 	engine calls on_death here (coop_levels_alife.cpp host_apply_death) and this calls the handlers of the domain host of
@@ -73,7 +74,8 @@ end
 local function world_server() return api ~= nil and qc().is_host() end
 local function map_server() return api ~= nil and qc().is_map_server() end
 
-local stats = { scopes = 0, orders = 0, repeats = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0, hits_out = 0, hits_in = 0, leaks = 0 }
+local stats = { scopes = 0, orders = 0, repeats = 0, superseded = 0, acks = 0, on_record = 0, dropped = 0, deaths = 0,
+	hits_out = 0, hits_in = 0, leaks = 0 }
 
 local scope = nil -- the far view that is open
 -- (anomalies, inside_zones, alife, CreateTimeEvent, hit): the stock's globals a far view swaps. Set from coop_mode.when_srv (on_game_start):
@@ -509,6 +511,14 @@ local function far_sound(real)
 	})
 end
 
+local function scoped_sound_factory(make_sound)
+	return function(...)
+		local snd = make_sound(...)
+		if scope and snd ~= nil then return far_sound(snd) end
+		return snd
+	end
+end
+
 local function open(lid, peer, what)
 	local gg_name = alife():level_name(lid)
 	local q = qc()
@@ -682,9 +692,8 @@ local done_list = {}
 -- A repeat while one is held adds nothing; once it is answered, carried out or dropped, a new one may be made. A sum is never
 -- merged: two payments of the same amount are two.
 -- A setting merges with its newest order only (FP45b): info and uninfo of one name are one setting, a relation and a goodwill one per
--- the other side, a community goodwill one per community, health, place and the community one each. Given A, B, A while A is held,
--- the third is a new order: the map server takes them in that order and ends on the last call, as each call was its own order before
--- P45b (a merge with the held A ended it on B, and the stand-in's has_info said the opposite of the map server's).
+-- the other side, a community goodwill one per community, health, place and the community one each. A different value retires
+-- the old order, so it cannot be retried or carried out on the record. A, B, A makes three orders and keeps only the last A.
 local newest = {} -- world server: setting of a held order -> the number of its newest order
 local SUMS = { money = true }
 local SETTINGS = {
@@ -711,7 +720,7 @@ local function setting_of(key, id, verb, a, b, c)
 	return table.concat({ arg_key(id), name, arg_key(side) }, "|")
 end
 
--- The order is no longer held: answered, carried out or dropped.
+-- The order is no longer held: answered, carried out, dropped or superseded.
 local function forget(q)
 	local o = orders[q]
 	orders[q] = nil
@@ -725,7 +734,7 @@ local function send_order(q, o)
 end
 
 function order(id, verb, a, b, c)
-	if not world_server() then return false end
+	if not (set_world and world_server()) then return false end
 	if (verb == "info" or verb == "uninfo") and type(id) == "number" and type(a) == "string" then
 		local g = infos_given[id] or {}
 		infos_given[id] = g
@@ -734,7 +743,8 @@ function order(id, verb, a, b, c)
 	local key = key_of(id, verb, a, b, c)
 	local setting = setting_of(key, id, verb, a, b, c)
 	local q = setting and newest[setting]
-	if q and orders[q] and orders[q].key == key then
+	local previous = q and orders[q]
+	if previous and previous.key == key then
 		stats.repeats = stats.repeats + 1
 		return true
 	end
@@ -742,6 +752,10 @@ function order(id, verb, a, b, c)
 	local o = { id = id, verb = verb, a = a, b = b, c = c, sends = 0, key = key, setting = setting }
 	stats.orders = stats.orders + 1
 	o.bridge = bridge_of_level(level_of_id(id))
+	if previous then
+		forget(q)
+		stats.superseded = stats.superseded + 1
+	end
 	orders[next_order] = o
 	if setting then newest[setting] = next_order end
 	if o.bridge then send_order(next_order, o) end
@@ -841,7 +855,7 @@ local function orders_tick(now)
 	for _, q in ipairs(due) do
 		local o = orders[q]
 		if not o then
-			-- carried out or answered meanwhile
+			-- carried out, answered or superseded meanwhile
 		elseif not alife_object(o.id) then
 			carry_out(q, o, "gone")
 		elseif obj_of(o.id) then
@@ -1139,9 +1153,9 @@ local function tick()
 end
 
 function print_status()
-	qc().log(TAG, "scopes %d | orders %d, repeats while held %d, answered %d, on records %d, dropped %d, held now %d | deaths relayed %d | hits out %d, in %d | leaks %d",
-		stats.scopes, stats.orders, stats.repeats, stats.acks, stats.on_record, stats.dropped, orders_held(), stats.deaths, stats.hits_out,
-		stats.hits_in, stats.leaks)
+	qc().log(TAG, "scopes %d | orders %d, repeats while held %d, superseded %d, answered %d, on records %d, dropped %d, held now %d | deaths relayed %d | hits out %d, in %d | leaks %d",
+		stats.scopes, stats.orders, stats.repeats, stats.superseded, stats.acks, stats.on_record, stats.dropped, orders_held(),
+		stats.deaths, stats.hits_out, stats.hits_in, stats.leaks)
 end
 
 function _tick() next_tick = 0; tick() end
@@ -1243,11 +1257,25 @@ function on_game_start()
 			-- coop_world_fx's stand-in of xr_sound (TASK_SCRIPTS) asks this module's function at each call, so it gets the same.
 			local xs = q_mod("xr_sound")
 			local get_safe = xs and xs.get_safe_sound_object
-			if type(get_safe) == "function" then
-				xs.get_safe_sound_object = function(...)
-					local snd = get_safe(...)
-					if scope and snd ~= nil then return far_sound(snd) end
-					return snd
+			if type(get_safe) == "function" then xs.get_safe_sound_object = scoped_sound_factory(get_safe) end
+			-- The dedicated world's first update can precede the session in which is_host becomes true.
+			if world_server() or (api.is_dedicated and api.is_dedicated()) then
+				local fx = q_mod("coop_world_fx")
+				if fx and type(fx.new_sound_object) == "function" then
+					fx.new_sound_object = scoped_sound_factory(fx.new_sound_object)
+				end
+				-- Keep the global constructor stock so xr_sound and other caches store engine objects.
+				local stock_class = rawget(_G, "sound_object")
+				if stock_class then
+					local make_sound = scoped_sound_factory(function(...) return stock_class(...) end)
+					local stand_in = setmetatable({}, {
+						__index = stock_class,
+						__call = function(_, ...) return make_sound(...) end,
+					})
+					for _, name in ipairs({ "dialogs_lostzone", "xr_effects" }) do
+						local m = q_mod(name)
+						if m and rawget(m, "sound_object") == nil then rawset(m, "sound_object", stand_in) end
+					end
 				end
 			end
 			-- `smart.online` of the stock: the rest of this condition reads the actor's place, which a check keeps at the player's
